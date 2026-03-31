@@ -1,46 +1,50 @@
-#!/bin/bash
-# ============================================================
-#  COATHEAL Raspberry Pi 4 Setup Script
-#  Prepares Raspberry Pi OS Lite (64-bit) for flight software
-# ============================================================
+#!/usr/bin/env bash
+set -euo pipefail
 
-echo "==> Updating system packages..."
-sudo apt update -y && sudo apt full-upgrade -y
+# COATHEAL Raspberry Pi bootstrap (Debian/Raspberry Pi OS)
 
-echo "==> Enabling I2C and SPI via raspi-config..."
-sudo raspi-config nonint do_i2c 0   # 0 = enable
+echo "==> Updating system packages"
+sudo apt update -y
+sudo apt full-upgrade -y
+
+echo "==> Installing build and runtime dependencies"
+sudo apt install -y \
+  build-essential cmake git pkg-config \
+  libgpiod-dev libi2c-dev i2c-tools \
+  python3 python3-pip python3-venv
+
+echo "==> Creating project directories"
+sudo mkdir -p /bexus/code /bexus/data /bexus/logs /bexus/config
+sudo chown -R "$USER":"$USER" /bexus
+
+echo "==> Enabling SPI and I2C"
+sudo raspi-config nonint do_i2c 0
 sudo raspi-config nonint do_spi 0
 
-echo "==> Installing development tools..."
-sudo apt install -y build-essential cmake git pkg-config
-
-echo "==> Installing libraries and utilities..."
-sudo apt install -y libi2c-dev libgpiod-dev pigpio i2c-tools vim htop screen curl
-
-echo "==> Enabling and starting pigpiod service..."
-sudo systemctl enable pigpiod
-sudo systemctl start pigpiod
-
-echo "==> Creating COATHEAL directory structure..."
-sudo mkdir -p /bexus/{code,data,logs,config}
-sudo chown -R $USER:$USER /bexus
-
-echo "==> Setting recommended system configuration..."
-# Reduce GPU memory to 16MB (no GUI needed)
-sudo raspi-config nonint do_memory_split 16
-
-# Optional: disable unnecessary services to reduce power draw
+echo "==> Recommended service trims"
 sudo systemctl disable --now bluetooth || true
 sudo systemctl disable --now triggerhappy || true
 sudo systemctl disable --now avahi-daemon || true
-sudo systemctl disable --now dphys-swapfile || true
 
-echo "==> Cleanup and reboot prompt..."
-sudo apt autoremove -y
-sudo apt clean
+if [[ -f scripts/preflight_healthcheck.sh ]]; then
+  chmod +x scripts/preflight_healthcheck.sh || true
+fi
+if [[ -f scripts/install_onboard_service.sh ]]; then
+  chmod +x scripts/install_onboard_service.sh || true
+fi
 
-echo "============================================================"
-echo " COATHEAL Raspberry Pi preparation complete."
-echo " Please REBOOT now: sudo reboot"
-echo "============================================================"
+cat <<'MSG'
 
+COATHEAL bootstrap complete.
+
+Next steps:
+1. Clone repository into /bexus/code/coatheal
+2. Build onboard app:
+   cmake -S . -B build
+   cmake --build build -j
+3. Run onboard manually once:
+   ./build/onboard/coatheal_onboard --config config/onboard.example.ini
+4. Install boot service:
+   ./scripts/install_onboard_service.sh /bexus/code/coatheal /bexus/code/coatheal/config/onboard.example.ini
+
+MSG

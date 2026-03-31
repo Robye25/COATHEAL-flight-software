@@ -1,0 +1,21 @@
+[Unit]
+Description=COATHEAL Onboard Flight Software
+After=network-online.target time-sync.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=coatheal
+WorkingDirectory=/bexus/code/coatheal
+ExecStartPre=/bexus/code/coatheal/scripts/preflight_healthcheck.sh /bexus/code/coatheal/config/onboard.example.ini
+ExecStart=/bexus/code/coatheal/build/onboard/coatheal_onboard --config /bexus/code/coatheal/config/onboard.example.ini
+Restart=always
+RestartSec=2
+StartLimitIntervalSec=120
+StartLimitBurst=10
+KillSignal=SIGINT
+TimeoutStopSec=20
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
