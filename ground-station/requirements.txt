@@ -1,0 +1,4 @@
+PyQt6>=6.5
+pyqtgraph>=0.13
+numpy>=1.24
+matplotlib>=3.7,<4   # kept for CLI telemetry-server --plot fallback

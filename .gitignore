@@ -1,1 +1,29 @@
 build/
+out/
+dist/
+
+# logs and generated data
+*.log
+*.csv
+*.sqlite
+logs/
+tmp/
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# editor
+.vscode/
+.idea/
+
+# secrets
+.env
+.env.*
+
+# OS
+Thumbs.db
+*.swp
