@@ -212,6 +212,8 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
       if (!parse_double(key, value, &config->power.max_system_w, line_no)) return false;
     } else if (key == "power.heater_nominal_w") {
       if (!parse_double(key, value, &config->power.heater_nominal_w, line_no)) return false;
+    } else if (key == "power.energy_budget_wh") {
+      if (!parse_double(key, value, &config->power.energy_budget_wh, line_no)) return false;
 
     } else if (key == "pid.kp") {
       if (!parse_double(key, value, &config->pid.kp, line_no)) return false;

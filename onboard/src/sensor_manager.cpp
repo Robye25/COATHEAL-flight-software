@@ -23,11 +23,13 @@ SensorSnapshot SensorManager::ReadSnapshot(MissionPhase phase,
   const double dt = dt_seconds <= 1e-6 ? 1.0 : dt_seconds;
 
   // Coarse pressure profile model for simulation and bench testing.
+  // Floor is 5 mbar per BEXUS User Manual §5.6 — the experiment acceptance
+  // pressure level — so vacuum-regime tests exercise the real flight envelope.
   if (phase == MissionPhase::kDescentFloor) {
     pressure_descending_ = false;
   }
   pressure_mbar_ += (pressure_descending_ ? -1.5 : 1.8) * dt;
-  pressure_mbar_ = std::clamp(pressure_mbar_, 60.0, 1013.25);
+  pressure_mbar_ = std::clamp(pressure_mbar_, 5.0, 1013.25);
 
   double ambient_temp = -40.0;
   if (phase == MissionPhase::kActivationRamp || phase == MissionPhase::kFloatHold) {

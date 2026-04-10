@@ -11,6 +11,7 @@ add_library(coatheal_onboard_core
   src/config.cpp
   src/heater_scheduler.cpp
   src/pid_controller.cpp
+  src/sd_notify.cpp
   src/sensor_manager.cpp
   src/state_manager.cpp
   src/status_flags.cpp

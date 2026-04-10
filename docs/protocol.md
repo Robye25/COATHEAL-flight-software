@@ -181,12 +181,13 @@ NACK,<COMMAND>,<reason>\n
 | Command | Args | Response | Description |
 |---|---|---|---|
 | `PING` | — | `ACK,PING,pong` | Liveness check |
-| `STATUS` | — | `ACK,STATUS,phase=...;bench_mode=...;debug_armed=...;telemetry_target=...;queue_depth=...` | System status |
+| `STATUS` | — | `ACK,STATUS,phase=...;bench_mode=...;debug_armed=...;telemetry_target=...;queue_depth=...;tick_hz=...;energy_wh=...;energy_budget_wh=...;budget_exhausted=...` | System status (includes live tick rate and cumulative heater energy budget) |
 | `FORCE_START` | — | `ACK,FORCE_START,override accepted` | Force transition to ACTIVATION_RAMP |
 | `FORCE_STOP` | — | `ACK,FORCE_STOP,override accepted` | Force transition to STOPPED |
 | `HEATERS_OFF` | — | `ACK,HEATERS_OFF,all heaters disabled` | Emergency: set all heater duties to 0 |
 | `RESET_CTRL` | — | `ACK,RESET_CTRL,control loop reset queued` | Reset PID integrators |
 | `SHUTDOWN_SAFE` | — | `ACK,SHUTDOWN_SAFE,safe shutdown queued` | Graceful process shutdown |
+| `SET_TICK_HZ` | `<hz>` | `ACK,SET_TICK_HZ,tick_hz=<hz>` | Live downlink/main-loop rate change. Range `[0.1, 5.0]` Hz. Required by BEXUS User Manual §5.4 (operator-tunable downlink). Flight-safe; no debug arm needed. |
 | `ARM_DEBUG` | `<token>` | `ACK,ARM_DEBUG,debug armed` | Arm extended debug commands (bench mode only) |
 
 Aliases: `ON` = `FORCE_START`, `OFF` = `FORCE_STOP`, `RESET` = `RESET_CTRL`.
@@ -212,6 +213,8 @@ Aliases: `ON` = `FORCE_START`, `OFF` = `FORCE_STOP`, `RESET` = `RESET_CTRL`.
 | `heater index out of range` | SET_HEATER_DUTY index ≥ heater_count |
 | `invalid argument count for <CMD>` | Wrong number of arguments |
 | `unknown command: <CMD>` | Unrecognized command name |
+| `hz out of range [0.1,5.0]` | `SET_TICK_HZ` argument outside the safe band |
+| `invalid hz value` | `SET_TICK_HZ` argument not parseable as a number |
 
 ### Example Session
 

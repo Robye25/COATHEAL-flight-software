@@ -20,6 +20,7 @@ enum class CommandType {
   kSetPid,
   kClearOverrides,
   kSetBenchMode,
+  kSetTickHz,
   kUnknown,
 };
 

@@ -467,6 +467,30 @@ class CommandPanel(QWidget):
         row1.addWidget(btn("STATUS", "STATUS", "#2980b9"))
         layout.addLayout(row1)
 
+        # ── downlink rate (BEXUS UM §5.4: operator must be able to tune
+        #     the downlink data rate during flight) ───────────────────
+        layout.addWidget(section_label("DOWNLINK RATE"))
+        rate_row = QHBoxLayout()
+        self._tick_hz = QDoubleSpinBox()
+        self._tick_hz.setRange(0.1, 5.0)
+        self._tick_hz.setSingleStep(0.1)
+        self._tick_hz.setDecimals(2)
+        self._tick_hz.setValue(1.0)
+        self._tick_hz.setSuffix(" Hz")
+        self._tick_hz.setToolTip(
+            "Onboard main-loop and telemetry frame rate.\n"
+            "Lower this to free E-Link bandwidth for other experiments."
+        )
+        rate_btn = QPushButton("SET TICK HZ")
+        rate_btn.setStyleSheet(
+            "background-color: #2980b9; color: white; font-weight: bold; "
+            "padding: 5px 8px; border-radius: 3px;"
+        )
+        rate_btn.clicked.connect(self._send_set_tick_hz)
+        rate_row.addWidget(self._tick_hz)
+        rate_row.addWidget(rate_btn)
+        layout.addLayout(rate_row)
+
         # ── phase control ──────────────────────────────────────────
         layout.addWidget(section_label("PHASE CONTROL"))
         layout.addWidget(btn("FORCE START", "FORCE_START", "#d35400"))
@@ -603,6 +627,9 @@ class CommandPanel(QWidget):
 
     def _send_set_all(self) -> None:
         self._send_cmd(f"SET_ALL_DUTY {self._all_duty.value():.2f}")
+
+    def _send_set_tick_hz(self) -> None:
+        self._send_cmd(f"SET_TICK_HZ {self._tick_hz.value():.2f}")
 
 
 # ── log viewer panel ───────────────────────────────────────────────
