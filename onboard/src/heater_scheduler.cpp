@@ -10,8 +10,26 @@ namespace coatheal {
 HeaterScheduler::HeaterScheduler(PowerConfig power, std::size_t electronics_heater_index)
     : power_(power), electronics_heater_index_(electronics_heater_index) {}
 
+void HeaterScheduler::Reset() {
+  energy_consumed_wh_ = 0.0;
+  budget_exhausted_ = false;
+}
+
 std::vector<double> HeaterScheduler::Schedule(const std::vector<double>& requested,
-                                              bool deprioritize_electronics) const {
+                                              bool deprioritize_electronics) {
+  return Schedule(requested, deprioritize_electronics, 0.0);
+}
+
+std::vector<double> HeaterScheduler::Schedule(const std::vector<double>& requested,
+                                              bool deprioritize_electronics,
+                                              double dt_seconds) {
+  // Once the energy budget is exhausted, latch all heaters off for the rest
+  // of the mission. The team's BEXUS power allocation (User Manual §5.2) is
+  // a hard cap; we never re-enable heaters until Reset() is called.
+  if (budget_exhausted_) {
+    return std::vector<double>(requested.size(), 0.0);
+  }
+
   std::vector<double> clamped = requested;
   for (double& value : clamped) {
     value = std::clamp(value, 0.0, 1.0);
@@ -54,6 +72,18 @@ std::vector<double> HeaterScheduler::Schedule(const std::vector<double>& request
     const double scale = power_.max_thermal_w / thermal_power;
     for (double& duty : scheduled) {
       duty *= scale;
+    }
+    thermal_power = power_.max_thermal_w;
+  }
+
+  // Cumulative energy enforcement (BEXUS User Manual §5.2: 150 Wh allocation).
+  if (power_.energy_budget_wh > 0.0 && dt_seconds > 0.0) {
+    const double tick_energy_wh = thermal_power * (dt_seconds / 3600.0);
+    energy_consumed_wh_ += tick_energy_wh;
+    if (energy_consumed_wh_ >= power_.energy_budget_wh) {
+      budget_exhausted_ = true;
+      // Drop this tick's duties as well so we never overshoot the budget.
+      std::fill(scheduled.begin(), scheduled.end(), 0.0);
     }
   }
 

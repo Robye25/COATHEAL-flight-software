@@ -53,6 +53,10 @@ struct PowerConfig {
   double max_thermal_w = 40.0;
   double max_system_w = 48.23;
   double heater_nominal_w = 10.0;
+  // BEXUS User Manual §5.2: each team is allocated 150 Wh for the full flight.
+  // Pi 4 + sensors consume ~5–10 W continuously, so the heater share is lower.
+  // 0 disables enforcement (back-compat).
+  double energy_budget_wh = 0.0;
 };
 
 struct PidConfig {

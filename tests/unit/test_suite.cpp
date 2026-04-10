@@ -11,6 +11,7 @@
 #include "coatheal/config.hpp"
 #include "coatheal/heater_scheduler.hpp"
 #include "coatheal/pid_controller.hpp"
+#include "coatheal/sensor_manager.hpp"
 #include "coatheal/state_manager.hpp"
 #include "coatheal/telemetry.hpp"
 #include "coatheal/telemetry_queue.hpp"
@@ -67,6 +68,107 @@ void TestCommandParser() {
 
   auto invalid = parser.ParseLine("SET_PID 1 2");
   assert(!invalid.ok);
+
+  // SET_TICK_HZ — flight-safe (no debug arm needed at parser layer).
+  auto tick = parser.ParseLine("SET_TICK_HZ 0.5");
+  assert(tick.ok);
+  assert(tick.command.type == coatheal::CommandType::kSetTickHz);
+  assert(tick.command.args.size() == 1);
+  assert(!tick.command.is_extended);
+
+  auto tick_bad = parser.ParseLine("SET_TICK_HZ");
+  assert(!tick_bad.ok);
+}
+
+void TestHeaterSchedulerEnergyBudget() {
+  // Budget exhaustion latches all heaters off for the rest of the mission
+  // (BEXUS User Manual §5.2 — 150 Wh per-team allocation).
+  coatheal::PowerConfig power;
+  power.max_active_heaters = 4;
+  power.heater_nominal_w = 10.0;
+  power.max_thermal_w = 40.0;
+  power.energy_budget_wh = 0.05;  // tiny budget so the test runs fast: 0.05 Wh
+
+  coatheal::HeaterScheduler scheduler(power, 9);
+  std::vector<double> requested(10, 1.0);
+
+  // 40 W * dt / 3600 — at dt=1 s we burn 40/3600 ≈ 0.0111 Wh per tick.
+  // After 5 ticks we should hit 0.0556 Wh, exceeding the 0.05 Wh budget.
+  bool latched = false;
+  for (int tick = 0; tick < 10; ++tick) {
+    auto out = scheduler.Schedule(requested, true, 1.0);
+    if (scheduler.is_budget_exhausted()) {
+      // Once latched, all subsequent ticks must be all-zero.
+      for (double d : out) {
+        assert(d == 0.0);
+      }
+      latched = true;
+    }
+  }
+  assert(latched);
+  assert(scheduler.energy_consumed_wh() >= power.energy_budget_wh - 1e-9);
+
+  // Reset() unlatches.
+  scheduler.Reset();
+  assert(!scheduler.is_budget_exhausted());
+  assert(scheduler.energy_consumed_wh() == 0.0);
+  auto out = scheduler.Schedule(requested, true, 1.0);
+  int active = 0;
+  for (double d : out) if (d > 1e-6) ++active;
+  assert(active > 0);
+
+  // Budget disabled (== 0) should never latch even after many ticks.
+  power.energy_budget_wh = 0.0;
+  coatheal::HeaterScheduler unbounded(power, 9);
+  for (int tick = 0; tick < 100; ++tick) {
+    unbounded.Schedule(requested, true, 1.0);
+    assert(!unbounded.is_budget_exhausted());
+  }
+}
+
+void TestVacuumRegime() {
+  // BEXUS User Manual §5.6: experiment acceptance pressure is 5 mbar.
+  // The simulated sensor must reach the float-pressure regime so we can
+  // verify the FSM stays stable in FLOAT_HOLD at flight pressure.
+  coatheal::OnboardConfig config;
+  config.transition.ascent_to_activation_mbar = 140.0;
+  config.transition.float_to_descent_mbar = 300.0;
+  config.phase.float_hold_minutes = 1000.0;  // long enough not to time out
+  config.hardware.heater_count = 10;
+  config.hardware.electronics_heater_index = 9;
+
+  coatheal::SensorManager sensors(config, nullptr, nullptr, nullptr);
+  std::vector<double> heater_duty(10, 0.0);
+
+  // Step the simulator forward at 1 Hz for 20 minutes — long enough for
+  // pressure to descend below the 140 mbar activation threshold and reach
+  // the 5 mbar floor that matches BEXUS float conditions.
+  double min_pressure = 1e9;
+  for (int i = 0; i < 1200; ++i) {
+    auto snap = sensors.ReadSnapshot(coatheal::MissionPhase::kFloatHold,
+                                     heater_duty, 1.0);
+    if (snap.ambient_pressure_mbar < min_pressure) {
+      min_pressure = snap.ambient_pressure_mbar;
+    }
+  }
+  // Must reach the new 5 mbar floor (was 60 mbar before the fix).
+  assert(min_pressure <= 5.5);
+
+  // FSM stays in FloatHold while pressure is below the descent threshold.
+  coatheal::StateManager sm(config);
+  std::vector<double> hot_temps(10, 70.0);
+  // Drive ascent → activation → float
+  auto p = sm.Update(120.0, std::vector<double>(10, -20.0), {},
+                     std::chrono::steady_clock::now());
+  assert(p == coatheal::MissionPhase::kActivationRamp);
+  p = sm.Update(50.0, hot_temps, {}, std::chrono::steady_clock::now());
+  assert(p == coatheal::MissionPhase::kFloatHold);
+  // Vacuum-regime pressure (5 mbar) must NOT trip the descent transition.
+  p = sm.Update(5.0, hot_temps, {}, std::chrono::steady_clock::now());
+  assert(p == coatheal::MissionPhase::kFloatHold);
+  // ...but a real descent (>= 300 mbar) must.
+  p = sm.Update(350.0, hot_temps, {}, std::chrono::steady_clock::now());
+  assert(p == coatheal::MissionPhase::kDescentFloor);
 }
 
 void TestTelemetrySerializer() {
@@ -164,6 +266,7 @@ void TestConfigParsesReliabilityFields() {
   out << "power.max_thermal_w=40\n";
   out << "power.max_system_w=48.23\n";
   out << "power.heater_nominal_w=10\n";
+  out << "power.energy_budget_wh=130.0\n";
   out << "pid.kp=0.2\n";
   out << "pid.ki=0.02\n";
   out << "pid.kd=0.03\n";
@@ -180,6 +283,7 @@ void TestConfigParsesReliabilityFields() {
   assert(cfg.comms.discovery_enabled);
   assert(cfg.storage.queue_max_bytes == 1024U);
   assert(!cfg.runtime.use_simulated_pwm);
+  assert(std::fabs(cfg.power.energy_budget_wh - 130.0) < 1e-9);
 
   std::error_code ec;
   std::filesystem::remove(cfg_path, ec);
@@ -210,11 +314,13 @@ void TestStateTransitions() {
 int main() {
   TestPidBoundsAndAntiWindup();
   TestHeaterSchedulerCap();
+  TestHeaterSchedulerEnergyBudget();
   TestCommandParser();
   TestTelemetrySerializer();
   TestTelemetryQueuePersistenceAndAck();
   TestConfigParsesReliabilityFields();
   TestStateTransitions();
+  TestVacuumRegime();
 
   std::cout << "All unit tests passed.\n";
   return 0;

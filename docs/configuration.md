@@ -95,6 +95,7 @@ Heater power budget enforced by `HeaterScheduler`.
 | `power.max_thermal_w` | float | `40.0` | Maximum combined thermal power draw in watts. Duty cycles are clamped proportionally if this limit is approached. |
 | `power.max_system_w` | float | `48.23` | Total system power budget in watts (informational; used for documentation and thermal modelling). Not enforced directly in software. |
 | `power.heater_nominal_w` | float | `10.0` | Nominal power per heater at 100% duty cycle (watts). Used to convert duty cycles to estimated wattage. |
+| `power.energy_budget_wh` | float | `130.0` | Cumulative heater-energy budget in Wh enforced by `HeaterScheduler` (BEXUS User Manual §5.2 — 150 Wh per-team allocation, minus ~20 Wh reserved for the Pi 4 + sensors). Once consumed, all heaters are latched off for the remainder of the mission. Set to `0` to disable enforcement. |
 
 ---
 
@@ -131,3 +132,5 @@ Heater channel mapping.
 - All paths are resolved relative to the **working directory** at launch, unless they are absolute. The systemd service sets `WorkingDirectory=/bexus/code/coatheal`.
 - `bench_mode=true` disables hardware I/O (sensors return simulated data) and enables extended debug commands after `ARM_DEBUG`.
 - The `debug_arm_code` token is transmitted in plaintext over the command TCP connection. Change it from the default before flight. For additional security, the command server only accepts one client at a time and closes the connection immediately after responding.
+- `runtime.tick_hz` is the **boot-time** rate. During flight the operator can change it live with the `SET_TICK_HZ <hz>` command (no restart required, no debug arm required) — the new rate is reported back via `STATUS`. The valid range is `0.1`–`5.0` Hz.
+- The systemd unit (`deploy/coatheal-onboard.service`) uses `Type=notify` and `WatchdogSec=10`. The main loop pings the systemd watchdog every tick via `sd_notify(WATCHDOG=1)`; if the loop hangs for >10 s, systemd kills and restarts the process. No external libsystemd dependency is required — the notification protocol is implemented in `onboard/src/sd_notify.cpp`.

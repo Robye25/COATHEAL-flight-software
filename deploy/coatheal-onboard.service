@@ -4,7 +4,9 @@ After=network-online.target time-sync.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+# Type=notify so systemd uses our sd_notify READY=1 and WATCHDOG=1 messages.
+Type=notify
+NotifyAccess=main
 User=coatheal
 WorkingDirectory=/bexus/code/coatheal
 ExecStartPre=/bexus/code/coatheal/scripts/preflight_healthcheck.sh /bexus/code/coatheal/config/onboard.example.ini
@@ -13,6 +15,9 @@ Restart=always
 RestartSec=2
 StartLimitIntervalSec=120
 StartLimitBurst=10
+# BEXUS User Manual §5.9: hung-loop recovery. The main loop pings the watchdog
+# every tick (default 1 Hz). 10 s gives 10 ticks of headroom before SIGKILL.
+WatchdogSec=10
 KillSignal=SIGINT
 TimeoutStopSec=20
 NoNewPrivileges=true

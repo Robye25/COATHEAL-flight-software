@@ -8,6 +8,7 @@
 #include <sstream>
 #include <thread>
 
+#include "coatheal/sd_notify.hpp"
 #include "coatheal/telemetry.hpp"
 
 namespace coatheal {
@@ -62,7 +63,9 @@ SystemController::SystemController(OnboardConfig config)
                         config_.comms.discovery_port,
                         config_.comms.static_ground_ip,
                         config_.comms.static_pi_ip),
-      last_heater_duty_(config_.hardware.heater_count, 0.0) {}
+      last_heater_duty_(config_.hardware.heater_count, 0.0) {
+  live_tick_hz_.store(std::max(0.1, config_.runtime.tick_hz));
+}
 
 bool SystemController::Initialize(std::string* error) {
   if (config_.runtime.use_simulated_pwm) {
@@ -85,15 +88,22 @@ bool SystemController::Initialize(std::string* error) {
     return false;
   }
 
+  // Tell systemd we are READY=1 so the WatchdogSec timer in the unit file
+  // starts ticking from a known good state. No-op when not running under
+  // systemd. (BEXUS User Manual §5.9 — durability and auto-recovery.)
+  SdNotify("READY=1");
+  SdNotify("STATUS=initialised");
+
   return true;
 }
 
 int SystemController::Run() {
-  const double tick_hz = std::max(0.1, config_.runtime.tick_hz);
-  const auto tick_duration = std::chrono::duration<double>(1.0 / tick_hz);
   bool last_link_ok = false;
 
   while (running_) {
+    // Recompute tick duration every iteration so SET_TICK_HZ takes effect live.
+    const double tick_hz = std::max(0.1, live_tick_hz_.load());
+    const auto tick_duration = std::chrono::duration<double>(1.0 / tick_hz);
     const auto tick_start = std::chrono::steady_clock::now();
 
     StateOverrides state_overrides;
@@ -123,7 +133,7 @@ int SystemController::Run() {
         phase, snapshot, tick_duration.count(), control_overrides);
 
     const std::vector<double> scheduled_duty = scheduler_.Schedule(
-        requested_duty, phase == MissionPhase::kActivationRamp);
+        requested_duty, phase == MissionPhase::kActivationRamp, tick_duration.count());
 
     for (std::size_t i = 0; i < scheduled_duty.size(); ++i) {
       pwm_->SetDuty(i, scheduled_duty[i]);
@@ -164,12 +174,18 @@ int SystemController::Run() {
       running_ = false;
     }
 
+    // Pet the systemd watchdog every tick. If the main loop hangs (e.g. an
+    // adapter blocks indefinitely) systemd will SIGKILL us after WatchdogSec
+    // and Restart=always brings us back. Silent no-op outside systemd.
+    SdNotifyWatchdog();
+
     const auto elapsed = std::chrono::steady_clock::now() - tick_start;
     if (elapsed < tick_duration) {
       std::this_thread::sleep_for(tick_duration - elapsed);
     }
   }
 
+  SdNotify("STOPPING=1");
   command_server_.Stop();
   return 0;
 }
@@ -237,13 +253,19 @@ std::string SystemController::HandleCommandLine(const std::string& line) {
     case CommandType::kPing:
       return Ack(cmd_name, "pong");
 
-    case CommandType::kStatus:
-      return Ack(cmd_name,
-                 "phase=" + ToString(state_manager_.phase()) +
-                     ";bench_mode=" + (config_.runtime.bench_mode ? "1" : "0") +
-                     ";debug_armed=" + (debug_armed_.load() ? "1" : "0") +
-                     ";telemetry_target=" + telemetry_client_.current_host() +
-                     ";queue_depth=" + std::to_string(telemetry_queue_.size()));
+    case CommandType::kStatus: {
+      std::ostringstream status;
+      status << "phase=" << ToString(state_manager_.phase())
+             << ";bench_mode=" << (config_.runtime.bench_mode ? "1" : "0")
+             << ";debug_armed=" << (debug_armed_.load() ? "1" : "0")
+             << ";telemetry_target=" << telemetry_client_.current_host()
+             << ";queue_depth=" << telemetry_queue_.size()
+             << ";tick_hz=" << live_tick_hz_.load()
+             << ";energy_wh=" << scheduler_.energy_consumed_wh()
+             << ";energy_budget_wh=" << config_.power.energy_budget_wh
+             << ";budget_exhausted=" << (scheduler_.is_budget_exhausted() ? "1" : "0");
+      return Ack(cmd_name, status.str());
+    }
 
     case CommandType::kForceStart:
       set_state_override([&]() { state_overrides_.force_start = true; });
@@ -355,6 +377,27 @@ std::string SystemController::HandleCommandLine(const std::string& line) {
         return Nack(cmd_name, "expected ON or OFF");
       }
       return Ack(cmd_name, "bench mode updated");
+    }
+
+    case CommandType::kSetTickHz: {
+      // Flight-safe: BEXUS User Manual §5.4 requires the operator to be able
+      // to tune the downlink data rate during flight. No debug arm required.
+      double hz = 0.0;
+      if (!ParseDouble(command.args[0], &hz)) {
+        return Nack(cmd_name, "invalid hz value");
+      }
+      // Clamp to a safe band: 0.1 Hz floor (one frame / 10 s) and 5 Hz ceiling
+      // (well below the 2 Mbps E-Link budget at our ~600 B frame size).
+      constexpr double kMinHz = 0.1;
+      constexpr double kMaxHz = 5.0;
+      if (hz < kMinHz || hz > kMaxHz) {
+        return Nack(cmd_name, "hz out of range [0.1,5.0]");
+      }
+      live_tick_hz_.store(hz);
+      config_.runtime.tick_hz = hz;
+      std::ostringstream msg;
+      msg << "tick_hz=" << hz;
+      return Ack(cmd_name, msg.str());
     }
 
     case CommandType::kUnknown:

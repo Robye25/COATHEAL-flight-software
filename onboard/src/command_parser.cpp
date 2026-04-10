@@ -60,6 +60,8 @@ std::string CommandTypeToString(CommandType type) {
       return "CLEAR_OVERRIDES";
     case CommandType::kSetBenchMode:
       return "SET_BENCH_MODE";
+    case CommandType::kSetTickHz:
+      return "SET_TICK_HZ";
     case CommandType::kUnknown:
       return "UNKNOWN";
   }
@@ -124,6 +126,7 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
       {"SET_PID", CommandType::kSetPid},
       {"CLEAR_OVERRIDES", CommandType::kClearOverrides},
       {"SET_BENCH_MODE", CommandType::kSetBenchMode},
+      {"SET_TICK_HZ", CommandType::kSetTickHz},
   };
 
   auto it = command_map.find(cmd);
@@ -181,6 +184,11 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
       }
       break;
     case CommandType::kSetBenchMode:
+      if (!require_args(1)) {
+        return result;
+      }
+      break;
+    case CommandType::kSetTickHz:
       if (!require_args(1)) {
         return result;
       }

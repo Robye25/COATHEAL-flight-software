@@ -54,6 +54,7 @@ class SystemController {
 
   std::atomic<bool> running_{true};
   std::atomic<bool> debug_armed_{false};
+  std::atomic<double> live_tick_hz_{1.0};
 
   mutable std::mutex overrides_mu_;
   StateOverrides state_overrides_;
