@@ -112,6 +112,19 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
     return false;
   };
 
+  auto parse_i64 = [&](const std::string& key,
+                       const std::string& value,
+                       std::int64_t* out,
+                       int line_no) -> bool {
+    if (ParseNumber(value, out)) {
+      return true;
+    }
+    if (error != nullptr) {
+      *error = "invalid int64 value for " + key + " at line " + std::to_string(line_no);
+    }
+    return false;
+  };
+
   auto parse_size_t = [&](const std::string& key,
                           const std::string& value,
                           std::size_t* out,
@@ -253,6 +266,46 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
       if (!parse_size_t(key, value, &config->hal.status_led_line, line_no)) return false;
     } else if (key == "hal.mode_led_line") {
       if (!parse_size_t(key, value, &config->hal.mode_led_line, line_no)) return false;
+
+    } else if (key == "stepper.steps_per_rev") {
+      if (!parse_int(key, value, &config->stepper.steps_per_rev, line_no)) return false;
+    } else if (key == "stepper.microstep") {
+      if (!parse_int(key, value, &config->stepper.microstep, line_no)) return false;
+    } else if (key == "stepper.default_step_hz") {
+      if (!parse_double(key, value, &config->stepper.default_step_hz, line_no)) return false;
+    } else if (key == "stepper.max_step_hz") {
+      if (!parse_double(key, value, &config->stepper.max_step_hz, line_no)) return false;
+    } else if (key == "stepper.max_position_steps") {
+      if (!parse_i64(key, value, &config->stepper.max_position_steps, line_no)) return false;
+    } else if (key == "stepper.step_line") {
+      if (!parse_size_t(key, value, &config->stepper.step_line, line_no)) return false;
+    } else if (key == "stepper.dir_line") {
+      if (!parse_size_t(key, value, &config->stepper.dir_line, line_no)) return false;
+    } else if (key == "stepper.enable_line") {
+      if (!parse_size_t(key, value, &config->stepper.enable_line, line_no)) return false;
+    } else if (key == "stepper.invert_direction") {
+      if (!parse_bool(key, value, &config->stepper.invert_direction, line_no)) return false;
+    } else if (key == "stepper.enable_active_low") {
+      if (!parse_bool(key, value, &config->stepper.enable_active_low, line_no)) return false;
+    } else if (key == "stepper.enable_on_boot") {
+      if (!parse_bool(key, value, &config->stepper.enable_on_boot, line_no)) return false;
+
+    } else if (key == "bend.ascent_steps") {
+      if (!parse_i64(key, value, &config->bend.ascent_steps, line_no)) return false;
+    } else if (key == "bend.ascent_hold_s") {
+      if (!parse_double(key, value, &config->bend.ascent_hold_s, line_no)) return false;
+    } else if (key == "bend.activation_steps") {
+      if (!parse_i64(key, value, &config->bend.activation_steps, line_no)) return false;
+    } else if (key == "bend.activation_hold_s") {
+      if (!parse_double(key, value, &config->bend.activation_hold_s, line_no)) return false;
+    } else if (key == "bend.float_steps") {
+      if (!parse_i64(key, value, &config->bend.float_steps, line_no)) return false;
+    } else if (key == "bend.float_hold_s") {
+      if (!parse_double(key, value, &config->bend.float_hold_s, line_no)) return false;
+    } else if (key == "bend.descent_steps") {
+      if (!parse_i64(key, value, &config->bend.descent_steps, line_no)) return false;
+    } else if (key == "bend.descent_hold_s") {
+      if (!parse_double(key, value, &config->bend.descent_hold_s, line_no)) return false;
     } else {
       if (error != nullptr) {
         *error = "unknown config key at line " + std::to_string(line_no) + ": " + key;

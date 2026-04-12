@@ -6,6 +6,7 @@
 
 #include "coatheal/phase.hpp"
 #include "coatheal/status_flags.hpp"
+#include "coatheal/stepper_controller.hpp"
 #include "coatheal/system_mode.hpp"
 
 namespace coatheal {
@@ -28,6 +29,7 @@ struct TelemetryRecord {
   SensorSnapshot sensors;
   std::vector<double> heater_duty;
   StatusFlags status;
+  StepperStatus stepper;
 };
 
 std::string SerializeTelemetryDataFrame(const TelemetryRecord& record,

@@ -29,6 +29,17 @@ std::string SerializeTelemetryDataFrame(const TelemetryRecord& record,
 
   oss << ",PHASE=" << ToString(record.phase) << ",MODE=" << ToString(record.mode)
       << ",STATUS=" << ToStatusBitfield(record.status);
+
+  const StepperStatus& st = record.stepper;
+  oss << ",STEPPER=pos:" << st.position_steps << "|tgt:" << st.target_steps
+      << "|hz:" << std::setprecision(2) << st.step_hz
+      << "|us:" << st.microstep
+      << "|en:" << (st.enabled ? 1 : 0)
+      << "|mv:" << (st.moving ? 1 : 0)
+      << "|hold:" << (st.holding ? 1 : 0)
+      << "|hold_s:" << std::setprecision(2) << st.hold_remaining_s
+      << "|pulses:" << st.pulses_total
+      << "|src:" << (st.last_source.empty() ? std::string("-") : st.last_source);
   return oss.str();
 }
 

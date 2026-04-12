@@ -86,6 +86,36 @@ struct HardwareConfig {
   std::size_t electronics_heater_index = 9;
 };
 
+struct StepperConfig {
+  // Driver is unspecified at SED v2.0. These defaults match a generic STEP/
+  // DIR/EN driver (A4988, DRV8825, TMC2209 legacy mode) and are fully
+  // overridable from onboard.ini once the hardware is chosen.
+  int steps_per_rev = 200;           // NEMA 17 full-step default
+  int microstep = 16;                // common default for bending actuator
+  double default_step_hz = 400.0;    // pulse rate used by Tick()
+  double max_step_hz = 4000.0;       // hard ceiling (SetSpeed clamp)
+  std::int64_t max_position_steps = 200000;  // absolute travel limit
+  std::size_t step_line = 5;         // GPIO lines (BCM) — see docs/hardware.md
+  std::size_t dir_line = 6;
+  std::size_t enable_line = 13;
+  bool invert_direction = false;
+  bool enable_active_low = true;     // most step/dir drivers have active-low /EN
+  bool enable_on_boot = false;       // stay de-energised until commanded
+};
+
+struct BendScheduleConfig {
+  // Per mission-phase bend setpoint + hold duration. Applied on phase entry.
+  // Units: steps (signed, driver-side; sign governed by stepper.invert_direction).
+  std::int64_t ascent_steps = 0;
+  double ascent_hold_s = 0.0;
+  std::int64_t activation_steps = 0;
+  double activation_hold_s = 0.0;
+  std::int64_t float_steps = 0;
+  double float_hold_s = 0.0;
+  std::int64_t descent_steps = 0;
+  double descent_hold_s = 0.0;
+};
+
 struct HalConfig {
   // GPIO line numbers for the two visual status LEDs on the Pi 40-pin header.
   // Defaults (BCM 17 / BCM 27) match the wiring documented in docs/hardware.md.
@@ -105,6 +135,8 @@ struct OnboardConfig {
   HeaterSafetyConfig heater_safety;
   SensorRangeConfig sensor_range;
   HalConfig hal;
+  StepperConfig stepper;
+  BendScheduleConfig bend;
 };
 
 bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::string* error);

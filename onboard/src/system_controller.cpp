@@ -8,6 +8,7 @@
 #include <sstream>
 #include <thread>
 
+#include "coatheal/hal/stepper_driver.hpp"
 #include "coatheal/sd_notify.hpp"
 #include "coatheal/telemetry.hpp"
 
@@ -83,6 +84,18 @@ bool SystemController::Initialize(std::string* error) {
         config_.runtime.gpio_chip, config_.hal.mode_led_line, "mode");
   }
   mode_led_->Set(StatusLed::Pattern::kSolid);
+
+  std::unique_ptr<StepperDriver> stepper_driver;
+  if (config_.runtime.use_simulated_pwm) {
+    stepper_driver = std::make_unique<SimulatedStepperDriver>();
+  } else {
+    stepper_driver = std::make_unique<GpioStepDirStepperDriver>(
+        config_.runtime.gpio_chip, config_.stepper.step_line,
+        config_.stepper.dir_line, config_.stepper.enable_line,
+        config_.stepper.invert_direction, config_.stepper.enable_active_low);
+  }
+  stepper_ = std::make_unique<StepperController>(
+      config_.stepper, config_.bend, std::move(stepper_driver));
 
   if (!storage_manager_.Initialize(error)) {
     return false;
@@ -162,6 +175,10 @@ int SystemController::Run() {
     }
     last_heater_duty_ = scheduled_duty;
 
+    if (stepper_) {
+      stepper_->Tick(phase, tick_duration.count());
+    }
+
     TelemetryRecord record;
     record.seq = seq_++;
     record.phase = phase;
@@ -177,6 +194,9 @@ int SystemController::Run() {
     record.status.overtemp_ok = !thermal_controller_.overtemp_latched();
     record.status.uniformity_ok = thermal_controller_.uniformity_ok();
     record.status.energy_ok = !scheduler_.is_budget_exhausted();
+    if (stepper_) {
+      record.stepper = stepper_->Snapshot();
+    }
 
     const std::string line = SerializeTelemetryDataFrame(record, telemetry_client_.session_id());
     storage_manager_.WriteLine(line);
@@ -553,6 +573,86 @@ std::string SystemController::HandleCommandLine(const std::string& line) {
     case CommandType::kRadioResume:
       telemetry_client_.SetTransmitEnabled(true);
       return Ack(cmd_name, "radio resumed");
+
+    case CommandType::kStepperMove: {
+      if (!stepper_) return Nack(cmd_name, "stepper unavailable");
+      std::int64_t steps = 0;
+      try {
+        steps = std::stoll(command.args[0]);
+      } catch (...) {
+        return Nack(cmd_name, "invalid steps");
+      }
+      std::string err;
+      if (!stepper_->MoveSteps(steps, &err)) return Nack(cmd_name, err);
+      return Ack(cmd_name, "move queued");
+    }
+
+    case CommandType::kStepperMoveTo:
+    case CommandType::kStepperBend: {
+      if (!stepper_) return Nack(cmd_name, "stepper unavailable");
+      std::int64_t steps = 0;
+      double hold_s = 0.0;
+      try {
+        steps = std::stoll(command.args[0]);
+        if (command.args.size() == 2) {
+          hold_s = std::stod(command.args[1]);
+        }
+      } catch (...) {
+        return Nack(cmd_name, "invalid args");
+      }
+      std::string err;
+      if (!stepper_->MoveToSteps(steps, hold_s, &err)) return Nack(cmd_name, err);
+      return Ack(cmd_name, "bend queued");
+    }
+
+    case CommandType::kStepperRotate: {
+      if (!stepper_) return Nack(cmd_name, "stepper unavailable");
+      double revs = 0.0;
+      if (!ParseDouble(command.args[0], &revs)) return Nack(cmd_name, "invalid revs");
+      std::string err;
+      if (!stepper_->Rotate(revs, &err)) return Nack(cmd_name, err);
+      return Ack(cmd_name, "rotate queued");
+    }
+
+    case CommandType::kStepperHome: {
+      if (!stepper_) return Nack(cmd_name, "stepper unavailable");
+      std::string err;
+      stepper_->Home(&err);
+      return Ack(cmd_name, "homing");
+    }
+
+    case CommandType::kStepperStop:
+      if (!stepper_) return Nack(cmd_name, "stepper unavailable");
+      stepper_->Stop();
+      return Ack(cmd_name, "stopped");
+
+    case CommandType::kStepperSetSpeed: {
+      if (!stepper_) return Nack(cmd_name, "stepper unavailable");
+      double hz = 0.0;
+      if (!ParseDouble(command.args[0], &hz)) return Nack(cmd_name, "invalid hz");
+      std::string err;
+      if (!stepper_->SetSpeed(hz, &err)) return Nack(cmd_name, err);
+      return Ack(cmd_name, "speed updated");
+    }
+
+    case CommandType::kStepperSetMicrostep: {
+      if (!stepper_) return Nack(cmd_name, "stepper unavailable");
+      std::size_t idx = 0;
+      if (!ParseIndex(command.args[0], &idx)) return Nack(cmd_name, "invalid divisor");
+      std::string err;
+      if (!stepper_->SetMicrostep(static_cast<int>(idx), &err)) return Nack(cmd_name, err);
+      return Ack(cmd_name, "microstep updated");
+    }
+
+    case CommandType::kStepperEnable:
+      if (!stepper_) return Nack(cmd_name, "stepper unavailable");
+      stepper_->SetEnabled(true);
+      return Ack(cmd_name, "stepper enabled");
+
+    case CommandType::kStepperDisable:
+      if (!stepper_) return Nack(cmd_name, "stepper unavailable");
+      stepper_->SetEnabled(false);
+      return Ack(cmd_name, "stepper disabled");
 
     case CommandType::kUnknown:
       return Nack(cmd_name, "unknown command");

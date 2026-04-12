@@ -13,6 +13,7 @@
 #include "coatheal/heater_scheduler.hpp"
 #include "coatheal/sensor_manager.hpp"
 #include "coatheal/state_manager.hpp"
+#include "coatheal/stepper_controller.hpp"
 #include "coatheal/storage_manager.hpp"
 #include "coatheal/system_mode.hpp"
 #include "coatheal/telemetry_client.hpp"
@@ -55,6 +56,7 @@ class SystemController {
   StorageManager storage_manager_;
   TelemetryQueue telemetry_queue_;
   TelemetryClient telemetry_client_;
+  std::unique_ptr<StepperController> stepper_;
 
   std::atomic<bool> running_{true};
   std::atomic<bool> debug_armed_{false};

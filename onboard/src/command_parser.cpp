@@ -76,6 +76,26 @@ std::string CommandTypeToString(CommandType type) {
       return "RADIO_SILENCE";
     case CommandType::kRadioResume:
       return "RADIO_RESUME";
+    case CommandType::kStepperMove:
+      return "STEPPER_MOVE";
+    case CommandType::kStepperMoveTo:
+      return "STEPPER_MOVETO";
+    case CommandType::kStepperRotate:
+      return "STEPPER_ROTATE";
+    case CommandType::kStepperHome:
+      return "STEPPER_HOME";
+    case CommandType::kStepperStop:
+      return "STEPPER_STOP";
+    case CommandType::kStepperSetSpeed:
+      return "STEPPER_SET_SPEED";
+    case CommandType::kStepperSetMicrostep:
+      return "STEPPER_SET_MICROSTEP";
+    case CommandType::kStepperEnable:
+      return "STEPPER_ENABLE";
+    case CommandType::kStepperDisable:
+      return "STEPPER_DISABLE";
+    case CommandType::kStepperBend:
+      return "STEPPER_BEND";
     case CommandType::kUnknown:
       return "UNKNOWN";
   }
@@ -148,6 +168,16 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
       {"SET_TICK_HZ", CommandType::kSetTickHz},
       {"RADIO_SILENCE", CommandType::kRadioSilence},
       {"RADIO_RESUME", CommandType::kRadioResume},
+      {"STEPPER_MOVE", CommandType::kStepperMove},
+      {"STEPPER_MOVETO", CommandType::kStepperMoveTo},
+      {"STEPPER_ROTATE", CommandType::kStepperRotate},
+      {"STEPPER_HOME", CommandType::kStepperHome},
+      {"STEPPER_STOP", CommandType::kStepperStop},
+      {"STEPPER_SET_SPEED", CommandType::kStepperSetSpeed},
+      {"STEPPER_SET_MICROSTEP", CommandType::kStepperSetMicrostep},
+      {"STEPPER_ENABLE", CommandType::kStepperEnable},
+      {"STEPPER_DISABLE", CommandType::kStepperDisable},
+      {"STEPPER_BEND", CommandType::kStepperBend},
   };
 
   auto it = command_map.find(cmd);
@@ -187,7 +217,28 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
     case CommandType::kClearOverrides:
     case CommandType::kRadioSilence:
     case CommandType::kRadioResume:
+    case CommandType::kStepperHome:
+    case CommandType::kStepperStop:
+    case CommandType::kStepperEnable:
+    case CommandType::kStepperDisable:
       if (!require_args(0)) {
+        return result;
+      }
+      break;
+    case CommandType::kStepperMove:
+    case CommandType::kStepperRotate:
+    case CommandType::kStepperSetSpeed:
+    case CommandType::kStepperSetMicrostep:
+      if (!require_args(1)) {
+        return result;
+      }
+      break;
+    case CommandType::kStepperMoveTo:
+    case CommandType::kStepperBend:
+      // BEND accepts 1 arg (steps only) or 2 args (steps + hold_s).
+      // MOVETO mirrors that for symmetry with MoveToSteps().
+      if (command.args.size() < 1 || command.args.size() > 2) {
+        result.error = "invalid argument count for " + command.name;
         return result;
       }
       break;
