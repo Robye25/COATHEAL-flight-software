@@ -62,6 +62,23 @@ class SystemController {
 
   std::vector<double> last_heater_duty_;
   std::uint64_t seq_ = 0;
+
+  // Heating-cycle event aggregator. Emits HEATING_CYCLE_EVENT frames on the
+  // float -> descent transition, one per specimen. TODO(Group-A): if
+  // mission-phase arc logic changes, move this trigger into state_manager.
+  struct HeatingCycleAggregator {
+    bool active = false;
+    double peak_temp_c = -1e9;
+    double hold_start_mono_s = 0.0;
+    double hold_duration_s = 0.0;
+    double last_temp_c = 0.0;
+    double last_mono_s = 0.0;
+    double cooldown_rate_c_per_s = 0.0;
+    std::string start_ts;
+  };
+  std::vector<HeatingCycleAggregator> cycle_aggregators_;
+  MissionPhase last_phase_ = MissionPhase::kAscentHold;
+  std::uint32_t next_cycle_id_ = 1;
 };
 
 }  // namespace coatheal

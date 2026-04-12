@@ -31,4 +31,15 @@ std::string SerializeTelemetryDataFrame(const TelemetryRecord& record,
   return oss.str();
 }
 
+std::string SerializeHeatingCycleEvent(const HeatingCycleEvent& event,
+                                       const std::string& session_id) {
+  std::ostringstream oss;
+  oss << "EVT,CYCLE," << session_id << ',' << event.cycle_id << ',' << event.start_ts << ','
+      << std::fixed << std::setprecision(2) << event.peak_temp_c << ','
+      << std::setprecision(2) << event.hold_duration_s << ','
+      << std::setprecision(4) << event.cooldown_rate_c_per_s << ','
+      << event.specimen_index;
+  return oss.str();
+}
+
 }  // namespace coatheal
