@@ -6,6 +6,7 @@
 
 #include "coatheal/phase.hpp"
 #include "coatheal/status_flags.hpp"
+#include "coatheal/system_mode.hpp"
 
 namespace coatheal {
 
@@ -23,6 +24,7 @@ struct SensorSnapshot {
 struct TelemetryRecord {
   std::uint64_t seq = 0;
   MissionPhase phase = MissionPhase::kAscentHold;
+  SystemMode mode = SystemMode::kStandby;
   SensorSnapshot sensors;
   std::vector<double> heater_duty;
   StatusFlags status;

@@ -44,7 +44,7 @@ struct PhaseConfig {
 };
 
 struct TransitionConfig {
-  double ascent_to_activation_mbar = 140.0;
+  double ascent_to_activation_mbar = 100.0;
   double float_to_descent_mbar = 300.0;
 };
 
