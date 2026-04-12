@@ -29,6 +29,12 @@ class TelemetryClient {
   bool SendFrameAwaitAck(const std::string& frame, TelemetryAck* ack);
   bool is_connected() const;
 
+  // When disabled, SendFrameAwaitAck returns false immediately without
+  // touching the socket and the TX side is closed promptly (<1 s). Upstream
+  // callers keep enqueuing frames into the on-disk queue so nothing is lost.
+  void SetTransmitEnabled(bool enabled);
+  bool transmit_enabled() const;
+
   std::string session_id() const;
   std::string current_host() const;
 
@@ -58,6 +64,7 @@ class TelemetryClient {
 
   mutable std::mutex mu_;
   bool connected_ = false;
+  bool transmit_enabled_ = true;
   int socket_fd_ = -1;
   std::string recv_buffer_;
   std::string session_id_;

@@ -12,7 +12,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from .protocol import TelemetryParseError, build_ack, parse_telemetry_csv
+from .protocol import (
+    TelemetryParseError,
+    build_ack,
+    parse_heating_cycle_event,
+    parse_telemetry_csv,
+)
 
 
 class LivePlotter:
@@ -315,6 +320,27 @@ class TelemetryServer:
                     line = line.strip()
                     if not line:
                         continue
+                    if line.startswith("EVT,CYCLE,"):
+                        try:
+                            event = parse_heating_cycle_event(line)
+                        except TelemetryParseError as exc:
+                            print(f"[telemetry][evt-parse-error] {exc}: {line}")
+                            continue
+                        self._last_packet_time = time.time()
+                        self._append_event_log(event, line)
+                        ack_line = build_ack(event.session_id, 0)
+                        try:
+                            conn.sendall(ack_line.encode("utf-8"))
+                        except OSError:
+                            return
+                        print(
+                            f"[evt][cycle] session={event.session_id} cycle={event.cycle_id} "
+                            f"specimen={event.specimen_index} peak={event.peak_temp_c:.2f}C "
+                            f"hold={event.hold_duration_s:.1f}s "
+                            f"cool={event.cooldown_rate_c_per_s:.3f}C/s"
+                        )
+                        continue
+
                     try:
                         packet = parse_telemetry_csv(line)
                     except TelemetryParseError as exc:
@@ -356,6 +382,36 @@ class TelemetryServer:
                         f"[telemetry] session={packet.session_id} seq={packet.seq} phase={packet.phase} "
                         f"P={packet.ambient_pressure_mbar:.1f}mbar Tbox={packet.box_temp_c:.2f}C"
                     )
+
+    def _append_event_log(self, event, raw_line: str) -> None:
+        event_path = self.log_path.with_name(self.log_path.stem + "_events.csv")
+        first = not event_path.exists()
+        try:
+            with event_path.open("a", newline="", encoding="utf-8") as ef:
+                writer = csv.writer(ef)
+                if first:
+                    writer.writerow([
+                        "session_id",
+                        "cycle_id",
+                        "start_ts",
+                        "peak_temp_c",
+                        "hold_duration_s",
+                        "cooldown_rate_c_per_s",
+                        "specimen_index",
+                        "raw",
+                    ])
+                writer.writerow([
+                    event.session_id,
+                    event.cycle_id,
+                    event.start_ts,
+                    f"{event.peak_temp_c:.2f}",
+                    f"{event.hold_duration_s:.2f}",
+                    f"{event.cooldown_rate_c_per_s:.4f}",
+                    event.specimen_index,
+                    raw_line,
+                ])
+        except OSError as exc:
+            print(f"[evt][log-error] {exc}")
 
     def _log_waiting(self) -> None:
         now = time.time()

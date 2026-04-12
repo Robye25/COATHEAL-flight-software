@@ -16,6 +16,7 @@ DANGEROUS_COMMANDS = {
     "SHUTDOWN_SAFE",
     "OFF",
     "RESET",
+    "RADIO_SILENCE",
 }
 
 

@@ -62,6 +62,10 @@ std::string CommandTypeToString(CommandType type) {
       return "SET_BENCH_MODE";
     case CommandType::kSetTickHz:
       return "SET_TICK_HZ";
+    case CommandType::kRadioSilence:
+      return "RADIO_SILENCE";
+    case CommandType::kRadioResume:
+      return "RADIO_RESUME";
     case CommandType::kUnknown:
       return "UNKNOWN";
   }
@@ -127,6 +131,8 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
       {"CLEAR_OVERRIDES", CommandType::kClearOverrides},
       {"SET_BENCH_MODE", CommandType::kSetBenchMode},
       {"SET_TICK_HZ", CommandType::kSetTickHz},
+      {"RADIO_SILENCE", CommandType::kRadioSilence},
+      {"RADIO_RESUME", CommandType::kRadioResume},
   };
 
   auto it = command_map.find(cmd);
@@ -159,6 +165,8 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
     case CommandType::kShutdownSafe:
     case CommandType::kDisarmDebug:
     case CommandType::kClearOverrides:
+    case CommandType::kRadioSilence:
+    case CommandType::kRadioResume:
       if (!require_args(0)) {
         return result;
       }

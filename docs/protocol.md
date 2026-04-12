@@ -75,6 +75,44 @@ DATA,coatheal-1718000000-123456,42,2024-06-10T12:00:00Z,1,-55.23,140.12,12.4,0.0
 
 ---
 
+## Heating Cycle Event Frame (`EVT,CYCLE`)
+
+Emitted by the onboard once per specimen at the `FLOAT_HOLD → DESCENT_FLOOR`
+transition (i.e. when an activation → float → descent arc completes). Uses the
+same newline-terminated framing and ACK flow as `DATA` frames.
+
+### Format
+
+```
+EVT,CYCLE,<session_id>,<cycle_id>,<start_ts>,<peak_temp_c>,<hold_duration_s>,<cooldown_rate_c_per_s>,<specimen_index>\n
+```
+
+### Fields
+
+| Index | Field | Type | Description |
+|---|---|---|---|
+| 0 | `EVT` | literal | Event frame marker |
+| 1 | `CYCLE` | literal | Event subtype: heating cycle completion |
+| 2 | `session_id` | string | Onboard session that produced the event |
+| 3 | `cycle_id` | uint32 | Monotonic cycle counter (per session) |
+| 4 | `start_ts` | string | UTC ISO-8601 timestamp at which `ACTIVATION_RAMP` began |
+| 5 | `peak_temp_c` | float | Maximum specimen temperature observed during the cycle (°C) |
+| 6 | `hold_duration_s` | float | Wall-clock seconds spent in `FLOAT_HOLD_+70C` |
+| 7 | `cooldown_rate_c_per_s` | float | Initial cooldown rate at entry to `DESCENT_FLOOR` (positive = cooling) |
+| 8 | `specimen_index` | uint | Zero-based specimen/heater index (0 … heater_count-1) |
+
+Ground-station behaviour: the telemetry server parses these rows out of the
+TCP stream, ACKs them like any other frame, and appends to a sibling
+`<log>_events.csv` file for post-flight analysis.
+
+### Example
+
+```
+EVT,CYCLE,coatheal-1718000000-123456,1,2026-04-13T12:34:56Z,71.42,3600.00,0.0812,3
+```
+
+---
+
 ## ACK Frame
 
 Sent by the ground station to the onboard for each valid, non-duplicate telemetry packet. ACKs are cumulative by session — the ground station tracks the highest received seq per session.
@@ -188,6 +226,8 @@ NACK,<COMMAND>,<reason>\n
 | `RESET_CTRL` | — | `ACK,RESET_CTRL,control loop reset queued` | Reset PID integrators |
 | `SHUTDOWN_SAFE` | — | `ACK,SHUTDOWN_SAFE,safe shutdown queued` | Graceful process shutdown |
 | `SET_TICK_HZ` | `<hz>` | `ACK,SET_TICK_HZ,tick_hz=<hz>` | Live downlink/main-loop rate change. Range `[0.1, 5.0]` Hz. Required by BEXUS User Manual §5.4 (operator-tunable downlink). Flight-safe; no debug arm needed. |
+| `RADIO_SILENCE` | — | `ACK,RADIO_SILENCE,radio silent` | Stop pushing frames out the TX socket and close the connection (latency < 1 s). Frames continue to fill the on-disk queue and will replay after `RADIO_RESUME`. |
+| `RADIO_RESUME` | — | `ACK,RADIO_RESUME,radio resumed` | Re-enable transmission. Queued frames are drained in order on the next tick. |
 | `ARM_DEBUG` | `<token>` | `ACK,ARM_DEBUG,debug armed` | Arm extended debug commands (bench mode only) |
 
 Aliases: `ON` = `FORCE_START`, `OFF` = `FORCE_STOP`, `RESET` = `RESET_CTRL`.
