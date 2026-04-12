@@ -67,6 +67,19 @@ MissionPhase StateManager::Update(double pressure_mbar,
         phase_ = MissionPhase::kDescentFloor;
         break;
       }
+      if (overrides.secondary_cycle) {
+        const auto hold_seconds = std::chrono::duration_cast<std::chrono::seconds>(
+            now - float_hold_started_);
+        const long long total_budget_s =
+            static_cast<long long>(config_.phase.float_hold_minutes * 60.0);
+        const long long remaining_s = total_budget_s - hold_seconds.count();
+        constexpr long long kMinReentryHoldSeconds = 10 * 60;
+        if (remaining_s >= kMinReentryHoldSeconds) {
+          phase_ = MissionPhase::kActivationRamp;
+          float_hold_started_valid_ = false;
+          break;
+        }
+      }
       if (float_hold_started_valid_) {
         const auto hold_seconds = std::chrono::duration_cast<std::chrono::seconds>(
             now - float_hold_started_);
