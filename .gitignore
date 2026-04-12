@@ -27,3 +27,6 @@ venv/
 # OS
 Thumbs.db
 *.swp
+
+.claude/
+memory/
