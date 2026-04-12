@@ -70,10 +70,19 @@ SystemController::SystemController(OnboardConfig config)
 bool SystemController::Initialize(std::string* error) {
   if (config_.runtime.use_simulated_pwm) {
     pwm_ = std::make_unique<SimulatedPwmController>(config_.hardware.heater_count);
+    status_led_ = std::make_unique<SimulatedStatusLed>("heartbeat",
+                                                       config_.hal.status_led_line);
+    mode_led_ = std::make_unique<SimulatedStatusLed>("mode",
+                                                     config_.hal.mode_led_line);
   } else {
     pwm_ = std::make_unique<LibgpiodPwmController>(
         config_.runtime.gpio_chip, config_.hardware.heater_count);
+    status_led_ = std::make_unique<GpioStatusLed>(
+        config_.runtime.gpio_chip, config_.hal.status_led_line, "heartbeat");
+    mode_led_ = std::make_unique<GpioStatusLed>(
+        config_.runtime.gpio_chip, config_.hal.mode_led_line, "mode");
   }
+  mode_led_->Set(StatusLed::Pattern::kSolid);
 
   if (!storage_manager_.Initialize(error)) {
     return false;
@@ -172,6 +181,15 @@ int SystemController::Run() {
 
     if (phase == MissionPhase::kStopped) {
       running_ = false;
+    }
+
+    // Heartbeat: toggle the status LED every tick so a human can see the
+    // main loop is alive. Mode-indicator LED: Group A owns SystemMode — at
+    // merge time, replace the kSolid default with the mapped pattern from
+    // the current SystemMode (e.g. kHeartbeat=NOMINAL, kFastBlink=WARN,
+    // kSOS=FAULT). TODO(group-a-merge): wire SystemMode -> StatusLed::Pattern.
+    if (status_led_) {
+      status_led_->Toggle();
     }
 
     // Pet the systemd watchdog every tick. If the main loop hangs (e.g. an

@@ -14,6 +14,8 @@ COATHEAL runs on a **Raspberry Pi 4** and interfaces with the following hardware
 | Real-time clock | External RTC (DS3231 or similar) | I2C | Driver pending |
 | Sample heaters (×9) | Resistive heaters via MOSFET | GPIO PWM | Pin mapping pending |
 | Electronics heater (×1) | Resistive heater via MOSFET | GPIO PWM | Pin mapping pending |
+| Heartbeat status LED | Discrete LED + series resistor | GPIO (libgpiod) | BCM 17 (`hal.status_led_line`) |
+| Mode indicator LED | Discrete LED + series resistor | GPIO (libgpiod) | BCM 27 (`hal.mode_led_line`) |
 
 ---
 
@@ -110,6 +112,21 @@ The `HeaterScheduler` enforces the 4-heater and 40 W limits. The electronics hea
 
 ---
 
+## Visual Status LEDs
+
+Two discrete LEDs on the Pi 40-pin header provide at-a-glance flight-software
+health without requiring a ground-station link.
+
+| LED | Default GPIO line | Config key | Behaviour |
+|---|---|---|---|
+| Heartbeat | BCM 17 | `hal.status_led_line` | Toggles once per main-loop tick (1 Hz at default `runtime.tick_hz=1.0`). If it stops blinking, the main loop is stalled. |
+| Mode indicator | BCM 27 | `hal.mode_led_line` | Blink pattern reflects `SystemMode` (SOLID = nominal boot, HEARTBEAT = running, FAST_BLINK = warning, SOS = fault). |
+
+Wire each LED anode through a ~330 Ω series resistor to the listed BCM GPIO,
+cathode to ground. Both lines are requested as outputs by `GpioStatusLed`
+(libgpiod). When `runtime.use_simulated_pwm=true`, a `SimulatedStatusLed`
+replacement logs state transitions to stderr instead of touching GPIO.
+
 ## HAL Status Summary
 
 | Component | File | Status | Pending Work |
@@ -119,6 +136,8 @@ The `HeaterScheduler` enforces the 4-heater and 40 W limits. The electronics hea
 | `RtcAdapter` | `hal/rtc_adapter.hpp` | **Stub** (system clock) | External RTC I2C driver |
 | `LibgpiodPwmController` | `hal/pwm_controller.hpp` | **Implemented** | GPIO pin mapping |
 | `SimulatedPwmController` | `hal/pwm_controller.hpp` | **Implemented** | (bench testing only) |
+| `GpioStatusLed` | `hal/status_led.hpp` | **Implemented** | libgpiod output on `hal.status_led_line` / `hal.mode_led_line` |
+| `SimulatedStatusLed` | `hal/status_led.hpp` | **Implemented** | (bench testing only; logs transitions to stderr) |
 
 ### Writing a HAL Driver
 

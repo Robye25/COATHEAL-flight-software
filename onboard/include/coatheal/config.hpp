@@ -73,6 +73,13 @@ struct HardwareConfig {
   std::size_t electronics_heater_index = 9;
 };
 
+struct HalConfig {
+  // GPIO line numbers for the two visual status LEDs on the Pi 40-pin header.
+  // Defaults (BCM 17 / BCM 27) match the wiring documented in docs/hardware.md.
+  std::size_t status_led_line = 17;  // heartbeat
+  std::size_t mode_led_line = 27;    // system-mode indicator
+};
+
 struct OnboardConfig {
   RuntimeConfig runtime;
   CommsConfig comms;
@@ -82,6 +89,7 @@ struct OnboardConfig {
   PowerConfig power;
   PidConfig pid;
   HardwareConfig hardware;
+  HalConfig hal;
 };
 
 bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::string* error);
