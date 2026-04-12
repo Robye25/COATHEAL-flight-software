@@ -27,7 +27,8 @@ std::string SerializeTelemetryDataFrame(const TelemetryRecord& record,
     oss << std::setprecision(3) << record.heater_duty[i];
   }
 
-  oss << ",PHASE=" << ToString(record.phase) << ",STATUS=" << ToStatusBitfield(record.status);
+  oss << ",PHASE=" << ToString(record.phase) << ",MODE=" << ToString(record.mode)
+      << ",STATUS=" << ToStatusBitfield(record.status);
   return oss.str();
 }
 

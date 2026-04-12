@@ -14,6 +14,7 @@
 #include "coatheal/sensor_manager.hpp"
 #include "coatheal/state_manager.hpp"
 #include "coatheal/storage_manager.hpp"
+#include "coatheal/system_mode.hpp"
 #include "coatheal/telemetry_client.hpp"
 #include "coatheal/telemetry_queue.hpp"
 #include "coatheal/thermal_controller.hpp"
@@ -54,6 +55,7 @@ class SystemController {
 
   std::atomic<bool> running_{true};
   std::atomic<bool> debug_armed_{false};
+  std::atomic<SystemMode> mode_{SystemMode::kStandby};
   std::atomic<double> live_tick_hz_{1.0};
 
   mutable std::mutex overrides_mu_;
