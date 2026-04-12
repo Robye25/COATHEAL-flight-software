@@ -159,3 +159,21 @@ When `bench_mode=true` (or hardware is absent), `SensorManager` uses a simplifie
 - After reaching `ascent_to_activation_mbar`, pressure holds briefly then rises (simulating descent)
 
 This allows full end-to-end software testing including automatic phase transitions, without any physical hardware.
+
+## Stepper motor + Pi-EzConnect HAT
+
+- **HAT:** Adafruit Pi-EzConnect Terminal Block Breakout. All GPIO lines pass
+  through unchanged — wire sensors and the stepper driver to the terminal
+  block next to the matching BCM number.
+- **Stepper driver:** TBD (A4988 / DRV8825 / TMC2209-class). Software uses a
+  STEP/DIR/EN abstraction (`coatheal::StepperDriver`) so any of those drop in.
+- **Default BCM assignments** (overridable via `onboard.ini`):
+  - `stepper.step_line=5`
+  - `stepper.dir_line=6`
+  - `stepper.enable_line=13` (active-low on most drivers)
+- **Power:** drive the stepper from the gondola 28.8 V rail through the
+  driver's VMOT input, not from the Pi 5 V supply. Share ground with the HAT.
+- **Pulse generation:** the flight software currently issues pulses from the
+  main tick loop (up to `stepper.default_step_hz`). Once the driver choice is
+  locked, a dedicated RT thread / hardware PWM path will replace the loop
+  pulser; the `StepperDriver` interface is stable.

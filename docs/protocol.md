@@ -271,3 +271,48 @@ Aliases: `ON` = `FORCE_START`, `OFF` = `FORCE_STOP`, `RESET` = `RESET_CTRL`.
 → SET_HEATER_DUTY 0 0.5\n
 ← ACK,SET_HEATER_DUTY,override applied\n
 ```
+
+## Stepper motor (sample-bending actuator)
+
+The on-board computer drives a stepper motor to bend coating specimens during
+flight. The driver IC is not yet finalised; the software uses a driver-agnostic
+STEP/DIR/EN interface that maps onto any A4988/DRV8825/TMC2209-class driver.
+
+### Commands
+
+| Command | Args | Description |
+|---------|------|-------------|
+| `STEPPER_MOVE <steps>` | signed int | Move relative by N microsteps (negative = reverse) |
+| `STEPPER_MOVETO <steps> [hold_s]` | signed int, optional float | Move to absolute microstep position, optionally hold for `hold_s` |
+| `STEPPER_ROTATE <revs>` | signed float | Rotate relative by N full revolutions (uses `steps_per_rev × microstep`) |
+| `STEPPER_BEND <steps> [hold_s]` | signed int, optional float | Alias for MOVETO, semantically tagged as a bend |
+| `STEPPER_HOME` | — | Return to position 0 |
+| `STEPPER_STOP` | — | Abort current motion |
+| `STEPPER_SET_SPEED <hz>` | positive float | Step rate in Hz (clamped to `stepper.max_step_hz`) |
+| `STEPPER_SET_MICROSTEP <n>` | int ∈ [1,32] | Set microstep divisor |
+| `STEPPER_ENABLE` / `STEPPER_DISABLE` | — | Toggle driver enable pin |
+
+### Telemetry field
+
+Every `DATA` frame appends a `STEPPER=` segment of pipe-separated key:value
+pairs so ground software can plot bend state alongside temperature:
+
+```
+STEPPER=pos:<position_steps>|tgt:<target_steps>|hz:<step_hz>|us:<microstep>
+       |en:<0|1>|mv:<0|1>|hold:<0|1>|hold_s:<remaining>|pulses:<total>|src:<tag>
+```
+
+`src` records what last changed the setpoint (`phase:FLOAT_HOLD`, `cmd:MOVE`,
+`cmd:BEND`, `cmd:HOME`, `cmd:STOP`, `init`).
+
+### Configuration (`onboard.ini`)
+
+Key takeaways — see `config/onboard.example.ini` for the full list:
+
+- `stepper.steps_per_rev`, `stepper.microstep`, `stepper.default_step_hz`,
+  `stepper.max_step_hz`, `stepper.max_position_steps`
+- `stepper.step_line`, `stepper.dir_line`, `stepper.enable_line` (BCM GPIO on
+  the Pi-EzConnect HAT terminal block), `stepper.invert_direction`,
+  `stepper.enable_active_low`, `stepper.enable_on_boot`
+- Per-phase bend schedule: `bend.{ascent,activation,float,descent}_steps` and
+  matching `_hold_s`. Applied on phase entry.

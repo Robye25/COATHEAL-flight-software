@@ -37,3 +37,11 @@ add_executable(coatheal_status_led_test
 target_link_libraries(coatheal_status_led_test PRIVATE coatheal_onboard_core)
 
 add_test(NAME coatheal_status_led_test COMMAND coatheal_status_led_test)
+
+add_executable(coatheal_stepper_tests
+  unit/stepper_test.cpp
+)
+
+target_link_libraries(coatheal_stepper_tests PRIVATE coatheal_onboard_core)
+
+add_test(NAME coatheal_stepper_tests COMMAND coatheal_stepper_tests)

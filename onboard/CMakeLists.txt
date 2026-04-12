@@ -15,6 +15,7 @@ add_library(coatheal_onboard_core
   src/sensor_manager.cpp
   src/state_manager.cpp
   src/status_flags.cpp
+  src/stepper_controller.cpp
   src/storage_manager.cpp
   src/system_controller.cpp
   src/telemetry.cpp
@@ -27,6 +28,8 @@ add_library(coatheal_onboard_core
   src/hal/spi_adapter.cpp
   src/hal/gpio_status_led.cpp
   src/hal/simulated_status_led.cpp
+  src/hal/simulated_stepper_driver.cpp
+  src/hal/gpio_step_dir_driver.cpp
 )
 
 target_include_directories(coatheal_onboard_core
