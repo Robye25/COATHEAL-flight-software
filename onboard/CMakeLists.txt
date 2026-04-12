@@ -25,6 +25,8 @@ add_library(coatheal_onboard_core
   src/hal/pwm_controller.cpp
   src/hal/rtc_adapter.cpp
   src/hal/spi_adapter.cpp
+  src/hal/gpio_status_led.cpp
+  src/hal/simulated_status_led.cpp
 )
 
 target_include_directories(coatheal_onboard_core
