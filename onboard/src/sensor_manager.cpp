@@ -62,6 +62,13 @@ SensorSnapshot SensorManager::ReadSnapshot(MissionPhase phase,
   snapshot.box_temp_c = box_temp_c_;
   snapshot.sample_temps_c = sample_temps_c_;
 
+  // Range checks: do not mutate raw readings; only flip status bits so the
+  // ground sees an honest out-of-range sample.
+  t_ambient_ok_ = (snapshot.ambient_temp_c >= config_.sensor_range.ambient_temp_min_c) &&
+                  (snapshot.ambient_temp_c <= config_.sensor_range.ambient_temp_max_c);
+  p_ambient_ok_ = (snapshot.ambient_pressure_mbar >= config_.sensor_range.ambient_pressure_min_mbar) &&
+                  (snapshot.ambient_pressure_mbar <= config_.sensor_range.ambient_pressure_max_mbar);
+
   if (spi_ != nullptr && i2c_ != nullptr) {
     if (!spi_->healthy() || !i2c_->healthy()) {
       // Keep data running but avoid NaNs in case hardware probing fails.

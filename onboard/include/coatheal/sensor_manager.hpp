@@ -22,6 +22,11 @@ class SensorManager {
                               const std::vector<double>& heater_duty,
                               double dt_seconds);
 
+  // Status flags for ambient temperature/pressure range checks. Updated on
+  // every ReadSnapshot call. Raw sensor values are not clamped.
+  bool t_ambient_ok() const { return t_ambient_ok_; }
+  bool p_ambient_ok() const { return p_ambient_ok_; }
+
  private:
   OnboardConfig config_;
   SpiAdapter* spi_ = nullptr;
@@ -31,6 +36,8 @@ class SensorManager {
   double box_temp_c_ = 10.0;
   double pressure_mbar_ = 1013.25;
   bool pressure_descending_ = true;
+  bool t_ambient_ok_ = true;
+  bool p_ambient_ok_ = true;
 };
 
 }  // namespace coatheal

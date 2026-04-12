@@ -41,11 +41,24 @@ struct PhaseConfig {
   double box_target_c = 0.0;
   double activation_ramp_c_per_s = 0.85;
   double float_hold_minutes = 90.0;
+  double uniformity_tolerance_c = 2.0;
 };
 
 struct TransitionConfig {
   double ascent_to_activation_mbar = 100.0;
   double float_to_descent_mbar = 300.0;
+};
+
+struct HeaterSafetyConfig {
+  double max_sample_temp_c = 85.0;
+  double max_box_temp_c = 60.0;
+};
+
+struct SensorRangeConfig {
+  double ambient_temp_min_c = -90.0;
+  double ambient_temp_max_c = 50.0;
+  double ambient_pressure_min_mbar = 5.0;
+  double ambient_pressure_max_mbar = 1050.0;
 };
 
 struct PowerConfig {
@@ -82,6 +95,8 @@ struct OnboardConfig {
   PowerConfig power;
   PidConfig pid;
   HardwareConfig hardware;
+  HeaterSafetyConfig heater_safety;
+  SensorRangeConfig sensor_range;
 };
 
 bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::string* error);

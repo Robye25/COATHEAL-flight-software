@@ -10,7 +10,12 @@ std::string ToStatusBitfield(const StatusFlags& flags) {
       << (flags.usb_ok ? "USB_OK" : "USB_FAIL") << '|'
       << (flags.i2c_ok ? "I2C_OK" : "I2C_FAIL") << '|'
       << (flags.spi_ok ? "SPI_OK" : "SPI_FAIL") << '|'
-      << (flags.link_ok ? "LINK_OK" : "LINK_FAIL");
+      << (flags.link_ok ? "LINK_OK" : "LINK_FAIL") << '|'
+      << (flags.t_ambient_ok ? "T_AMBIENT_OK" : "T_AMBIENT_FAIL") << '|'
+      << (flags.p_ambient_ok ? "P_AMBIENT_OK" : "P_AMBIENT_FAIL") << '|'
+      << (flags.uniformity_ok ? "UNIFORMITY_OK" : "UNIFORMITY_FAIL") << '|'
+      << (flags.overtemp_ok ? "OVERTEMP_OK" : "OVERTEMP_FAIL") << '|'
+      << (flags.energy_ok ? "ENERGY_OK" : "ENERGY_FAIL");
   return oss.str();
 }
 
