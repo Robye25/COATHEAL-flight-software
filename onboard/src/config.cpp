@@ -232,6 +232,11 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
       if (!parse_size_t(key, value, &config->hardware.heater_count, line_no)) return false;
     } else if (key == "hardware.electronics_heater_index") {
       if (!parse_size_t(key, value, &config->hardware.electronics_heater_index, line_no)) return false;
+
+    } else if (key == "hal.status_led_line") {
+      if (!parse_size_t(key, value, &config->hal.status_led_line, line_no)) return false;
+    } else if (key == "hal.mode_led_line") {
+      if (!parse_size_t(key, value, &config->hal.mode_led_line, line_no)) return false;
     } else {
       if (error != nullptr) {
         *error = "unknown config key at line " + std::to_string(line_no) + ": " + key;

@@ -21,6 +21,7 @@
 #include "coatheal/hal/pwm_controller.hpp"
 #include "coatheal/hal/rtc_adapter.hpp"
 #include "coatheal/hal/spi_adapter.hpp"
+#include "coatheal/hal/status_led.hpp"
 
 namespace coatheal {
 
@@ -44,6 +45,8 @@ class SystemController {
   RtcAdapter rtc_;
 
   std::unique_ptr<PwmController> pwm_;
+  std::unique_ptr<StatusLed> status_led_;  // heartbeat, toggled each tick
+  std::unique_ptr<StatusLed> mode_led_;    // system-mode indicator
   SensorManager sensor_manager_;
   StateManager state_manager_;
   ThermalController thermal_controller_;
