@@ -116,24 +116,37 @@ int SystemController::Run() {
       state_overrides_.force_stop = false;
       state_overrides_.reset_control = false;
       state_overrides_.shutdown_safe = false;
+      state_overrides_.secondary_cycle = false;
     }
 
     if (state_overrides.reset_control) {
       thermal_controller_.Reset();
     }
 
+    const SystemMode current_mode = mode_.load();
+
     SensorSnapshot snapshot = sensor_manager_.ReadSnapshot(
         state_manager_.phase(), last_heater_duty_, tick_duration.count());
 
-    const MissionPhase phase = state_manager_.Update(
-        snapshot.ambient_pressure_mbar, snapshot.sample_temps_c, state_overrides,
-        std::chrono::steady_clock::now());
+    MissionPhase phase = state_manager_.phase();
+    if (current_mode == SystemMode::kRun) {
+      phase = state_manager_.Update(
+          snapshot.ambient_pressure_mbar, snapshot.sample_temps_c, state_overrides,
+          std::chrono::steady_clock::now());
+    }
+
+    const bool heaters_allowed = (current_mode == SystemMode::kRun);
+    ControlOverrides effective_control = control_overrides;
+    if (!heaters_allowed) {
+      effective_control.heaters_off = true;
+    }
 
     std::vector<double> requested_duty = thermal_controller_.ComputeRequestedDuty(
-        phase, snapshot, tick_duration.count(), control_overrides);
+        phase, snapshot, tick_duration.count(), effective_control);
 
     const std::vector<double> scheduled_duty = scheduler_.Schedule(
-        requested_duty, phase == MissionPhase::kActivationRamp, tick_duration.count());
+        requested_duty, heaters_allowed && phase == MissionPhase::kActivationRamp,
+        tick_duration.count());
 
     for (std::size_t i = 0; i < scheduled_duty.size(); ++i) {
       pwm_->SetDuty(i, scheduled_duty[i]);
@@ -143,6 +156,7 @@ int SystemController::Run() {
     TelemetryRecord record;
     record.seq = seq_++;
     record.phase = phase;
+    record.mode = current_mode;
     record.sensors = snapshot;
     record.heater_duty = scheduled_duty;
     record.status = storage_manager_.status();
@@ -256,6 +270,7 @@ std::string SystemController::HandleCommandLine(const std::string& line) {
     case CommandType::kStatus: {
       std::ostringstream status;
       status << "phase=" << ToString(state_manager_.phase())
+             << ";mode=" << ToString(mode_.load())
              << ";bench_mode=" << (config_.runtime.bench_mode ? "1" : "0")
              << ";debug_armed=" << (debug_armed_.load() ? "1" : "0")
              << ";telemetry_target=" << telemetry_client_.current_host()
@@ -284,9 +299,39 @@ std::string SystemController::HandleCommandLine(const std::string& line) {
       return Ack(cmd_name, "control loop reset queued");
 
     case CommandType::kShutdownSafe:
-      set_state_override([&]() { state_overrides_.shutdown_safe = true; });
-      running_ = false;
-      return Ack(cmd_name, "safe shutdown queued");
+    case CommandType::kEnterSafe:
+      mode_.store(SystemMode::kSafe);
+      set_state_override([&]() { control_overrides_.heaters_off = true; });
+      return Ack(cmd_name, "entered SAFE mode");
+
+    case CommandType::kExitSafe: {
+      SystemMode expected = SystemMode::kSafe;
+      if (!mode_.compare_exchange_strong(expected, SystemMode::kStandby)) {
+        return Nack(cmd_name, "not in SAFE mode");
+      }
+      set_state_override([&]() { control_overrides_.heaters_off = false; });
+      return Ack(cmd_name, "exited SAFE mode to STANDBY");
+    }
+
+    case CommandType::kArm: {
+      SystemMode expected = SystemMode::kStandby;
+      if (!mode_.compare_exchange_strong(expected, SystemMode::kRun)) {
+        return Nack(cmd_name, "ARM requires STANDBY mode");
+      }
+      return Ack(cmd_name, "mode=RUN");
+    }
+
+    case CommandType::kDisarm: {
+      SystemMode expected = SystemMode::kRun;
+      if (!mode_.compare_exchange_strong(expected, SystemMode::kStandby)) {
+        return Nack(cmd_name, "DISARM requires RUN mode");
+      }
+      return Ack(cmd_name, "mode=STANDBY");
+    }
+
+    case CommandType::kSecondaryCycle:
+      set_state_override([&]() { state_overrides_.secondary_cycle = true; });
+      return Ack(cmd_name, "secondary heating cycle requested");
 
     case CommandType::kArmDebug:
       if (!config_.runtime.bench_mode) {

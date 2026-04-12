@@ -46,6 +46,16 @@ std::string CommandTypeToString(CommandType type) {
       return "RESET_CTRL";
     case CommandType::kShutdownSafe:
       return "SHUTDOWN_SAFE";
+    case CommandType::kArm:
+      return "ARM";
+    case CommandType::kDisarm:
+      return "DISARM";
+    case CommandType::kEnterSafe:
+      return "ENTER_SAFE";
+    case CommandType::kExitSafe:
+      return "EXIT_SAFE";
+    case CommandType::kSecondaryCycle:
+      return "SECONDARY_CYCLE";
     case CommandType::kArmDebug:
       return "ARM_DEBUG";
     case CommandType::kDisarmDebug:
@@ -119,6 +129,11 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
       {"RESET_CTRL", CommandType::kResetCtrl},
       {"RESET", CommandType::kResetCtrl},
       {"SHUTDOWN_SAFE", CommandType::kShutdownSafe},
+      {"ARM", CommandType::kArm},
+      {"DISARM", CommandType::kDisarm},
+      {"ENTER_SAFE", CommandType::kEnterSafe},
+      {"EXIT_SAFE", CommandType::kExitSafe},
+      {"SECONDARY_CYCLE", CommandType::kSecondaryCycle},
       {"ARM_DEBUG", CommandType::kArmDebug},
       {"DISARM_DEBUG", CommandType::kDisarmDebug},
       {"SET_HEATER_DUTY", CommandType::kSetHeaterDuty},
@@ -157,6 +172,11 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
     case CommandType::kHeatersOff:
     case CommandType::kResetCtrl:
     case CommandType::kShutdownSafe:
+    case CommandType::kArm:
+    case CommandType::kDisarm:
+    case CommandType::kEnterSafe:
+    case CommandType::kExitSafe:
+    case CommandType::kSecondaryCycle:
     case CommandType::kDisarmDebug:
     case CommandType::kClearOverrides:
       if (!require_args(0)) {

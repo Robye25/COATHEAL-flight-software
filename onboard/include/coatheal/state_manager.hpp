@@ -13,6 +13,7 @@ struct StateOverrides {
   bool force_stop = false;
   bool reset_control = false;
   bool shutdown_safe = false;
+  bool secondary_cycle = false;
 };
 
 class StateManager {
