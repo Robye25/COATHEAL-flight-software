@@ -1,7 +1,11 @@
 #include "coatheal/storage_manager.hpp"
 
+#include <cstdio>
 #include <filesystem>
-#include <fstream>
+
+#if defined(__unix__) || defined(__APPLE__)
+#include <unistd.h>
+#endif
 
 namespace coatheal {
 
@@ -31,33 +35,74 @@ bool StorageManager::Initialize(std::string* error) {
   return true;
 }
 
+void StorageManager::AppendLine(const std::string& path, const std::string& line,
+                                bool write_header, bool sync, bool* ok) {
+  std::FILE* fp = std::fopen(path.c_str(), "ab");
+  if (fp == nullptr) {
+    *ok = false;
+    return;
+  }
+  if (write_header) {
+    const char header[] = "# COATHEAL telemetry log\n";
+    if (std::fwrite(header, 1, sizeof(header) - 1, fp) != sizeof(header) - 1) {
+      *ok = false;
+      std::fclose(fp);
+      return;
+    }
+  }
+  if (std::fwrite(line.data(), 1, line.size(), fp) != line.size() ||
+      std::fputc('\n', fp) == EOF) {
+    *ok = false;
+    std::fclose(fp);
+    return;
+  }
+  if (std::fflush(fp) != 0) {
+    *ok = false;
+    std::fclose(fp);
+    return;
+  }
+  if (sync) {
+#if defined(__unix__) || defined(__APPLE__)
+    const int fd = ::fileno(fp);
+    if (fd >= 0 && ::fsync(fd) != 0) {
+      *ok = false;
+    }
+#endif
+  }
+  std::fclose(fp);
+}
+
 void StorageManager::WriteLine(const std::string& line) {
   std::lock_guard<std::mutex> lock(mu_);
+  const bool sync = safe_mode_.load();
+  const bool write_header = !wrote_header_;
 
-  bool any_wrote = false;
-
-  auto append = [&](const std::string& path, bool* ok) {
-    std::ofstream out(path, std::ios::app);
-    if (!out.is_open()) {
-      *ok = false;
-      return;
-    }
-    if (!wrote_header_) {
-      out << "# COATHEAL telemetry log\n";
-    }
-    out << line << '\n';
-    if (!out.good()) {
-      *ok = false;
-      return;
-    }
-    any_wrote = true;
-  };
-
-  append(primary_path_, &primary_ok_);
-  append(secondary_path_, &secondary_ok_);
-  if (any_wrote) {
+  AppendLine(primary_path_, line, write_header, sync, &primary_ok_);
+  AppendLine(secondary_path_, line, write_header, sync, &secondary_ok_);
+  if (primary_ok_ || secondary_ok_) {
     wrote_header_ = true;
   }
+}
+
+void StorageManager::FlushAndSync() {
+  std::lock_guard<std::mutex> lock(mu_);
+#if defined(__unix__) || defined(__APPLE__)
+  auto sync_path = [](const std::string& path, bool* ok) {
+    std::FILE* fp = std::fopen(path.c_str(), "ab");
+    if (fp == nullptr) {
+      *ok = false;
+      return;
+    }
+    std::fflush(fp);
+    const int fd = ::fileno(fp);
+    if (fd >= 0 && ::fsync(fd) != 0) {
+      *ok = false;
+    }
+    std::fclose(fp);
+  };
+  sync_path(primary_path_, &primary_ok_);
+  sync_path(secondary_path_, &secondary_ok_);
+#endif
 }
 
 StatusFlags StorageManager::status() const {

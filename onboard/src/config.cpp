@@ -198,6 +198,22 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
       if (!parse_double(key, value, &config->phase.activation_ramp_c_per_s, line_no)) return false;
     } else if (key == "phase.float_hold_minutes") {
       if (!parse_double(key, value, &config->phase.float_hold_minutes, line_no)) return false;
+    } else if (key == "phase.uniformity_tolerance_c") {
+      if (!parse_double(key, value, &config->phase.uniformity_tolerance_c, line_no)) return false;
+
+    } else if (key == "heater.max_sample_temp_c") {
+      if (!parse_double(key, value, &config->heater_safety.max_sample_temp_c, line_no)) return false;
+    } else if (key == "heater.max_box_temp_c") {
+      if (!parse_double(key, value, &config->heater_safety.max_box_temp_c, line_no)) return false;
+
+    } else if (key == "sensor.ambient_temp_min_c") {
+      if (!parse_double(key, value, &config->sensor_range.ambient_temp_min_c, line_no)) return false;
+    } else if (key == "sensor.ambient_temp_max_c") {
+      if (!parse_double(key, value, &config->sensor_range.ambient_temp_max_c, line_no)) return false;
+    } else if (key == "sensor.ambient_pressure_min_mbar") {
+      if (!parse_double(key, value, &config->sensor_range.ambient_pressure_min_mbar, line_no)) return false;
+    } else if (key == "sensor.ambient_pressure_max_mbar") {
+      if (!parse_double(key, value, &config->sensor_range.ambient_pressure_max_mbar, line_no)) return false;
 
     } else if (key == "transition.ascent_to_activation_mbar") {
       if (!parse_double(key, value, &config->transition.ascent_to_activation_mbar, line_no)) return false;
