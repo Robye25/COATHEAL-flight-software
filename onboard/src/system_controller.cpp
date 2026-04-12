@@ -163,6 +163,11 @@ int SystemController::Run() {
     record.status.spi_ok = spi_.healthy();
     record.status.i2c_ok = i2c_.healthy();
     record.status.link_ok = last_link_ok;
+    record.status.t_ambient_ok = sensor_manager_.t_ambient_ok();
+    record.status.p_ambient_ok = sensor_manager_.p_ambient_ok();
+    record.status.overtemp_ok = !thermal_controller_.overtemp_latched();
+    record.status.uniformity_ok = thermal_controller_.uniformity_ok();
+    record.status.energy_ok = !scheduler_.is_budget_exhausted();
 
     const std::string line = SerializeTelemetryDataFrame(record, telemetry_client_.session_id());
     storage_manager_.WriteLine(line);
@@ -302,6 +307,8 @@ std::string SystemController::HandleCommandLine(const std::string& line) {
     case CommandType::kEnterSafe:
       mode_.store(SystemMode::kSafe);
       set_state_override([&]() { control_overrides_.heaters_off = true; });
+      storage_manager_.SetSafeMode(true);
+      storage_manager_.FlushAndSync();
       return Ack(cmd_name, "entered SAFE mode");
 
     case CommandType::kExitSafe: {
@@ -310,6 +317,7 @@ std::string SystemController::HandleCommandLine(const std::string& line) {
         return Nack(cmd_name, "not in SAFE mode");
       }
       set_state_override([&]() { control_overrides_.heaters_off = false; });
+      storage_manager_.SetSafeMode(false);
       return Ack(cmd_name, "exited SAFE mode to STANDBY");
     }
 
