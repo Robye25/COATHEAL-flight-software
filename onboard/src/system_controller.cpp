@@ -189,6 +189,81 @@ int SystemController::Run() {
       std::cerr << "[telemetry] drain error: " << drain_error << '\n';
     }
 
+    // Heating-cycle aggregator: accumulate per-specimen peak/hold/cooldown
+    // across ACTIVATION_RAMP -> FLOAT_HOLD -> DESCENT_FLOOR and emit an
+    // HEATING_CYCLE_EVENT frame for each specimen at the float->descent edge.
+    // TODO(Group-A): if state_manager gains a dedicated cycle-complete hook,
+    // replace this phase-edge detection with that signal.
+    {
+      const std::size_t n = snapshot.sample_temps_c.size();
+      if (cycle_aggregators_.size() != n) {
+        cycle_aggregators_.assign(n, HeatingCycleAggregator{});
+      }
+      const double mono_s =
+          std::chrono::duration<double>(tick_start.time_since_epoch()).count();
+
+      const bool in_cycle = (phase == MissionPhase::kActivationRamp ||
+                             phase == MissionPhase::kFloatHold);
+      for (std::size_t i = 0; i < n; ++i) {
+        HeatingCycleAggregator& agg = cycle_aggregators_[i];
+        const double t = snapshot.sample_temps_c[i];
+        if (in_cycle) {
+          if (!agg.active) {
+            agg = HeatingCycleAggregator{};
+            agg.active = true;
+            agg.peak_temp_c = t;
+            agg.start_ts = snapshot.timestamp_utc;
+            agg.hold_start_mono_s = mono_s;
+          }
+          if (t > agg.peak_temp_c) {
+            agg.peak_temp_c = t;
+          }
+          if (phase == MissionPhase::kFloatHold) {
+            agg.hold_duration_s = mono_s - agg.hold_start_mono_s;
+          }
+          agg.last_temp_c = t;
+          agg.last_mono_s = mono_s;
+        } else if (agg.active && phase == MissionPhase::kDescentFloor) {
+          const double dt = std::max(1e-3, mono_s - agg.last_mono_s);
+          agg.cooldown_rate_c_per_s = (agg.last_temp_c - t) / dt;
+        }
+      }
+
+      const bool cycle_complete =
+          (last_phase_ == MissionPhase::kFloatHold && phase == MissionPhase::kDescentFloor);
+      if (cycle_complete) {
+        for (std::size_t i = 0; i < cycle_aggregators_.size(); ++i) {
+          HeatingCycleAggregator& agg = cycle_aggregators_[i];
+          if (!agg.active) {
+            continue;
+          }
+          HeatingCycleEvent event;
+          event.cycle_id = next_cycle_id_;
+          event.start_ts = agg.start_ts;
+          event.peak_temp_c = agg.peak_temp_c;
+          event.hold_duration_s = agg.hold_duration_s;
+          event.cooldown_rate_c_per_s = agg.cooldown_rate_c_per_s;
+          event.specimen_index = i;
+
+          const std::string evt_line =
+              SerializeHeatingCycleEvent(event, telemetry_client_.session_id());
+          storage_manager_.WriteLine(evt_line);
+
+          QueuedTelemetryFrame evt_frame;
+          evt_frame.queued_epoch_s = CurrentUnixEpochSeconds();
+          evt_frame.session_id = telemetry_client_.session_id();
+          evt_frame.seq = seq_++;
+          evt_frame.frame = evt_line;
+          std::string evt_error;
+          telemetry_queue_.Enqueue(evt_frame, &evt_error);
+
+          agg.active = false;
+        }
+        ++next_cycle_id_;
+      }
+      last_phase_ = phase;
+    }
+
     if (phase == MissionPhase::kStopped) {
       running_ = false;
     }
@@ -452,6 +527,14 @@ std::string SystemController::HandleCommandLine(const std::string& line) {
       msg << "tick_hz=" << hz;
       return Ack(cmd_name, msg.str());
     }
+
+    case CommandType::kRadioSilence:
+      telemetry_client_.SetTransmitEnabled(false);
+      return Ack(cmd_name, "radio silent");
+
+    case CommandType::kRadioResume:
+      telemetry_client_.SetTransmitEnabled(true);
+      return Ack(cmd_name, "radio resumed");
 
     case CommandType::kUnknown:
       return Nack(cmd_name, "unknown command");

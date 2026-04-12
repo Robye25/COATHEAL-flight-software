@@ -21,3 +21,11 @@ add_executable(coatheal_safety_tests
 target_link_libraries(coatheal_safety_tests PRIVATE coatheal_onboard_core)
 
 add_test(NAME coatheal_safety_tests COMMAND coatheal_safety_tests)
+
+add_executable(coatheal_downlink_bandwidth_test
+  downlink_bandwidth_test.cpp
+)
+
+target_link_libraries(coatheal_downlink_bandwidth_test PRIVATE coatheal_onboard_core)
+
+add_test(NAME coatheal_downlink_bandwidth COMMAND coatheal_downlink_bandwidth_test)

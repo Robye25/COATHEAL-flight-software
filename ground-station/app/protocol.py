@@ -95,3 +95,59 @@ def build_command(command: str) -> str:
     if not command:
         raise ValueError("empty command")
     return command + "\n"
+
+
+# Commands accepted by the onboard command server. Kept in sync with
+# onboard/src/command_parser.cpp.
+KNOWN_COMMANDS = {
+    "PING",
+    "STATUS",
+    "FORCE_START",
+    "FORCE_STOP",
+    "ON",
+    "OFF",
+    "HEATERS_OFF",
+    "RESET_CTRL",
+    "RESET",
+    "SHUTDOWN_SAFE",
+    "ARM_DEBUG",
+    "DISARM_DEBUG",
+    "SET_HEATER_DUTY",
+    "SET_ALL_DUTY",
+    "SET_PID",
+    "CLEAR_OVERRIDES",
+    "SET_BENCH_MODE",
+    "SET_TICK_HZ",
+    "RADIO_SILENCE",
+    "RADIO_RESUME",
+}
+
+
+@dataclass
+class HeatingCycleEvent:
+    session_id: str
+    cycle_id: int
+    start_ts: str
+    peak_temp_c: float
+    hold_duration_s: float
+    cooldown_rate_c_per_s: float
+    specimen_index: int
+
+
+def parse_heating_cycle_event(line: str) -> HeatingCycleEvent:
+    """Parse an `EVT,CYCLE,...` line emitted by the onboard."""
+    parts = [p.strip() for p in line.strip().split(",")]
+    if len(parts) < 9 or parts[0] != "EVT" or parts[1] != "CYCLE":
+        raise TelemetryParseError("not an EVT,CYCLE frame")
+    try:
+        return HeatingCycleEvent(
+            session_id=parts[2],
+            cycle_id=int(parts[3]),
+            start_ts=parts[4],
+            peak_temp_c=float(parts[5]),
+            hold_duration_s=float(parts[6]),
+            cooldown_rate_c_per_s=float(parts[7]),
+            specimen_index=int(parts[8]),
+        )
+    except ValueError as exc:
+        raise TelemetryParseError(f"invalid EVT,CYCLE fields: {exc}") from exc

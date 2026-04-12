@@ -350,6 +350,15 @@ bool TelemetryClient::ParseAckLine(const std::string& line, TelemetryAck* ack) {
 bool TelemetryClient::SendFrameAwaitAck(const std::string& frame, TelemetryAck* ack) {
   std::lock_guard<std::mutex> lock(mu_);
 
+  if (!transmit_enabled_) {
+    // Radio silence: drop the socket quickly and refuse to transmit. Callers
+    // keep the frame in the persistent queue for replay after RADIO_RESUME.
+    if (socket_fd_ >= 0) {
+      CloseLocked();
+    }
+    return false;
+  }
+
   if (!connected_) {
     if (!ConnectLocked()) {
       std::this_thread::sleep_for(std::chrono::milliseconds(reconnect_ms_));
@@ -385,6 +394,19 @@ bool TelemetryClient::SendFrameAwaitAck(const std::string& frame, TelemetryAck* 
 bool TelemetryClient::is_connected() const {
   std::lock_guard<std::mutex> lock(mu_);
   return connected_;
+}
+
+void TelemetryClient::SetTransmitEnabled(bool enabled) {
+  std::lock_guard<std::mutex> lock(mu_);
+  transmit_enabled_ = enabled;
+  if (!enabled) {
+    CloseLocked();
+  }
+}
+
+bool TelemetryClient::transmit_enabled() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return transmit_enabled_;
 }
 
 std::string TelemetryClient::session_id() const {

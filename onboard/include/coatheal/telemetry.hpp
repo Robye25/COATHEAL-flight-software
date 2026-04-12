@@ -33,4 +33,20 @@ struct TelemetryRecord {
 std::string SerializeTelemetryDataFrame(const TelemetryRecord& record,
                                         const std::string& session_id);
 
+struct HeatingCycleEvent {
+  std::uint32_t cycle_id = 0;
+  std::string start_ts;               // UTC ISO-8601
+  double peak_temp_c = 0.0;
+  double hold_duration_s = 0.0;
+  double cooldown_rate_c_per_s = 0.0; // positive = cooling
+  std::size_t specimen_index = 0;
+};
+
+// Newline-terminated, CSV-style with a distinct prefix so the ground parser
+// can route it separately from DATA frames.
+// Format: EVT,CYCLE,<session_id>,<cycle_id>,<start_ts>,<peak_temp_c>,
+//         <hold_duration_s>,<cooldown_rate_c_per_s>,<specimen_index>
+std::string SerializeHeatingCycleEvent(const HeatingCycleEvent& event,
+                                       const std::string& session_id);
+
 }  // namespace coatheal

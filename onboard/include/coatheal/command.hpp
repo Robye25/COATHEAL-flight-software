@@ -26,6 +26,8 @@ enum class CommandType {
   kClearOverrides,
   kSetBenchMode,
   kSetTickHz,
+  kRadioSilence,
+  kRadioResume,
   kUnknown,
 };
 
