@@ -1,7 +1,21 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import List
+from dataclasses import dataclass, field
+from typing import Callable, List, Optional, Tuple
+
+
+@dataclass
+class StepperSnapshot:
+    position: int = 0
+    target: int = 0
+    hz: float = 0.0
+    microstep: int = 1
+    enabled: bool = False
+    moving: bool = False
+    holding: bool = False
+    hold_s: float = 0.0
+    pulses: int = 0
+    source: str = ""
 
 
 @dataclass
@@ -19,10 +33,47 @@ class TelemetryPacket:
     heater_duty: List[float]
     phase: str
     status: str
+    mode: str = ""
+    stepper: Optional[StepperSnapshot] = None
 
 
 class TelemetryParseError(ValueError):
     pass
+
+
+def _parse_stepper_segment(value: str) -> StepperSnapshot:
+    s = StepperSnapshot()
+    for piece in value.split("|"):
+        if not piece:
+            continue
+        if ":" not in piece:
+            raise TelemetryParseError(f"malformed STEPPER pair: {piece!r}")
+        key, raw = piece.split(":", 1)
+        try:
+            if key == "pos":
+                s.position = int(raw)
+            elif key == "tgt":
+                s.target = int(raw)
+            elif key == "hz":
+                s.hz = float(raw)
+            elif key == "us":
+                s.microstep = int(raw)
+            elif key == "en":
+                s.enabled = raw not in ("0", "false", "False")
+            elif key == "mv":
+                s.moving = raw not in ("0", "false", "False")
+            elif key == "hold":
+                s.holding = raw not in ("0", "false", "False")
+            elif key == "hold_s":
+                s.hold_s = float(raw)
+            elif key == "pulses":
+                s.pulses = int(raw)
+            elif key == "src":
+                s.source = raw
+            # unknown keys silently ignored (forward-compat)
+        except ValueError as exc:
+            raise TelemetryParseError(f"invalid STEPPER {key}={raw!r}: {exc}") from exc
+    return s
 
 
 def parse_telemetry_csv(line: str) -> TelemetryPacket:
@@ -60,11 +111,17 @@ def parse_telemetry_csv(line: str) -> TelemetryPacket:
 
     phase = ""
     status = ""
+    mode = ""
+    stepper: Optional[StepperSnapshot] = None
     for token in parts[heater_field_index + 1 :]:
         if token.startswith("PHASE="):
             phase = token.split('=', 1)[1]
+        elif token.startswith("MODE="):
+            mode = token.split('=', 1)[1]
         elif token.startswith("STATUS="):
             status = token.split('=', 1)[1]
+        elif token.startswith("STEPPER="):
+            stepper = _parse_stepper_segment(token.split('=', 1)[1])
 
     if not phase or not status:
         raise TelemetryParseError("missing PHASE or STATUS field")
@@ -83,6 +140,8 @@ def parse_telemetry_csv(line: str) -> TelemetryPacket:
         heater_duty=heater_duty,
         phase=phase,
         status=status,
+        mode=mode,
+        stepper=stepper,
     )
 
 
@@ -97,8 +156,6 @@ def build_command(command: str) -> str:
     return command + "\n"
 
 
-# Commands accepted by the onboard command server. Kept in sync with
-# onboard/src/command_parser.cpp.
 KNOWN_COMMANDS = {
     "PING",
     "STATUS",
@@ -166,3 +223,99 @@ def parse_heating_cycle_event(line: str) -> HeatingCycleEvent:
         )
     except ValueError as exc:
         raise TelemetryParseError(f"invalid EVT,CYCLE fields: {exc}") from exc
+
+
+@dataclass
+class CommandResponse:
+    ok: bool
+    command: str
+    body: str = ""
+    error: str = ""
+    raw: str = ""
+
+
+def parse_command_response(line: str) -> CommandResponse:
+    """Parse the onboard reply format: `ACK,<cmd>,<body>` or `NACK,<cmd>,<reason>`.
+
+    `command_parser.cpp` actually emits `ACK,<cmd>,<message>` without a
+    session/seq echo today, so we accept that shape. Unknown shapes return
+    ok=False with the raw line as the body so the operator sees something.
+    """
+    raw = line.strip()
+    if not raw:
+        return CommandResponse(ok=False, command="", error="empty response", raw=raw)
+    parts = raw.split(",", 2)
+    tag = parts[0].upper()
+    if tag == "ACK" and len(parts) >= 2:
+        return CommandResponse(ok=True, command=parts[1],
+                               body=parts[2] if len(parts) >= 3 else "", raw=raw)
+    if tag == "NACK" and len(parts) >= 2:
+        return CommandResponse(ok=False, command=parts[1],
+                               error=parts[2] if len(parts) >= 3 else "", raw=raw)
+    return CommandResponse(ok=False, command="", error="unrecognised reply", raw=raw)
+
+
+# --- Argument validators ------------------------------------------------------
+# Each returns (ok, normalised_or_error). Used by GUI before enabling Send and
+# by CLI before wire-encoding. Single source of truth for bounds.
+
+def validate_heater_index(idx: int, count: int = 10) -> Tuple[bool, str]:
+    if not isinstance(idx, int) or idx < 0 or idx >= count:
+        return False, f"index must be in [0, {count - 1}]"
+    return True, str(idx)
+
+
+def validate_duty(duty: float) -> Tuple[bool, str]:
+    try:
+        d = float(duty)
+    except (TypeError, ValueError):
+        return False, "duty must be numeric"
+    if d < 0.0 or d > 1.0:
+        return False, "duty must be in [0.0, 1.0]"
+    return True, f"{d:.3f}"
+
+
+def validate_tick_hz(hz: float) -> Tuple[bool, str]:
+    try:
+        v = float(hz)
+    except (TypeError, ValueError):
+        return False, "hz must be numeric"
+    if v < 0.1 or v > 5.0:
+        return False, "hz must be in [0.1, 5.0]"
+    return True, f"{v:.3f}"
+
+
+def validate_speed_hz(hz: float, max_hz: float = 5000.0) -> Tuple[bool, str]:
+    try:
+        v = float(hz)
+    except (TypeError, ValueError):
+        return False, "hz must be numeric"
+    if v <= 0.0 or v > max_hz:
+        return False, f"hz must be in (0, {max_hz}]"
+    return True, f"{v:.3f}"
+
+
+def validate_microstep(divisor: int) -> Tuple[bool, str]:
+    if divisor not in (1, 2, 4, 8, 16, 32):
+        return False, "microstep must be 1, 2, 4, 8, 16 or 32"
+    return True, str(divisor)
+
+
+def validate_stepper_move(steps: int, max_range: int = 200000) -> Tuple[bool, str]:
+    try:
+        n = int(steps)
+    except (TypeError, ValueError):
+        return False, "steps must be integer"
+    if abs(n) > max_range:
+        return False, f"steps exceed max_range {max_range}"
+    return True, str(n)
+
+
+def validate_revolutions(revs: float) -> Tuple[bool, str]:
+    try:
+        r = float(revs)
+    except (TypeError, ValueError):
+        return False, "revs must be numeric"
+    if abs(r) > 1e6:
+        return False, "revs unrealistically large"
+    return True, f"{r:.4f}"
