@@ -50,21 +50,27 @@ def _style_button(btn: QPushButton, *, bg: str, fg: str = "white",
 # ── Connection ───────────────────────────────────────────────────────────────
 class ConnectionPanel(QGroupBox):
     start_requested = pyqtSignal(str, int, int, str)  # bind, tel_port, cmd_port, cmd_host
+    priority_changed = pyqtSignal(int)
 
     def __init__(self, default_bind: str, default_tel: int, default_cmd_port: int,
-                 default_cmd_host: str, parent=None):
+                 default_cmd_host: str, parent=None, *, default_priority: int = 100):
         super().__init__("Connection", parent)
         form = QFormLayout(self)
         form.setContentsMargins(6, 6, 6, 6)
 
         self._bind = QLineEdit(default_bind)
         self._tel_port = QSpinBox(); self._tel_port.setRange(1, 65535); self._tel_port.setValue(default_tel)
-        self._cmd_host = QLineEdit(default_cmd_host)
+        self._cmd_host = QLineEdit(default_cmd_host if default_cmd_host else "")
+        self._cmd_host.setPlaceholderText("auto-detected")
         self._cmd_port = QSpinBox(); self._cmd_port.setRange(1, 65535); self._cmd_port.setValue(default_cmd_port)
+        self._priority = QSpinBox(); self._priority.setRange(0, 999); self._priority.setValue(default_priority)
+        self._priority.setToolTip("GS beacon priority — higher wins. Backup GS should be lower (e.g. 50).")
+        self._priority.valueChanged.connect(self.priority_changed.emit)
         form.addRow("Bind IP:",    self._bind)
         form.addRow("Tel port:",   self._tel_port)
         form.addRow("Onboard IP:", self._cmd_host)
         form.addRow("Cmd port:",   self._cmd_port)
+        form.addRow("Priority:",   self._priority)
 
         self._start_btn = QPushButton("▶ Start Telemetry")
         _style_button(self._start_btn, bg="#2980b9", bold=True, min_height=30)
@@ -74,6 +80,11 @@ class ConnectionPanel(QGroupBox):
         self._status = QLabel("● idle")
         self._status.setStyleSheet("color: #888; font-size: 11px;")
         form.addRow(self._status)
+
+        self._discovered = QLabel("Discovered: —")
+        self._discovered.setStyleSheet("color: #888; font-family: monospace; font-size: 10px;")
+        self._discovered.setWordWrap(True)
+        form.addRow(self._discovered)
 
     def _emit_start(self) -> None:
         self.start_requested.emit(self._bind.text().strip(), self._tel_port.value(),
@@ -88,6 +99,32 @@ class ConnectionPanel(QGroupBox):
         else:
             self._status.setText("● waiting for onboard…")
             self._status.setStyleSheet("color: #f39c12; font-size: 11px;")
+
+    def set_status(self, state: str) -> None:
+        colors = {
+            "listening": ("#3498db", "● listening"),
+            "connected": ("#2ecc71", "● connected"),
+            "stale":     ("#f39c12", "● stale (no data)"),
+            "searching": ("#f39c12", "● searching for onboard…"),
+        }
+        color, text = colors.get(state, ("#888", f"● {state}"))
+        self._status.setText(text)
+        self._status.setStyleSheet(f"color: {color}; font-size: 11px;")
+
+    def set_discovered(self, host: str, cmd_port: int, tel_port: int,
+                       session: str, hostname: str) -> None:
+        self._discovered.setText(
+            f"Discovered: {hostname}@{host}  cmd:{cmd_port} tel:{tel_port}  sess:{session[:8]}"
+        )
+        self._discovered.setStyleSheet(
+            "color: #2ecc71; font-family: monospace; font-size: 10px;"
+        )
+
+    def current_priority(self) -> int:
+        return int(self._priority.value())
+
+    def onboard_host_value(self) -> str:
+        return self._cmd_host.text().strip()
 
 
 # ── Mode / Safety ─────────────────────────────────────────────────────────────

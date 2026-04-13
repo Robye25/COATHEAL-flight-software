@@ -46,4 +46,48 @@ if [[ ! -w "$PRIMARY_LOG" || ! -w "$SECONDARY_LOG" || ! -w "$QUEUE_DIR" ]]; then
   exit 1
 fi
 
+# --- Network environment checks (fail fast) -------------------------------
+
+# UDP 4100 is the discovery port; if something else holds it we can't bind.
+# ss is preferred (iproute2); fall back to lsof/netstat if missing.
+udp_port_in_use() {
+  local port="$1"
+  if command -v ss >/dev/null 2>&1; then
+    ss -lun 2>/dev/null | awk '{print $5}' | grep -Eq "[:.]${port}$" && return 0 || return 1
+  elif command -v lsof >/dev/null 2>&1; then
+    lsof -iUDP:"$port" -sUDP:LISTEN >/dev/null 2>&1 && return 0 || return 1
+  elif command -v netstat >/dev/null 2>&1; then
+    netstat -lun 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${port}$" && return 0 || return 1
+  else
+    # Can't check - don't block the flight on tool absence.
+    echo "[preflight] warn: no ss/lsof/netstat; skipping UDP port check" >&2
+    return 1
+  fi
+}
+
+if udp_port_in_use 4100; then
+  echo "[preflight] UDP 4100 (discovery) is already in use by another process" >&2
+  exit 1
+fi
+
+# At least one non-loopback interface must be up. /sys/class/net/*/operstate
+# reports "up" / "down" / "unknown".
+have_link=0
+if [[ -d /sys/class/net ]]; then
+  for iface in /sys/class/net/*; do
+    name="$(basename "$iface")"
+    [[ "$name" == "lo" ]] && continue
+    state="$(cat "$iface/operstate" 2>/dev/null || echo down)"
+    if [[ "$state" == "up" ]]; then
+      have_link=1
+      break
+    fi
+  done
+fi
+
+if [[ "$have_link" -ne 1 ]]; then
+  echo "[preflight] no non-loopback network interface is up (/sys/class/net)" >&2
+  exit 1
+fi
+
 echo "[preflight] ok config=$CONFIG_PATH"

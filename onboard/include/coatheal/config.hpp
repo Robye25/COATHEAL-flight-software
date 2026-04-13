@@ -16,13 +16,17 @@ struct RuntimeConfig {
 
 struct CommsConfig {
   std::string telemetry_host = "127.0.0.1";
-  std::string static_ground_ip = "192.168.50.1";
+  std::string static_ground_ip;
   std::string static_pi_ip = "192.168.50.2";
   int telemetry_port = 4000;
   int command_port = 5000;
   int reconnect_ms = 2000;
   bool discovery_enabled = true;
   int discovery_port = 4100;
+  int discovery_period_ms = 2000;
+  int rediscover_period_s = 30;
+  int failover_grace_s = 5;
+  int priority = 100;
 };
 
 struct StorageConfig {

@@ -14,7 +14,9 @@ from PyQt6.QtWidgets import (
 )
 
 from ..protocol import CommandResponse, TelemetryPacket
+from . import firewall
 from .dispatch import CommandDispatcher, TelemetryReceiver
+from .discovery import GsBeacon, OnboardListener, DISCOVERY_PORT_DEFAULT
 from .panels_control import (
     CommandPanel, ConnectionPanel, EmergencyBar, HeaterPanel, ModePanel,
     StepperPanel,
@@ -28,7 +30,7 @@ from .widgets import Toast
 
 class MainWindow(QMainWindow):
     def __init__(self, *, bind: str, tel_port: int, cmd_port: int, cmd_host: str,
-                 log_path: Path):
+                 log_path: Path, firewall_check: bool = True):
         super().__init__()
         self.setWindowTitle("COATHEAL Ground Station")
         self.resize(1500, 920)
@@ -59,6 +61,11 @@ class MainWindow(QMainWindow):
         # dock width.
         self._connection = ConnectionPanel(bind, tel_port, cmd_port, cmd_host)
         self._connection.start_requested.connect(self._on_start_telemetry)
+        self._connection.priority_changed.connect(self._on_priority_changed)
+        self._tel_port = tel_port
+        self._cmd_port = cmd_port
+        self._discovered_host: Optional[str] = None
+        self._discovered_cmd_port: Optional[int] = None
         self._mode_panel = ModePanel(self._dispatcher)
         self._heater_panel = HeaterPanel(self._dispatcher)
         self._stepper_panel = StepperPanel(self._dispatcher)
@@ -125,7 +132,48 @@ class MainWindow(QMainWindow):
         self._build_menus()
         self._build_shortcuts()
 
+        # ── discovery: beacon + passive listener start immediately ──
+        self._beacon = GsBeacon(
+            tel_port=tel_port, cmd_port=cmd_port,
+            priority=self._connection.current_priority(),
+            discovery_port=DISCOVERY_PORT_DEFAULT,
+        )
+        self._beacon.log_message.connect(self._log.append)
+        self._listener = OnboardListener(discovery_port=DISCOVERY_PORT_DEFAULT)
+        self._listener.log_message.connect(self._log.append)
+        self._listener.onboard_discovered.connect(self._on_onboard_discovered)
+        self._listener.peer_gs_seen.connect(self._on_peer_gs_seen)
+        self._beacon.start()
+        self._listener.start()
+
         # ── restore geometry ──
+        # ── firewall / network-profile auto-configure (Windows only) ──
+        if firewall_check:
+            try:
+                fw_result = firewall.check_and_prompt(self)
+            except Exception as exc:  # never block GUI startup on this
+                fw_result = "failed"
+                self._log.append(f"[firewall] probe error: {exc}")
+            if fw_result == "ok":
+                self._log.append("[firewall] rules OK")
+            elif fw_result == "deferred":
+                self._log.append(
+                    "[firewall] not configured — Pi may not reach GS; "
+                    "see docs/firewall.md"
+                )
+                self.statusBar().showMessage(
+                    "firewall not configured — Pi may not reach GS; "
+                    "see docs/firewall.md",
+                    10_000,
+                )
+            elif fw_result == "failed":
+                self._log.append(
+                    "[firewall] auto-configure failed — see docs/firewall.md "
+                    "to run scripts/configure_firewall.ps1 manually"
+                )
+        else:
+            self._log.append("[firewall] check skipped (--no-firewall-check)")
+
         geo = self._settings.value("window/geometry")
         if geo:
             self.restoreGeometry(geo)
@@ -140,7 +188,48 @@ class MainWindow(QMainWindow):
         self._receiver.packet_received.connect(self._on_packet)
         self._receiver.log_message.connect(self._log.append)
         self._receiver.connection_changed.connect(self._on_connection_changed)
+        self._receiver.status_changed.connect(self._on_receiver_status)
         self._receiver.start()
+
+    def _on_receiver_status(self, state: str) -> None:
+        self._connection.set_status(state)
+        colors = {"listening": "#3498db", "connected": "#2ecc71",
+                  "stale": "#f39c12", "searching": "#f39c12"}
+        self._top.set_discovery(f"tel: {state}", colors.get(state, "#888"))
+
+    def _on_priority_changed(self, p: int) -> None:
+        if hasattr(self, "_beacon") and self._beacon is not None:
+            self._beacon.set_priority(int(p))
+            self._log.append(f"[discovery] beacon priority => {p}")
+
+    def _on_onboard_discovered(self, host: str, cmd_port: int, tel_port: int,
+                               session: str, hostname: str) -> None:
+        self._connection.set_discovered(host, cmd_port, tel_port, session, hostname)
+        # Only retarget dispatcher if operator left host blank OR a new host/port appeared.
+        user_host = self._connection.onboard_host_value()
+        retarget = (not user_host) and (
+            host != self._discovered_host or cmd_port != self._discovered_cmd_port
+        )
+        if retarget:
+            self._dispatcher.set_endpoint(host, cmd_port)
+            self._discovered_host = host
+            self._discovered_cmd_port = cmd_port
+            self._log.append(f"[discovery] command target => {host}:{cmd_port}")
+            self._top.set_discovery(f"cmd: {host}:{cmd_port}", "#2ecc71")
+            try:
+                Toast.anchor(self._connection, f"Found {hostname} @ {host}", ok=True)
+            except RuntimeError:
+                pass
+        elif host != self._discovered_host or cmd_port != self._discovered_cmd_port:
+            self._discovered_host = host
+            self._discovered_cmd_port = cmd_port
+            self._log.append(
+                f"[discovery] onboard seen at {host}:{cmd_port} "
+                f"(user override {user_host} in effect)"
+            )
+
+    def _on_peer_gs_seen(self, host: str, priority: int) -> None:
+        self._log.append(f"[discovery] peer GS seen at {host} priority={priority}")
 
     def _on_connection_changed(self, connected: bool, addr: str) -> None:
         self._link_ok = connected
@@ -230,6 +319,10 @@ class MainWindow(QMainWindow):
         if self._receiver is not None:
             self._receiver.stop()
             self._receiver.wait(2000)
+        if getattr(self, "_beacon", None) is not None:
+            self._beacon.stop(); self._beacon.wait(2000)
+        if getattr(self, "_listener", None) is not None:
+            self._listener.stop(); self._listener.wait(2000)
         super().closeEvent(event)
 
 
@@ -240,6 +333,8 @@ def run_gui(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--cmd-port", type=int, default=5000)
     parser.add_argument("--host", default="169.254.10.10")
     parser.add_argument("--log", type=Path, default=Path("logs/ground_telemetry.csv"))
+    parser.add_argument("--no-firewall-check", action="store_true",
+                        help="Skip the Windows firewall / network-profile auto-check at startup.")
     args = parser.parse_args(argv)
 
     app = QApplication.instance() or QApplication([])
@@ -248,6 +343,7 @@ def run_gui(argv: Optional[list[str]] = None) -> int:
 
     win = MainWindow(bind=args.bind, tel_port=args.tel_port,
                      cmd_port=args.cmd_port, cmd_host=args.host,
-                     log_path=args.log)
+                     log_path=args.log,
+                     firewall_check=not args.no_firewall_check)
     win.show()
     return app.exec()

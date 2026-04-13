@@ -14,6 +14,7 @@
 #include "coatheal/sensor_manager.hpp"
 #include "coatheal/state_manager.hpp"
 #include "coatheal/telemetry.hpp"
+#include "coatheal/telemetry_client.hpp"
 #include "coatheal/telemetry_queue.hpp"
 
 namespace {
@@ -309,6 +310,34 @@ void TestStateTransitions() {
   assert(phase == coatheal::MissionPhase::kDescentFloor);
 }
 
+void TestDiscoveryBeaconParser() {
+  // discovery_enabled=false keeps Start()/Stop() a no-op so the test does not
+  // open real sockets — ProcessIncomingDiscoveryLine is still usable.
+  coatheal::TelemetryClient client("", 4000, 5000, 2000, false, 4100, "", "",
+                                   2000, 30, 5, 100);
+
+  const bool ok = client.ProcessIncomingDiscoveryLine(
+      "GS_BEACON,abc,4000,5000,200", "10.0.0.42");
+  assert(ok);
+
+  const coatheal::GroundStationAdvert latest = client.latest_gs();
+  assert(latest.valid);
+  assert(latest.host == "10.0.0.42");
+  assert(latest.telemetry_port == 4000);
+  assert(latest.command_port == 5000);
+  assert(latest.priority == 200);
+
+  // Malformed line: wrong field count — must not crash, must return false.
+  const bool bad = client.ProcessIncomingDiscoveryLine("GS_BEACON,abc,4000",
+                                                        "10.0.0.42");
+  assert(!bad);
+
+  // Non-beacon line returns false (GS_HELLO is handled in the listener loop).
+  const bool other = client.ProcessIncomingDiscoveryLine(
+      "RANDOM_JUNK,1,2,3", "10.0.0.42");
+  assert(!other);
+}
+
 }  // namespace
 
 int main() {
@@ -321,6 +350,7 @@ int main() {
   TestConfigParsesReliabilityFields();
   TestStateTransitions();
   TestVacuumRegime();
+  TestDiscoveryBeaconParser();
 
   std::cout << "All unit tests passed.\n";
   return 0;

@@ -31,7 +31,8 @@ class GuiSmoke(unittest.TestCase):
         from app.protocol import parse_telemetry_csv
 
         win = MainWindow(bind="127.0.0.1", tel_port=44000, cmd_port=45000,
-                         cmd_host="127.0.0.1", log_path=Path("logs/smoke.csv"))
+                         cmd_host="127.0.0.1", log_path=Path("logs/smoke.csv"),
+                         firewall_check=False)
         try:
             line = (
                 "DATA,sess-smoke,3,2026-04-13T12:00:00Z,1,-25.0,180.0,20.0,0.5,4.0,"

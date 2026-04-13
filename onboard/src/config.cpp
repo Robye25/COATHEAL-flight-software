@@ -185,6 +185,14 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
       if (!parse_bool(key, value, &config->comms.discovery_enabled, line_no)) return false;
     } else if (key == "comms.discovery_port") {
       if (!parse_int(key, value, &config->comms.discovery_port, line_no)) return false;
+    } else if (key == "comms.discovery_period_ms") {
+      if (!parse_int(key, value, &config->comms.discovery_period_ms, line_no)) return false;
+    } else if (key == "comms.rediscover_period_s") {
+      if (!parse_int(key, value, &config->comms.rediscover_period_s, line_no)) return false;
+    } else if (key == "comms.failover_grace_s") {
+      if (!parse_int(key, value, &config->comms.failover_grace_s, line_no)) return false;
+    } else if (key == "comms.priority") {
+      if (!parse_int(key, value, &config->comms.priority, line_no)) return false;
 
     } else if (key == "storage.primary_log_path") {
       config->storage.primary_log_path = value;
@@ -339,6 +347,13 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
       config->comms.discovery_port <= 0) {
     if (error != nullptr) {
       *error = "all comms ports must be > 0";
+    }
+    return false;
+  }
+
+  if (config->comms.priority < 0 || config->comms.priority > 999) {
+    if (error != nullptr) {
+      *error = "comms.priority must be in [0, 999]";
     }
     return false;
   }
