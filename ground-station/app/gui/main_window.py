@@ -9,8 +9,8 @@ import pyqtgraph as pg
 from PyQt6.QtCore import Qt, QSettings
 from PyQt6.QtGui import QAction, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
-    QApplication, QDockWidget, QMainWindow, QMessageBox, QStatusBar,
-    QTabWidget, QToolBox, QVBoxLayout, QWidget,
+    QApplication, QDockWidget, QMainWindow, QMessageBox, QScrollArea,
+    QSizePolicy, QSplitter, QStatusBar, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from ..protocol import CommandResponse, TelemetryPacket
@@ -52,7 +52,11 @@ class MainWindow(QMainWindow):
         v.addWidget(self._top); v.addWidget(self._plots, 1)
         self.setCentralWidget(central)
 
-        # ── left dock: QToolBox ──
+        # ── left dock: all panels stacked in a resizable splitter, scroll
+        # vertically if the window is short. Each panel is a QGroupBox with
+        # a size policy that lets the user drag the splitter to re-balance
+        # heights. Horizontal scroll is never needed — panels wrap to the
+        # dock width.
         self._connection = ConnectionPanel(bind, tel_port, cmd_port, cmd_host)
         self._connection.start_requested.connect(self._on_start_telemetry)
         self._mode_panel = ModePanel(self._dispatcher)
@@ -61,17 +65,29 @@ class MainWindow(QMainWindow):
         self._command_panel = CommandPanel(self._dispatcher)
         self._command_panel.debug_armed_changed.connect(self._heater_panel.set_armed)
 
-        left_box = QToolBox()
-        left_box.addItem(self._connection,    "Connection")
-        left_box.addItem(self._mode_panel,    "Mode / Phase")
-        left_box.addItem(self._heater_panel,  "Heaters")
-        left_box.addItem(self._stepper_panel, "Stepper")
-        left_box.addItem(self._command_panel, "Diagnostics")
+        left_splitter = QSplitter(Qt.Orientation.Vertical)
+        left_splitter.setChildrenCollapsible(True)
+        for panel, stretch in [
+            (self._connection,    0),
+            (self._mode_panel,    1),
+            (self._heater_panel,  3),
+            (self._stepper_panel, 2),
+            (self._command_panel, 1),
+        ]:
+            panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            left_splitter.addWidget(panel)
+            left_splitter.setStretchFactor(left_splitter.count() - 1, stretch)
+
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        left_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        left_scroll.setWidget(left_splitter)
 
         left_dock = QDockWidget("Controls", self)
-        left_dock.setWidget(left_box)
+        left_dock.setWidget(left_scroll)
         left_dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
-        left_dock.setMinimumWidth(340)
+        left_dock.setMinimumWidth(360)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, left_dock)
 
         # ── right dock: tabs ──
@@ -85,7 +101,7 @@ class MainWindow(QMainWindow):
         right_tabs.addTab(self._history,   "Cmd History")
         right_dock = QDockWidget("Status", self)
         right_dock.setWidget(right_tabs)
-        right_dock.setMinimumWidth(280)
+        right_dock.setMinimumWidth(320)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, right_dock)
 
         # ── bottom: emergency bar + log ──
