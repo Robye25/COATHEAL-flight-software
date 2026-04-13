@@ -146,6 +146,12 @@ class MainWindow(QMainWindow):
         self._beacon.start()
         self._listener.start()
 
+        # Auto-start the TCP telemetry acceptor on :tel_port so the operator
+        # doesn't have to click "Start Telemetry" for plug-and-play. The
+        # Connection panel's button remains a user-visible trigger for the
+        # case where auto-start failed (e.g. port already in use).
+        self._on_start_telemetry(bind, tel_port, cmd_port, cmd_host)
+
         # ── restore geometry ──
         # ── firewall / network-profile auto-configure (Windows only) ──
         if firewall_check:
@@ -184,6 +190,9 @@ class MainWindow(QMainWindow):
     # ── telemetry plumbing ──
     def _on_start_telemetry(self, bind: str, tel_port: int, cmd_port: int, cmd_host: str) -> None:
         self._dispatcher.set_endpoint(cmd_host, cmd_port)
+        if self._receiver is not None and self._receiver.isRunning():
+            self._log.append("[telemetry] receiver already running — ignoring")
+            return
         self._receiver = TelemetryReceiver(bind, tel_port, self._log_path)
         self._receiver.packet_received.connect(self._on_packet)
         self._receiver.log_message.connect(self._log.append)
