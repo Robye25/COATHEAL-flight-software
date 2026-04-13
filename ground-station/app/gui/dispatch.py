@@ -38,6 +38,7 @@ class TelemetryReceiver(QThread):
     packet_received    = pyqtSignal(object)
     log_message        = pyqtSignal(str)
     connection_changed = pyqtSignal(bool, str)
+    status_changed     = pyqtSignal(str)  # "listening" | "connected" | "stale" | "searching"
 
     # CSV v2 — appends stepper columns after the v1 schema. Legacy readers
     # indexing the first 13 columns continue to work unchanged.
@@ -51,7 +52,8 @@ class TelemetryReceiver(QThread):
         "stepper_pulses", "stepper_src",
     ]
 
-    _DATA_TIMEOUT_S = 3.0  # idle window before we force-close the onboard socket
+    _STALE_EMIT_S   = 5.0  # emit "stale" status when DATA frames older than this
+    _DATA_TIMEOUT_S = 8.0  # idle window before we force-close the onboard socket
 
     def __init__(self, bind: str, port: int, log_path: Path, parent=None):
         super().__init__(parent)
@@ -102,6 +104,7 @@ class TelemetryReceiver(QThread):
                 self.log_message.emit(
                     f"[telemetry] listening on {self._bind}:{self._port}"
                 )
+                self.status_changed.emit("listening")
                 while not self._stop_flag.is_set():
                     try:
                         conn, addr = srv.accept()
@@ -109,6 +112,7 @@ class TelemetryReceiver(QThread):
                         continue
                     addr_str = f"{addr[0]}:{addr[1]}"
                     self.connection_changed.emit(True, addr_str)
+                    self.status_changed.emit("connected")
                     self.log_message.emit(f"[telemetry] onboard connected from {addr_str}")
                     try:
                         self._handle_connection(conn, first_write)
@@ -118,6 +122,7 @@ class TelemetryReceiver(QThread):
                     finally:
                         conn.close()
                         self.connection_changed.emit(False, "")
+                        self.status_changed.emit("searching")
                         self.log_message.emit("[telemetry] onboard disconnected")
         except Exception as exc:
             self.log_message.emit(f"[error] receiver fatal: {exc}")
@@ -129,6 +134,7 @@ class TelemetryReceiver(QThread):
         conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         buf = ""
         last_data = time.monotonic()
+        stale_emitted = False
         with self._log_path.open("a", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=self.CSV_FIELDS)
             if write_header:
@@ -138,18 +144,25 @@ class TelemetryReceiver(QThread):
                 try:
                     chunk = conn.recv(4096)
                 except socket.timeout:
-                    if time.monotonic() - last_data > self._DATA_TIMEOUT_S:
+                    idle = time.monotonic() - last_data
+                    if idle > self._DATA_TIMEOUT_S:
                         self.log_message.emit(
                             f"[telemetry] no data for {self._DATA_TIMEOUT_S:.0f}s "
                             "— closing stale connection, waiting for reconnect"
                         )
                         return
+                    if idle > self._STALE_EMIT_S and not stale_emitted:
+                        stale_emitted = True
+                        self.status_changed.emit("stale")
                     continue
                 except OSError:
                     return
                 if not chunk:
                     break
                 last_data = time.monotonic()
+                if stale_emitted:
+                    stale_emitted = False
+                    self.status_changed.emit("connected")
 
                 buf += chunk.decode("utf-8", errors="replace")
                 while "\n" in buf:

@@ -63,7 +63,11 @@ SystemController::SystemController(OnboardConfig config)
                         config_.comms.discovery_enabled,
                         config_.comms.discovery_port,
                         config_.comms.static_ground_ip,
-                        config_.comms.static_pi_ip),
+                        config_.comms.static_pi_ip,
+                        config_.comms.discovery_period_ms,
+                        config_.comms.rediscover_period_s,
+                        config_.comms.failover_grace_s,
+                        config_.comms.priority),
       last_heater_duty_(config_.hardware.heater_count, 0.0) {
   live_tick_hz_.store(std::max(0.1, config_.runtime.tick_hz));
 }
@@ -113,6 +117,8 @@ bool SystemController::Initialize(std::string* error) {
   // Tell systemd we are READY=1 so the WatchdogSec timer in the unit file
   // starts ticking from a known good state. No-op when not running under
   // systemd. (BEXUS User Manual §5.9 — durability and auto-recovery.)
+  telemetry_client_.Start();
+
   SdNotify("READY=1");
   SdNotify("STATUS=initialised");
 
@@ -319,6 +325,7 @@ int SystemController::Run() {
 
   SdNotify("STOPPING=1");
   command_server_.Stop();
+  telemetry_client_.Stop();
   return 0;
 }
 

@@ -59,13 +59,14 @@ def discover_onboard_host(discovery_port: int, command_port: int, timeout: float
 
             line = data.decode("utf-8", errors="replace").strip()
             parts = [p.strip() for p in line.split(",")]
-            if len(parts) < 6:
+            if not parts:
                 continue
-            if parts[0] != "ONBOARD_HELLO":
-                continue
-            if parts[1] != nonce:
-                continue
-            return addr[0]
+            # Legacy nonce-matched reply.
+            if parts[0] == "ONBOARD_HELLO" and len(parts) >= 6 and parts[1] == nonce:
+                return addr[0]
+            # New passive broadcast from onboard — no nonce, still authoritative.
+            if parts[0] == "ONBOARD_BEACON" and len(parts) >= 5:
+                return addr[0]
 
     return None
 

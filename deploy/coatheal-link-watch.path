@@ -1,0 +1,12 @@
+[Unit]
+Description=COATHEAL Ethernet link-state watcher
+Documentation=man:systemd.path(5)
+
+[Path]
+# /sys/class/net/*/operstate files change when a NIC goes up/down
+# (including USB-Ethernet dongle replug). PathChanged fires on any such edit.
+PathChanged=/sys/class/net
+Unit=coatheal-link-watch.service
+
+[Install]
+WantedBy=multi-user.target

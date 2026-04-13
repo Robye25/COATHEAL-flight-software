@@ -1,0 +1,27 @@
+[Unit]
+Description=COATHEAL link-change reaction (restart onboard on NIC up/down)
+# Don't fight the onboard's own start-up.
+After=coatheal-onboard.service
+
+[Service]
+Type=oneshot
+# Cool-down guard: if we fired within the last 10 s, skip. This prevents a
+# link-flap loop where restart -> NIC churn -> path trigger -> restart ...
+# The guard file lives under /run so it vanishes on reboot.
+ExecStart=/bin/sh -c '\
+  COOLDOWN=/run/coatheal-link-watch.cooldown; \
+  NOW=$(date +%%s); \
+  if [ -f "$COOLDOWN" ]; then \
+    LAST=$(cat "$COOLDOWN" 2>/dev/null || echo 0); \
+    DELTA=$((NOW - LAST)); \
+    if [ "$DELTA" -lt 10 ]; then \
+      echo "[link-watch] cool-down active (${DELTA}s < 10s), skipping"; \
+      exit 0; \
+    fi; \
+  fi; \
+  echo "$NOW" > "$COOLDOWN"; \
+  echo "[link-watch] link change detected, restarting coatheal-onboard.service"; \
+  /usr/bin/systemctl restart coatheal-onboard.service || true'
+
+[Install]
+WantedBy=multi-user.target

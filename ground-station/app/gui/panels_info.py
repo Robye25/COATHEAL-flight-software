@@ -42,6 +42,15 @@ class TopStatusStrip(QWidget):
         self._last_packet_mono: float = 0.0
         self._timer = QTimer(self); self._timer.timeout.connect(self._refresh_link); self._timer.start(500)
 
+        self._disc = QLabel("disc: —"); self._disc.setStyleSheet(
+            "font-family: monospace; font-size: 10pt; color: #888;")
+        lay.addWidget(self._disc)
+
+    def set_discovery(self, text: str, color: str = "#888") -> None:
+        self._disc.setText(text)
+        self._disc.setStyleSheet(
+            f"font-family: monospace; font-size: 10pt; color: {color};")
+
     def on_packet(self, pkt: TelemetryPacket) -> None:
         self._last_packet_mono = time.monotonic()
         self._mode.setText(f"MODE: {pkt.mode or '—'}")

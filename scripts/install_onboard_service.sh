@@ -1,15 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Install COATHEAL onboard systemd units (flight + debug + link-watch) from
+# the deploy/ tree. Idempotent: safe to re-run.
+
 PROJECT_DIR="${1:-/bexus/code/coatheal}"
 CONFIG_PATH="${2:-$PROJECT_DIR/config/onboard.example.ini}"
-SERVICE_NAME="coatheal-onboard.service"
-SERVICE_PATH="/etc/systemd/system/$SERVICE_NAME"
+DEPLOY_DIR="$PROJECT_DIR/deploy"
+SYSTEMD_DIR="/etc/systemd/system"
 BINARY_PATH="$PROJECT_DIR/build/onboard/coatheal_onboard"
 HEALTHCHECK_PATH="$PROJECT_DIR/scripts/preflight_healthcheck.sh"
 
+UNITS=(
+  coatheal-onboard.service
+  coatheal-onboard-debug.service
+  coatheal-link-watch.service
+  coatheal-link-watch.path
+)
+
 if [[ ! -x "$HEALTHCHECK_PATH" ]]; then
-  chmod +x "$HEALTHCHECK_PATH"
+  chmod +x "$HEALTHCHECK_PATH" || true
 fi
 
 if [[ ! -x "$BINARY_PATH" ]]; then
@@ -23,35 +33,44 @@ if [[ ! -f "$CONFIG_PATH" ]]; then
   exit 1
 fi
 
-SERVICE_USER="${SUDO_USER:-$USER}"
+if [[ ! -d "$DEPLOY_DIR" ]]; then
+  echo "[install-service] deploy dir missing: $DEPLOY_DIR" >&2
+  exit 1
+fi
 
-cat <<SERVICE | sudo tee "$SERVICE_PATH" >/dev/null
-[Unit]
-Description=COATHEAL Onboard Flight Software
-After=network-online.target time-sync.target
-Wants=network-online.target
+SUDO=""
+if [[ $EUID -ne 0 ]]; then
+  if ! command -v sudo >/dev/null 2>&1; then
+    echo "[install-service] must run as root or have sudo" >&2
+    exit 1
+  fi
+  SUDO="sudo"
+fi
 
-[Service]
-Type=simple
-User=$SERVICE_USER
-WorkingDirectory=$PROJECT_DIR
-ExecStartPre=$HEALTHCHECK_PATH $CONFIG_PATH
-ExecStart=$BINARY_PATH --config $CONFIG_PATH
-Restart=always
-RestartSec=2
-StartLimitIntervalSec=120
-StartLimitBurst=10
-KillSignal=SIGINT
-TimeoutStopSec=20
-NoNewPrivileges=true
+for unit in "${UNITS[@]}"; do
+  src="$DEPLOY_DIR/$unit"
+  if [[ ! -f "$src" ]]; then
+    echo "[install-service] missing unit file: $src" >&2
+    exit 1
+  fi
+  echo "[install-service] installing $unit"
+  $SUDO cp -f "$src" "$SYSTEMD_DIR/$unit"
+  $SUDO chmod 0644 "$SYSTEMD_DIR/$unit"
+done
 
-[Install]
-WantedBy=multi-user.target
-SERVICE
+$SUDO systemctl daemon-reload
 
-sudo systemctl daemon-reload
-sudo systemctl enable "$SERVICE_NAME"
-sudo systemctl restart "$SERVICE_NAME"
-sudo systemctl --no-pager --full status "$SERVICE_NAME" || true
+# Flight + link-watch on by default; debug installed but left disabled.
+$SUDO systemctl enable --now coatheal-onboard.service coatheal-link-watch.path
 
-echo "[install-service] installed and started $SERVICE_NAME"
+echo "[install-service] --- status ---"
+for unit in "${UNITS[@]}"; do
+  echo
+  echo "### $unit"
+  $SUDO systemctl --no-pager --full status "$unit" || true
+done
+
+echo "[install-service] done. Debug profile is installed but not enabled."
+echo "[install-service] To switch profiles:"
+echo "  $SUDO systemctl disable --now coatheal-onboard.service"
+echo "  $SUDO systemctl enable  --now coatheal-onboard-debug.service"
