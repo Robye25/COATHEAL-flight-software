@@ -193,6 +193,9 @@ class CmdHistoryPanel(QWidget):
 
         self._list = QListWidget()
         self._list.setStyleSheet("font-family: monospace; font-size: 10pt;")
+        self._list.setWordWrap(True)
+        self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._list.setTextElideMode(Qt.TextElideMode.ElideNone)
         self._list.itemDoubleClicked.connect(self._on_reissue)
         lay.addWidget(self._list, 1)
 

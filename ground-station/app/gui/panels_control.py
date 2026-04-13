@@ -21,7 +21,7 @@ from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QComboBox, QDoubleSpinBox, QFormLayout, QFrame, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QProgressBar, QPushButton, QScrollArea,
-    QSizePolicy, QSlider, QSpinBox, QToolBox, QVBoxLayout, QWidget,
+    QSizePolicy, QSlider, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from ..protocol import (
@@ -253,26 +253,31 @@ class HeaterPanel(QGroupBox):
         )
         outer.addWidget(self._banner)
 
-        grid = QGridLayout(); grid.setSpacing(3)
+        # 2 columns × 5 rows so the grid fits the dock without horizontal
+        # scrolling. Each cell expands to fill its column.
+        grid = QGridLayout(); grid.setSpacing(4)
         self._cells: list[HeaterCell] = []
         for i in range(10):
             cell = HeaterCell(i)
+            cell.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
             cell.set_requested.connect(self._set_one)
             cell.off_requested.connect(lambda idx: self._set_one(idx, 0.0))
-            grid.addWidget(cell, i // 5, i % 5)
+            grid.addWidget(cell, i // 2, i % 2)
             self._cells.append(cell)
+        grid.setColumnStretch(0, 1); grid.setColumnStretch(1, 1)
         outer.addLayout(grid)
 
-        # Global row
-        gl = QHBoxLayout()
-        for pct, color in [(0, "#34495e"), (25, "#2980b9"), (50, "#f39c12"), (100, "#c0392b")]:
+        # Global row — 2x2 grid of preset buttons to stay within dock width.
+        preset_grid = QGridLayout(); preset_grid.setSpacing(3)
+        presets = [(0, "#34495e"), (25, "#2980b9"), (50, "#f39c12"), (100, "#c0392b")]
+        for idx, (pct, color) in enumerate(presets):
             b = QPushButton(f"All {pct}%"); _style_button(b, bg=color)
             b.clicked.connect(lambda _, d=pct / 100.0: self._set_all(d))
-            gl.addWidget(b)
-        clear = QPushButton("Clear"); _style_button(clear, bg="#7f8c8d")
+            preset_grid.addWidget(b, idx // 2, idx % 2)
+        clear = QPushButton("Clear Overrides"); _style_button(clear, bg="#7f8c8d")
         clear.clicked.connect(lambda: self._send("CLEAR_OVERRIDES"))
-        gl.addWidget(clear)
-        outer.addLayout(gl)
+        preset_grid.addWidget(clear, 2, 0, 1, 2)
+        outer.addLayout(preset_grid)
 
         # Uniform slider
         ul = QHBoxLayout()
@@ -350,44 +355,53 @@ class StepperPanel(QGroupBox):
         )
         outer.addWidget(self._state)
 
-        # Jog row
-        jog = QHBoxLayout()
-        for delta in (-1000, -100, -10, -1, 1, 10, 100, 1000):
-            label = f"{'+' if delta > 0 else ''}{delta}"
-            b = QPushButton(label)
-            _style_button(b, bg="#34495e", min_height=24)
+        # Jog: 4x2 grid so +/- groupings stay together and the row fits.
+        jog = QGridLayout(); jog.setSpacing(3)
+        for col, delta in enumerate((-1000, -100, -10, -1)):
+            b = QPushButton(str(delta)); _style_button(b, bg="#34495e", min_height=24)
             b.clicked.connect(lambda _, d=delta: self._send(f"STEPPER_MOVE {d}", tag=self))
-            jog.addWidget(b)
+            jog.addWidget(b, 0, col)
+        for col, delta in enumerate((1, 10, 100, 1000)):
+            b = QPushButton(f"+{delta}"); _style_button(b, bg="#34495e", min_height=24)
+            b.clicked.connect(lambda _, d=delta: self._send(f"STEPPER_MOVE {d}", tag=self))
+            jog.addWidget(b, 1, col)
         outer.addLayout(jog)
 
-        # Direct input
-        di = QHBoxLayout()
-        self._move_in = QSpinBox(); self._move_in.setRange(-10_000_000, 10_000_000); self._move_in.setValue(100)
-        mv_btn = QPushButton("MOVE");   _style_button(mv_btn, bg="#2980b9"); mv_btn.clicked.connect(self._on_move)
-        self._moveto_in = QSpinBox(); self._moveto_in.setRange(-10_000_000, 10_000_000)
-        mt_btn = QPushButton("MOVETO"); _style_button(mt_btn, bg="#2980b9"); mt_btn.clicked.connect(self._on_moveto)
-        self._rot_in = QDoubleSpinBox(); self._rot_in.setRange(-100000.0, 100000.0); self._rot_in.setDecimals(3); self._rot_in.setValue(1.0)
-        rot_btn = QPushButton("ROTATE"); _style_button(rot_btn, bg="#2980b9"); rot_btn.clicked.connect(self._on_rotate)
-        di.addWidget(self._move_in);   di.addWidget(mv_btn)
-        di.addWidget(self._moveto_in); di.addWidget(mt_btn)
-        di.addWidget(self._rot_in);    di.addWidget(rot_btn)
-        outer.addLayout(di)
+        # Direct input — one row per action keeps each clearly readable.
+        def _add_input_row(label: str, spinbox: QWidget, btn_text: str, slot) -> None:
+            row = QHBoxLayout()
+            lbl = QLabel(label); lbl.setFixedWidth(60)
+            row.addWidget(lbl); row.addWidget(spinbox, 1)
+            btn = QPushButton(btn_text); _style_button(btn, bg="#2980b9")
+            btn.clicked.connect(slot)
+            row.addWidget(btn)
+            outer.addLayout(row)
 
-        # Config row
-        cf = QHBoxLayout()
-        cf.addWidget(QLabel("Speed:"))
+        self._move_in = QSpinBox(); self._move_in.setRange(-10_000_000, 10_000_000); self._move_in.setValue(100)
+        _add_input_row("Δsteps:", self._move_in, "MOVE", self._on_move)
+        self._moveto_in = QSpinBox(); self._moveto_in.setRange(-10_000_000, 10_000_000)
+        _add_input_row("abs pos:", self._moveto_in, "MOVETO", self._on_moveto)
+        self._rot_in = QDoubleSpinBox(); self._rot_in.setRange(-100000.0, 100000.0); self._rot_in.setDecimals(3); self._rot_in.setValue(1.0)
+        _add_input_row("revs:", self._rot_in, "ROTATE", self._on_rotate)
+
+        # Config: speed row + microstep row (two rows avoid overflow).
+        speed_row = QHBoxLayout()
+        speed_row.addWidget(QLabel("Speed:"))
         self._speed = QSlider(Qt.Orientation.Horizontal); self._speed.setRange(10, 4000); self._speed.setValue(400)
         self._speed_lbl = QLabel("400 Hz"); self._speed_lbl.setFixedWidth(60)
         self._speed.valueChanged.connect(lambda v: self._speed_lbl.setText(f"{v} Hz"))
         speed_btn = QPushButton("Set"); _style_button(speed_btn, bg="#2980b9", min_height=22)
         speed_btn.clicked.connect(self._on_set_speed)
-        cf.addWidget(self._speed); cf.addWidget(self._speed_lbl); cf.addWidget(speed_btn)
+        speed_row.addWidget(self._speed, 1); speed_row.addWidget(self._speed_lbl); speed_row.addWidget(speed_btn)
+        outer.addLayout(speed_row)
 
-        cf.addWidget(QLabel("µstep:"))
+        us_row = QHBoxLayout()
+        us_row.addWidget(QLabel("µstep:"))
         self._us = QComboBox(); self._us.addItems(["1", "2", "4", "8", "16", "32"]); self._us.setCurrentText("16")
-        us_btn = QPushButton("Set"); _style_button(us_btn, bg="#2980b9", min_height=22); us_btn.clicked.connect(self._on_set_microstep)
-        cf.addWidget(self._us); cf.addWidget(us_btn)
-        outer.addLayout(cf)
+        us_btn = QPushButton("Set"); _style_button(us_btn, bg="#2980b9", min_height=22)
+        us_btn.clicked.connect(self._on_set_microstep)
+        us_row.addWidget(self._us, 1); us_row.addWidget(us_btn); us_row.addStretch()
+        outer.addLayout(us_row)
 
         # Enable/Disable/Home/Stop
         act = QHBoxLayout()
@@ -402,18 +416,18 @@ class StepperPanel(QGroupBox):
         act.addWidget(en_btn); act.addWidget(dis_btn); act.addWidget(home); act.addWidget(self._stop)
         outer.addLayout(act)
 
-        # BEND presets
-        bend = QHBoxLayout()
+        # BEND presets — 2x2 grid.
+        bend = QGridLayout(); bend.setSpacing(4)
         self._bend_hold: dict[str, QDoubleSpinBox] = {}
-        for label, phase in self.BEND_PRESETS:
+        for idx, (label, phase) in enumerate(self.BEND_PRESETS):
             w = QWidget(); vl = QVBoxLayout(w); vl.setContentsMargins(0, 0, 0, 0); vl.setSpacing(2)
-            b = QPushButton(f"BEND\n{label}"); _style_button(b, bg="#8e44ad", bold=True, min_height=40)
+            b = QPushButton(f"BEND {label}"); _style_button(b, bg="#8e44ad", bold=True, min_height=36)
             b.setToolTip(f"Sends: STEPPER_BEND  (target from config for {phase})")
             hold = QDoubleSpinBox(); hold.setRange(0.0, 36000.0); hold.setSuffix(" s hold"); hold.setDecimals(0)
             self._bend_hold[phase] = hold
             b.clicked.connect(lambda _, p=phase: self._on_bend(p))
             vl.addWidget(b); vl.addWidget(hold)
-            bend.addWidget(w)
+            bend.addWidget(w, idx // 2, idx % 2)
         outer.addLayout(bend)
 
     # ── helpers ──
@@ -563,26 +577,29 @@ class EmergencyBar(QWidget):
         super().__init__(parent)
         self._disp = dispatcher
         self.setStyleSheet("background: #2b0000;")
-        lay = QHBoxLayout(self); lay.setContentsMargins(6, 4, 6, 4); lay.setSpacing(6)
+        outer = QVBoxLayout(self); outer.setContentsMargins(6, 4, 6, 4); outer.setSpacing(4)
 
-        warn = QLabel("⚠ EMERGENCY")
-        warn.setStyleSheet("color: #ff6b6b; font-weight: bold; font-size: 11pt;")
-        lay.addWidget(warn)
+        warn = QLabel("⚠ EMERGENCY — click to fire")
+        warn.setStyleSheet("color: #ff6b6b; font-weight: bold; font-size: 11pt; background: transparent;")
+        outer.addWidget(warn)
 
-        def add(label: str, wire: str, needs_confirm: bool = True, color: str = "#c0392b"):
-            b = QPushButton(label); _style_button(b, bg=color, bold=True, min_height=28)
+        btn_row = QGridLayout(); btn_row.setSpacing(4)
+
+        def add(label: str, wire: str, needs_confirm: bool, color: str, pos: tuple[int, int]) -> None:
+            b = QPushButton(label); _style_button(b, bg=color, bold=True, min_height=30)
             b.setToolTip(f"Sends: {wire}")
             def fire():
                 if needs_confirm and not confirm(self, label, f"Send {wire}?"):
                     return
                 self._disp.send(wire, tag=b)
             b.clicked.connect(fire)
-            lay.addWidget(b)
-            return b
+            btn_row.addWidget(b, pos[0], pos[1])
 
         # HEATERS_OFF has no confirmation — it is the panic button.
-        add("HEATERS OFF",   "HEATERS_OFF",   needs_confirm=False, color="#8e1d1d")
-        add("ENTER SAFE",    "ENTER_SAFE",    needs_confirm=True)
-        add("SHUTDOWN SAFE", "SHUTDOWN_SAFE", needs_confirm=True)
-        add("RADIO SILENCE", "RADIO_SILENCE", needs_confirm=True)
-        lay.addStretch()
+        add("HEATERS OFF",   "HEATERS_OFF",   False, "#8e1d1d", (0, 0))
+        add("ENTER SAFE",    "ENTER_SAFE",    True,  "#c0392b", (0, 1))
+        add("SHUTDOWN SAFE", "SHUTDOWN_SAFE", True,  "#c0392b", (0, 2))
+        add("RADIO SILENCE", "RADIO_SILENCE", True,  "#c0392b", (0, 3))
+        for col in range(4):
+            btn_row.setColumnStretch(col, 1)
+        outer.addLayout(btn_row)
