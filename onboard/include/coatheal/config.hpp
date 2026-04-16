@@ -38,19 +38,20 @@ struct StorageConfig {
 };
 
 struct PhaseConfig {
-  double ascent_target_c = -30.0;
-  double activation_target_c = 70.0;
-  double float_target_c = 70.0;
-  double descent_floor_c = -20.0;
+  // Rev B: single cold-protection floor shared across ASCENT/FLOAT/DESCENT.
+  // Samples must never drop below this value; box tracks its own target.
+  double sample_floor_c = 5.0;
   double box_target_c = 0.0;
-  double activation_ramp_c_per_s = 0.85;
-  double float_hold_minutes = 90.0;
   double uniformity_tolerance_c = 2.0;
 };
 
 struct TransitionConfig {
-  double ascent_to_activation_mbar = 100.0;
+  // Pressure thresholds in mbar. Ascent->Float at low pressure (float
+  // altitude), Float->Descent on re-pressurisation, Descent->Landed once
+  // near-surface pressure is recovered.
+  double ascent_to_float_mbar = 100.0;
   double float_to_descent_mbar = 300.0;
+  double descent_to_landed_mbar = 800.0;
 };
 
 struct HeaterSafetyConfig {
@@ -86,8 +87,9 @@ struct PidConfig {
 };
 
 struct HardwareConfig {
-  std::size_t heater_count = 10;
-  std::size_t electronics_heater_index = 9;
+  // Rev B: 8 sample heaters + 1 electronics heater = 9 PWM channels.
+  std::size_t heater_count = 9;
+  std::size_t electronics_heater_index = 8;
 };
 
 struct StepperConfig {

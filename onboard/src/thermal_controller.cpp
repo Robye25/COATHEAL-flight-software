@@ -1,50 +1,56 @@
 #include "coatheal/thermal_controller.hpp"
 
 #include <algorithm>
-#include <numeric>
+
+#include "coatheal/telemetry.hpp"  // full definition of SensorSnapshot
 
 namespace coatheal {
 
 ThermalController::ThermalController(const OnboardConfig& config)
     : config_(config),
-      sample_pid_({config.pid.kp, config.pid.ki, config.pid.kd}, 0.0, 1.0, -10.0, 10.0),
-      box_pid_({config.pid.box_kp, config.pid.box_ki, config.pid.box_kd}, 0.0, 1.0, -10.0, 10.0),
-      activation_setpoint_c_(config.phase.ascent_target_c),
-      channel_latched_(config.hardware.heater_count, false) {}
+      box_pid_({config.pid.box_kp, config.pid.box_ki, config.pid.box_kd},
+               0.0, 1.0, -10.0, 10.0),
+      channel_latched_(config.hardware.heater_count, false),
+      sample_heating_(config.hardware.heater_count, false) {
+  const std::size_t samples = config_.hardware.heater_count > 0
+                                  ? config_.hardware.heater_count - 1
+                                  : 0;
+  sample_pids_.reserve(samples);
+  for (std::size_t i = 0; i < samples; ++i) {
+    sample_pids_.emplace_back(PidGains{config.pid.kp, config.pid.ki, config.pid.kd},
+                              0.0, 1.0, -10.0, 10.0);
+  }
+}
 
 void ThermalController::Reset() {
-  sample_pid_.Reset();
+  for (auto& pid : sample_pids_) {
+    pid.Reset();
+  }
   box_pid_.Reset();
-  activation_setpoint_c_ = config_.phase.ascent_target_c;
   std::fill(channel_latched_.begin(), channel_latched_.end(), false);
+  std::fill(sample_heating_.begin(), sample_heating_.end(), false);
   overtemp_latched_ = false;
   uniformity_ok_ = true;
 }
 
 void ThermalController::UpdatePid(PidGains gains) {
-  sample_pid_.SetGains(gains);
+  for (auto& pid : sample_pids_) {
+    pid.SetGains(gains);
+  }
 }
 
-double ThermalController::ComputeSampleSetpoint(MissionPhase phase, double dt_seconds) {
+bool ThermalController::ShouldHeatPhase(MissionPhase phase) const {
   switch (phase) {
-    case MissionPhase::kAscentHold:
-      activation_setpoint_c_ = config_.phase.ascent_target_c;
-      return config_.phase.ascent_target_c;
-    case MissionPhase::kActivationRamp: {
-      activation_setpoint_c_ += config_.phase.activation_ramp_c_per_s * dt_seconds;
-      activation_setpoint_c_ = std::min(activation_setpoint_c_, config_.phase.activation_target_c);
-      return activation_setpoint_c_;
-    }
-    case MissionPhase::kFloatHold:
-      activation_setpoint_c_ = config_.phase.float_target_c;
-      return config_.phase.float_target_c;
-    case MissionPhase::kDescentFloor:
-      activation_setpoint_c_ = config_.phase.descent_floor_c;
-      return config_.phase.descent_floor_c;
+    case MissionPhase::kAscent:
+    case MissionPhase::kFloat:
+    case MissionPhase::kDescent:
+      return true;
+    case MissionPhase::kBoot:
+    case MissionPhase::kLanded:
     case MissionPhase::kStopped:
-      return config_.phase.descent_floor_c;
+      return false;
   }
-  return config_.phase.descent_floor_c;
+  return false;
 }
 
 std::vector<double> ThermalController::ComputeRequestedDuty(
@@ -56,11 +62,13 @@ std::vector<double> ThermalController::ComputeRequestedDuty(
   if (channel_latched_.size() != heater_count) {
     channel_latched_.assign(heater_count, false);
   }
+  if (sample_heating_.size() != heater_count) {
+    sample_heating_.assign(heater_count, false);
+  }
   std::vector<double> duty(heater_count, 0.0);
 
-  // Per-channel over-temperature latch. Any sample RTD above max_sample_temp_c
-  // forces that channel's duty to 0 until RESET_CONTROL is issued. The
-  // electronics heater is latched against max_box_temp_c.
+  // Per-channel over-temp latch (defense-in-depth; Rev B is a floor
+  // controller but we still cut off any channel that pegs the RTD).
   const std::size_t elec_idx = config_.hardware.electronics_heater_index;
   for (std::size_t i = 0; i < sensors.sample_temps_c.size() && i < heater_count; ++i) {
     if (i == elec_idx) continue;
@@ -72,13 +80,12 @@ std::vector<double> ThermalController::ComputeRequestedDuty(
       sensors.box_temp_c > config_.heater_safety.max_box_temp_c) {
     channel_latched_[elec_idx] = true;
   }
-
   overtemp_latched_ = std::any_of(channel_latched_.begin(), channel_latched_.end(),
                                   [](bool v) { return v; });
 
-  // Uniformity monitor: during kFloatHold flag spread > tolerance.
+  // Uniformity monitor: flag spread > tolerance during any heating phase.
   uniformity_ok_ = true;
-  if (phase == MissionPhase::kFloatHold && !sensors.sample_temps_c.empty()) {
+  if (ShouldHeatPhase(phase) && !sensors.sample_temps_c.empty()) {
     const auto [lo, hi] = std::minmax_element(sensors.sample_temps_c.begin(),
                                               sensors.sample_temps_c.end());
     if ((*hi - *lo) > config_.phase.uniformity_tolerance_c) {
@@ -86,26 +93,49 @@ std::vector<double> ThermalController::ComputeRequestedDuty(
     }
   }
 
-  if (overrides.heaters_off || phase == MissionPhase::kStopped) {
+  if (overrides.heaters_off || !ShouldHeatPhase(phase)) {
+    std::fill(sample_heating_.begin(), sample_heating_.end(), false);
     return duty;
   }
 
-  const double sample_setpoint = ComputeSampleSetpoint(phase, dt_seconds);
-  double avg_sample_temp = sensors.box_temp_c;
-  if (!sensors.sample_temps_c.empty()) {
-    const double sum = std::accumulate(sensors.sample_temps_c.begin(), sensors.sample_temps_c.end(), 0.0);
-    avg_sample_temp = sum / static_cast<double>(sensors.sample_temps_c.size());
+  const double floor_c = config_.phase.sample_floor_c;
+  const double on_threshold = floor_c - kFloorHysteresisC;  // below -> heat
+  const double off_threshold = floor_c;                      // at/above -> off
+
+  // Per-sample floor PID with hysteresis. The PID output is only applied
+  // (and the integrator only accumulates) while the sample is below the
+  // on_threshold; once it reaches off_threshold we freeze the controller.
+  for (std::size_t i = 0; i < sample_pids_.size() && i < heater_count; ++i) {
+    // Skip the electronics heater slot (samples occupy [0, elec_idx)).
+    if (i == elec_idx) continue;
+    const double measured = (i < sensors.sample_temps_c.size())
+                                ? sensors.sample_temps_c[i]
+                                : floor_c;  // no data -> assume at floor
+
+    if (sample_heating_[i]) {
+      if (measured >= off_threshold) {
+        sample_heating_[i] = false;
+        sample_pids_[i].Reset();
+        duty[i] = 0.0;
+        continue;
+      }
+    } else {
+      if (measured < on_threshold) {
+        sample_heating_[i] = true;
+      }
+    }
+
+    if (sample_heating_[i]) {
+      duty[i] = sample_pids_[i].Update(floor_c, measured, dt_seconds);
+    } else {
+      duty[i] = 0.0;
+    }
   }
 
-  const double sample_duty = sample_pid_.Update(sample_setpoint, avg_sample_temp, dt_seconds);
-  const double electronics_duty = box_pid_.Update(config_.phase.box_target_c, sensors.box_temp_c, dt_seconds);
-
-  for (std::size_t i = 0; i < heater_count; ++i) {
-    duty[i] = sample_duty;
-  }
-
-  if (config_.hardware.electronics_heater_index < duty.size()) {
-    duty[config_.hardware.electronics_heater_index] = electronics_duty;
+  // Box PID is unchanged — continuously tracks box_target_c.
+  if (elec_idx < heater_count) {
+    duty[elec_idx] = box_pid_.Update(config_.phase.box_target_c,
+                                     sensors.box_temp_c, dt_seconds);
   }
 
   if (overrides.all_heaters_override.has_value()) {
@@ -121,11 +151,13 @@ std::vector<double> ThermalController::ComputeRequestedDuty(
   }
 
   if (overrides.pid_override.has_value()) {
-    sample_pid_.SetGains(overrides.pid_override.value());
+    for (auto& pid : sample_pids_) {
+      pid.SetGains(overrides.pid_override.value());
+    }
   }
 
-  // Enforce per-channel over-temperature latch last so no override can re-arm
-  // a tripped channel without RESET_CONTROL.
+  // Enforce per-channel latch last so no override re-arms a tripped channel
+  // without RESET_CONTROL.
   for (std::size_t i = 0; i < heater_count; ++i) {
     if (channel_latched_[i]) {
       duty[i] = 0.0;

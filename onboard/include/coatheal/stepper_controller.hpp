@@ -67,7 +67,7 @@ class StepperController {
   double hold_remaining_s_ = 0.0;
   double fractional_steps_ = 0.0;  // accumulator for sub-integer pulses per tick
   std::string last_source_ = "init";
-  MissionPhase last_phase_ = MissionPhase::kAscentHold;
+  MissionPhase last_phase_ = MissionPhase::kBoot;
   bool last_phase_valid_ = false;
 };
 
