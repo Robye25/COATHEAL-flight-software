@@ -160,20 +160,44 @@ When `bench_mode=true` (or hardware is absent), `SensorManager` uses a simplifie
 
 This allows full end-to-end software testing including automatic phase transitions, without any physical hardware.
 
-## Stepper motor + Pi-EzConnect HAT
+## Stepper motors + Pi-EzConnect HAT
+
+REV-B: **two** sample-pulling steppers, interlocked so only one pulls at a
+time. The heater scheduler also gates duty while a pull is in progress.
 
 - **HAT:** Adafruit Pi-EzConnect Terminal Block Breakout. All GPIO lines pass
-  through unchanged — wire sensors and the stepper driver to the terminal
-  block next to the matching BCM number.
-- **Stepper driver:** TBD (A4988 / DRV8825 / TMC2209-class). Software uses a
-  STEP/DIR/EN abstraction (`coatheal::StepperDriver`) so any of those drop in.
-- **Default BCM assignments** (overridable via `onboard.ini`):
-  - `stepper.step_line=5`
-  - `stepper.dir_line=6`
-  - `stepper.enable_line=13` (active-low on most drivers)
-- **Power:** drive the stepper from the gondola 28.8 V rail through the
-  driver's VMOT input, not from the Pi 5 V supply. Share ground with the HAT.
-- **Pulse generation:** the flight software currently issues pulses from the
-  main tick loop (up to `stepper.default_step_hz`). Once the driver choice is
-  locked, a dedicated RT thread / hardware PWM path will replace the loop
-  pulser; the `StepperDriver` interface is stable.
+  through unchanged — wire both driver boards' STEP/DIR/EN (and MS0..2 for
+  motor 1) to the terminal block next to the matching BCM number.
+- **Motor 0 (samples 0–3):** Pololu 2851 NEMA-17 high-torque, driven by a
+  **TMC5160** on **SPI1** (/dev/spidev1.0). The IC is programmed at boot
+  with run current 1.5 A RMS (`IRUN`=21 on the 0.075 Ω sense resistor
+  scale), hold current 30 % (`IHOLD`≈6), microstep 4× (MRES=6), stealthChop
+  enabled (`GCONF` bit 2). See `onboard/src/tmc5160_driver.cpp` for the
+  exact register map. STEP/DIR/EN share the same GPIO pattern as motor 1
+  so pulse generation is identical.
+- **Motor 1 (samples 4–7):** Adafruit 1918 NEMA-17, driven by an
+  **A4988/DRV8825**. Plain STEP/DIR/EN, optional microstep pins MS0/MS1/MS2
+  wired if the board exposes them.
+- **Default BCM assignments** (overridable via `onboard.ini` once Agent D's
+  config schema lands):
+  - motor 0: `motor0.step_line`, `motor0.dir_line`, `motor0.enable_line`
+    — the legacy single-stepper keys (`stepper.step_line=5`,
+    `stepper.dir_line=6`, `stepper.enable_line=13`) are kept as a fallback
+    for the REV-A single-motor build.
+  - motor 1: `motor1.step_line`, `motor1.dir_line`, `motor1.enable_line`,
+    `motor1.ms{0,1,2}_line` (free BCM pins on the HAT).
+- **Power:** drive both steppers from the gondola 28.8 V rail through each
+  driver's VMOT input; share ground with the HAT. Motor 0's TMC5160 has
+  VM input tolerant to 8–60 V. Motor 1's A4988 is 8–35 V.
+- **Motion envelope:** max pull rate 100 full-step/s (≈30 rpm), trapezoidal
+  accel/decel at 200 full-step/s² (0.5 s ramp from 0 to 100 Hz). 1
+  revolution (200 full-steps) ≈ 1–2 mm of downward pull.
+- **Pulse generation:** `StepperChannel` issues pulses either from the main
+  tick loop (bench / CI) or from a dedicated near-RT std::thread that
+  sleep-spaces pulses via `std::chrono::steady_clock` (flight). The
+  trapezoidal ramp logic is identical on both paths.
+- **Interlock:** before pulling, each channel calls
+  `MotionLock::TryAcquire(motor_id)`; on failure the command is rejected.
+  The heater scheduler must consult the same lock (and the channel's
+  `samples()` mapping) to refuse duty while a pull is active — Agent D owns
+  the implementation, the stepper side ships the API stub.

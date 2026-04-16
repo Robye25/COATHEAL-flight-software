@@ -272,30 +272,61 @@ Aliases: `ON` = `FORCE_START`, `OFF` = `FORCE_STOP`, `RESET` = `RESET_CTRL`.
 ← ACK,SET_HEATER_DUTY,override applied\n
 ```
 
-## Stepper motor (sample-bending actuator)
+## Stepper motors (sample-pulling actuators)
 
-The on-board computer drives a stepper motor to bend coating specimens during
-flight. The driver IC is not yet finalised; the software uses a driver-agnostic
-STEP/DIR/EN interface that maps onto any A4988/DRV8825/TMC2209-class driver.
+REV-B: the on-board computer drives **two** stepper motors that pull samples
+downward to induce microcracks. Motor 0 (TMC5160 on SPI1, Pololu 2851
+NEMA-17) owns samples 0–3; motor 1 (A4988/DRV8825 on STEP/DIR/EN, Adafruit
+1918 NEMA-17) owns samples 4–7. Only one motor may pull at a time — the
+`MotionLock` interlock enforces this, and the heater scheduler also gates
+duty while the lock is held.
+
+### Motion envelope
+
+- Full-step motors: **200 full-steps / revolution**.
+- Max pull rate: **100 full-steps / second** (≈30 rpm). Commands that ask for
+  more are clamped.
+- Default acceleration: **200 full-steps / s²** — ramps 0 → 100 Hz in 0.5 s.
+- Microstep: **4×** default (= 800 µstep / rev), configurable to **5×** (=
+  1000 µstep / rev). All linear distances in the command surface below are
+  in microsteps unless noted.
+- 1 revolution ≈ 1–2 mm of downward pull (mechanical calibration, see
+  `docs/hardware.md`).
 
 ### Commands
 
+All commands accept an **optional leading motor id** (integer 0 or 1). If
+omitted, id defaults to 0 — legacy REV-A operator scripts keep working.
+
 | Command | Args | Description |
 |---------|------|-------------|
-| `STEPPER_MOVE <steps>` | signed int | Move relative by N microsteps (negative = reverse) |
-| `STEPPER_MOVETO <steps> [hold_s]` | signed int, optional float | Move to absolute microstep position, optionally hold for `hold_s` |
-| `STEPPER_ROTATE <revs>` | signed float | Rotate relative by N full revolutions (uses `steps_per_rev × microstep`) |
-| `STEPPER_BEND <steps> [hold_s]` | signed int, optional float | Alias for MOVETO, semantically tagged as a bend |
-| `STEPPER_HOME` | — | Return to position 0 |
-| `STEPPER_STOP` | — | Abort current motion |
-| `STEPPER_SET_SPEED <hz>` | positive float | Step rate in Hz (clamped to `stepper.max_step_hz`) |
-| `STEPPER_SET_MICROSTEP <n>` | int ∈ [1,32] | Set microstep divisor |
-| `STEPPER_ENABLE` / `STEPPER_DISABLE` | — | Toggle driver enable pin |
+| `STEPPER_MOVE <id> <steps>` | int id, signed int steps | Relative move, id-addressed |
+| `STEPPER_MOVETO <id> <abs_steps> [hold_s]` | int, signed int, optional float | Absolute move with optional hold |
+| `STEPPER_ROTATE <id> <revs>` | int, signed float | Rotate relative by N full revolutions |
+| `STEPPER_BEND <id> <steps> [hold_s]` | int, signed int, optional float | Alias for MOVETO, tagged as a bend |
+| `STEPPER_HOME <id>` | int id | Return to position 0 |
+| `STEPPER_STOP <id>` | int id | Abort motion, release MotionLock |
+| `STEPPER_SET_SPEED <id> <hz>` | int, positive float | Full-step Hz, clamped to `stepper.max_step_hz` |
+| `STEPPER_SET_MICROSTEP <id> <n>` | int, int | 4 or 5 by default (extensible per-motor via config) |
+| `STEPPER_ENABLE <id>` / `STEPPER_DISABLE <id>` | int id | Gate the driver /EN line |
+| `PULL_ARM <id>` | int id | Acquire MotionLock and queue a pull cycle (non-blocking) |
+| `PULL_EXECUTE <id>` | int id | Acquire lock and run one full pull+hold+retract synchronously |
+
+Legacy forms (no id) route to motor 0: `STEPPER_MOVE 400` is equivalent to
+`STEPPER_MOVE 0 400`.
+
+A pull cycle is: move to `pull.travel_full_steps × microstep` (default 200
+full-steps = 1 rev), hold for `pull.hold_s` (default 5 s), retract to
+position 0, release the MotionLock. Completion emits the log line
+`[pull] cycle complete id=<id> samples=<list>`.
 
 ### Telemetry field
 
 Every `DATA` frame appends a `STEPPER=` segment of pipe-separated key:value
-pairs so ground software can plot bend state alongside temperature:
+pairs so ground software can plot motion state alongside temperature. The
+frame currently reflects motor 0 (channel 0) — motor 1's status is exposed
+via per-channel snapshot (`StepperController::Snapshot(int)`). A follow-up
+telemetry rev will add a parallel `STEPPER1=` segment:
 
 ```
 STEPPER=pos:<position_steps>|tgt:<target_steps>|hz:<step_hz>|us:<microstep>
@@ -303,16 +334,31 @@ STEPPER=pos:<position_steps>|tgt:<target_steps>|hz:<step_hz>|us:<microstep>
 ```
 
 `src` records what last changed the setpoint (`phase:FLOAT_HOLD`, `cmd:MOVE`,
-`cmd:BEND`, `cmd:HOME`, `cmd:STOP`, `init`).
+`cmd:BEND`, `cmd:HOME`, `cmd:STOP`, `cmd:PULL`, `init`).
 
 ### Configuration (`onboard.ini`)
 
-Key takeaways — see `config/onboard.example.ini` for the full list:
+Legacy keys (REV-A, still honoured for the channel-0 fallback path):
 
 - `stepper.steps_per_rev`, `stepper.microstep`, `stepper.default_step_hz`,
   `stepper.max_step_hz`, `stepper.max_position_steps`
-- `stepper.step_line`, `stepper.dir_line`, `stepper.enable_line` (BCM GPIO on
-  the Pi-EzConnect HAT terminal block), `stepper.invert_direction`,
-  `stepper.enable_active_low`, `stepper.enable_on_boot`
+- `stepper.step_line`, `stepper.dir_line`, `stepper.enable_line`,
+  `stepper.invert_direction`, `stepper.enable_active_low`,
+  `stepper.enable_on_boot`
 - Per-phase bend schedule: `bend.{ascent,activation,float,descent}_steps` and
-  matching `_hold_s`. Applied on phase entry.
+  matching `_hold_s`. Applied to motor 0 on phase entry.
+
+REV-B keys expected by the multi-channel controller (Agent D / orchestrator
+must plumb these through `config.cpp`):
+
+- `motor0.driver=tmc5160`, `motor0.spi_device=/dev/spidev1.0`,
+  `motor0.cs_line=<gpio>`, `motor0.step_line`, `motor0.dir_line`,
+  `motor0.enable_line`, `motor0.run_current_a_rms=1.5`,
+  `motor0.hold_current_frac=0.30`, `motor0.stealth_chop=1`,
+  `motor0.samples=0,1,2,3`
+- `motor1.driver=a4988`, `motor1.step_line`, `motor1.dir_line`,
+  `motor1.enable_line`, `motor1.ms0_line`, `motor1.ms1_line`,
+  `motor1.ms2_line`, `motor1.samples=4,5,6,7`
+- Shared motion envelope: `pull.max_step_hz=100`,
+  `pull.accel_steps_per_s2=200`, `pull.microstep=4`,
+  `pull.travel_full_steps=200`, `pull.hold_s=5`

@@ -96,6 +96,10 @@ std::string CommandTypeToString(CommandType type) {
       return "STEPPER_DISABLE";
     case CommandType::kStepperBend:
       return "STEPPER_BEND";
+    case CommandType::kPullArm:
+      return "PULL_ARM";
+    case CommandType::kPullExecute:
+      return "PULL_EXECUTE";
     case CommandType::kUnknown:
       return "UNKNOWN";
   }
@@ -178,6 +182,8 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
       {"STEPPER_ENABLE", CommandType::kStepperEnable},
       {"STEPPER_DISABLE", CommandType::kStepperDisable},
       {"STEPPER_BEND", CommandType::kStepperBend},
+      {"PULL_ARM", CommandType::kPullArm},
+      {"PULL_EXECUTE", CommandType::kPullExecute},
   };
 
   auto it = command_map.find(cmd);
@@ -200,6 +206,38 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
     return true;
   };
 
+  // REV-B: stepper / PULL_* commands accept an optional leading motor_id
+  // argument. The parser peels it into `command.motor_id` and leaves the
+  // remaining tokens in `args` so the legacy dispatch surface ("args[0] is
+  // the numeric payload") continues to work unchanged.
+  //
+  // Detection is arity-based: if the arg count is one greater than the
+  // legacy count AND the first token is a small unsigned integer, we treat
+  // it as the motor id. Otherwise id defaults to 0.
+  auto is_small_int_token = [](const std::string& tok) {
+    if (tok.empty() || tok.size() > 3) return false;  // motor ids are 0..99
+    for (char c : tok) {
+      if (!std::isdigit(static_cast<unsigned char>(c))) return false;
+    }
+    return true;
+  };
+
+  auto maybe_extract_id = [&](std::size_t legacy_min, std::size_t legacy_max) {
+    const std::size_t n = command.args.size();
+    const std::size_t new_min = legacy_min + 1;
+    const std::size_t new_max = legacy_max + 1;
+    const bool matches_new = (n >= new_min && n <= new_max);
+    if (matches_new && !command.args.empty() &&
+        is_small_int_token(command.args[0])) {
+      try {
+        command.motor_id = std::stoi(command.args[0]);
+      } catch (...) {
+        command.motor_id = 0;
+      }
+      command.args.erase(command.args.begin());
+    }
+  };
+
   switch (command.type) {
     case CommandType::kPing:
     case CommandType::kStatus:
@@ -217,10 +255,18 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
     case CommandType::kClearOverrides:
     case CommandType::kRadioSilence:
     case CommandType::kRadioResume:
+      if (!require_args(0)) {
+        return result;
+      }
+      break;
     case CommandType::kStepperHome:
     case CommandType::kStepperStop:
     case CommandType::kStepperEnable:
     case CommandType::kStepperDisable:
+    case CommandType::kPullArm:
+    case CommandType::kPullExecute:
+      // REV-B: accept an optional motor id. Legacy arity: 0. New: 1.
+      maybe_extract_id(0, 0);
       if (!require_args(0)) {
         return result;
       }
@@ -229,14 +275,16 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
     case CommandType::kStepperRotate:
     case CommandType::kStepperSetSpeed:
     case CommandType::kStepperSetMicrostep:
+      // REV-B arity (after id-peel): 1 (the value).
+      maybe_extract_id(1, 1);
       if (!require_args(1)) {
         return result;
       }
       break;
     case CommandType::kStepperMoveTo:
     case CommandType::kStepperBend:
-      // BEND accepts 1 arg (steps only) or 2 args (steps + hold_s).
-      // MOVETO mirrors that for symmetry with MoveToSteps().
+      // REV-B arity (after id-peel): 1 or 2 (steps, [hold_s]).
+      maybe_extract_id(1, 2);
       if (command.args.size() < 1 || command.args.size() > 2) {
         result.error = "invalid argument count for " + command.name;
         return result;
