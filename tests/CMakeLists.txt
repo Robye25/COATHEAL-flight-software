@@ -62,3 +62,12 @@ target_include_directories(coatheal_phase_rev_b_tests PRIVATE
 )
 
 add_test(NAME coatheal_phase_rev_b_tests COMMAND coatheal_phase_rev_b_tests)
+
+# Rev B safety interlock tests (Agent D).
+add_executable(coatheal_safety_rev_b_tests
+  unit/test_safety_rev_b.cpp
+)
+
+target_link_libraries(coatheal_safety_rev_b_tests PRIVATE coatheal_onboard_core)
+
+add_test(NAME coatheal_safety_rev_b_tests COMMAND coatheal_safety_rev_b_tests)
