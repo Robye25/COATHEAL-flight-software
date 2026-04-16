@@ -188,7 +188,7 @@ class PreflightPanel(QWidget):
         for key, label in [
             ("rtc",        "RTC reporting valid"),
             ("ambient",    "Ambient sensors in-range"),
-            ("heaters",    "10 heater duties reporting"),
+            ("heaters",    "9 heater duties reporting"),
             ("stepper_en", "Stepper enabled"),
             ("link",       "Telemetry link healthy"),
             ("uniformity", "Specimen uniformity OK"),
@@ -208,7 +208,7 @@ class PreflightPanel(QWidget):
             dot.set_color("#2ecc71" if good else "#e74c3c")
         mark("rtc", bool(pkt.rtc_valid))
         mark("ambient", "T_AMBIENT_FAIL" not in pkt.status and "P_AMBIENT_FAIL" not in pkt.status)
-        mark("heaters", len(pkt.heater_duty) >= 10)
+        mark("heaters", len(pkt.heater_duty) >= 9)
         mark("stepper_en", pkt.stepper is not None and pkt.stepper.enabled)
         mark("link", link_ok)
         mark("uniformity", "UNIFORMITY_FAIL" not in pkt.status)

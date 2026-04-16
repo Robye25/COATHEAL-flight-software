@@ -5,6 +5,16 @@ Scope: software-relevant requirements only. Chemistry, mechanical, and thermal-
 analysis content ignored except where it constrains software behavior (e.g. phase
 targets, power caps).
 
+> **Rev A (historical) notice.** This report was written against the pre-Rev B
+> phase model (five phases: `ASCENT_HOLD`, `ACTIVATION_RAMP`, `FLOAT_HOLD`,
+> `DESCENT_FLOOR`, `STOPPED` — with a +70 °C activation target). Rev B
+> collapsed the thermal policy to a single cold-protection floor
+> (`phase.sample_floor_c = +5 °C` shared across `ASCENT/FLOAT/DESCENT`) and
+> replaced the FSM with `BOOT → ASCENT → FLOAT → DESCENT → LANDED` plus
+> `STOPPED`. The per-requirement references below still describe the code
+> paths that existed at the time of writing; see `docs/configuration.md`
+> and `docs/onboard.md` for the current Rev B design.
+
 ---
 
 ## 1. Requirement-by-requirement compliance matrix

@@ -35,8 +35,8 @@ Commands from the ground station set thread-safe flags (`std::mutex overrides_mu
 
 | Flag | Set by | Effect |
 |---|---|---|
-| `force_start` | FORCE_START | Transitions to ACTIVATION_RAMP next tick |
-| `force_stop` | FORCE_STOP | Transitions to STOPPED next tick |
+| `force_start` | FORCE_START | Transitions from `BOOT` into `ASCENT` next tick (Rev B) |
+| `force_stop` | FORCE_STOP | Transitions to `DESCENT` (then `STOPPED` on `SHUTDOWN_SAFE`) |
 | `reset_control` | RESET_CTRL | Calls `ThermalController::Reset()` next tick |
 | `shutdown_safe` | SHUTDOWN_SAFE | Sets `running_ = false`, stops loop |
 | `heaters_off` | HEATERS_OFF | Zeroes all heater duties via ControlOverrides |
@@ -50,15 +50,16 @@ Commands from the ground station set thread-safe flags (`std::mutex overrides_mu
 
 **`onboard/src/state_manager.cpp`** | **`onboard/include/coatheal/state_manager.hpp`**
 
-Implements the mission phase finite state machine. Transitions are based on:
+Implements the Rev B mission phase FSM
+(`BOOT → ASCENT → FLOAT → DESCENT → LANDED`, plus `STOPPED`). Transitions
+are driven purely by ambient pressure; there is no timed FLOAT expiry.
 
-- **Pressure** (from BME280): ascent→activation at `ascent_to_activation_mbar` (140 mbar), float→descent at `float_to_descent_mbar` (300 mbar)
-- **Float duration**: descent triggered after `float_hold_minutes` (90 min) at float altitude
+- **Pressure** (from BME280): ASCENT→FLOAT at `ascent_to_float_mbar` (100 mbar), FLOAT→DESCENT at `float_to_descent_mbar` (300 mbar), DESCENT→LANDED at `descent_to_landed_mbar` (800 mbar)
 - **Overrides**: `force_start`, `force_stop`, `shutdown_safe` from command handler
 
 ### `Update(pressure, sample_temps, overrides, now)`
 
-Called every tick. Returns the current `MissionPhase`. Manages internal timers for float hold duration.
+Called every tick. Returns the current `MissionPhase`. Rev B is stateless across ticks (no timers); every transition is a direct function of the latest pressure reading and override flags.
 
 ---
 
@@ -72,18 +73,23 @@ Computes requested heater duty cycles using two PID controllers.
 
 | Controller | Target | Feedback | Controls |
 |---|---|---|---|
-| Sample PID | Phase-dependent setpoint | Sample temperatures (avg or per-sensor) | Heaters 0–8 |
-| Box PID | `phase.box_target_c` | `box_temp_c` | Heater 9 (electronics) |
+| Per-sample PID (×8) | `phase.sample_floor_c` (+5 °C) | Per-sample RTD | Heaters 0–7 |
+| Box PID | `phase.box_target_c` | `box_temp_c` | Heater 8 (electronics BOX) |
 
-### Setpoint Schedule
+### Setpoint Schedule (Rev B floor-only)
 
-| Phase | Sample setpoint |
+All three flying phases share the same +5 °C floor. The per-sample PID
+engages only when `T_sample < floor − 0.5 °C` and disengages once the
+sample is at or above the floor (0.5 °C hysteresis).
+
+| Phase | Sample policy |
 |---|---|
-| ASCENT_HOLD | `ascent_target_c` (−30 °C) |
-| ACTIVATION_RAMP | Ramping at `activation_ramp_c_per_s` (0.85 °C/s) |
-| FLOAT_HOLD | `float_target_c` (+70 °C) |
-| DESCENT_FLOOR | `descent_floor_c` (−20 °C) |
-| STOPPED | 0.0 (all off) |
+| BOOT / LANDED / STOPPED | 0.0 (all off) |
+| ASCENT / FLOAT / DESCENT | Floor = `phase.sample_floor_c` (+5 °C) |
+
+> Rev A (historical): the four-setpoint schedule (`ASCENT_HOLD −30 °C`,
+> `ACTIVATION_RAMP` ramping at 0.85 °C/s, `FLOAT_HOLD +70 °C`,
+> `DESCENT_FLOOR −20 °C`) was replaced with the floor-only policy above.
 
 ### `ComputeRequestedDuty(phase, snapshot, dt, overrides)`
 
@@ -118,7 +124,7 @@ Enforces power and heater count constraints on the requested duties.
 
 ### `Schedule(requested_duty, prioritize_samples)`
 
-Returns constrained `std::vector<double>`. During `ACTIVATION_RAMP`, `prioritize_samples = true` which further de-prioritizes the electronics heater.
+Returns constrained `std::vector<double>`. During any flying phase (`ASCENT` / `FLOAT` / `DESCENT`), `prioritize_samples = true` which further de-prioritizes the electronics heater (Rev B: all three flying phases share the same +5 °C floor).
 
 ---
 

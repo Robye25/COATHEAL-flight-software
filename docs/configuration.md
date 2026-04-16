@@ -60,28 +60,36 @@ Persistent data logging.
 
 ## `[phase]`
 
-Thermal setpoints and ramp parameters for each mission phase.
+Rev B floor-only thermal policy. A single cold-protection floor is shared
+across `ASCENT`, `FLOAT`, and `DESCENT`; the electronics box runs its own
+PID against `phase.box_target_c`.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `phase.ascent_target_c` | float | `-30.0` | Sample temperature setpoint during `ASCENT_HOLD` (°C). |
-| `phase.activation_target_c` | float | `70.0` | Final target temperature for `ACTIVATION_RAMP` (°C). Ramp ends when this is reached. |
-| `phase.float_target_c` | float | `70.0` | Sample temperature setpoint during `FLOAT_HOLD` (°C). |
-| `phase.descent_floor_c` | float | `-20.0` | Sample temperature floor during `DESCENT_FLOOR` (°C). Heaters activate only if samples drop below this. |
+| `phase.sample_floor_c` | float | `5.0` | Minimum sample temperature enforced during any flying phase (°C). Per-sample PIDs engage when `T_sample < (floor − 0.5 °C)` and disengage at/above the floor (0.5 °C hysteresis). |
 | `phase.box_target_c` | float | `0.0` | Electronics box temperature setpoint for the box PID (°C). Set to 0 to disable box heating. |
-| `phase.activation_ramp_c_per_s` | float | `0.85` | Ramp rate during `ACTIVATION_RAMP` in °C per second. Controls how quickly the setpoint increases toward `activation_target_c`. |
-| `phase.float_hold_minutes` | float | `90.0` | Duration of `FLOAT_HOLD` before descending to `DESCENT_FLOOR` (minutes). Also the timeout fallback if pressure fails to indicate descent. |
+| `phase.uniformity_tolerance_c` | float | `2.0` | Maximum allowed sample-to-sample spread (°C) during heating. Exceeding this trips the `UNIFORMITY_FAIL` status bit (soft flag; heaters keep running). |
+
+> Rev A (historical): keys `phase.ascent_target_c`, `phase.activation_target_c`,
+> `phase.float_target_c`, `phase.descent_floor_c`, `phase.activation_ramp_c_per_s`,
+> and `phase.float_hold_minutes` were removed in the Rev B refactor.
 
 ---
 
 ## `[transition]`
 
-Pressure thresholds that trigger automatic phase transitions.
+Pressure thresholds that trigger automatic phase transitions in the Rev B
+FSM (`BOOT → ASCENT → FLOAT → DESCENT → LANDED`).
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `transition.ascent_to_activation_mbar` | float | `140.0` | Ambient pressure below which `ASCENT_HOLD` → `ACTIVATION_RAMP` (mbar). Corresponds to ~14 km altitude. |
-| `transition.float_to_descent_mbar` | float | `300.0` | Ambient pressure above which `FLOAT_HOLD` → `DESCENT_FLOOR` (mbar). Corresponds to balloon descending through ~9 km. |
+| `transition.ascent_to_float_mbar` | float | `100.0` | Ambient pressure at/below which `ASCENT → FLOAT` triggers (mbar). |
+| `transition.float_to_descent_mbar` | float | `300.0` | Ambient pressure at/above which `FLOAT → DESCENT` triggers (mbar). |
+| `transition.descent_to_landed_mbar` | float | `800.0` | Ambient pressure at/above which `DESCENT → LANDED` triggers (mbar). |
+
+> Rev A (historical): the key `transition.ascent_to_activation_mbar` was
+> renamed to `transition.ascent_to_float_mbar` when the activation-ramp
+> phase was removed.
 
 ---
 
@@ -122,8 +130,8 @@ Heater channel mapping.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `hardware.heater_count` | size_t | `10` | Total number of heater channels (sample heaters + electronics heater). |
-| `hardware.electronics_heater_index` | size_t | `9` | Index of the electronics box heater within the duty array. This heater is de-prioritized by the scheduler and driven by the box PID, not the sample PID. |
+| `hardware.heater_count` | size_t | `9` | Total number of heater channels. Rev B: 8 sample heaters (`H0..H7`) + 1 electronics BOX heater. |
+| `hardware.electronics_heater_index` | size_t | `8` | Index of the electronics box heater within the duty array. This heater is de-prioritized by the scheduler and driven by the box PID, not the sample PID. |
 
 ---
 
