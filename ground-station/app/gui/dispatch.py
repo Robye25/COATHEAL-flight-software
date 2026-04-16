@@ -19,10 +19,12 @@ from PyQt6.QtCore import QObject, QRunnable, QThread, QThreadPool, pyqtSignal
 
 from ..protocol import (
     CommandResponse,
+    PullEvent,
     TelemetryPacket,
     TelemetryParseError,
     build_ack,
     parse_command_response,
+    parse_pull_event,
     parse_telemetry_csv,
 )
 
@@ -36,20 +38,29 @@ class TelemetryReceiver(QThread):
     """
 
     packet_received    = pyqtSignal(object)
+    pull_event         = pyqtSignal(object)  # PullEvent
     log_message        = pyqtSignal(str)
     connection_changed = pyqtSignal(bool, str)
     status_changed     = pyqtSignal(str)  # "listening" | "connected" | "stale" | "searching"
 
-    # CSV v2 — appends stepper columns after the v1 schema. Legacy readers
-    # indexing the first 13 columns continue to work unchanged.
+    # CSV v3 — v2 (single stepper) columns remain at their fixed positions
+    # so existing post-flight parsers stay valid, and a second block of
+    # `m1_*` columns is appended for the Rev-B second motor. When a frame
+    # only carries one motor (legacy DATA or the new DATA if M1 was
+    # omitted), the `m1_*` cells are written empty.
     CSV_FIELDS = [
         "session_id", "seq", "timestamp", "rtc_valid",
         "ambient_temp_c", "ambient_pressure_mbar", "ambient_humidity_pct",
         "uv", "box_temp_c", "sample_temps_c", "heater_duty", "phase", "status",
         "mode",
+        # Motor 0 (legacy column names kept).
         "stepper_pos", "stepper_tgt", "stepper_hz", "stepper_us",
         "stepper_en", "stepper_mv", "stepper_hold", "stepper_hold_s",
         "stepper_pulses", "stepper_src",
+        # Motor 1 (Rev-B addition).
+        "m1_pos", "m1_tgt", "m1_hz", "m1_us",
+        "m1_en", "m1_mv", "m1_hold", "m1_hold_s",
+        "m1_pulses", "m1_src",
     ]
 
     _STALE_EMIT_S   = 5.0  # emit "stale" status when DATA frames older than this
@@ -170,6 +181,26 @@ class TelemetryReceiver(QThread):
                     line = line.strip()
                     if not line:
                         continue
+                    # Route PULL events to their own signal + ACK them
+                    # cumulatively (seq=0). Same framing as EVT,CYCLE so
+                    # the onboard queue clears in-order.
+                    if line.startswith("EVT,PULL,"):
+                        try:
+                            ev = parse_pull_event(line)
+                        except TelemetryParseError as exc:
+                            self.log_message.emit(f"[parse-error] {exc}")
+                            continue
+                        try:
+                            conn.sendall(build_ack(ev.session_id, 0).encode("utf-8"))
+                        except OSError:
+                            return
+                        self.pull_event.emit(ev)
+                        self.log_message.emit(
+                            f"[evt][pull] motor={ev.motor_id} pull_id={ev.pull_id} "
+                            f"steps={ev.steps_moved} hold={ev.hold_s:.1f}s "
+                            f"samples={'|'.join(str(s) for s in ev.samples) or '-'}"
+                        )
+                        continue
                     try:
                         pkt = parse_telemetry_csv(line)
                     except TelemetryParseError as exc:
@@ -199,9 +230,36 @@ class TelemetryReceiver(QThread):
                     self.packet_received.emit(pkt)
 
 
-def _packet_to_csv_row(pkt: TelemetryPacket) -> dict:
-    st = pkt.stepper
+def _motor_cells(m: Optional[dict], prefix: str) -> dict:
+    """Flatten a stepper snapshot dict into CSV cells.
+
+    Returns an empty-value dict when the motor is missing so the CSV row
+    remains the full width.
+    """
+    keys = ["pos", "tgt", "hz", "us", "en", "mv", "hold", "hold_s",
+            "pulses", "src"]
+    if m is None:
+        return {f"{prefix}_{k}": "" for k in keys}
     return {
+        f"{prefix}_pos":    m["position"],
+        f"{prefix}_tgt":    m["target"],
+        f"{prefix}_hz":     m["hz"],
+        f"{prefix}_us":     m["microstep"],
+        f"{prefix}_en":     int(m["enabled"]),
+        f"{prefix}_mv":     int(m["moving"]),
+        f"{prefix}_hold":   int(m["holding"]),
+        f"{prefix}_hold_s": m["hold_s"],
+        f"{prefix}_pulses": m["pulses"],
+        f"{prefix}_src":    m["source"],
+    }
+
+
+def _packet_to_csv_row(pkt: TelemetryPacket) -> dict:
+    # Motor 0 keeps the legacy `stepper_*` prefix for back-compat; motor 1
+    # uses the new `m1_*` prefix.
+    m0 = pkt.steppers[0] if pkt.steppers else None
+    m1 = pkt.steppers[1] if len(pkt.steppers) > 1 else None
+    row = {
         "session_id": pkt.session_id,
         "seq": pkt.seq,
         "timestamp": pkt.timestamp,
@@ -216,17 +274,10 @@ def _packet_to_csv_row(pkt: TelemetryPacket) -> dict:
         "phase": pkt.phase,
         "status": pkt.status,
         "mode": pkt.mode,
-        "stepper_pos":     "" if st is None else st.position,
-        "stepper_tgt":     "" if st is None else st.target,
-        "stepper_hz":      "" if st is None else st.hz,
-        "stepper_us":      "" if st is None else st.microstep,
-        "stepper_en":      "" if st is None else int(st.enabled),
-        "stepper_mv":      "" if st is None else int(st.moving),
-        "stepper_hold":    "" if st is None else int(st.holding),
-        "stepper_hold_s":  "" if st is None else st.hold_s,
-        "stepper_pulses":  "" if st is None else st.pulses,
-        "stepper_src":     "" if st is None else st.source,
     }
+    row.update(_motor_cells(m0, "stepper"))
+    row.update(_motor_cells(m1, "m1"))
+    return row
 
 
 # ── async command dispatcher ─────────────────────────────────────────────────

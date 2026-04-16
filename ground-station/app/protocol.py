@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 
 @dataclass
@@ -34,6 +34,14 @@ class TelemetryPacket:
     phase: str
     status: str
     mode: str = ""
+    # Rev-B: multi-motor snapshot list. `steppers[0]` = M0, `steppers[1]` = M1.
+    # Length: 0 (legacy log with no stepper segment), 1 (legacy single
+    # STEPPER=... segment), or 2+ (new STEPPER0=/STEPPER1=... segments).
+    # Entries are dicts matching the StepperSnapshot field set, with an
+    # extra 'motor_id' key carrying the index.
+    steppers: List[Dict] = field(default_factory=list)
+    # Legacy accessor. Mirrors `steppers[0]` when present so existing callers
+    # (`pkt.stepper.position`, etc.) keep working.
     stepper: Optional[StepperSnapshot] = None
 
 
@@ -76,6 +84,22 @@ def _parse_stepper_segment(value: str) -> StepperSnapshot:
     return s
 
 
+def _snapshot_to_dict(snap: StepperSnapshot, motor_id: int) -> Dict:
+    return {
+        "motor_id": motor_id,
+        "position": snap.position,
+        "target": snap.target,
+        "hz": snap.hz,
+        "microstep": snap.microstep,
+        "enabled": snap.enabled,
+        "moving": snap.moving,
+        "holding": snap.holding,
+        "hold_s": snap.hold_s,
+        "pulses": snap.pulses,
+        "source": snap.source,
+    }
+
+
 def parse_telemetry_csv(line: str) -> TelemetryPacket:
     parts = [p.strip() for p in line.strip().split(',')]
     if len(parts) < 13:
@@ -112,7 +136,12 @@ def parse_telemetry_csv(line: str) -> TelemetryPacket:
     phase = ""
     status = ""
     mode = ""
-    stepper: Optional[StepperSnapshot] = None
+    # Collect both old-style single STEPPER= and new-style STEPPERn=
+    # segments. Indexed entries win over the legacy unindexed segment if
+    # both are somehow present (shouldn't happen, but the behaviour is
+    # deterministic: new log schema always takes precedence).
+    legacy_stepper: Optional[StepperSnapshot] = None
+    indexed_steppers: Dict[int, StepperSnapshot] = {}
     for token in parts[heater_field_index + 1 :]:
         if token.startswith("PHASE="):
             phase = token.split('=', 1)[1]
@@ -121,10 +150,38 @@ def parse_telemetry_csv(line: str) -> TelemetryPacket:
         elif token.startswith("STATUS="):
             status = token.split('=', 1)[1]
         elif token.startswith("STEPPER="):
-            stepper = _parse_stepper_segment(token.split('=', 1)[1])
+            legacy_stepper = _parse_stepper_segment(token.split('=', 1)[1])
+        elif token.startswith("STEPPER"):
+            # STEPPER<digits>=...  — Rev-B dual-motor form. Anything after
+            # STEPPER up to the '=' is a non-negative integer motor id.
+            eq = token.find('=')
+            if eq <= len("STEPPER"):
+                # Not a well-formed STEPPER<n>= segment; drop silently for
+                # forward-compat.
+                continue
+            suffix = token[len("STEPPER"):eq]
+            if not suffix.isdigit():
+                # Unknown variant (e.g. STEPPERX=...) — ignore.
+                continue
+            motor_id = int(suffix)
+            indexed_steppers[motor_id] = _parse_stepper_segment(token[eq + 1:])
 
     if not phase or not status:
         raise TelemetryParseError("missing PHASE or STATUS field")
+
+    # Build ordered snapshot list. Prefer indexed entries; otherwise fall
+    # back to the single legacy STEPPER= segment as motor_id=0.
+    steppers_list: List[Dict] = []
+    primary_snapshot: Optional[StepperSnapshot] = None
+    if indexed_steppers:
+        for mid in sorted(indexed_steppers.keys()):
+            snap = indexed_steppers[mid]
+            steppers_list.append(_snapshot_to_dict(snap, mid))
+            if primary_snapshot is None:
+                primary_snapshot = snap
+    elif legacy_stepper is not None:
+        steppers_list.append(_snapshot_to_dict(legacy_stepper, 0))
+        primary_snapshot = legacy_stepper
 
     return TelemetryPacket(
         session_id=session_id,
@@ -141,7 +198,8 @@ def parse_telemetry_csv(line: str) -> TelemetryPacket:
         phase=phase,
         status=status,
         mode=mode,
-        stepper=stepper,
+        steppers=steppers_list,
+        stepper=primary_snapshot,
     )
 
 
@@ -226,6 +284,57 @@ def parse_heating_cycle_event(line: str) -> HeatingCycleEvent:
 
 
 @dataclass
+class PullEvent:
+    """One bend-and-hold cycle completed by a motor.
+
+    Wire format (newline-terminated):
+        EVT,PULL,<session>,<pull_id>,<motor_id>,<start_ts>,<steps_moved>,
+            <hold_s>,<samples>
+    where <samples> is pipe-separated specimen indices (e.g. ``0|1|2|3``)
+    or ``-`` for no specimens.
+    """
+
+    session_id: str
+    pull_id: int
+    motor_id: int
+    start_ts: str
+    steps_moved: int
+    hold_s: float
+    samples: List[int] = field(default_factory=list)
+
+
+def parse_pull_event(line: str) -> PullEvent:
+    """Parse an `EVT,PULL,...` line emitted by the stepper subsystem.
+
+    Accepts a trailing ``-`` or empty string in the samples field (meaning
+    no specimens recorded). Raises ``TelemetryParseError`` on any other
+    malformed input.
+    """
+    parts = [p.strip() for p in line.strip().split(",")]
+    if len(parts) < 9 or parts[0] != "EVT" or parts[1] != "PULL":
+        raise TelemetryParseError("not an EVT,PULL frame")
+    samples_raw = parts[8]
+    samples: List[int] = []
+    if samples_raw and samples_raw != "-":
+        try:
+            samples = [int(x) for x in samples_raw.split("|") if x != ""]
+        except ValueError as exc:
+            raise TelemetryParseError(f"invalid EVT,PULL samples: {exc}") from exc
+    try:
+        return PullEvent(
+            session_id=parts[2],
+            pull_id=int(parts[3]),
+            motor_id=int(parts[4]),
+            start_ts=parts[5],
+            steps_moved=int(parts[6]),
+            hold_s=float(parts[7]),
+            samples=samples,
+        )
+    except ValueError as exc:
+        raise TelemetryParseError(f"invalid EVT,PULL fields: {exc}") from exc
+
+
+@dataclass
 class CommandResponse:
     ok: bool
     command: str
@@ -259,7 +368,13 @@ def parse_command_response(line: str) -> CommandResponse:
 # Each returns (ok, normalised_or_error). Used by GUI before enabling Send and
 # by CLI before wire-encoding. Single source of truth for bounds.
 
-def validate_heater_index(idx: int, count: int = 10) -> Tuple[bool, str]:
+def validate_heater_index(idx: int, count: int = 9) -> Tuple[bool, str]:
+    """Validate a heater index.
+
+    Rev-B heater channels: 0..7 = sample heaters, 8 = electronics BOX
+    heater. Total count = 9. Existing call sites that passed ``count=10``
+    (legacy 9 samples + box) keep working because they override explicitly.
+    """
     if not isinstance(idx, int) or idx < 0 or idx >= count:
         return False, f"index must be in [0, {count - 1}]"
     return True, str(idx)

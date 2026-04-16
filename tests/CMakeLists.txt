@@ -80,3 +80,12 @@ add_executable(coatheal_stepper_rev_b_tests
 target_link_libraries(coatheal_stepper_rev_b_tests PRIVATE coatheal_onboard_core)
 
 add_test(NAME coatheal_stepper_rev_b_tests COMMAND coatheal_stepper_rev_b_tests)
+
+# Rev B telemetry serializer tests (Agent C).
+add_executable(coatheal_telemetry_rev_b_tests
+  unit/test_telemetry_rev_b.cpp
+)
+
+target_link_libraries(coatheal_telemetry_rev_b_tests PRIVATE coatheal_onboard_core)
+
+add_test(NAME coatheal_telemetry_rev_b_tests COMMAND coatheal_telemetry_rev_b_tests)
