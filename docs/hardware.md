@@ -289,29 +289,64 @@ channels, not a fixed struct.
 
 ### Two stepper motors (Rev B)
 
-The design moves from one stepper to two independent channels:
+Rev B introduces two sample-pulling steppers, each owning four specimens.
+Motors pull downward to induce microcracks. Only one motor pulls at a time
+(MotionLock), and no heater duty is delivered while a pull is active (heater
+scheduler interlock).
 
-| Channel | Motor | Driver | Purpose |
-|---|---|---|---|
-| Stepper 0 | Pololu 2851 NEMA-17 (1.68 A/phase) | **TMC5160** on SPI1 | High-torque actuator (role: existing sample-bend, or to be redefined) |
-| Stepper 1 | Adafruit 1918 NEMA-17 (12 V / 350 mA) | **A4988 / DRV8825** (STEP/DIR only) | Low-current actuator — role TBD, pending user input |
+| Channel | Motor | Driver | Sample group | Purpose |
+|---|---|---|---|---|
+| Stepper 0 | Pololu 2851 NEMA-17 (1.68 A/phase) | **TMC5160** on SPI1 (`/dev/spidev1.0`) | samples 0–3 | Microcrack-pull actuator |
+| Stepper 1 | Adafruit 1918 NEMA-17 (12 V / 350 mA) | **A4988 / DRV8825** (STEP/DIR/EN) | samples 4–7 | Microcrack-pull actuator |
 
-Software impact:
+**Motion envelope.** Max pull rate **100 full-steps/s (≈30 rpm)**, trapezoidal
+accel/decel at **200 steps/s²** (0.5 s ramp from 0 → 100 Hz). One full
+revolution = 200 full-steps = **1–2 mm** of downward travel. Default
+microstepping **4× (800 µsteps/rev)**, configurable to 5× (1000 µsteps/rev).
 
-- `StepperDriver` is kept as the common STEP/DIR/EN base. A new
-  `Tmc5160Driver` subclass adds a boot-time SPI configuration pass (run
-  current, hold current, microstep, stealthChop) then operates through the
-  same STEP/DIR/EN path.
-- Config is duplicated: `stepper0.*` and `stepper1.*`. Existing
-  `stepper.*` keys become aliases of `stepper0.*` for backward compatibility.
-- Commands gain a channel argument: `STEPPER_MOVE <id> <steps>`,
-  `STEPPER_BEND <id> <steps> [hold_s]`, etc. `<id>` defaults to 0 when
-  omitted so existing scripts keep working.
-- Telemetry `STEPPER=` segment is emitted once per channel:
-  `STEPPER0=pos:…|…` and `STEPPER1=pos:…|…`.
-- Pulse timing runs in a dedicated RT thread per channel. Running both
-  steppers simultaneously is allowed — there is no shared lock beyond SPI1
-  (TMC5160 only, one-time at boot).
+**TMC5160 driver (motor 0).** Programmed at boot with run current 1.5 A RMS
+(`IRUN`=21 on the 0.075 Ω sense-resistor scale), hold current 30 %
+(`IHOLD`≈6), microstep 4× (`MRES`=6), stealthChop enabled (`GCONF` bit 2).
+Register map lives in `onboard/src/tmc5160_driver.cpp`. After SPI
+configuration, motion is identical STEP/DIR/EN to motor 1.
+
+**A4988 driver (motor 1).** Plain STEP/DIR/EN, optional microstep pins
+MS0/MS1/MS2 wired if the board exposes them.
+
+**Default BCM assignments** (overridable via `onboard.ini`):
+
+- Motor 0: `motor0.step_line`, `motor0.dir_line`, `motor0.enable_line` — the
+  legacy single-stepper keys (`stepper.step_line=5`, `stepper.dir_line=6`,
+  `stepper.enable_line=13`) remain as a Rev A fallback that routes to
+  channel 0.
+- Motor 1: `motor1.step_line`, `motor1.dir_line`, `motor1.enable_line`,
+  `motor1.ms{0,1,2}_line` (free BCM pins on the HAT).
+
+**Power.** Both steppers share the gondola 28.8 V rail through each driver's
+VMOT input and share ground with the HAT. TMC5160 VM tolerates 8–60 V;
+A4988 tolerates 8–35 V.
+
+**Pulse generation.** `StepperChannel` issues pulses either from the main
+tick loop (bench / CI) or from a dedicated near-RT `std::thread` that
+sleep-spaces pulses via `std::chrono::steady_clock` (flight). The
+trapezoidal ramp logic is identical on both paths.
+
+**Software impact summary.**
+
+- `StepperDriver` is the common STEP/DIR/EN base. `Tmc5160Driver` adds a
+  boot-time SPI configuration pass, then operates via STEP/DIR/EN like any
+  other driver.
+- Config adds `motor0.*` and `motor1.*` sections plus a shared `pull.*`
+  motion-envelope block. Legacy `stepper.*` / `bend.*` keys still honored
+  (route to channel 0).
+- Commands take a motor-id first argument: `STEPPER_MOVE <id> <steps>`,
+  `STEPPER_BEND <id> <steps> [hold_s]`, `PULL_ARM <id>`, `PULL_EXECUTE <id>`,
+  etc. `<id>` defaults to 0 when omitted.
+- Telemetry emits `STEPPER0=pos:…|…` and `STEPPER1=pos:…|…` segments, plus
+  an `EVT,PULL,…` event frame per completed pull cycle.
+- Interlocks (enforced in software): `MotionLock::TryAcquire(motor_id)`
+  around every pull; `HeaterScheduler` zeros all duty when the lock is
+  active (new `HEATER_INHIBITED` STATUS bit).
 
 ### Open questions — Rev B blockers
 
@@ -336,5 +371,5 @@ finalised and the BOM committed:
    on the BOM and whether the SPI PT100 bus is retained.
 7. **BME280 kept or removed.** Redundancy vs. I2C bus load vs. BOM cost.
 
-All items are tracked again alongside the phase changes once flight-phase
-requirements are locked in.
+Resolved open questions as of 2026-04-16: item 4 (second stepper role —
+drives samples 4–7 for microcrack pulls) and items 1/2/3/5/6/7 remain open.

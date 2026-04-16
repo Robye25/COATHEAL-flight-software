@@ -4,9 +4,11 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "coatheal/config.hpp"
 #include "coatheal/hal/stepper_driver.hpp"
+#include "coatheal/motion_lock.hpp"
 #include "coatheal/phase.hpp"
 
 namespace coatheal {
@@ -26,47 +28,100 @@ struct StepperStatus {
   std::string last_source;              // "phase:FLOAT_HOLD", "cmd:MOVE", ...
 };
 
+// Forward-declared so we can hold channels without a circular include. The
+// full channel header is pulled in by the .cpp.
+class StepperChannel;
+struct StepperChannelConfig;
+
+// REV-B stepper controller.
+//
+// Two-motor capable: holds a vector of StepperChannel objects, one per motor,
+// and dispatches commands by motor_id. All single-motor methods preserve the
+// REV-A signature and route to channel 0 — the existing system_controller
+// integration keeps working unchanged. New id-taking overloads are provided
+// for the multi-motor command surface.
+//
+// Ownership: channels are created in one of three ways
+//   1. Legacy ctor (single StepperConfig + driver) — builds a single channel
+//      from `cfg` with channel_id=0 and samples=0..3. Backward compatible.
+//   2. Multi-channel ctor (vector of StepperChannelConfig + vector of
+//      unique_ptr<StepperDriver>) — one channel per pair. The MotionLock is
+//      owned by the controller and shared across channels.
+//   3. AddChannel() — append a pre-built channel (used by tests / plugins).
 class StepperController {
  public:
+  // Legacy single-channel constructor. Behaves exactly like REV-A for the one
+  // motor it controls; Tick() still applies phase-based bend setpoints to
+  // channel 0. Kept so the existing system_controller wiring compiles.
   StepperController(const StepperConfig& cfg,
                     const BendScheduleConfig& schedule,
                     std::unique_ptr<StepperDriver> driver);
 
+  // Multi-channel constructor. `channel_cfgs[i]` pairs with `drivers[i]`.
+  // Throws std::invalid_argument if the vectors differ in size.
+  StepperController(std::vector<StepperChannelConfig> channel_cfgs,
+                    std::vector<std::unique_ptr<StepperDriver>> drivers,
+                    const BendScheduleConfig& schedule);
+
+  ~StepperController();
+
+  StepperController(const StepperController&) = delete;
+  StepperController& operator=(const StepperController&) = delete;
+
   // Called once per control-loop tick with the wall-clock dt since the last
-  // call. Emits pulses up to the configured step rate, advances the hold
-  // timer, and triggers phase-based bend setpoints on phase entry.
+  // call. Applies phase-based bend setpoints (to channel 0 only) and ticks
+  // every owned channel so their ramp schedulers advance.
   void Tick(MissionPhase phase, double dt_s);
 
-  // Command surface — all return false + set *error on rejection.
+  // ---- Legacy single-motor command surface (routes to channel 0) ----
   bool MoveSteps(std::int64_t delta_steps, std::string* error);
   bool MoveToSteps(std::int64_t absolute_steps, double hold_s, std::string* error);
   bool Rotate(double revolutions, std::string* error);
-  bool Home(std::string* error);             // return to 0
-  void Stop();                               // abort current motion
+  bool Home(std::string* error);
+  void Stop();
   bool SetSpeed(double step_hz, std::string* error);
   bool SetMicrostep(int divisor, std::string* error);
   bool SetEnabled(bool enable);
 
+  // ---- REV-B multi-motor command surface ----
+  bool MoveSteps(int motor_id, std::int64_t delta_steps, std::string* error);
+  bool MoveToSteps(int motor_id, std::int64_t absolute_steps, double hold_s,
+                   std::string* error);
+  bool Rotate(int motor_id, double revolutions, std::string* error);
+  bool Home(int motor_id, std::string* error);
+  bool Stop(int motor_id, std::string* error);
+  bool SetSpeed(int motor_id, double step_hz, std::string* error);
+  bool SetMicrostep(int motor_id, int divisor, std::string* error);
+  bool SetEnabled(int motor_id, bool enable, std::string* error);
+
+  // Pull-cycle shortcuts. ArmPull queues the motion non-blocking; ExecutePull
+  // blocks until the retract leg completes. Both acquire / release the
+  // MotionLock atomically.
+  bool ArmPull(int motor_id, std::string* error);
+  bool ExecutePull(int motor_id, std::string* error);
+
+  // Legacy single-motor snapshot — returns channel 0's status.
   StepperStatus Snapshot() const;
+  // Per-channel snapshot.
+  StepperStatus Snapshot(int motor_id) const;
+
+  std::size_t channel_count() const;
+  // Lookup samples() for a channel (empty if invalid id).
+  std::vector<std::size_t> SamplesForMotor(int motor_id) const;
+
+  MotionLock* motion_lock() { return &lock_; }
 
  private:
   void ApplyPhaseSetpoint(MissionPhase phase);
   bool ResolvePhaseBend(MissionPhase phase, std::int64_t* steps, double* hold_s) const;
+  StepperChannel* ChannelById(int motor_id);
+  const StepperChannel* ChannelById(int motor_id) const;
 
-  StepperConfig cfg_;
   BendScheduleConfig schedule_;
-  std::unique_ptr<StepperDriver> driver_;
+  MotionLock lock_;
+  std::vector<std::unique_ptr<StepperChannel>> channels_;
 
   mutable std::mutex mu_;
-  std::int64_t position_ = 0;
-  std::int64_t target_ = 0;
-  double step_hz_ = 0.0;
-  int microstep_ = 1;
-  bool enabled_ = false;
-  bool moving_ = false;
-  double hold_remaining_s_ = 0.0;
-  double fractional_steps_ = 0.0;  // accumulator for sub-integer pulses per tick
-  std::string last_source_ = "init";
   MissionPhase last_phase_ = MissionPhase::kBoot;
   bool last_phase_valid_ = false;
 };
