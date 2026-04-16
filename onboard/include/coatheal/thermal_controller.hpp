@@ -8,9 +8,12 @@
 #include "coatheal/config.hpp"
 #include "coatheal/phase.hpp"
 #include "coatheal/pid_controller.hpp"
-#include "coatheal/telemetry.hpp"
 
 namespace coatheal {
+
+struct SensorSnapshot;  // defined in telemetry.hpp; forward-declared here
+                        // so this header does not transitively include the
+                        // telemetry/stepper headers (owned by other agents).
 
 struct ControlOverrides {
   bool heaters_off = false;
@@ -19,8 +22,18 @@ struct ControlOverrides {
   std::optional<PidGains> pid_override;
 };
 
+// Rev B floor controller:
+//   * Per-sample PID setpoint = phase.sample_floor_c (shared across
+//     ASCENT/FLOAT/DESCENT).
+//   * PID is only active when sample < (floor - hysteresis); once sample
+//     reaches floor it switches off, duty goes to 0, and the integrator is
+//     frozen. kFloorHysteresisC defines the dead-band.
+//   * Box PID is unchanged (tracks phase.box_target_c continuously).
+//   * kBoot / kLanded / kStopped force zero output.
 class ThermalController {
  public:
+  static constexpr double kFloorHysteresisC = 0.5;
+
   explicit ThermalController(const OnboardConfig& config);
 
   void Reset();
@@ -32,26 +45,27 @@ class ThermalController {
 
   void UpdatePid(PidGains gains);
 
-  // Per-channel over-temperature latch: true while any channel has tripped the
-  // explicit per-channel cutoff. Cleared only by Reset() (RESET_CONTROL).
+  // Per-channel over-temperature latch (kept from Rev A for defense-in-depth
+  // even though the Rev B thermal goal is a floor, not a ceiling).
   bool overtemp_latched() const { return overtemp_latched_; }
 
-  // True while sample spread exceeded uniformity_tolerance_c during kFloatHold
-  // on the most recent tick.
+  // True while sample spread stayed within uniformity_tolerance_c this tick.
   bool uniformity_ok() const { return uniformity_ok_; }
 
-  // Per-channel latch vector, sized to heater_count. Indices 0..N-1 map to
-  // sample channels; the electronics heater tracks max_box_temp_c.
   const std::vector<bool>& channel_latched() const { return channel_latched_; }
 
+  // True while each per-sample PID is currently driving output (below
+  // floor - hysteresis). Exposed for tests and telemetry.
+  const std::vector<bool>& sample_heating() const { return sample_heating_; }
+
  private:
-  double ComputeSampleSetpoint(MissionPhase phase, double dt_seconds);
+  bool ShouldHeatPhase(MissionPhase phase) const;
 
   OnboardConfig config_;
-  PidController sample_pid_;
+  std::vector<PidController> sample_pids_;
   PidController box_pid_;
-  double activation_setpoint_c_ = 0.0;
   std::vector<bool> channel_latched_;
+  std::vector<bool> sample_heating_;
   bool overtemp_latched_ = false;
   bool uniformity_ok_ = true;
 };

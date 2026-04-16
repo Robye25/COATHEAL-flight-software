@@ -205,20 +205,10 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
     } else if (key == "storage.queue_max_bytes") {
       if (!parse_u64(key, value, &config->storage.queue_max_bytes, line_no)) return false;
 
-    } else if (key == "phase.ascent_target_c") {
-      if (!parse_double(key, value, &config->phase.ascent_target_c, line_no)) return false;
-    } else if (key == "phase.activation_target_c") {
-      if (!parse_double(key, value, &config->phase.activation_target_c, line_no)) return false;
-    } else if (key == "phase.float_target_c") {
-      if (!parse_double(key, value, &config->phase.float_target_c, line_no)) return false;
-    } else if (key == "phase.descent_floor_c") {
-      if (!parse_double(key, value, &config->phase.descent_floor_c, line_no)) return false;
+    } else if (key == "phase.sample_floor_c") {
+      if (!parse_double(key, value, &config->phase.sample_floor_c, line_no)) return false;
     } else if (key == "phase.box_target_c") {
       if (!parse_double(key, value, &config->phase.box_target_c, line_no)) return false;
-    } else if (key == "phase.activation_ramp_c_per_s") {
-      if (!parse_double(key, value, &config->phase.activation_ramp_c_per_s, line_no)) return false;
-    } else if (key == "phase.float_hold_minutes") {
-      if (!parse_double(key, value, &config->phase.float_hold_minutes, line_no)) return false;
     } else if (key == "phase.uniformity_tolerance_c") {
       if (!parse_double(key, value, &config->phase.uniformity_tolerance_c, line_no)) return false;
 
@@ -236,10 +226,12 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
     } else if (key == "sensor.ambient_pressure_max_mbar") {
       if (!parse_double(key, value, &config->sensor_range.ambient_pressure_max_mbar, line_no)) return false;
 
-    } else if (key == "transition.ascent_to_activation_mbar") {
-      if (!parse_double(key, value, &config->transition.ascent_to_activation_mbar, line_no)) return false;
+    } else if (key == "transition.ascent_to_float_mbar") {
+      if (!parse_double(key, value, &config->transition.ascent_to_float_mbar, line_no)) return false;
     } else if (key == "transition.float_to_descent_mbar") {
       if (!parse_double(key, value, &config->transition.float_to_descent_mbar, line_no)) return false;
+    } else if (key == "transition.descent_to_landed_mbar") {
+      if (!parse_double(key, value, &config->transition.descent_to_landed_mbar, line_no)) return false;
 
     } else if (key == "power.max_active_heaters") {
       if (!parse_size_t(key, value, &config->power.max_active_heaters, line_no)) return false;

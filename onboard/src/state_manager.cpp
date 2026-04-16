@@ -1,30 +1,17 @@
 #include "coatheal/state_manager.hpp"
 
-#include <algorithm>
-#include <numeric>
-
 namespace coatheal {
 
 StateManager::StateManager(const OnboardConfig& config) : config_(config) {}
 
 void StateManager::Reset() {
-  phase_ = MissionPhase::kAscentHold;
-  float_hold_started_valid_ = false;
-}
-
-bool StateManager::IsAtTarget(const std::vector<double>& sample_temps_c, double target) const {
-  if (sample_temps_c.empty()) {
-    return false;
-  }
-  const double sum = std::accumulate(sample_temps_c.begin(), sample_temps_c.end(), 0.0);
-  const double avg = sum / static_cast<double>(sample_temps_c.size());
-  return avg >= (target - 1.0);
+  phase_ = MissionPhase::kBoot;
 }
 
 MissionPhase StateManager::Update(double pressure_mbar,
-                                  const std::vector<double>& sample_temps_c,
+                                  const std::vector<double>& /*sample_temps_c*/,
                                   StateOverrides overrides,
-                                  std::chrono::steady_clock::time_point now) {
+                                  std::chrono::steady_clock::time_point /*now*/) {
   if (overrides.reset_control) {
     Reset();
   }
@@ -35,63 +22,42 @@ MissionPhase StateManager::Update(double pressure_mbar,
   }
 
   if (overrides.force_stop) {
-    phase_ = MissionPhase::kDescentFloor;
+    // FORCE_STOP short-circuits straight to DESCENT so heaters/motors follow
+    // the descent policy; a subsequent SHUTDOWN_SAFE takes us to STOPPED.
+    phase_ = MissionPhase::kDescent;
     return phase_;
   }
 
-  if (overrides.force_start && phase_ == MissionPhase::kAscentHold) {
-    phase_ = MissionPhase::kActivationRamp;
+  if (overrides.force_start && phase_ == MissionPhase::kBoot) {
+    phase_ = MissionPhase::kAscent;
   }
 
   switch (phase_) {
-    case MissionPhase::kAscentHold:
-      if (pressure_mbar <= config_.transition.ascent_to_activation_mbar) {
-        phase_ = MissionPhase::kActivationRamp;
+    case MissionPhase::kBoot:
+      // First tick out of BOOT is immediate; the orchestrator gates this
+      // behind SystemMode::kRun so BOOT only persists while in STANDBY.
+      phase_ = MissionPhase::kAscent;
+      break;
+
+    case MissionPhase::kAscent:
+      if (pressure_mbar <= config_.transition.ascent_to_float_mbar) {
+        phase_ = MissionPhase::kFloat;
       }
       break;
 
-    case MissionPhase::kActivationRamp:
-      if (IsAtTarget(sample_temps_c, config_.phase.activation_target_c)) {
-        phase_ = MissionPhase::kFloatHold;
-        float_hold_started_ = now;
-        float_hold_started_valid_ = true;
-      }
-      break;
-
-    case MissionPhase::kFloatHold:
-      if (!float_hold_started_valid_) {
-        float_hold_started_ = now;
-        float_hold_started_valid_ = true;
-      }
+    case MissionPhase::kFloat:
       if (pressure_mbar >= config_.transition.float_to_descent_mbar) {
-        phase_ = MissionPhase::kDescentFloor;
-        break;
-      }
-      if (overrides.secondary_cycle) {
-        const auto hold_seconds = std::chrono::duration_cast<std::chrono::seconds>(
-            now - float_hold_started_);
-        const long long total_budget_s =
-            static_cast<long long>(config_.phase.float_hold_minutes * 60.0);
-        const long long remaining_s = total_budget_s - hold_seconds.count();
-        constexpr long long kMinReentryHoldSeconds = 10 * 60;
-        if (remaining_s >= kMinReentryHoldSeconds) {
-          phase_ = MissionPhase::kActivationRamp;
-          float_hold_started_valid_ = false;
-          break;
-        }
-      }
-      if (float_hold_started_valid_) {
-        const auto hold_seconds = std::chrono::duration_cast<std::chrono::seconds>(
-            now - float_hold_started_);
-        if (hold_seconds.count() >= static_cast<long long>(config_.phase.float_hold_minutes * 60.0)) {
-          phase_ = MissionPhase::kDescentFloor;
-        }
+        phase_ = MissionPhase::kDescent;
       }
       break;
 
-    case MissionPhase::kDescentFloor:
+    case MissionPhase::kDescent:
+      if (pressure_mbar >= config_.transition.descent_to_landed_mbar) {
+        phase_ = MissionPhase::kLanded;
+      }
       break;
 
+    case MissionPhase::kLanded:
     case MissionPhase::kStopped:
       break;
   }
