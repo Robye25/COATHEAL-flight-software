@@ -10,7 +10,9 @@
 
 #include "coatheal/hal/stepper_driver.hpp"
 #include "coatheal/sd_notify.hpp"
+#include "coatheal/stepper_channel.hpp"
 #include "coatheal/telemetry.hpp"
+#include "coatheal/tmc5160_driver.hpp"
 
 namespace coatheal {
 namespace {
@@ -51,7 +53,8 @@ SystemController::SystemController(OnboardConfig config)
       sensor_manager_(config_, &spi_, &i2c_, &rtc_),
       state_manager_(config_),
       thermal_controller_(config_),
-      scheduler_(config_.power, config_.hardware.electronics_heater_index),
+      scheduler_(config_.power, config_.hardware.electronics_heater_index,
+                 &motion_lock_),
       storage_manager_(config_.storage.primary_log_path, config_.storage.secondary_log_path),
       telemetry_queue_(config_.storage.queue_dir,
                        config_.storage.queue_retention_hours,
@@ -89,17 +92,61 @@ bool SystemController::Initialize(std::string* error) {
   }
   mode_led_->Set(StatusLed::Pattern::kSolid);
 
-  std::unique_ptr<StepperDriver> stepper_driver;
+  // Rev B: two stepper channels. Motor 0 drives samples 0..3 (high-torque
+  // Pololu 2851 via TMC5160 on SPI1), motor 1 drives samples 4..7 (Adafruit
+  // 1918 via A4988/DRV8825 STEP/DIR/EN). The MotionLock is owned by this
+  // controller and shared with the heater scheduler for the interlock.
+  //
+  // We currently build both channels from the legacy StepperConfig defaults
+  // plus a compiled-in sample split (0..3 / 4..7). When the Rev B
+  // onboard.ini schema (`motor0.*` / `motor1.*` / `pull.*`) lands in
+  // config.cpp, these fields will be populated from it instead.
+  StepperChannelConfig cfg0;
+  cfg0.channel_id = 0;
+  cfg0.full_steps_per_rev = config_.stepper.steps_per_rev;
+  cfg0.max_step_hz = 100.0;
+  cfg0.default_step_hz = 100.0;
+  cfg0.accel_steps_per_s2 = 200.0;
+  cfg0.microstep = 4;
+  cfg0.max_position_steps = config_.stepper.max_position_steps;
+  cfg0.samples = {0, 1, 2, 3};
+  cfg0.pull_travel_full_steps = 200;
+  cfg0.pull_hold_s = 5.0;
+  cfg0.enable_on_boot = config_.stepper.enable_on_boot;
+
+  StepperChannelConfig cfg1 = cfg0;
+  cfg1.channel_id = 1;
+  cfg1.samples = {4, 5, 6, 7};
+
+  std::vector<StepperChannelConfig> channel_cfgs;
+  channel_cfgs.push_back(cfg0);
+  channel_cfgs.push_back(cfg1);
+
+  std::vector<std::unique_ptr<StepperDriver>> drivers;
   if (config_.runtime.use_simulated_pwm) {
-    stepper_driver = std::make_unique<SimulatedStepperDriver>();
+    drivers.emplace_back(std::make_unique<SimulatedStepperDriver>());
+    drivers.emplace_back(std::make_unique<SimulatedStepperDriver>());
   } else {
-    stepper_driver = std::make_unique<GpioStepDirStepperDriver>(
+    // Motor 0: TMC5160 (SPI1 + STEP/DIR/EN on the HAT). Falls back to a
+    // plain GPIO driver until the TMC5160 SPI setup path is exercised on
+    // real hardware.
+    drivers.emplace_back(std::make_unique<GpioStepDirStepperDriver>(
         config_.runtime.gpio_chip, config_.stepper.step_line,
         config_.stepper.dir_line, config_.stepper.enable_line,
-        config_.stepper.invert_direction, config_.stepper.enable_active_low);
+        config_.stepper.invert_direction, config_.stepper.enable_active_low));
+    // Motor 1: A4988/DRV8825 plain STEP/DIR/EN. Pin mapping is TBD; uses the
+    // legacy stepper pins as a safe bench default until `motor1.*` lands.
+    drivers.emplace_back(std::make_unique<GpioStepDirStepperDriver>(
+        config_.runtime.gpio_chip, config_.stepper.step_line,
+        config_.stepper.dir_line, config_.stepper.enable_line,
+        config_.stepper.invert_direction, config_.stepper.enable_active_low));
   }
+
   stepper_ = std::make_unique<StepperController>(
-      config_.stepper, config_.bend, std::move(stepper_driver));
+      std::move(channel_cfgs), std::move(drivers), config_.bend);
+
+  // One PullState entry per channel for EVT,PULL edge detection in Run().
+  pull_state_.resize(stepper_->channel_count());
 
   if (!storage_manager_.Initialize(error)) {
     return false;
@@ -172,8 +219,14 @@ int SystemController::Run() {
     std::vector<double> requested_duty = thermal_controller_.ComputeRequestedDuty(
         phase, snapshot, tick_duration.count(), effective_control);
 
+    // Rev B: the "prioritize samples" flag deprioritises the electronics
+    // heater during any flying phase (not just the removed ramp). All three
+    // flying phases share the same +5 C floor policy.
+    const bool any_flying_phase =
+        (phase == MissionPhase::kAscent || phase == MissionPhase::kFloat ||
+         phase == MissionPhase::kDescent);
     const std::vector<double> scheduled_duty = scheduler_.Schedule(
-        requested_duty, heaters_allowed && phase == MissionPhase::kActivationRamp,
+        requested_duty, heaters_allowed && any_flying_phase,
         tick_duration.count());
 
     for (std::size_t i = 0; i < scheduled_duty.size(); ++i) {
@@ -200,8 +253,15 @@ int SystemController::Run() {
     record.status.overtemp_ok = !thermal_controller_.overtemp_latched();
     record.status.uniformity_ok = thermal_controller_.uniformity_ok();
     record.status.energy_ok = !scheduler_.is_budget_exhausted();
+    record.status.heater_inhibited = scheduler_.heater_inhibited();
     if (stepper_) {
-      record.stepper = stepper_->Snapshot();
+      // Rev B: one snapshot per channel drives the STEPPER0=/STEPPER1=
+      // telemetry segments. Legacy `record.stepper` is left default — the
+      // serializer prefers `steppers` when non-empty.
+      record.steppers.clear();
+      for (std::size_t i = 0; i < stepper_->channel_count(); ++i) {
+        record.steppers.push_back(stepper_->Snapshot(static_cast<int>(i)));
+      }
     }
 
     const std::string line = SerializeTelemetryDataFrame(record, telemetry_client_.session_id());
@@ -224,64 +284,37 @@ int SystemController::Run() {
       std::cerr << "[telemetry] drain error: " << drain_error << '\n';
     }
 
-    // Heating-cycle aggregator: accumulate per-specimen peak/hold/cooldown
-    // across ACTIVATION_RAMP -> FLOAT_HOLD -> DESCENT_FLOOR and emit an
-    // HEATING_CYCLE_EVENT frame for each specimen at the float->descent edge.
-    // TODO(Group-A): if state_manager gains a dedicated cycle-complete hook,
-    // replace this phase-edge detection with that signal.
-    {
-      const std::size_t n = snapshot.sample_temps_c.size();
-      if (cycle_aggregators_.size() != n) {
-        cycle_aggregators_.assign(n, HeatingCycleAggregator{});
+    // Rev B: emit EVT,PULL after each motor finishes a pull cycle. The Rev A
+    // heating-cycle aggregator is retired with the +70 C activation ramp.
+    //
+    // A pull starts when the channel first appears `moving` while the
+    // MotionLock reports that motor as holder. It completes on the falling
+    // edge of `moving` — that moment we emit the event.
+    if (stepper_ && !record.steppers.empty()) {
+      if (pull_state_.size() != record.steppers.size()) {
+        pull_state_.resize(record.steppers.size());
       }
-      const double mono_s =
-          std::chrono::duration<double>(tick_start.time_since_epoch()).count();
+      for (std::size_t i = 0; i < record.steppers.size(); ++i) {
+        PullState& ps = pull_state_[i];
+        const StepperStatus& s = record.steppers[i];
+        const bool lock_held_now = (motion_lock_.holder() == static_cast<int>(i));
 
-      const bool in_cycle = (phase == MissionPhase::kActivationRamp ||
-                             phase == MissionPhase::kFloatHold);
-      for (std::size_t i = 0; i < n; ++i) {
-        HeatingCycleAggregator& agg = cycle_aggregators_[i];
-        const double t = snapshot.sample_temps_c[i];
-        if (in_cycle) {
-          if (!agg.active) {
-            agg = HeatingCycleAggregator{};
-            agg.active = true;
-            agg.peak_temp_c = t;
-            agg.start_ts = snapshot.timestamp_utc;
-            agg.hold_start_mono_s = mono_s;
-          }
-          if (t > agg.peak_temp_c) {
-            agg.peak_temp_c = t;
-          }
-          if (phase == MissionPhase::kFloatHold) {
-            agg.hold_duration_s = mono_s - agg.hold_start_mono_s;
-          }
-          agg.last_temp_c = t;
-          agg.last_mono_s = mono_s;
-        } else if (agg.active && phase == MissionPhase::kDescentFloor) {
-          const double dt = std::max(1e-3, mono_s - agg.last_mono_s);
-          agg.cooldown_rate_c_per_s = (agg.last_temp_c - t) / dt;
-        }
-      }
-
-      const bool cycle_complete =
-          (last_phase_ == MissionPhase::kFloatHold && phase == MissionPhase::kDescentFloor);
-      if (cycle_complete) {
-        for (std::size_t i = 0; i < cycle_aggregators_.size(); ++i) {
-          HeatingCycleAggregator& agg = cycle_aggregators_[i];
-          if (!agg.active) {
-            continue;
-          }
-          HeatingCycleEvent event;
-          event.cycle_id = next_cycle_id_;
-          event.start_ts = agg.start_ts;
-          event.peak_temp_c = agg.peak_temp_c;
-          event.hold_duration_s = agg.hold_duration_s;
-          event.cooldown_rate_c_per_s = agg.cooldown_rate_c_per_s;
-          event.specimen_index = i;
+        if (!ps.was_moving && s.moving && lock_held_now) {
+          ps.was_moving = true;
+          ps.lock_held = true;
+          ps.start_ts = snapshot.timestamp_utc;
+          ps.start_pos = s.position_steps;
+        } else if (ps.was_moving && !s.moving) {
+          HeatingPullEvent pev;
+          pev.pull_id = next_pull_id_++;
+          pev.motor_id = static_cast<int>(i);
+          pev.start_ts = ps.start_ts;
+          pev.steps_moved = s.position_steps - ps.start_pos;
+          pev.hold_s = s.hold_remaining_s;
+          pev.samples = stepper_->SamplesForMotor(static_cast<int>(i));
 
           const std::string evt_line =
-              SerializeHeatingCycleEvent(event, telemetry_client_.session_id());
+              SerializeTelemetryPullEventFrame(pev, telemetry_client_.session_id());
           storage_manager_.WriteLine(evt_line);
 
           QueuedTelemetryFrame evt_frame;
@@ -292,11 +325,10 @@ int SystemController::Run() {
           std::string evt_error;
           telemetry_queue_.Enqueue(evt_frame, &evt_error);
 
-          agg.active = false;
+          ps.was_moving = false;
+          ps.lock_held = false;
         }
-        ++next_cycle_id_;
       }
-      last_phase_ = phase;
     }
 
     if (phase == MissionPhase::kStopped) {
@@ -590,7 +622,8 @@ std::string SystemController::HandleCommandLine(const std::string& line) {
         return Nack(cmd_name, "invalid steps");
       }
       std::string err;
-      if (!stepper_->MoveSteps(steps, &err)) return Nack(cmd_name, err);
+      if (!stepper_->MoveSteps(command.motor_id, steps, &err))
+        return Nack(cmd_name, err);
       return Ack(cmd_name, "move queued");
     }
 
@@ -608,7 +641,8 @@ std::string SystemController::HandleCommandLine(const std::string& line) {
         return Nack(cmd_name, "invalid args");
       }
       std::string err;
-      if (!stepper_->MoveToSteps(steps, hold_s, &err)) return Nack(cmd_name, err);
+      if (!stepper_->MoveToSteps(command.motor_id, steps, hold_s, &err))
+        return Nack(cmd_name, err);
       return Ack(cmd_name, "bend queued");
     }
 
@@ -617,28 +651,32 @@ std::string SystemController::HandleCommandLine(const std::string& line) {
       double revs = 0.0;
       if (!ParseDouble(command.args[0], &revs)) return Nack(cmd_name, "invalid revs");
       std::string err;
-      if (!stepper_->Rotate(revs, &err)) return Nack(cmd_name, err);
+      if (!stepper_->Rotate(command.motor_id, revs, &err))
+        return Nack(cmd_name, err);
       return Ack(cmd_name, "rotate queued");
     }
 
     case CommandType::kStepperHome: {
       if (!stepper_) return Nack(cmd_name, "stepper unavailable");
       std::string err;
-      stepper_->Home(&err);
+      stepper_->Home(command.motor_id, &err);
       return Ack(cmd_name, "homing");
     }
 
-    case CommandType::kStepperStop:
+    case CommandType::kStepperStop: {
       if (!stepper_) return Nack(cmd_name, "stepper unavailable");
-      stepper_->Stop();
+      std::string err;
+      stepper_->Stop(command.motor_id, &err);
       return Ack(cmd_name, "stopped");
+    }
 
     case CommandType::kStepperSetSpeed: {
       if (!stepper_) return Nack(cmd_name, "stepper unavailable");
       double hz = 0.0;
       if (!ParseDouble(command.args[0], &hz)) return Nack(cmd_name, "invalid hz");
       std::string err;
-      if (!stepper_->SetSpeed(hz, &err)) return Nack(cmd_name, err);
+      if (!stepper_->SetSpeed(command.motor_id, hz, &err))
+        return Nack(cmd_name, err);
       return Ack(cmd_name, "speed updated");
     }
 
@@ -647,19 +685,38 @@ std::string SystemController::HandleCommandLine(const std::string& line) {
       std::size_t idx = 0;
       if (!ParseIndex(command.args[0], &idx)) return Nack(cmd_name, "invalid divisor");
       std::string err;
-      if (!stepper_->SetMicrostep(static_cast<int>(idx), &err)) return Nack(cmd_name, err);
+      if (!stepper_->SetMicrostep(command.motor_id, static_cast<int>(idx), &err))
+        return Nack(cmd_name, err);
       return Ack(cmd_name, "microstep updated");
     }
 
-    case CommandType::kStepperEnable:
+    case CommandType::kStepperEnable: {
       if (!stepper_) return Nack(cmd_name, "stepper unavailable");
-      stepper_->SetEnabled(true);
+      std::string err;
+      stepper_->SetEnabled(command.motor_id, true, &err);
       return Ack(cmd_name, "stepper enabled");
+    }
 
-    case CommandType::kStepperDisable:
+    case CommandType::kStepperDisable: {
       if (!stepper_) return Nack(cmd_name, "stepper unavailable");
-      stepper_->SetEnabled(false);
+      std::string err;
+      stepper_->SetEnabled(command.motor_id, false, &err);
       return Ack(cmd_name, "stepper disabled");
+    }
+
+    case CommandType::kPullArm: {
+      if (!stepper_) return Nack(cmd_name, "stepper unavailable");
+      std::string err;
+      if (!stepper_->ArmPull(command.motor_id, &err)) return Nack(cmd_name, err);
+      return Ack(cmd_name, "pull armed");
+    }
+
+    case CommandType::kPullExecute: {
+      if (!stepper_) return Nack(cmd_name, "stepper unavailable");
+      std::string err;
+      if (!stepper_->ExecutePull(command.motor_id, &err)) return Nack(cmd_name, err);
+      return Ack(cmd_name, "pull executed");
+    }
 
     case CommandType::kUnknown:
       return Nack(cmd_name, "unknown command");

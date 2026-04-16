@@ -11,6 +11,7 @@
 #include "coatheal/command_server.hpp"
 #include "coatheal/config.hpp"
 #include "coatheal/heater_scheduler.hpp"
+#include "coatheal/motion_lock.hpp"
 #include "coatheal/sensor_manager.hpp"
 #include "coatheal/state_manager.hpp"
 #include "coatheal/stepper_controller.hpp"
@@ -52,6 +53,9 @@ class SystemController {
   SensorManager sensor_manager_;
   StateManager state_manager_;
   ThermalController thermal_controller_;
+  // MotionLock must be declared BEFORE scheduler_ so the scheduler ctor can
+  // take its address (member-init order is declaration order).
+  MotionLock motion_lock_;
   HeaterScheduler scheduler_;
   StorageManager storage_manager_;
   TelemetryQueue telemetry_queue_;
@@ -70,22 +74,17 @@ class SystemController {
   std::vector<double> last_heater_duty_;
   std::uint64_t seq_ = 0;
 
-  // Heating-cycle event aggregator. Emits HEATING_CYCLE_EVENT frames on the
-  // float -> descent transition, one per specimen. TODO(Group-A): if
-  // mission-phase arc logic changes, move this trigger into state_manager.
-  struct HeatingCycleAggregator {
-    bool active = false;
-    double peak_temp_c = -1e9;
-    double hold_start_mono_s = 0.0;
-    double hold_duration_s = 0.0;
-    double last_temp_c = 0.0;
-    double last_mono_s = 0.0;
-    double cooldown_rate_c_per_s = 0.0;
+  // Rev B pull-event bookkeeping: emit EVT,PULL after each motor completes a
+  // pull cycle. Edge-detects channel moving true->false while the MotionLock
+  // was held by that motor.
+  struct PullState {
+    bool was_moving = false;
+    bool lock_held = false;
     std::string start_ts;
+    std::int64_t start_pos = 0;
   };
-  std::vector<HeatingCycleAggregator> cycle_aggregators_;
-  MissionPhase last_phase_ = MissionPhase::kAscentHold;
-  std::uint32_t next_cycle_id_ = 1;
+  std::vector<PullState> pull_state_;
+  std::uint32_t next_pull_id_ = 1;
 };
 
 }  // namespace coatheal

@@ -306,6 +306,14 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
       if (!parse_i64(key, value, &config->bend.descent_steps, line_no)) return false;
     } else if (key == "bend.descent_hold_s") {
       if (!parse_double(key, value, &config->bend.descent_hold_s, line_no)) return false;
+    } else if (key.rfind("pull.", 0) == 0 ||
+               key.rfind("motor0.", 0) == 0 ||
+               key.rfind("motor1.", 0) == 0) {
+      // Rev B dual-stepper / pull-envelope keys. Accepted but not yet wired
+      // into StepperChannelConfig — system_controller.cpp uses hard-coded
+      // Rev B defaults for now. Parsing will be added when the multi-channel
+      // config path is fully plumbed.
+      (void)value;
     } else {
       if (error != nullptr) {
         *error = "unknown config key at line " + std::to_string(line_no) + ": " + key;

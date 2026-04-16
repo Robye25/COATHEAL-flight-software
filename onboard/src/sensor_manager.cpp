@@ -15,7 +15,9 @@ SensorManager::SensorManager(const OnboardConfig& config,
       spi_(spi),
       i2c_(i2c),
       rtc_(rtc),
-      sample_temps_c_(config.hardware.heater_count, config.phase.ascent_target_c) {}
+      // Init samples at the floor so the simulation cooldown drives PID
+      // activation as soon as ambient pulls them below the hysteresis band.
+      sample_temps_c_(config.hardware.heater_count, config.phase.sample_floor_c) {}
 
 SensorSnapshot SensorManager::ReadSnapshot(MissionPhase phase,
                                            const std::vector<double>& heater_duty,
@@ -25,17 +27,19 @@ SensorSnapshot SensorManager::ReadSnapshot(MissionPhase phase,
   // Coarse pressure profile model for simulation and bench testing.
   // Floor is 5 mbar per BEXUS User Manual §5.6 — the experiment acceptance
   // pressure level — so vacuum-regime tests exercise the real flight envelope.
-  if (phase == MissionPhase::kDescentFloor) {
+  if (phase == MissionPhase::kDescent || phase == MissionPhase::kLanded) {
     pressure_descending_ = false;
   }
   pressure_mbar_ += (pressure_descending_ ? -1.5 : 1.8) * dt;
   pressure_mbar_ = std::clamp(pressure_mbar_, 5.0, 1013.25);
 
   double ambient_temp = -40.0;
-  if (phase == MissionPhase::kActivationRamp || phase == MissionPhase::kFloatHold) {
+  if (phase == MissionPhase::kFloat) {
     ambient_temp = -55.0;
-  } else if (phase == MissionPhase::kDescentFloor) {
+  } else if (phase == MissionPhase::kDescent) {
     ambient_temp = -15.0;
+  } else if (phase == MissionPhase::kLanded) {
+    ambient_temp = 0.0;
   }
 
   for (std::size_t i = 0; i < sample_temps_c_.size(); ++i) {
@@ -58,7 +62,7 @@ SensorSnapshot SensorManager::ReadSnapshot(MissionPhase phase,
   snapshot.ambient_temp_c = ambient_temp;
   snapshot.ambient_pressure_mbar = pressure_mbar_;
   snapshot.ambient_humidity_pct = 15.0 + (std::sin(pressure_mbar_ / 90.0) * 5.0);
-  snapshot.uv = phase == MissionPhase::kFloatHold ? 1.8 : 0.4;
+  snapshot.uv = phase == MissionPhase::kFloat ? 1.8 : 0.4;
   snapshot.box_temp_c = box_temp_c_;
   snapshot.sample_temps_c = sample_temps_c_;
 

@@ -89,22 +89,22 @@ bool StepperController::ResolvePhaseBend(MissionPhase phase,
                                          std::int64_t* steps,
                                          double* hold_s) const {
   switch (phase) {
-    case MissionPhase::kAscentHold:
+    case MissionPhase::kBoot:
+      return false;
+    case MissionPhase::kAscent:
       *steps = schedule_.ascent_steps;
       *hold_s = schedule_.ascent_hold_s;
       return true;
-    case MissionPhase::kActivationRamp:
-      *steps = schedule_.activation_steps;
-      *hold_s = schedule_.activation_hold_s;
-      return true;
-    case MissionPhase::kFloatHold:
+    case MissionPhase::kFloat:
+      // Activation-ramp schedule collapsed into the float phase in Rev B.
       *steps = schedule_.float_steps;
       *hold_s = schedule_.float_hold_s;
       return true;
-    case MissionPhase::kDescentFloor:
+    case MissionPhase::kDescent:
       *steps = schedule_.descent_steps;
       *hold_s = schedule_.descent_hold_s;
       return true;
+    case MissionPhase::kLanded:
     case MissionPhase::kStopped:
       return false;
   }
