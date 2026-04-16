@@ -41,7 +41,7 @@ void TestMoveStepsIssuesPulses() {
   std::string err;
   assert(c->MoveSteps(100, &err));
   // 1000 Hz × 1 s = 1000 pulses available; we only need 100.
-  c->Tick(MissionPhase::kAscentHold, 1.0);
+  c->Tick(MissionPhase::kAscent, 1.0);
   auto s = c->Snapshot();
   assert(s.position_steps == 100);
   assert(!s.moving);
@@ -52,7 +52,7 @@ void TestSpeedLimitsPulsesPerTick() {
   auto c = MakeCtl();
   c->SetSpeed(50.0, nullptr);  // 50 Hz
   c->MoveSteps(1000, nullptr);
-  c->Tick(MissionPhase::kAscentHold, 1.0);
+  c->Tick(MissionPhase::kAscent, 1.0);
   auto s = c->Snapshot();
   // 50 pulses/s — should be around 50 after 1 s, definitely < 1000.
   assert(s.position_steps > 40 && s.position_steps < 60);
@@ -62,7 +62,7 @@ void TestSpeedLimitsPulsesPerTick() {
 void TestPhaseEntryAppliesBend() {
   auto c = MakeCtl();
   // Give enough time to reach the 500-step float bend.
-  c->Tick(MissionPhase::kFloatHold, 1.0);
+  c->Tick(MissionPhase::kFloat, 1.0);
   auto s = c->Snapshot();
   assert(s.target_steps == 500);
   // 1000 Hz × 1 s ≥ 500 — should already be at target.
@@ -74,9 +74,9 @@ void TestPhaseEntryAppliesBend() {
 
 void TestHoldCountdown() {
   auto c = MakeCtl();
-  c->Tick(MissionPhase::kFloatHold, 1.0);
+  c->Tick(MissionPhase::kFloat, 1.0);
   const double before = c->Snapshot().hold_remaining_s;
-  c->Tick(MissionPhase::kFloatHold, 2.0);
+  c->Tick(MissionPhase::kFloat, 2.0);
   const double after = c->Snapshot().hold_remaining_s;
   assert(after < before);
   assert(before - after >= 1.9);
@@ -85,10 +85,10 @@ void TestHoldCountdown() {
 void TestStopAbortsMotion() {
   auto c = MakeCtl();
   c->MoveSteps(10000, nullptr);
-  c->Tick(MissionPhase::kAscentHold, 0.1);  // partial
+  c->Tick(MissionPhase::kAscent, 0.1);  // partial
   c->Stop();
   auto s1 = c->Snapshot();
-  c->Tick(MissionPhase::kAscentHold, 1.0);
+  c->Tick(MissionPhase::kAscent, 1.0);
   auto s2 = c->Snapshot();
   assert(s2.position_steps == s1.position_steps);
   assert(!s2.moving);
@@ -100,7 +100,7 @@ void TestRotateUsesStepsPerRev() {
   cfg.microstep = 1;
   auto c = MakeCtl(cfg);
   c->Rotate(2.0, nullptr);  // 2 full revs × 200 = 400 steps
-  c->Tick(MissionPhase::kAscentHold, 1.0);
+  c->Tick(MissionPhase::kAscent, 1.0);
   auto s = c->Snapshot();
   assert(s.position_steps == 400);
 }
@@ -108,9 +108,9 @@ void TestRotateUsesStepsPerRev() {
 void TestHomeReturnsToZero() {
   auto c = MakeCtl();
   c->MoveSteps(250, nullptr);
-  c->Tick(MissionPhase::kAscentHold, 1.0);
+  c->Tick(MissionPhase::kAscent, 1.0);
   c->Home(nullptr);
-  c->Tick(MissionPhase::kAscentHold, 1.0);
+  c->Tick(MissionPhase::kAscent, 1.0);
   auto s = c->Snapshot();
   assert(s.position_steps == 0);
 }
@@ -128,7 +128,7 @@ void TestDisabledDriverDoesNotPulse() {
   auto c = MakeCtl();
   c->SetEnabled(false);
   c->MoveSteps(100, nullptr);
-  c->Tick(MissionPhase::kAscentHold, 1.0);
+  c->Tick(MissionPhase::kAscent, 1.0);
   auto s = c->Snapshot();
   assert(s.position_steps == 0);
   assert(s.pulses_total == 0);

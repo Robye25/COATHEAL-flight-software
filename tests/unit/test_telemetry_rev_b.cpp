@@ -26,7 +26,7 @@ namespace {
 TelemetryRecord MakeBaseRecord() {
   TelemetryRecord r;
   r.seq = 42;
-  r.phase = MissionPhase::kFloatHold;
+  r.phase = MissionPhase::kFloat;
   r.mode = SystemMode::kRun;
   r.sensors.rtc_valid = true;
   r.sensors.timestamp_utc = "2026-04-16T12:00:00Z";

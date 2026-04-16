@@ -44,59 +44,59 @@ void TestModeCommandsParse() {
   assert(sec.command.type == coatheal::CommandType::kSecondaryCycle);
 }
 
-void TestDefaultActivationAt100Mbar() {
-  // SED v2.0: heating initiates when ambient pressure falls below 100 mbar.
+void TestDefaultAscentToFloatAt100Mbar() {
+  // Rev B: FLOAT begins when ambient pressure falls at/below 100 mbar.
   coatheal::OnboardConfig config;
-  assert(config.transition.ascent_to_activation_mbar == 100.0);
+  assert(config.transition.ascent_to_float_mbar == 100.0);
 
   coatheal::StateManager sm(config);
-  const std::vector<double> cold(10, -30.0);
+  const std::vector<double> samples(8, 5.0);
 
-  // 120 mbar: still above threshold — stays in ASCENT_HOLD.
-  auto p = sm.Update(120.0, cold, {}, std::chrono::steady_clock::now());
-  assert(p == coatheal::MissionPhase::kAscentHold);
+  // First Update leaves BOOT for ASCENT.
+  auto p = sm.Update(900.0, samples, {}, std::chrono::steady_clock::now());
+  assert(p == coatheal::MissionPhase::kAscent);
 
-  // 101 mbar: above the 100 mbar threshold — still ASCENT_HOLD.
-  p = sm.Update(101.0, cold, {}, std::chrono::steady_clock::now());
-  assert(p == coatheal::MissionPhase::kAscentHold);
+  // 120 mbar: still above the 100 mbar threshold — stays in ASCENT.
+  p = sm.Update(120.0, samples, {}, std::chrono::steady_clock::now());
+  assert(p == coatheal::MissionPhase::kAscent);
 
-  // 100 mbar: at threshold (<=) — activation triggers.
-  p = sm.Update(100.0, cold, {}, std::chrono::steady_clock::now());
-  assert(p == coatheal::MissionPhase::kActivationRamp);
+  // 101 mbar: still above (>) 100 — still ASCENT.
+  p = sm.Update(101.0, samples, {}, std::chrono::steady_clock::now());
+  assert(p == coatheal::MissionPhase::kAscent);
+
+  // 100 mbar: at threshold (<=) — FLOAT triggers.
+  p = sm.Update(100.0, samples, {}, std::chrono::steady_clock::now());
+  assert(p == coatheal::MissionPhase::kFloat);
 }
 
-void TestSecondaryCycleReentry() {
+void TestSecondaryCycleNoOpInRevB() {
+  // Rev B removed the timed FLOAT hold and the secondary-cycle re-entry to
+  // ACTIVATION_RAMP that went with it. `secondary_cycle` is kept on the
+  // StateOverrides struct for wire-compat but the FSM ignores it.
   coatheal::OnboardConfig config;
-  config.transition.ascent_to_activation_mbar = 100.0;
+  config.transition.ascent_to_float_mbar = 100.0;
   config.transition.float_to_descent_mbar = 300.0;
-  config.phase.float_hold_minutes = 90.0;
+  config.transition.descent_to_landed_mbar = 800.0;
 
   coatheal::StateManager sm(config);
-  const std::vector<double> cold(10, -30.0);
-  const std::vector<double> hot(10, 70.0);
+  const std::vector<double> samples(8, 5.0);
   const auto t0 = std::chrono::steady_clock::now();
 
-  auto p = sm.Update(80.0, cold, {}, t0);
-  assert(p == coatheal::MissionPhase::kActivationRamp);
-  p = sm.Update(50.0, hot, {}, t0);
-  assert(p == coatheal::MissionPhase::kFloatHold);
+  // Drive BOOT -> ASCENT -> FLOAT via pressure.
+  auto p = sm.Update(900.0, samples, {}, t0);
+  assert(p == coatheal::MissionPhase::kAscent);
+  p = sm.Update(80.0, samples, {}, t0);
+  assert(p == coatheal::MissionPhase::kFloat);
 
-  // Secondary cycle early in FloatHold: remaining budget (≈90 min) >> 10 min
-  // so we should re-enter ActivationRamp.
+  // Secondary cycle while in FLOAT: no-op (stays in FLOAT).
   coatheal::StateOverrides ov;
   ov.secondary_cycle = true;
-  p = sm.Update(50.0, hot, ov, t0 + std::chrono::minutes(1));
-  assert(p == coatheal::MissionPhase::kActivationRamp);
+  p = sm.Update(80.0, samples, ov, t0 + std::chrono::minutes(1));
+  assert(p == coatheal::MissionPhase::kFloat);
 
-  // Reach target again — back to FloatHold.
-  p = sm.Update(50.0, hot, {}, t0 + std::chrono::minutes(2));
-  assert(p == coatheal::MissionPhase::kFloatHold);
-
-  // Secondary cycle with too little remaining (>80 min elapsed of 90 min
-  // budget) should NOT transition — the request is ignored.
-  ov.secondary_cycle = true;
-  p = sm.Update(50.0, hot, ov, t0 + std::chrono::minutes(85));
-  assert(p == coatheal::MissionPhase::kFloatHold);
+  // Pressure rising drives DESCENT — no timed float expiry.
+  p = sm.Update(350.0, samples, {}, t0 + std::chrono::minutes(5));
+  assert(p == coatheal::MissionPhase::kDescent);
 }
 
 void TestStandbyRunSafeTransitionsViaCommands() {
@@ -117,8 +117,8 @@ void TestStandbyRunSafeTransitionsViaCommands() {
 int main() {
   TestSystemModeToString();
   TestModeCommandsParse();
-  TestDefaultActivationAt100Mbar();
-  TestSecondaryCycleReentry();
+  TestDefaultAscentToFloatAt100Mbar();
+  TestSecondaryCycleNoOpInRevB();
   TestStandbyRunSafeTransitionsViaCommands();
   std::cout << "State machine tests passed.\n";
   return 0;
