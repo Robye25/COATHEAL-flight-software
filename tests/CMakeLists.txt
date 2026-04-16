@@ -45,3 +45,11 @@ add_executable(coatheal_stepper_tests
 target_link_libraries(coatheal_stepper_tests PRIVATE coatheal_onboard_core)
 
 add_test(NAME coatheal_stepper_tests COMMAND coatheal_stepper_tests)
+
+add_executable(coatheal_safety_rev_b_tests
+  unit/test_safety_rev_b.cpp
+)
+
+target_link_libraries(coatheal_safety_rev_b_tests PRIVATE coatheal_onboard_core)
+
+add_test(NAME coatheal_safety_rev_b_tests COMMAND coatheal_safety_rev_b_tests)
