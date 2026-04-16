@@ -10,6 +10,7 @@ add_library(coatheal_onboard_core
   src/command_server.cpp
   src/config.cpp
   src/heater_scheduler.cpp
+  src/motion_lock.cpp
   src/pid_controller.cpp
   src/sd_notify.cpp
   src/sensor_manager.cpp

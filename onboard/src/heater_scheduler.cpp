@@ -1,18 +1,29 @@
 #include "coatheal/heater_scheduler.hpp"
 
 #include <algorithm>
+#include <iostream>
 #include <numeric>
 #include <utility>
 #include <vector>
+
+#include "coatheal/motion_lock.hpp"
 
 namespace coatheal {
 
 HeaterScheduler::HeaterScheduler(PowerConfig power, std::size_t electronics_heater_index)
     : power_(power), electronics_heater_index_(electronics_heater_index) {}
 
+HeaterScheduler::HeaterScheduler(PowerConfig power,
+                                 std::size_t electronics_heater_index,
+                                 MotionLock* lock)
+    : power_(power),
+      electronics_heater_index_(electronics_heater_index),
+      lock_(lock) {}
+
 void HeaterScheduler::Reset() {
   energy_consumed_wh_ = 0.0;
   budget_exhausted_ = false;
+  last_inhibited_ = false;
 }
 
 std::vector<double> HeaterScheduler::Schedule(const std::vector<double>& requested,
@@ -23,6 +34,24 @@ std::vector<double> HeaterScheduler::Schedule(const std::vector<double>& request
 std::vector<double> HeaterScheduler::Schedule(const std::vector<double>& requested,
                                               bool deprioritize_electronics,
                                               double dt_seconds) {
+  // === SAFETY INTERLOCK (REV B) ===
+  // Heater↔motor mutex. If any stepper motor holds the lock (pull cycle in
+  // progress) every heater duty MUST be zero. There is no "but only clamp
+  // to 20 %" branch — anything non-zero here is a safety violation.
+  const bool motion_active = (lock_ != nullptr) && lock_->is_active();
+  if (motion_active) {
+    if (!last_inhibited_) {
+      std::cerr << "[safety] heater scheduler INHIBITED — motion lock held by "
+                << "motor " << lock_->holder() << "; forcing all duties to 0\n";
+    }
+    last_inhibited_ = true;
+    return std::vector<double>(requested.size(), 0.0);
+  }
+  if (last_inhibited_) {
+    std::cerr << "[safety] heater scheduler RESUMED — motion lock released\n";
+  }
+  last_inhibited_ = false;
+
   // Once the energy budget is exhausted, latch all heaters off for the rest
   // of the mission. The team's BEXUS power allocation (User Manual §5.2) is
   // a hard cap; we never re-enable heaters until Reset() is called.
