@@ -24,7 +24,7 @@ struct SensorSnapshot {
 
 struct TelemetryRecord {
   std::uint64_t seq = 0;
-  MissionPhase phase = MissionPhase::kAscentHold;
+  MissionPhase phase = MissionPhase::kBoot;
   SystemMode mode = SystemMode::kStandby;
   SensorSnapshot sensors;
   std::vector<double> heater_duty;

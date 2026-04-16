@@ -45,3 +45,20 @@ add_executable(coatheal_stepper_tests
 target_link_libraries(coatheal_stepper_tests PRIVATE coatheal_onboard_core)
 
 add_test(NAME coatheal_stepper_tests COMMAND coatheal_stepper_tests)
+
+# Rev B phase/thermal tests. Built as a standalone executable that links
+# only the files it needs, so it compiles even while system_controller.cpp
+# still references the old API (the orchestrator wires that in at merge).
+add_executable(coatheal_phase_rev_b_tests
+  unit/test_phase_rev_b.cpp
+  ${CMAKE_SOURCE_DIR}/onboard/src/state_manager.cpp
+  ${CMAKE_SOURCE_DIR}/onboard/src/thermal_controller.cpp
+  ${CMAKE_SOURCE_DIR}/onboard/src/pid_controller.cpp
+  ${CMAKE_SOURCE_DIR}/onboard/src/config.cpp
+)
+
+target_include_directories(coatheal_phase_rev_b_tests PRIVATE
+  ${CMAKE_SOURCE_DIR}/onboard/include
+)
+
+add_test(NAME coatheal_phase_rev_b_tests COMMAND coatheal_phase_rev_b_tests)
