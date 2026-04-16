@@ -74,7 +74,27 @@ PyQtGraph-based scrolling plot. Each trace is a pre-created `PlotDataItem` (curv
 
 #### Heater Duties Panel (left dock)
 
-10 `QProgressBar` widgets showing current duty cycle (0–100%). Labels: H0–H8 (sample heaters), BOX (electronics heater index 9). Each bar is color-coded: sample heaters in amber, BOX heater in cyan.
+**Rev-B:** 9 `HeaterCell` widgets. Labels `H0–H7` (the 8 sample heaters) are
+colored from the `HEATER_COLORS` amber-orange palette; `BOX` (the electronics
+box heater, index 8) is colored cyan and sits on its own row spanning both
+columns. Each cell has a 0–100 % progress bar, a readout of `duty | temp`,
+and a `Set` / `Off` action row.
+
+#### Motor Dock (right dock, "Motors" tab)
+
+**Rev-B:** dedicated read-only dashboard for the two sample-bending motors.
+Each motor (M0, M1) has its own `QGroupBox` with pos/tgt/Hz/µstep/hold/pulses
+readouts and three status dots (`en`, `mv`, `hold`). Populated from
+`packet.steppers[0]` and `packet.steppers[1]`. When the onboard reports
+only one motor (legacy single-`STEPPER=` frame), M1 is rendered as "—".
+
+#### Pull Events Panel (bottom dock, "Pull events" tab)
+
+**Rev-B:** scrolling `QTableWidget` of `EVT,PULL,...` frames. Columns:
+`time`, `motor`, `pull_id`, `steps`, `hold s`, `samples`, `session`.
+Motor column is colored per motor (green for M0, orange for M1). Fed by
+the `TelemetryReceiver.pull_event` signal; the dispatcher also appends to
+`<log>_pulls.csv` alongside the main DATA log.
 
 #### Commands Panel (left dock)
 
@@ -98,7 +118,12 @@ Ambient humidity (%) and UV × 100 over sequence number.
 
 #### Values Panel (right, resizable)
 
-Latest value for every telemetry field, updated on each packet. Status flags (`SD_OK/FAIL`, `USB_OK/FAIL`, `I2C_OK/FAIL`, `SPI_OK/FAIL`, `LINK_OK/FAIL`) are color-coded green / red.
+Latest value for every telemetry field, updated on each packet. **Rev-B**
+adds rows for 8 samples (S0–S7), a `MOTORS` section with per-motor state
+(M0 and M1 each surface pos/tgt, Hz · µstep, mode, src), and broken-out
+indicator rows for the new STATUS bits `RS485_OK/FAIL` and
+`HEATER_INHIBITED/HEATER_ACTIVE`. Status flags are color-coded green / red
+/ amber.
 
 #### Log Panel (bottom dock)
 
@@ -154,6 +179,9 @@ Holds all fields from a decoded DATA frame:
 | `heater_duty` | `List[float]` |
 | `phase` | `str` |
 | `status` | `str` |
+| `mode` | `str` (Rev-B: populated from `MODE=` token) |
+| `steppers` | `List[Dict]` (Rev-B: 0, 1, or 2+ motor snapshots) |
+| `stepper` | `StepperSnapshot` or `None` (legacy; mirrors `steppers[0]`) |
 
 ### `parse_telemetry_csv(line) → TelemetryPacket`
 
@@ -164,7 +192,23 @@ Parses a raw DATA frame string. Raises `TelemetryParseError` on:
 - Missing `HEATER_DUTY=` field
 - Missing `PHASE=` or `STATUS=` field
 
-The number of sample temperatures is inferred from the position of `HEATER_DUTY=` — it is not hardcoded to 9 or 10.
+The number of sample temperatures is inferred from the position of `HEATER_DUTY=` — it is not hardcoded to 8, 9, or 10.
+
+**Rev-B stepper handling:** both the legacy single-segment `STEPPER=…` and
+the new indexed `STEPPER0=…`, `STEPPER1=…` forms are accepted.
+`packet.steppers` is a list of dicts with keys
+`motor_id, position, target, hz, microstep, enabled, moving, holding,
+hold_s, pulses, source`:
+
+| Input | `packet.steppers` length | `packet.stepper` |
+|---|---|---|
+| No stepper segment (legacy short frame) | 0 | `None` |
+| Legacy single `STEPPER=…` | 1 (motor_id=0) | mirrors `steppers[0]` |
+| Rev-B `STEPPER0=…`, `STEPPER1=…` | 2+, sorted by motor_id | mirrors `steppers[0]` |
+
+### `parse_pull_event(line) → PullEvent`
+
+Parses an `EVT,PULL,<session>,<pull_id>,<motor_id>,<start_ts>,<steps_moved>,<hold_s>,<samples>` line. `samples` is either pipe-separated specimen indices or `-` for empty. Raises `TelemetryParseError` on malformed input.
 
 ### `build_ack(session_id, seq) → str`
 
