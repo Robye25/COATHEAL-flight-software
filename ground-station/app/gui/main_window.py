@@ -22,7 +22,8 @@ from .panels_control import (
     StepperPanel,
 )
 from .panels_info import (
-    CmdHistoryPanel, LogPanel, PreflightPanel, TopStatusStrip, ValuesPanel,
+    CmdHistoryPanel, LogPanel, MotorPanel, PreflightPanel, PullEventsPanel,
+    TopStatusStrip, ValuesPanel,
 )
 from .plots import PlotTabs
 from .widgets import Toast
@@ -101,9 +102,13 @@ class MainWindow(QMainWindow):
         self._values = ValuesPanel()
         self._preflight = PreflightPanel()
         self._history = CmdHistoryPanel()
+        # Rev-B: dedicated dual-motor dashboard. It reads `packet.steppers[0]`
+        # and `[1]` and is independent from the command-side StepperPanel.
+        self._motors = MotorPanel()
         self._history.reissue_requested.connect(lambda cmd: self._dispatcher.send(cmd, tag=self._history))
         right_tabs = QTabWidget()
         right_tabs.addTab(self._values,    "Values")
+        right_tabs.addTab(self._motors,    "Motors")
         right_tabs.addTab(self._preflight, "Preflight")
         right_tabs.addTab(self._history,   "Cmd History")
         right_dock = QDockWidget("Status", self)
@@ -111,13 +116,17 @@ class MainWindow(QMainWindow):
         right_dock.setMinimumWidth(320)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, right_dock)
 
-        # ── bottom: emergency bar + log ──
+        # ── bottom: emergency bar + log + pull events (tabbed) ──
         bottom_container = QWidget()
         bv = QVBoxLayout(bottom_container); bv.setContentsMargins(0, 0, 0, 0); bv.setSpacing(0)
         self._emergency = EmergencyBar(self._dispatcher)
         self._log = LogPanel()
+        self._pull_events = PullEventsPanel()
+        bottom_tabs = QTabWidget()
+        bottom_tabs.addTab(self._log,         "Event log")
+        bottom_tabs.addTab(self._pull_events, "Pull events")
         bv.addWidget(self._emergency)
-        bv.addWidget(self._log, 1)
+        bv.addWidget(bottom_tabs, 1)
         bottom_dock = QDockWidget("Emergency & Log", self)
         bottom_dock.setWidget(bottom_container)
         bottom_dock.setAllowedAreas(Qt.DockWidgetArea.BottomDockWidgetArea)
@@ -195,6 +204,7 @@ class MainWindow(QMainWindow):
             return
         self._receiver = TelemetryReceiver(bind, tel_port, self._log_path)
         self._receiver.packet_received.connect(self._on_packet)
+        self._receiver.pull_event.connect(self._on_pull_event)
         self._receiver.log_message.connect(self._log.append)
         self._receiver.connection_changed.connect(self._on_connection_changed)
         self._receiver.status_changed.connect(self._on_receiver_status)
@@ -249,10 +259,14 @@ class MainWindow(QMainWindow):
         self._top.on_packet(pkt)
         self._plots.on_packet(pkt)
         self._values.on_packet(pkt)
+        self._motors.on_packet(pkt)
         self._heater_panel.update_from_packet(pkt)
         self._stepper_panel.update_from_packet(pkt)
         self._mode_panel.update_from_packet(pkt)
         self._preflight.on_packet(pkt, self._link_ok)
+
+    def _on_pull_event(self, ev) -> None:
+        self._pull_events.on_pull_event(ev)
 
     def _on_response(self, cmd: str, resp: CommandResponse, ms: float, tag) -> None:
         ok = resp.ok

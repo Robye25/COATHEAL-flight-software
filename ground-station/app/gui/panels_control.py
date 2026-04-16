@@ -219,8 +219,12 @@ class HeaterCell(QFrame):
         lay = QVBoxLayout(self); lay.setContentsMargins(4, 4, 4, 4); lay.setSpacing(2)
 
         header = QHBoxLayout()
-        self._label = QLabel(HEATER_LABELS[idx])
-        self._label.setStyleSheet(f"font-weight: bold; color: {HEATER_COLORS[idx]};")
+        label_text = HEATER_LABELS[idx]
+        self._label = QLabel(label_text)
+        # BOX gets a distinct cyan; the 8 sample heaters share the amber-ish
+        # HEATER_COLORS palette.
+        color = "#00bcd4" if label_text == "BOX" else HEATER_COLORS[idx % len(HEATER_COLORS)]
+        self._label.setStyleSheet(f"font-weight: bold; color: {color};")
         header.addWidget(self._label); header.addStretch()
         self._dot = StatusDot(8); self._dot.set_color("#333"); header.addWidget(self._dot)
         lay.addLayout(header)
@@ -290,16 +294,22 @@ class HeaterPanel(QGroupBox):
         )
         outer.addWidget(self._banner)
 
-        # 2 columns × 5 rows so the grid fits the dock without horizontal
-        # scrolling. Each cell expands to fill its column.
+        # Rev-B: 9 heater cells (8 samples + BOX). Lay them out in 2
+        # columns so the dock width stays constant; the final row holds
+        # BOX alone, spanning both columns for emphasis.
         grid = QGridLayout(); grid.setSpacing(4)
         self._cells: list[HeaterCell] = []
-        for i in range(10):
+        num_cells = len(HEATER_LABELS)
+        for i in range(num_cells):
             cell = HeaterCell(i)
             cell.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
             cell.set_requested.connect(self._set_one)
             cell.off_requested.connect(lambda idx: self._set_one(idx, 0.0))
-            grid.addWidget(cell, i // 2, i % 2)
+            if HEATER_LABELS[i] == "BOX":
+                # BOX on its own row, spanning both columns.
+                grid.addWidget(cell, i // 2, 0, 1, 2)
+            else:
+                grid.addWidget(cell, i // 2, i % 2)
             self._cells.append(cell)
         grid.setColumnStretch(0, 1); grid.setColumnStretch(1, 1)
         outer.addLayout(grid)
@@ -366,11 +376,14 @@ class HeaterPanel(QGroupBox):
         self._disp.send(f"SET_ALL_DUTY {d}", tag=self)
 
     def update_from_packet(self, pkt: TelemetryPacket) -> None:
-        duties = pkt.heater_duty + [0.0] * (10 - len(pkt.heater_duty))
+        # Rev-B: 9 cells — H0..H7 (sample heaters) + BOX (electronics,
+        # index 8). Pad the duty list if the wire frame is short.
+        n = len(self._cells)
+        duties = pkt.heater_duty + [0.0] * (n - len(pkt.heater_duty))
         temps = list(pkt.sample_temps_c)
-        # H0..H8 → sample_temps_c[0..8]; H9/BOX → box_temp_c.
-        for i in range(10):
-            t = pkt.box_temp_c if i == 9 else (temps[i] if i < len(temps) else None)
+        box_idx = n - 1
+        for i in range(n):
+            t = pkt.box_temp_c if i == box_idx else (temps[i] if i < len(temps) else None)
             self._cells[i].update_live(duties[i], t)
 
 
@@ -516,6 +529,32 @@ class StepperPanel(QGroupBox):
         self._disp.send("STEPPER_STOP", tag=self._stop)
 
     def update_from_packet(self, pkt: TelemetryPacket) -> None:
+        # Rev-B: show a compact one-liner per motor if dual; otherwise fall
+        # back to the legacy single-motor rendering via `pkt.stepper`.
+        if pkt.steppers:
+            lines = []
+            any_moving = False
+            any_enabled = False
+            for m in pkt.steppers:
+                en  = "EN"  if m["enabled"] else "DIS"
+                mv  = "MOVING" if m["moving"] else ("HOLD" if m["holding"] else "idle")
+                any_moving |= bool(m["moving"])
+                any_enabled |= bool(m["enabled"])
+                hold_suffix = f" {m['hold_s']:.0f}s" if m["holding"] else ""
+                lines.append(
+                    f"M{m['motor_id']}: pos {m['position']} / tgt {m['target']} · "
+                    f"{m['hz']:.0f} Hz · µ{m['microstep']} · {en} · {mv}"
+                    f"{hold_suffix} · src={m['source']}"
+                )
+            self._state.setText("\n".join(lines))
+            color = ("#2ecc71" if (any_enabled and not any_moving)
+                     else ("#f39c12" if any_moving else "#e74c3c"))
+            self._state.setStyleSheet(
+                f"background: #111; color: {color}; padding: 6px; border-radius: 3px; "
+                "font-family: monospace; font-size: 10pt;"
+            )
+            return
+
         s = pkt.stepper
         if s is None:
             self._state.setText("pos — / tgt — · — Hz · µ— · — · — · src=—")

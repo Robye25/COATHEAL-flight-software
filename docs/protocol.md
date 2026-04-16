@@ -8,11 +8,25 @@ All messages are UTF-8 encoded, newline (`\n`) terminated, and transmitted over 
 
 Sent by the onboard over TCP (port 4000) once per tick.
 
-### Format
+### Format (Rev-B)
 
 ```
-DATA,<session_id>,<seq>,<timestamp>,<rtc_valid>,<ambient_temp_c>,<ambient_pressure_mbar>,<ambient_humidity_pct>,<uv>,<box_temp_c>,<sample_0>,...,<sample_N>,HEATER_DUTY=<d0>|<d1>|...|<d9>,PHASE=<phase>,STATUS=<flags>\n
+DATA,<session_id>,<seq>,<timestamp>,<rtc_valid>,<ambient_temp_c>,<ambient_pressure_mbar>,<ambient_humidity_pct>,<uv>,<box_temp_c>,<sample_0>,...,<sample_7>,HEATER_DUTY=<d0>|<d1>|...|<d8>,PHASE=<phase>,MODE=<mode>,STATUS=<flags>,STEPPER0=<kv>,STEPPER1=<kv>\n
 ```
+
+Rev-B changes (vs. Rev-A):
+
+- 8 `sample_i` columns instead of 9.
+- `HEATER_DUTY=` carries **9** values (8 sample heaters + 1 electronics BOX heater).
+- Two stepper segments per frame: `STEPPER0=` and `STEPPER1=` (one per motor).
+  The single-segment legacy form `STEPPER=…` is still accepted by
+  `parse_telemetry_csv` for old SD-card logs.
+- New `PHASE` vocabulary (see below) and additional `STATUS` bits.
+
+The parser locates `HEATER_DUTY=` by token name (it is not at a fixed column
+index), so the number of sample temperatures is **inferred from the position
+of `HEATER_DUTY=`**. Frames with any number of sample_i columns parse as long
+as every column before `HEATER_DUTY=` is a float.
 
 ### Fields
 
@@ -28,36 +42,50 @@ DATA,<session_id>,<seq>,<timestamp>,<rtc_valid>,<ambient_temp_c>,<ambient_pressu
 | 7 | `ambient_humidity_pct` | float | BME280 relative humidity (%) |
 | 8 | `uv` | float | UV irradiance from BPW21/ADS1115 (normalized) |
 | 9 | `box_temp_c` | float | Electronics box temperature (°C) |
-| 10…N | `sample_i` | float | PT100 sample temperatures (°C), one per heater channel |
-| N+1 | `HEATER_DUTY=…` | key=value | Pipe-separated heater duty cycles (0.0–1.0), 10 values |
-| N+2 | `PHASE=…` | key=value | Current mission phase string |
-| N+3 | `STATUS=…` | key=value | Pipe-separated status flags (see below) |
+| 10…17 | `sample_i` | float | PT100 sample temperatures (°C), 8 channels (Rev-B) |
+| 18 | `HEATER_DUTY=…` | key=value | Pipe-separated heater duty cycles (0.0–1.0), **9 values** |
+| 19 | `PHASE=…` | key=value | Current mission phase string |
+| 20 | `MODE=…` | key=value | System mode (`STANDBY`, `RUN`, `SAFE`) |
+| 21 | `STATUS=…` | key=value | Pipe-separated status flags (see below) |
+| 22 | `STEPPER0=…` | key=value | Motor 0 snapshot |
+| 23 | `STEPPER1=…` | key=value | Motor 1 snapshot |
 
 ### HEATER_DUTY Format
 
 ```
-HEATER_DUTY=0.000|0.250|0.000|0.500|0.000|0.000|0.000|0.000|0.000|0.000
+HEATER_DUTY=0.000|0.250|0.000|0.500|0.000|0.000|0.000|0.000|0.000
 ```
 
-10 values, indices 0–8 = sample heaters, index 9 = electronics box heater.
+9 values. Indices 0–7 = sample heaters, index 8 = electronics box heater.
 
-### PHASE Values
+### PHASE Values (Rev-B placeholders)
+
+Agent A is reshaping mission phases: thermal *targets* are gone — only a
+floor (+5 °C) is enforced — so the old `_±XC` suffixes are dropped. The
+string values are:
 
 | String | Description |
 |---|---|
-| `ASCENT_HOLD_-30C` | Holding −30 °C during ascent |
-| `ACTIVATION_RAMP_+70C` | Ramping to +70 °C |
-| `FLOAT_HOLD_+70C` | Holding +70 °C at float altitude |
-| `DESCENT_FLOOR_-20C` | Descent with −20 °C floor |
+| `BOOT`    | Onboard starting up; sensors warming / self-tests running |
+| `ASCENT`  | Balloon ascending (floor-only control, +5 °C) |
+| `FLOAT`   | At float altitude; sample pulls happen here |
+| `DESCENT` | Descending (floor-only control, +5 °C) |
+| `LANDED`  | Parachute deployed / on ground |
 | `STOPPED` | Mission complete or safe shutdown |
+
+Rev-A phase strings (`ASCENT_HOLD_-30C`, `ACTIVATION_RAMP_+70C`,
+`FLOAT_HOLD_+70C`, `DESCENT_FLOOR_-20C`, `STOPPED`) remain parseable for
+log replay.
 
 ### STATUS Flags
 
 ```
-STATUS=SD_OK|USB_OK|I2C_OK|SPI_OK|LINK_OK
+STATUS=SD_OK|USB_OK|I2C_OK|SPI_OK|LINK_OK|T_AMBIENT_OK|P_AMBIENT_OK|UNIFORMITY_OK|OVERTEMP_OK|ENERGY_OK|RS485_OK|HEATER_ACTIVE
 ```
 
-Each flag is either `<NAME>_OK` or `<NAME>_FAIL`.
+Each flag is either `<NAME>_OK` or `<NAME>_FAIL`, except the Rev-B
+`HEATER_INHIBITED` / `HEATER_ACTIVE` bit which is a state (not a health)
+indicator.
 
 | Flag | Description |
 |---|---|
@@ -66,11 +94,18 @@ Each flag is either `<NAME>_OK` or `<NAME>_FAIL`.
 | `I2C_OK` / `I2C_FAIL` | I2C bus (BME280, ADS1115, RTC) healthy |
 | `SPI_OK` / `SPI_FAIL` | SPI bus (MIKROE-2815 PT100 adapters) healthy |
 | `LINK_OK` / `LINK_FAIL` | Telemetry link (last ACK received successfully) |
+| `T_AMBIENT_OK` / `T_AMBIENT_FAIL` | BME280 temperature sample within expected range |
+| `P_AMBIENT_OK` / `P_AMBIENT_FAIL` | BME280 pressure sample within expected range |
+| `UNIFORMITY_OK` / `UNIFORMITY_FAIL` | Specimen bank uniformity within tolerance |
+| `OVERTEMP_OK` / `OVERTEMP_FAIL` | No over-temperature latch tripped |
+| `ENERGY_OK` / `ENERGY_FAIL` | Heater energy budget not exhausted |
+| `RS485_OK` / `RS485_FAIL` | **Rev-B** — RS-485 bus (stepper link) healthy |
+| `HEATER_INHIBITED` / `HEATER_ACTIVE` | **Rev-B** — set by the scheduler while a pull is active; the orchestrator (Agent D) holds heaters off for the pull duration |
 
-### Example
+### Example (Rev-B)
 
 ```
-DATA,coatheal-1718000000-123456,42,2024-06-10T12:00:00Z,1,-55.23,140.12,12.4,0.00012,-5.10,-30.1,-30.2,-30.0,-30.3,-30.1,-30.2,-30.0,-30.3,-30.1,HEATER_DUTY=0.250|0.000|0.250|0.000|0.000|0.000|0.000|0.000|0.000|0.000,PHASE=ASCENT_HOLD_-30C,STATUS=SD_OK|USB_OK|I2C_OK|SPI_OK|LINK_OK
+DATA,coatheal-1718000000-123456,42,2026-04-16T12:00:00Z,1,-10.23,140.12,12.4,0.00012,3.10,5.1,5.2,5.0,5.3,5.1,5.2,5.0,5.3,HEATER_DUTY=0.250|0.000|0.250|0.000|0.000|0.000|0.000|0.000|0.050,PHASE=FLOAT,MODE=RUN,STATUS=SD_OK|USB_OK|I2C_OK|SPI_OK|LINK_OK|T_AMBIENT_OK|P_AMBIENT_OK|UNIFORMITY_OK|OVERTEMP_OK|ENERGY_OK|RS485_OK|HEATER_ACTIVE,STEPPER0=pos:100|tgt:200|hz:400|us:16|en:1|mv:1|hold:0|hold_s:0|pulses:100|src:cmd:MOVE,STEPPER1=pos:-50|tgt:-50|hz:200|us:8|en:1|mv:0|hold:1|hold_s:3.5|pulses:50|src:phase:FLOAT
 ```
 
 ---
@@ -109,6 +144,58 @@ TCP stream, ACKs them like any other frame, and appends to a sibling
 
 ```
 EVT,CYCLE,coatheal-1718000000-123456,1,2026-04-13T12:34:56Z,71.42,3600.00,0.0812,3
+```
+
+---
+
+## Pull-Cycle Event Frame (`EVT,PULL`) — Rev-B
+
+Emitted once per completed *pull* (a single bend-and-hold actuation of a
+motor) by the stepper subsystem. Uses the same framing and ACK flow as
+`DATA` / `EVT,CYCLE` frames.
+
+### Format
+
+```
+EVT,PULL,<session_id>,<pull_id>,<motor_id>,<start_ts>,<steps_moved>,<hold_s>,<samples>\n
+```
+
+### Fields
+
+| Index | Field | Type | Description |
+|---|---|---|---|
+| 0 | `EVT` | literal | Event frame marker |
+| 1 | `PULL` | literal | Event subtype: pull-cycle completion |
+| 2 | `session_id` | string | Onboard session that produced the event |
+| 3 | `pull_id` | uint32 | Monotonic pull counter (per session) |
+| 4 | `motor_id` | uint | `0` = M0, `1` = M1 |
+| 5 | `start_ts` | string | UTC ISO-8601 timestamp at which the pull began |
+| 6 | `steps_moved` | int64 | Signed net step delta = `final_pos − start_pos` |
+| 7 | `hold_s` | float | Wall-clock seconds the motor held at target before releasing |
+| 8 | `samples` | string | Pipe-separated list of specimen indices touched by the pull (e.g. `0\|1\|2\|3`), or `-` when the pull touched no specimens |
+
+### Emission site
+
+The serializer lives in `onboard/src/telemetry.cpp` as
+`SerializeTelemetryPullEventFrame(...)`. It is analogous to
+`SerializeHeatingCycleEvent(...)` and emits the one-line newline-less body;
+the caller is responsible for appending `\n` and enqueuing onto the
+telemetry queue. Expected emission point: the stepper subsystem (Agent D)
+at the completion of each `STEPPER_BEND` motion, after the hold timer
+expires and the motor has released.
+
+### Ground-station behaviour
+
+`telemetry_server.py` and the GUI's `TelemetryReceiver` both intercept
+`EVT,PULL,…` lines ahead of the DATA parser. The server appends to a
+sibling `<log>_pulls.csv` file; the GUI populates the "Pull events" tab
+in the bottom dock. Both ACK with cumulative `ACK,<session_id>,0\n` so the
+onboard queue clears in order.
+
+### Example
+
+```
+EVT,PULL,coatheal-1718000000-123456,3,1,2026-04-16T10:21:00Z,2400,12.00,0|1|2|3
 ```
 
 ---
@@ -322,16 +409,19 @@ position 0, release the MotionLock. Completion emits the log line
 
 ### Telemetry field
 
-Every `DATA` frame appends a `STEPPER=` segment of pipe-separated key:value
-pairs so ground software can plot motion state alongside temperature. The
-frame currently reflects motor 0 (channel 0) — motor 1's status is exposed
-via per-channel snapshot (`StepperController::Snapshot(int)`). A follow-up
-telemetry rev will add a parallel `STEPPER1=` segment:
+Every `DATA` frame appends one segment per motor so ground software can
+plot bend state alongside temperature. Rev-B emits two segments
+(`STEPPER0=…`, `STEPPER1=…`); the per-segment schema is unchanged from
+Rev-A's single `STEPPER=` form, which remains parseable for legacy logs.
 
 ```
-STEPPER=pos:<position_steps>|tgt:<target_steps>|hz:<step_hz>|us:<microstep>
-       |en:<0|1>|mv:<0|1>|hold:<0|1>|hold_s:<remaining>|pulses:<total>|src:<tag>
+STEPPER<n>=pos:<position_steps>|tgt:<target_steps>|hz:<step_hz>|us:<microstep>
+          |en:<0|1>|mv:<0|1>|hold:<0|1>|hold_s:<remaining>|pulses:<total>|src:<tag>
 ```
+
+Where `<n>` is the motor index (`0`, `1`, …). The Rev-A un-indexed
+`STEPPER=` form remains parseable on the ground station for old SD-card
+logs; it is mapped to `motor_id=0` in `TelemetryPacket.steppers`.
 
 `src` records what last changed the setpoint (`phase:FLOAT_HOLD`, `cmd:MOVE`,
 `cmd:BEND`, `cmd:HOME`, `cmd:STOP`, `cmd:PULL`, `init`).
