@@ -71,3 +71,12 @@ add_executable(coatheal_safety_rev_b_tests
 target_link_libraries(coatheal_safety_rev_b_tests PRIVATE coatheal_onboard_core)
 
 add_test(NAME coatheal_safety_rev_b_tests COMMAND coatheal_safety_rev_b_tests)
+
+# Rev B dual-stepper tests (Agent B).
+add_executable(coatheal_stepper_rev_b_tests
+  unit/test_stepper_rev_b.cpp
+)
+
+target_link_libraries(coatheal_stepper_rev_b_tests PRIVATE coatheal_onboard_core)
+
+add_test(NAME coatheal_stepper_rev_b_tests COMMAND coatheal_stepper_rev_b_tests)
