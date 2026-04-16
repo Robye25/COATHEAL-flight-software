@@ -39,8 +39,10 @@ void TestHeaterSchedulerCap() {
   power.heater_nominal_w = 10.0;
   power.max_thermal_w = 40.0;
 
-  coatheal::HeaterScheduler scheduler(power, 9);
-  std::vector<double> requested(10, 1.0);
+  // Rev B: 8 sample heaters + 1 electronics BOX = 9 channels; electronics
+  // heater lives at index 8.
+  coatheal::HeaterScheduler scheduler(power, 8);
+  std::vector<double> requested(9, 1.0);
 
   const std::vector<double> scheduled = scheduler.Schedule(requested, true);
   int active = 0;
@@ -90,8 +92,9 @@ void TestHeaterSchedulerEnergyBudget() {
   power.max_thermal_w = 40.0;
   power.energy_budget_wh = 0.05;  // tiny budget so the test runs fast: 0.05 Wh
 
-  coatheal::HeaterScheduler scheduler(power, 9);
-  std::vector<double> requested(10, 1.0);
+  // Rev B: 9 channels (8 samples + 1 BOX).
+  coatheal::HeaterScheduler scheduler(power, 8);
+  std::vector<double> requested(9, 1.0);
 
   // 40 W * dt / 3600 — at dt=1 s we burn 40/3600 ≈ 0.0111 Wh per tick.
   // After 5 ticks we should hit 0.0556 Wh, exceeding the 0.05 Wh budget.
@@ -120,7 +123,7 @@ void TestHeaterSchedulerEnergyBudget() {
 
   // Budget disabled (== 0) should never latch even after many ticks.
   power.energy_budget_wh = 0.0;
-  coatheal::HeaterScheduler unbounded(power, 9);
+  coatheal::HeaterScheduler unbounded(power, 8);
   for (int tick = 0; tick < 100; ++tick) {
     unbounded.Schedule(requested, true, 1.0);
     assert(!unbounded.is_budget_exhausted());
@@ -130,52 +133,51 @@ void TestHeaterSchedulerEnergyBudget() {
 void TestVacuumRegime() {
   // BEXUS User Manual §5.6: experiment acceptance pressure is 5 mbar.
   // The simulated sensor must reach the float-pressure regime so we can
-  // verify the FSM stays stable in FLOAT_HOLD at flight pressure.
+  // verify the FSM stays stable in FLOAT at flight pressure.
   coatheal::OnboardConfig config;
-  config.transition.ascent_to_activation_mbar = 140.0;
+  config.transition.ascent_to_float_mbar = 140.0;
   config.transition.float_to_descent_mbar = 300.0;
-  config.phase.float_hold_minutes = 1000.0;  // long enough not to time out
-  config.hardware.heater_count = 10;
-  config.hardware.electronics_heater_index = 9;
+  config.transition.descent_to_landed_mbar = 800.0;
+  config.hardware.heater_count = 9;
+  config.hardware.electronics_heater_index = 8;
 
   coatheal::SensorManager sensors(config, nullptr, nullptr, nullptr);
-  std::vector<double> heater_duty(10, 0.0);
+  std::vector<double> heater_duty(9, 0.0);
 
   // Step the simulator forward at 1 Hz for 20 minutes — long enough for
-  // pressure to descend below the 140 mbar activation threshold and reach
+  // pressure to descend below the 140 mbar ascent->float threshold and reach
   // the 5 mbar floor that matches BEXUS float conditions.
   double min_pressure = 1e9;
   for (int i = 0; i < 1200; ++i) {
-    auto snap = sensors.ReadSnapshot(coatheal::MissionPhase::kFloatHold,
+    auto snap = sensors.ReadSnapshot(coatheal::MissionPhase::kFloat,
                                      heater_duty, 1.0);
     if (snap.ambient_pressure_mbar < min_pressure) {
       min_pressure = snap.ambient_pressure_mbar;
     }
   }
-  // Must reach the new 5 mbar floor (was 60 mbar before the fix).
+  // Must reach the 5 mbar floor.
   assert(min_pressure <= 5.5);
 
-  // FSM stays in FloatHold while pressure is below the descent threshold.
+  // FSM stays in FLOAT while pressure is below the descent threshold.
   coatheal::StateManager sm(config);
-  std::vector<double> hot_temps(10, 70.0);
-  // Drive ascent → activation → float
-  auto p = sm.Update(120.0, std::vector<double>(10, -20.0), {},
-                     std::chrono::steady_clock::now());
-  assert(p == coatheal::MissionPhase::kActivationRamp);
-  p = sm.Update(50.0, hot_temps, {}, std::chrono::steady_clock::now());
-  assert(p == coatheal::MissionPhase::kFloatHold);
+  std::vector<double> samples(8, 5.0);
+  // Drive BOOT → ASCENT → FLOAT via pressure transitions.
+  auto p = sm.Update(900.0, samples, {}, std::chrono::steady_clock::now());
+  assert(p == coatheal::MissionPhase::kAscent);
+  p = sm.Update(120.0, samples, {}, std::chrono::steady_clock::now());
+  assert(p == coatheal::MissionPhase::kFloat);
   // Vacuum-regime pressure (5 mbar) must NOT trip the descent transition.
-  p = sm.Update(5.0, hot_temps, {}, std::chrono::steady_clock::now());
-  assert(p == coatheal::MissionPhase::kFloatHold);
+  p = sm.Update(5.0, samples, {}, std::chrono::steady_clock::now());
+  assert(p == coatheal::MissionPhase::kFloat);
   // ...but a real descent (>= 300 mbar) must.
-  p = sm.Update(350.0, hot_temps, {}, std::chrono::steady_clock::now());
-  assert(p == coatheal::MissionPhase::kDescentFloor);
+  p = sm.Update(350.0, samples, {}, std::chrono::steady_clock::now());
+  assert(p == coatheal::MissionPhase::kDescent);
 }
 
 void TestTelemetrySerializer() {
   coatheal::TelemetryRecord record;
   record.seq = 42;
-  record.phase = coatheal::MissionPhase::kFloatHold;
+  record.phase = coatheal::MissionPhase::kFloat;
   record.sensors.timestamp_utc = "2026-03-31T12:00:00Z";
   record.sensors.rtc_valid = true;
   record.sensors.ambient_temp_c = -40.0;
@@ -183,7 +185,7 @@ void TestTelemetrySerializer() {
   record.sensors.ambient_humidity_pct = 15.0;
   record.sensors.uv = 1.2;
   record.sensors.box_temp_c = 5.5;
-  record.sensors.sample_temps_c = {70.0, 69.5, 70.2};
+  record.sensors.sample_temps_c = {7.0, 6.5, 7.2};
   record.heater_duty = {0.1, 0.2, 0.3};
 
   const std::string frame = coatheal::SerializeTelemetryDataFrame(record, "session-abc");
@@ -206,11 +208,11 @@ void TestTelemetryQueuePersistenceAndAck() {
     f1.queued_epoch_s = coatheal::CurrentUnixEpochSeconds();
     f1.session_id = "s1";
     f1.seq = 1;
-    f1.frame = "DATA,s1,1,2026-01-01T00:00:01Z,1,0,0,0,0,0,HEATER_DUTY=0.0,PHASE=ASCENT_HOLD_-30C,STATUS=SD_OK";
+    f1.frame = "DATA,s1,1,2026-01-01T00:00:01Z,1,0,0,0,0,0,HEATER_DUTY=0.0,PHASE=ASCENT,STATUS=SD_OK";
 
     coatheal::QueuedTelemetryFrame f2 = f1;
     f2.seq = 2;
-    f2.frame = "DATA,s1,2,2026-01-01T00:00:02Z,1,0,0,0,0,0,HEATER_DUTY=0.0,PHASE=ASCENT_HOLD_-30C,STATUS=SD_OK";
+    f2.frame = "DATA,s1,2,2026-01-01T00:00:02Z,1,0,0,0,0,0,HEATER_DUTY=0.0,PHASE=ASCENT,STATUS=SD_OK";
 
     assert(queue.Enqueue(f1, &error));
     assert(queue.Enqueue(f2, &error));
@@ -255,14 +257,13 @@ void TestConfigParsesReliabilityFields() {
   out << "storage.queue_dir=logs/q\n";
   out << "storage.queue_retention_hours=72\n";
   out << "storage.queue_max_bytes=1024\n";
-  out << "phase.ascent_target_c=-30\n";
-  out << "phase.activation_target_c=70\n";
-  out << "phase.float_target_c=70\n";
-  out << "phase.descent_floor_c=-20\n";
-  out << "phase.activation_ramp_c_per_s=0.85\n";
-  out << "phase.float_hold_minutes=90\n";
-  out << "transition.ascent_to_activation_mbar=140\n";
+  // Rev B phase keys: floor-only thermal policy.
+  out << "phase.sample_floor_c=5\n";
+  out << "phase.box_target_c=0\n";
+  out << "phase.uniformity_tolerance_c=2\n";
+  out << "transition.ascent_to_float_mbar=100\n";
   out << "transition.float_to_descent_mbar=300\n";
+  out << "transition.descent_to_landed_mbar=800\n";
   out << "power.max_active_heaters=4\n";
   out << "power.max_thermal_w=40\n";
   out << "power.max_system_w=48.23\n";
@@ -274,8 +275,9 @@ void TestConfigParsesReliabilityFields() {
   out << "pid.box_kp=0.15\n";
   out << "pid.box_ki=0.01\n";
   out << "pid.box_kd=0.02\n";
-  out << "hardware.heater_count=10\n";
-  out << "hardware.electronics_heater_index=9\n";
+  // Rev B hardware: 9 heaters (8 samples + BOX at idx 8).
+  out << "hardware.heater_count=9\n";
+  out << "hardware.electronics_heater_index=8\n";
   out.close();
 
   coatheal::OnboardConfig cfg;
@@ -285,29 +287,35 @@ void TestConfigParsesReliabilityFields() {
   assert(cfg.storage.queue_max_bytes == 1024U);
   assert(!cfg.runtime.use_simulated_pwm);
   assert(std::fabs(cfg.power.energy_budget_wh - 130.0) < 1e-9);
+  assert(cfg.hardware.heater_count == 9U);
+  assert(cfg.hardware.electronics_heater_index == 8U);
 
   std::error_code ec;
   std::filesystem::remove(cfg_path, ec);
 }
 
 void TestStateTransitions() {
+  // Rev B FSM: pure-pressure transitions through ASCENT -> FLOAT -> DESCENT
+  // -> LANDED. No timed FLOAT expiry; re-pressurisation drives DESCENT.
   coatheal::OnboardConfig config;
-  config.transition.ascent_to_activation_mbar = 200.0;
+  config.transition.ascent_to_float_mbar = 200.0;
   config.transition.float_to_descent_mbar = 350.0;
-  config.phase.float_hold_minutes = 0.0;
+  config.transition.descent_to_landed_mbar = 800.0;
 
   coatheal::StateManager sm(config);
-  std::vector<double> temps(10, -20.0);
+  std::vector<double> samples(8, 5.0);
 
-  auto phase = sm.Update(150.0, temps, {}, std::chrono::steady_clock::now());
-  assert(phase == coatheal::MissionPhase::kActivationRamp);
+  // First tick out of BOOT lands in ASCENT.
+  auto phase = sm.Update(900.0, samples, {}, std::chrono::steady_clock::now());
+  assert(phase == coatheal::MissionPhase::kAscent);
 
-  temps.assign(10, 70.0);
-  phase = sm.Update(150.0, temps, {}, std::chrono::steady_clock::now());
-  assert(phase == coatheal::MissionPhase::kFloatHold);
+  // 150 mbar: <= ascent_to_float_mbar (200). Transitions to FLOAT.
+  phase = sm.Update(150.0, samples, {}, std::chrono::steady_clock::now());
+  assert(phase == coatheal::MissionPhase::kFloat);
 
-  phase = sm.Update(400.0, temps, {}, std::chrono::steady_clock::now());
-  assert(phase == coatheal::MissionPhase::kDescentFloor);
+  // 400 mbar: >= float_to_descent_mbar (350). Transitions to DESCENT.
+  phase = sm.Update(400.0, samples, {}, std::chrono::steady_clock::now());
+  assert(phase == coatheal::MissionPhase::kDescent);
 }
 
 void TestDiscoveryBeaconParser() {

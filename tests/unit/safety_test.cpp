@@ -1,5 +1,5 @@
 // Safety regression tests: per-channel over-temperature cutoff latch,
-// uniformity monitor during float hold, ambient-range flagging, and
+// uniformity monitor during FLOAT, ambient-range flagging, and
 // StorageManager SAFE-mode fsync durability.
 #include <cassert>
 #include <filesystem>
@@ -22,12 +22,14 @@ namespace {
 
 coatheal::OnboardConfig MakeConfig() {
   coatheal::OnboardConfig cfg;
-  cfg.hardware.heater_count = 10;
-  cfg.hardware.electronics_heater_index = 9;
+  // Rev B: 8 sample heaters + 1 electronics BOX heater = 9 channels total.
+  cfg.hardware.heater_count = 9;
+  cfg.hardware.electronics_heater_index = 8;
   cfg.heater_safety.max_sample_temp_c = 85.0;
   cfg.heater_safety.max_box_temp_c = 60.0;
   cfg.phase.uniformity_tolerance_c = 2.0;
-  cfg.phase.float_target_c = 70.0;
+  // Rev B stores the flying-phase target in `sample_floor_c` (floor policy).
+  cfg.phase.sample_floor_c = 5.0;
   return cfg;
 }
 
@@ -45,27 +47,27 @@ void TestOvertempCutoffLatches() {
   coatheal::ThermalController ctrl(cfg);
   coatheal::ControlOverrides ov;
 
-  // Channel 3 is over the 85 C cutoff.
-  coatheal::SensorSnapshot hot = MakeSnapshot(10, 50.0);
+  // Channel 3 is over the 85 C cutoff. 8 samples are provided.
+  coatheal::SensorSnapshot hot = MakeSnapshot(8, 50.0);
   hot.sample_temps_c[3] = 90.0;
 
   auto duty = ctrl.ComputeRequestedDuty(
-      coatheal::MissionPhase::kFloatHold, hot, 1.0, ov);
+      coatheal::MissionPhase::kFloat, hot, 1.0, ov);
   assert(duty[3] == 0.0);
   assert(ctrl.overtemp_latched());
   assert(ctrl.channel_latched()[3]);
 
   // Next tick, channel cools back down, but it must stay latched off.
-  coatheal::SensorSnapshot cool = MakeSnapshot(10, 50.0);
+  coatheal::SensorSnapshot cool = MakeSnapshot(8, 50.0);
   duty = ctrl.ComputeRequestedDuty(
-      coatheal::MissionPhase::kFloatHold, cool, 1.0, ov);
+      coatheal::MissionPhase::kFloat, cool, 1.0, ov);
   assert(duty[3] == 0.0);
   assert(ctrl.overtemp_latched());
 
   // Even a full-power override must not re-arm a latched channel.
   ov.all_heaters_override = 1.0;
   duty = ctrl.ComputeRequestedDuty(
-      coatheal::MissionPhase::kFloatHold, cool, 1.0, ov);
+      coatheal::MissionPhase::kFloat, cool, 1.0, ov);
   assert(duty[3] == 0.0);
   ov.all_heaters_override.reset();
 
@@ -73,7 +75,7 @@ void TestOvertempCutoffLatches() {
   ctrl.Reset();
   assert(!ctrl.overtemp_latched());
   duty = ctrl.ComputeRequestedDuty(
-      coatheal::MissionPhase::kFloatHold, cool, 1.0, ov);
+      coatheal::MissionPhase::kFloat, cool, 1.0, ov);
   assert(!ctrl.channel_latched()[3]);
 }
 
@@ -82,22 +84,22 @@ void TestUniformityBit() {
   coatheal::ThermalController ctrl(cfg);
   coatheal::ControlOverrides ov;
 
-  // Within tolerance.
-  coatheal::SensorSnapshot tight = MakeSnapshot(10, 70.0);
-  tight.sample_temps_c[0] = 69.0;
-  tight.sample_temps_c[1] = 70.5;
-  ctrl.ComputeRequestedDuty(coatheal::MissionPhase::kFloatHold, tight, 1.0, ov);
+  // Within tolerance. 8 sample channels in Rev B.
+  coatheal::SensorSnapshot tight = MakeSnapshot(8, 5.0);
+  tight.sample_temps_c[0] = 4.5;
+  tight.sample_temps_c[1] = 5.5;
+  ctrl.ComputeRequestedDuty(coatheal::MissionPhase::kFloat, tight, 1.0, ov);
   assert(ctrl.uniformity_ok());
 
-  // Spread > 2.0 C during float hold -> uniformity_ok == false.
-  coatheal::SensorSnapshot spread = MakeSnapshot(10, 70.0);
-  spread.sample_temps_c[0] = 68.0;
-  spread.sample_temps_c[1] = 72.0;
-  ctrl.ComputeRequestedDuty(coatheal::MissionPhase::kFloatHold, spread, 1.0, ov);
+  // Spread > 2.0 C during FLOAT -> uniformity_ok == false.
+  coatheal::SensorSnapshot spread = MakeSnapshot(8, 5.0);
+  spread.sample_temps_c[0] = 3.0;
+  spread.sample_temps_c[1] = 7.0;
+  ctrl.ComputeRequestedDuty(coatheal::MissionPhase::kFloat, spread, 1.0, ov);
   assert(!ctrl.uniformity_ok());
 
-  // Outside float hold, uniformity bit should be OK regardless.
-  ctrl.ComputeRequestedDuty(coatheal::MissionPhase::kAscentHold, spread, 1.0, ov);
+  // Outside any flying phase (BOOT), uniformity bit should be OK regardless.
+  ctrl.ComputeRequestedDuty(coatheal::MissionPhase::kBoot, spread, 1.0, ov);
   assert(ctrl.uniformity_ok());
 }
 
@@ -111,7 +113,7 @@ void TestAmbientRangeFlags() {
   // Drive several ticks; the simulated model keeps ambient_temp at -40/-55 C
   // (in range) and pressure in [5, 1013.25] (in range).
   for (int i = 0; i < 5; ++i) {
-    sm.ReadSnapshot(coatheal::MissionPhase::kFloatHold, {}, 1.0);
+    sm.ReadSnapshot(coatheal::MissionPhase::kFloat, {}, 1.0);
   }
   assert(sm.t_ambient_ok());
   assert(sm.p_ambient_ok());
@@ -123,7 +125,7 @@ void TestAmbientRangeFlags() {
   cfg.sensor_range.ambient_pressure_min_mbar = 2000.0;
   cfg.sensor_range.ambient_pressure_max_mbar = 3000.0;
   coatheal::SensorManager sm2(cfg, &spi, &i2c, &rtc);
-  sm2.ReadSnapshot(coatheal::MissionPhase::kFloatHold, {}, 1.0);
+  sm2.ReadSnapshot(coatheal::MissionPhase::kFloat, {}, 1.0);
   assert(!sm2.t_ambient_ok());
   assert(!sm2.p_ambient_ok());
 }

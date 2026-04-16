@@ -15,7 +15,7 @@ namespace {
 coatheal::TelemetryRecord MakeRealisticRecord(std::uint64_t seq) {
   coatheal::TelemetryRecord r;
   r.seq = seq;
-  r.phase = coatheal::MissionPhase::kFloatHold;
+  r.phase = coatheal::MissionPhase::kFloat;
   r.sensors.rtc_valid = true;
   r.sensors.timestamp_utc = "2026-04-13T12:00:00Z";
   r.sensors.ambient_temp_c = -55.23;
