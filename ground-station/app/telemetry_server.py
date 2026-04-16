@@ -13,9 +13,12 @@ from pathlib import Path
 from typing import Optional
 
 from .protocol import (
+    HeatingCycleEvent,
+    PullEvent,
     TelemetryParseError,
     build_ack,
     parse_heating_cycle_event,
+    parse_pull_event,
     parse_telemetry_csv,
 )
 
@@ -287,6 +290,12 @@ class TelemetryServer:
                     "phase",
                     "status",
                 ],
+                # Rev-B adds new in-memory fields (`steppers`, `stepper`,
+                # `mode`) that we keep out of the persisted CSV schema so
+                # existing log-replay tooling keeps working byte-for-byte.
+                # `extrasaction='ignore'` lets us pass the full asdict()
+                # without it raising on the additions.
+                extrasaction="ignore",
             )
             if first:
                 writer.writeheader()
@@ -341,6 +350,27 @@ class TelemetryServer:
                         )
                         continue
 
+                    if line.startswith("EVT,PULL,"):
+                        try:
+                            pull = parse_pull_event(line)
+                        except TelemetryParseError as exc:
+                            print(f"[telemetry][evt-parse-error] {exc}: {line}")
+                            continue
+                        self._last_packet_time = time.time()
+                        self._append_pull_log(pull, line)
+                        ack_line = build_ack(pull.session_id, 0)
+                        try:
+                            conn.sendall(ack_line.encode("utf-8"))
+                        except OSError:
+                            return
+                        samples_str = "|".join(str(s) for s in pull.samples) or "-"
+                        print(
+                            f"[evt][pull] session={pull.session_id} pull={pull.pull_id} "
+                            f"motor={pull.motor_id} steps={pull.steps_moved} "
+                            f"hold={pull.hold_s:.1f}s samples={samples_str}"
+                        )
+                        continue
+
                     try:
                         packet = parse_telemetry_csv(line)
                     except TelemetryParseError as exc:
@@ -382,6 +412,42 @@ class TelemetryServer:
                         f"[telemetry] session={packet.session_id} seq={packet.seq} phase={packet.phase} "
                         f"P={packet.ambient_pressure_mbar:.1f}mbar Tbox={packet.box_temp_c:.2f}C"
                     )
+
+    def _append_pull_log(self, pull: PullEvent, raw_line: str) -> None:
+        """Write a pull-cycle event to a sibling `<log>_pulls.csv` file.
+
+        Kept separate from the cycle events log so the two streams can be
+        analyzed independently post-flight. Header is written on first row
+        only so appending to an existing file remains valid.
+        """
+        pull_path = self.log_path.with_name(self.log_path.stem + "_pulls.csv")
+        first = not pull_path.exists()
+        try:
+            with pull_path.open("a", newline="", encoding="utf-8") as pf:
+                writer = csv.writer(pf)
+                if first:
+                    writer.writerow([
+                        "session_id",
+                        "pull_id",
+                        "motor_id",
+                        "start_ts",
+                        "steps_moved",
+                        "hold_s",
+                        "samples",
+                        "raw",
+                    ])
+                writer.writerow([
+                    pull.session_id,
+                    pull.pull_id,
+                    pull.motor_id,
+                    pull.start_ts,
+                    pull.steps_moved,
+                    f"{pull.hold_s:.2f}",
+                    "|".join(str(s) for s in pull.samples),
+                    raw_line,
+                ])
+        except OSError as exc:
+            print(f"[evt][pull-log-error] {exc}")
 
     def _append_event_log(self, event, raw_line: str) -> None:
         event_path = self.log_path.with_name(self.log_path.stem + "_events.csv")

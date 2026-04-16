@@ -7,15 +7,24 @@ MAX_POINTS = 1200                     # rolling plot window depth (~20 min at 1 
 
 HEATER_COLORS = [
     "#e74c3c", "#e67e22", "#f1c40f", "#2ecc71", "#1abc9c",
-    "#3498db", "#9b59b6", "#e91e63", "#00bcd4", "#ff6b35",
+    "#3498db", "#9b59b6", "#e91e63", "#00bcd4",
 ]
-HEATER_LABELS = [f"H{i}" for i in range(9)] + ["BOX"]
+# Rev-B: 8 sample heaters (H0..H7) + 1 electronics box heater (BOX). 9 total.
+HEATER_LABELS = [f"H{i}" for i in range(8)] + ["BOX"]
 
 PHASE_COLORS = {
+    # Rev-A phase strings (kept for replay of old logs).
     "ASCENT_HOLD":     "#3498db",
     "ACTIVATION_RAMP": "#f39c12",
     "FLOAT_HOLD":      "#2ecc71",
     "DESCENT_FLOOR":   "#9b59b6",
+    # Rev-B placeholders (Agent A is reshaping phases — floor-only control,
+    # no setpoint suffix).
+    "BOOT":            "#7f8c8d",
+    "ASCENT":          "#3498db",
+    "FLOAT":           "#2ecc71",
+    "DESCENT":         "#9b59b6",
+    "LANDED":          "#34495e",
     "STOPPED":         "#e74c3c",
 }
 MODE_COLORS = {"STANDBY": "#7f8c8d", "RUN": "#2ecc71", "SAFE": "#e74c3c"}

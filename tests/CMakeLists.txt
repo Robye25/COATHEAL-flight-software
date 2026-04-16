@@ -45,3 +45,13 @@ add_executable(coatheal_stepper_tests
 target_link_libraries(coatheal_stepper_tests PRIVATE coatheal_onboard_core)
 
 add_test(NAME coatheal_stepper_tests COMMAND coatheal_stepper_tests)
+
+# Rev-B telemetry serializer coverage — separate target so `test_suite.cpp`
+# (owned by another agent) stays untouched.
+add_executable(coatheal_telemetry_rev_b_tests
+  unit/test_telemetry_rev_b.cpp
+)
+
+target_link_libraries(coatheal_telemetry_rev_b_tests PRIVATE coatheal_onboard_core)
+
+add_test(NAME coatheal_telemetry_rev_b_tests COMMAND coatheal_telemetry_rev_b_tests)

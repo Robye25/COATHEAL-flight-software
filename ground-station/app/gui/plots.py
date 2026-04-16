@@ -122,7 +122,8 @@ class PlotTabs(QTabWidget):
         super().__init__(parent)
         self._temp = LivePlotWidget("Specimen & Box Temperature", "temperature", "°C")
         self._temp.add_curve("Box", "#e67e22", width=3)
-        for i in range(9):
+        # Rev-B: 8 specimen temperature traces (S0..S7).
+        for i in range(8):
             self._temp.add_curve(f"S{i}", HEATER_COLORS[i % len(HEATER_COLORS)])
         self._temp.add_threshold(ACTIVATION_TARGET_C, "#2ecc71", f"target {ACTIVATION_TARGET_C:.0f}°C")
         self._temp.add_threshold(OVERTEMP_CUTOFF_C, "#e74c3c", f"over-T {OVERTEMP_CUTOFF_C:.0f}°C")
@@ -137,16 +138,22 @@ class PlotTabs(QTabWidget):
                                      f"activation {ACTIVATION_PRESSURE_MBAR:.0f} mbar")
 
         self._heaters = LivePlotWidget("Heater Duty", "duty", "%")
-        for i in range(10):
-            self._heaters.add_curve(HEATER_LABELS[i], HEATER_COLORS[i % len(HEATER_COLORS)])
+        # Rev-B: 9 heater traces (H0..H7 + BOX). BOX uses a distinct cyan so
+        # operators can tell it apart from the sample channels at a glance.
+        for i, label in enumerate(HEATER_LABELS):
+            color = "#00bcd4" if label == "BOX" else HEATER_COLORS[i % len(HEATER_COLORS)]
+            self._heaters.add_curve(label, color)
 
         self._env = LivePlotWidget("Environment", "value")
         self._env.add_curve("humidity%", "#3498db")
         self._env.add_curve("UV×100", "#f1c40f")
 
+        # Rev-B: two motors, each with a position + target trace.
         self._stepper = LivePlotWidget("Stepper position", "steps")
-        self._stepper.add_curve("position", "#2ecc71", width=2)
-        self._stepper.add_curve("target",  "#e67e22", width=2)
+        self._stepper.add_curve("M0 pos", "#2ecc71", width=2)
+        self._stepper.add_curve("M0 tgt", "#27ae60", width=1)
+        self._stepper.add_curve("M1 pos", "#e67e22", width=2)
+        self._stepper.add_curve("M1 tgt", "#d35400", width=1)
 
         self.addTab(self._temp,     "🌡 Temperature")
         self.addTab(self._pressure, "📈 Pressure")
@@ -158,18 +165,23 @@ class PlotTabs(QTabWidget):
     def on_packet(self, pkt: TelemetryPacket) -> None:
         seq = pkt.seq
         temps = {"Box": pkt.box_temp_c}
-        for i, t in enumerate(pkt.sample_temps_c[:9]):
+        for i, t in enumerate(pkt.sample_temps_c[:8]):
             temps[f"S{i}"] = t
         self._temp.push(seq, temps)
         self._pressure.push(seq, {"ambient": pkt.ambient_pressure_mbar})
         heaters = {}
-        for i, d in enumerate(pkt.heater_duty[:10]):
+        for i, d in enumerate(pkt.heater_duty[:len(HEATER_LABELS)]):
             heaters[HEATER_LABELS[i]] = d * 100.0
         self._heaters.push(seq, heaters)
         self._env.push(seq, {"humidity%": pkt.ambient_humidity_pct, "UV×100": pkt.uv * 100.0})
-        if pkt.stepper is not None:
-            self._stepper.push(seq, {"position": float(pkt.stepper.position),
-                                     "target":   float(pkt.stepper.target)})
+        # Dual-motor traces. Missing motors are simply not pushed; their
+        # curves stay at their last value until the next update.
+        step_values: Dict[str, float] = {}
+        for i, m in enumerate(pkt.steppers[:2]):
+            step_values[f"M{i} pos"] = float(m["position"])
+            step_values[f"M{i} tgt"] = float(m["target"])
+        if step_values:
+            self._stepper.push(seq, step_values)
 
     def toggle_paused(self) -> bool:
         paused = not self._temp._paused  # all share state via set_paused

@@ -15,6 +15,9 @@ struct StatusFlags {
   bool uniformity_ok = true;
   bool overtemp_ok = true;
   bool energy_ok = true;
+  bool rs485_ok = true;              // RS-485 bus healthy (stepper link, etc.)
+  bool heater_inhibited = false;     // true while a pull cycle is active
+                                     // (Agent D's scheduler sets this)
 };
 
 std::string ToStatusBitfield(const StatusFlags& flags);

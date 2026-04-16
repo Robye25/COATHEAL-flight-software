@@ -7,12 +7,14 @@ from collections import deque
 from typing import Deque
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
-    QFileDialog, QGroupBox, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-    QPushButton, QScrollArea, QTextEdit, QVBoxLayout, QWidget,
+    QAbstractItemView, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
+    QListWidget, QListWidgetItem, QPushButton, QScrollArea, QTableWidget,
+    QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
 )
 
-from ..protocol import CommandResponse, TelemetryPacket
+from ..protocol import CommandResponse, PullEvent, TelemetryPacket
 from .dispatch import CommandHistoryEntry
 from .theme import mode_color, phase_color
 from .widgets import StatusDot
@@ -94,16 +96,22 @@ class ValuesPanel(QScrollArea):
             self._row(k, l)
 
         self._section("SAMPLES")
-        for i in range(9):
+        for i in range(8):
             self._row(f"sample_{i}", f"sample {i} °C")
 
-        self._section("STEPPER")
-        for k, l in [("stepper_state", "pos / tgt"), ("stepper_cfg", "Hz · µstep"),
-                     ("stepper_mode", "mode"), ("stepper_src", "src")]:
-            self._row(k, l)
+        self._section("MOTORS")
+        for m in range(2):
+            self._row(f"m{m}_state", f"M{m} pos / tgt")
+            self._row(f"m{m}_cfg", f"M{m} Hz · µstep")
+            self._row(f"m{m}_mode", f"M{m} mode")
+            self._row(f"m{m}_src", f"M{m} src")
 
         self._section("STATUS")
         self._row("status", "flags")
+        # Individual Rev-B flags broken out so operators can watch them
+        # without scanning the whole bitfield string.
+        self._row("rs485", "RS-485")
+        self._row("heater_inhibit", "heater inhibit")
 
         self._lay.addStretch()
 
@@ -134,17 +142,38 @@ class ValuesPanel(QScrollArea):
         f["ambient_humidity_pct"].setText(f"{pkt.ambient_humidity_pct:.1f}")
         f["uv"].setText(f"{pkt.uv:.3f}")
         f["box_temp_c"].setText(f"{pkt.box_temp_c:.2f}")
-        for i in range(9):
+        for i in range(8):
             if i < len(pkt.sample_temps_c):
                 f[f"sample_{i}"].setText(f"{pkt.sample_temps_c[i]:.2f}")
-        s = pkt.stepper
-        if s is not None:
-            f["stepper_state"].setText(f"{s.position} / {s.target}")
-            f["stepper_cfg"].setText(f"{s.hz:.0f}Hz · µ{s.microstep}")
-            mode = "MOVING" if s.moving else ("HOLD" if s.holding else ("ON" if s.enabled else "OFF"))
-            f["stepper_mode"].setText(mode)
-            f["stepper_src"].setText(s.source or "—")
+        # Two-motor rendering; missing motors show "—".
+        for m in range(2):
+            if m < len(pkt.steppers):
+                mot = pkt.steppers[m]
+                f[f"m{m}_state"].setText(f"{mot['position']} / {mot['target']}")
+                f[f"m{m}_cfg"].setText(f"{mot['hz']:.0f}Hz · µ{mot['microstep']}")
+                mode = ("MOVING" if mot['moving']
+                        else ("HOLD" if mot['holding']
+                              else ("ON" if mot['enabled'] else "OFF")))
+                f[f"m{m}_mode"].setText(mode)
+                f[f"m{m}_src"].setText(mot['source'] or "—")
+            else:
+                for k in ("state", "cfg", "mode", "src"):
+                    f[f"m{m}_{k}"].setText("—")
         f["status"].setText(pkt.status)
+        # Rev-B STATUS bits, surfaced as boolean-ish indicators.
+        rs_ok = "RS485_OK" in pkt.status
+        hi    = "HEATER_INHIBITED" in pkt.status
+        f["rs485"].setText("OK" if rs_ok else ("FAIL" if "RS485_FAIL" in pkt.status else "—"))
+        f["rs485"].setStyleSheet(
+            "font-family: monospace; font-size: 11px; color: "
+            + ("#2ecc71" if rs_ok else "#e74c3c" if "RS485_FAIL" in pkt.status else "#888")
+            + ";"
+        )
+        f["heater_inhibit"].setText("INHIBITED" if hi else "active")
+        f["heater_inhibit"].setStyleSheet(
+            "font-family: monospace; font-size: 11px; color: "
+            + ("#f39c12" if hi else "#2ecc71") + ";"
+        )
 
 
 # ── Preflight checklist ───────────────────────────────────────────────────────
@@ -263,3 +292,142 @@ class LogPanel(QWidget):
 
     def _clear(self) -> None:
         self._text.clear()
+
+
+# ── Motor status dock (M0 + M1) ──────────────────────────────────────────────
+class MotorPanel(QWidget):
+    """Live state tiles for the two sample-bending motors (Rev-B).
+
+    Reads `packet.steppers[0]` and `[1]`. Shows each motor's position,
+    target, step rate, microstep, and enable/move indicators. This is a
+    read-only dashboard panel — control still happens through the existing
+    StepperPanel on the left dock.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        outer = QVBoxLayout(self); outer.setContentsMargins(6, 6, 6, 6); outer.setSpacing(6)
+        self._motor_widgets: list[dict[str, QLabel | StatusDot]] = []
+        for m in range(2):
+            box = QGroupBox(f"Motor {m}")
+            grid = QGridLayout(box); grid.setContentsMargins(8, 8, 8, 8); grid.setSpacing(4)
+
+            header = QHBoxLayout()
+            title = QLabel(f"M{m}")
+            title.setStyleSheet("font-weight: bold; font-size: 12pt; color: #eee;")
+            header.addWidget(title)
+            en_dot = StatusDot(10); en_dot.set_color("#555")
+            mv_dot = StatusDot(10); mv_dot.set_color("#555")
+            hold_dot = StatusDot(10); hold_dot.set_color("#555")
+            header.addStretch()
+            header.addWidget(QLabel("en")); header.addWidget(en_dot)
+            header.addWidget(QLabel("mv")); header.addWidget(mv_dot)
+            header.addWidget(QLabel("hold")); header.addWidget(hold_dot)
+            grid.addLayout(header, 0, 0, 1, 4)
+
+            def _kv_row(row: int, left_key: str, left_label: str,
+                         right_key: str, right_label: str) -> dict[str, QLabel]:
+                l = QLabel(left_label); l.setStyleSheet("color: #888; font-size: 10pt;")
+                lv = QLabel("—"); lv.setStyleSheet("font-family: monospace; font-size: 11pt;")
+                r = QLabel(right_label); r.setStyleSheet("color: #888; font-size: 10pt;")
+                rv = QLabel("—"); rv.setStyleSheet("font-family: monospace; font-size: 11pt;")
+                grid.addWidget(l, row, 0); grid.addWidget(lv, row, 1)
+                grid.addWidget(r, row, 2); grid.addWidget(rv, row, 3)
+                return {left_key: lv, right_key: rv}
+
+            cells: dict[str, QLabel | StatusDot] = {
+                "en_dot": en_dot, "mv_dot": mv_dot, "hold_dot": hold_dot,
+            }
+            cells.update(_kv_row(1, "pos", "pos",      "tgt", "tgt"))
+            cells.update(_kv_row(2, "hz",  "Hz",       "us",  "µstep"))
+            cells.update(_kv_row(3, "hold_s", "hold s", "pulses", "pulses"))
+            cells.update(_kv_row(4, "src", "src",      "motor_id", "motor_id"))
+            self._motor_widgets.append(cells)
+            outer.addWidget(box)
+        outer.addStretch()
+
+    def on_packet(self, pkt: TelemetryPacket) -> None:
+        for m, cells in enumerate(self._motor_widgets):
+            if m >= len(pkt.steppers):
+                for key in ("pos", "tgt", "hz", "us", "hold_s", "pulses", "src", "motor_id"):
+                    w = cells[key]; assert isinstance(w, QLabel); w.setText("—")
+                cells["en_dot"].set_color("#555")
+                cells["mv_dot"].set_color("#555")
+                cells["hold_dot"].set_color("#555")
+                continue
+            mot = pkt.steppers[m]
+            def _set(key: str, text: str) -> None:
+                w = cells[key]
+                assert isinstance(w, QLabel)
+                w.setText(text)
+            _set("pos",      str(mot["position"]))
+            _set("tgt",      str(mot["target"]))
+            _set("hz",       f"{mot['hz']:.0f}")
+            _set("us",       str(mot["microstep"]))
+            _set("hold_s",   f"{mot['hold_s']:.1f}")
+            _set("pulses",   str(mot["pulses"]))
+            _set("src",      mot["source"] or "—")
+            _set("motor_id", str(mot["motor_id"]))
+            cells["en_dot"].set_color("#2ecc71" if mot["enabled"] else "#7f8c8d")
+            cells["mv_dot"].set_color("#f39c12" if mot["moving"] else "#333")
+            cells["hold_dot"].set_color("#3498db" if mot["holding"] else "#333")
+
+
+# ── Pull events log table ────────────────────────────────────────────────────
+class PullEventsPanel(QWidget):
+    """Scrolling table of `EVT,PULL,...` events.
+
+    Populated by the `TelemetryReceiver.pull_event` signal. Most recent
+    event goes on top. The table is append-only; a "Clear" button wipes
+    the in-memory list but not the `<log>_pulls.csv` mirror.
+    """
+
+    COLUMNS = ("time", "motor", "pull_id", "steps", "hold s", "samples", "session")
+    MAX_ROWS = 500
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self); lay.setContentsMargins(6, 6, 6, 6); lay.setSpacing(4)
+
+        header = QHBoxLayout()
+        header.addWidget(QLabel("Pull events"))
+        header.addStretch()
+        clear = QPushButton("Clear"); clear.clicked.connect(self._clear)
+        header.addWidget(clear)
+        lay.addLayout(header)
+
+        self._table = QTableWidget(0, len(self.COLUMNS))
+        self._table.setHorizontalHeaderLabels(list(self.COLUMNS))
+        self._table.verticalHeader().setVisible(False)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.setAlternatingRowColors(True)
+        self._table.setStyleSheet("font-family: monospace; font-size: 10pt;")
+        self._table.horizontalHeader().setStretchLastSection(True)
+        lay.addWidget(self._table, 1)
+
+    def on_pull_event(self, ev: PullEvent) -> None:
+        ts = time.strftime("%H:%M:%S")
+        samples = "|".join(str(s) for s in ev.samples) or "—"
+        values = [
+            ts,
+            f"M{ev.motor_id}",
+            str(ev.pull_id),
+            str(ev.steps_moved),
+            f"{ev.hold_s:.1f}",
+            samples,
+            ev.session_id[:8],
+        ]
+        self._table.insertRow(0)
+        for col, val in enumerate(values):
+            item = QTableWidgetItem(val)
+            # Colour the motor column so M0 / M1 pop visually.
+            if col == 1:
+                item.setForeground(QColor("#2ecc71" if ev.motor_id == 0 else "#e67e22"))
+            self._table.setItem(0, col, item)
+        # Trim history.
+        while self._table.rowCount() > self.MAX_ROWS:
+            self._table.removeRow(self._table.rowCount() - 1)
+
+    def _clear(self) -> None:
+        self._table.setRowCount(0)
