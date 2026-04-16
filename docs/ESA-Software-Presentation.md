@@ -19,6 +19,14 @@
 
 ## 1. Project Overview
 
+> **Rev A (historical) notice.** This presentation documents the Rev A thermal
+> profile (ASCENT_HOLD −30 °C → ACTIVATION_RAMP → FLOAT_HOLD +70 °C →
+> DESCENT_FLOOR −20 °C → STOPPED). Rev B collapsed this to a single
+> cold-protection floor (`phase.sample_floor_c = +5 °C` shared across
+> `ASCENT/FLOAT/DESCENT`) with a `BOOT → ASCENT → FLOAT → DESCENT → LANDED`
+> FSM. Heater count dropped from 10 (9 samples + BOX) to 9 (8 samples + BOX).
+> See `docs/configuration.md` and `docs/onboard.md` for the current design.
+
 **COATHEAL** is a BEXUS high-altitude balloon experiment investigating thermal self-healing coatings. The flight software autonomously controls thermal profiles on material samples during all mission phases -- from ground through ascent, float at ~30 km altitude, and descent.
 
 **Software Components:**
