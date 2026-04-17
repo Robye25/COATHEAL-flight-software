@@ -1,10 +1,13 @@
 #include "coatheal/system_controller.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <iostream>
 #include <memory>
+#include <numeric>
 #include <sstream>
 #include <thread>
 
@@ -13,6 +16,19 @@
 #include "coatheal/stepper_channel.hpp"
 #include "coatheal/telemetry.hpp"
 #include "coatheal/tmc2240_driver.hpp"
+
+// Perf instrumentation. Off in flight builds (default). Enable with
+// -DCOATHEAL_PERF_TRACE to emit a single "[perf]" line per 60 ticks with
+// the per-stage microsecond breakdown of the tick loop. No extra work is
+// done when undefined; everything folds away at compile time.
+#ifdef COATHEAL_PERF_TRACE
+#define COATHEAL_PERF_STAMP(target) target = std::chrono::steady_clock::now()
+#define COATHEAL_PERF_DIFF_US(a, b) \
+  std::chrono::duration_cast<std::chrono::microseconds>((b) - (a)).count()
+#else
+#define COATHEAL_PERF_STAMP(target) (void)0
+#define COATHEAL_PERF_DIFF_US(a, b) 0
+#endif
 
 namespace coatheal {
 namespace {
@@ -202,11 +218,85 @@ bool SystemController::Initialize(std::string* error) {
 int SystemController::Run() {
   bool last_link_ok = false;
 
+#ifdef COATHEAL_PERF_TRACE
+  // Rolling accumulators reset every 60 ticks. Per-stage total µs and
+  // max-observed µs are emitted on flush. p50/p99 are computed from a
+  // ring buffer of 60 total-tick-us samples.
+  constexpr int kPerfWindow = 60;
+  constexpr int kNumStages = 10;
+  std::array<std::uint64_t, kNumStages> perf_sum_us{};
+  std::array<std::uint64_t, kNumStages> perf_max_us{};
+  std::array<std::uint64_t, kPerfWindow> perf_tick_total_us{};
+  std::array<std::uint64_t, kPerfWindow> perf_enqueue_us{};
+  std::uint64_t perf_enqueue_sum = 0;
+  std::uint64_t perf_enqueue_max = 0;
+  int perf_ticks = 0;
+  auto flush_perf = [&]() {
+    if (perf_ticks == 0) return;
+    std::array<std::uint64_t, kPerfWindow> sorted = perf_tick_total_us;
+    std::sort(sorted.begin(), sorted.begin() + perf_ticks);
+    const int p50_idx = (perf_ticks * 50) / 100;
+    const int p99_idx = (perf_ticks >= 100) ? ((perf_ticks * 99) / 100)
+                                             : (perf_ticks - 1);
+    std::array<std::uint64_t, kPerfWindow> enq_sorted = perf_enqueue_us;
+    std::sort(enq_sorted.begin(), enq_sorted.begin() + perf_ticks);
+    const int enq_p99_idx = (perf_ticks >= 100) ? ((perf_ticks * 99) / 100)
+                                                 : (perf_ticks - 1);
+    std::fprintf(
+        stderr,
+        "[perf] n=%d avg_us=%llu max_us=%llu p50_us=%llu p99_us=%llu "
+        "enqueue_avg_us=%llu enqueue_max_us=%llu enqueue_p99_us=%llu "
+        "stages_avg_us=[%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu] "
+        "stages_max_us=[%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu]\n",
+        perf_ticks,
+        (unsigned long long)(std::accumulate(
+            perf_tick_total_us.begin(), perf_tick_total_us.begin() + perf_ticks,
+            0ULL) / perf_ticks),
+        (unsigned long long)sorted[perf_ticks - 1],
+        (unsigned long long)sorted[p50_idx],
+        (unsigned long long)sorted[p99_idx],
+        (unsigned long long)(perf_enqueue_sum / perf_ticks),
+        (unsigned long long)perf_enqueue_max,
+        (unsigned long long)enq_sorted[enq_p99_idx],
+        (unsigned long long)(perf_sum_us[0] / perf_ticks),
+        (unsigned long long)(perf_sum_us[1] / perf_ticks),
+        (unsigned long long)(perf_sum_us[2] / perf_ticks),
+        (unsigned long long)(perf_sum_us[3] / perf_ticks),
+        (unsigned long long)(perf_sum_us[4] / perf_ticks),
+        (unsigned long long)(perf_sum_us[5] / perf_ticks),
+        (unsigned long long)(perf_sum_us[6] / perf_ticks),
+        (unsigned long long)(perf_sum_us[7] / perf_ticks),
+        (unsigned long long)(perf_sum_us[8] / perf_ticks),
+        (unsigned long long)(perf_sum_us[9] / perf_ticks),
+        (unsigned long long)perf_max_us[0],
+        (unsigned long long)perf_max_us[1],
+        (unsigned long long)perf_max_us[2],
+        (unsigned long long)perf_max_us[3],
+        (unsigned long long)perf_max_us[4],
+        (unsigned long long)perf_max_us[5],
+        (unsigned long long)perf_max_us[6],
+        (unsigned long long)perf_max_us[7],
+        (unsigned long long)perf_max_us[8],
+        (unsigned long long)perf_max_us[9]);
+    perf_sum_us.fill(0);
+    perf_max_us.fill(0);
+    perf_enqueue_sum = 0;
+    perf_enqueue_max = 0;
+    perf_ticks = 0;
+  };
+#endif
+
   while (running_) {
     // Recompute tick duration every iteration so SET_TICK_HZ takes effect live.
     const double tick_hz = std::max(0.1, live_tick_hz_.load());
     const auto tick_duration = std::chrono::duration<double>(1.0 / tick_hz);
     const auto tick_start = std::chrono::steady_clock::now();
+
+#ifdef COATHEAL_PERF_TRACE
+    std::chrono::steady_clock::time_point perf_ts[kNumStages + 1];
+    std::chrono::steady_clock::time_point perf_enqueue_end;
+    perf_ts[0] = tick_start;
+#endif
 
     StateOverrides state_overrides;
     ControlOverrides control_overrides;
@@ -226,9 +316,11 @@ int SystemController::Run() {
     }
 
     const SystemMode current_mode = mode_.load();
+    COATHEAL_PERF_STAMP(perf_ts[1]);  // stage 0: snapshot overrides + mode load
 
     SensorSnapshot snapshot = sensor_manager_.ReadSnapshot(
         state_manager_.phase(), last_heater_duty_, tick_duration.count());
+    COATHEAL_PERF_STAMP(perf_ts[2]);  // stage 1: sensor snapshot
 
     MissionPhase phase = state_manager_.phase();
     if (current_mode == SystemMode::kRun) {
@@ -242,9 +334,11 @@ int SystemController::Run() {
     if (!heaters_allowed) {
       effective_control.heaters_off = true;
     }
+    COATHEAL_PERF_STAMP(perf_ts[3]);  // stage 2: phase update + effective ovr
 
     std::vector<double> requested_duty = thermal_controller_.ComputeRequestedDuty(
         phase, snapshot, tick_duration.count(), effective_control);
+    COATHEAL_PERF_STAMP(perf_ts[4]);  // stage 3: thermal controller
 
     // Rev B: the "prioritize samples" flag deprioritises the electronics
     // heater during any flying phase (not just the removed ramp). All three
@@ -255,6 +349,7 @@ int SystemController::Run() {
     const std::vector<double> scheduled_duty = scheduler_.Schedule(
         requested_duty, heaters_allowed && any_flying_phase,
         tick_duration.count());
+    COATHEAL_PERF_STAMP(perf_ts[5]);  // stage 4: heater scheduler
 
     for (std::size_t i = 0; i < scheduled_duty.size(); ++i) {
       pwm_->SetDuty(i, scheduled_duty[i]);
@@ -264,6 +359,7 @@ int SystemController::Run() {
     if (stepper_) {
       stepper_->Tick(phase, tick_duration.count());
     }
+    COATHEAL_PERF_STAMP(perf_ts[6]);  // stage 5: pwm set + stepper tick
 
     TelemetryRecord record;
     record.seq = seq_++;
@@ -284,15 +380,21 @@ int SystemController::Run() {
     record.status.resistance_ok = ina_.healthy();
     if (stepper_) {
       // Rev B: one snapshot per channel drives the STEPPER0=/STEPPER1=
-      // telemetry segments.
+      // telemetry segments. Reserve up-front so the two push_back calls
+      // never trigger a realloc on the hot path. (Agent B perf fix.)
+      const std::size_t n_channels = stepper_->channel_count();
       record.steppers.clear();
-      for (std::size_t i = 0; i < stepper_->channel_count(); ++i) {
+      record.steppers.reserve(n_channels);
+      for (std::size_t i = 0; i < n_channels; ++i) {
         record.steppers.push_back(stepper_->Snapshot(static_cast<int>(i)));
       }
     }
 
     const std::string line = SerializeTelemetryDataFrame(record, telemetry_client_.session_id());
+    COATHEAL_PERF_STAMP(perf_ts[7]);  // stage 6: build+serialize telemetry
+
     storage_manager_.WriteLine(line);
+    COATHEAL_PERF_STAMP(perf_ts[8]);  // stage 7: storage write
 
     std::string queue_error;
     QueuedTelemetryFrame queued_frame;
@@ -304,12 +406,14 @@ int SystemController::Run() {
     if (!telemetry_queue_.Enqueue(queued_frame, &queue_error)) {
       last_link_ok = false;
     }
+    COATHEAL_PERF_STAMP(perf_enqueue_end);  // sub-stage: enqueue-only latency
 
     std::string drain_error;
     if (!DrainTelemetryQueue(&last_link_ok, &drain_error)) {
       last_link_ok = false;
       std::cerr << "[telemetry] drain error: " << drain_error << '\n';
     }
+    COATHEAL_PERF_STAMP(perf_ts[9]);  // stage 8: queue enqueue + drain
 
     // Rev B: emit EVT,PULL after each motor finishes a pull cycle. The Rev A
     // heating-cycle aggregator is retired with the +70 C activation ramp.
@@ -379,12 +483,43 @@ int SystemController::Run() {
     // adapter blocks indefinitely) systemd will SIGKILL us after WatchdogSec
     // and Restart=always brings us back. Silent no-op outside systemd.
     SdNotifyWatchdog();
+    COATHEAL_PERF_STAMP(perf_ts[10]);  // stage 9: pull-evt + LED + sd_notify
+
+#ifdef COATHEAL_PERF_TRACE
+    {
+      std::uint64_t tick_total_us = 0;
+      for (int s = 0; s < kNumStages; ++s) {
+        const std::uint64_t dt = static_cast<std::uint64_t>(
+            COATHEAL_PERF_DIFF_US(perf_ts[s], perf_ts[s + 1]));
+        perf_sum_us[s] += dt;
+        if (dt > perf_max_us[s]) perf_max_us[s] = dt;
+        tick_total_us += dt;
+      }
+      perf_tick_total_us[perf_ticks] = tick_total_us;
+      // Enqueue-only latency (pre-storage-write is stage 7; enqueue lives
+      // between that and perf_ts[9]). We measure from stage 7 end to
+      // perf_enqueue_end, which isolates the fsync cost of Enqueue() alone.
+      const std::uint64_t enq_us = static_cast<std::uint64_t>(
+          COATHEAL_PERF_DIFF_US(perf_ts[8], perf_enqueue_end));
+      perf_enqueue_us[perf_ticks] = enq_us;
+      perf_enqueue_sum += enq_us;
+      if (enq_us > perf_enqueue_max) perf_enqueue_max = enq_us;
+      ++perf_ticks;
+      if (perf_ticks >= kPerfWindow) {
+        flush_perf();
+      }
+    }
+#endif
 
     const auto elapsed = std::chrono::steady_clock::now() - tick_start;
     if (elapsed < tick_duration) {
       std::this_thread::sleep_for(tick_duration - elapsed);
     }
   }
+
+#ifdef COATHEAL_PERF_TRACE
+  flush_perf();
+#endif
 
   SdNotify("STOPPING=1");
   command_server_.Stop();
