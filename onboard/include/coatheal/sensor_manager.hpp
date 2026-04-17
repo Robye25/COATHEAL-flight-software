@@ -25,6 +25,10 @@ namespace coatheal {
 class SensorManager {
  public:
   static constexpr std::size_t kSampleCount = 8;
+  // Rev B.1: only the first 6 samples have INA3221 channels wired (two chips
+  // × 3 channels each). Samples 6 and 7 are pulled but electrically
+  // unmeasured — their resistance serializes as the "-" placeholder.
+  static constexpr std::size_t kResistanceChannelCount = 6;
 
   SensorManager(const OnboardConfig& config,
                 SpiAdapter* spi,
