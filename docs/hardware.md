@@ -4,7 +4,7 @@
 
 ## Status
 
-Rev B.1 (April 2026) is the BOM committed in [`lista_cumparaturri.xlsx`](../lista_cumparaturri.xlsx) and implemented in the current source tree. It narrows Rev B in three directions: 6 heaters instead of 9, no electronics-box heater / sensor / PID, no humidity output. The INA3221 chips — originally scoped as power-monitor housekeeping — are repurposed as a **sample-resistance science instrument** that detects microcrack formation during pulls. Two stratospheric-grade MS5803-01BA sensors replace the BME280 for ambient P + T with no humidity output. Both steppers become OMC integrated ball-screw motors with a 1 mm lead driven by a TMC5160 each.
+Rev B.1 (April 2026) is the BOM committed in [`lista_cumparaturri.xlsx`](../lista_cumparaturri.xlsx) and implemented in the current source tree. It narrows Rev B in three directions: 6 heaters instead of 9, no electronics-box heater / sensor / PID, no humidity output. The INA3221 chips — originally scoped as power-monitor housekeeping — are repurposed as a **sample-resistance science instrument** that detects microcrack formation during pulls. Two stratospheric-grade MS5803-01BA sensors replace the BME280 for ambient P + T with no humidity output. Both steppers become OMC integrated ball-screw motors with a 1 mm lead driven by a TMC2240 each.
 
 Driver-level bring-up (real I2C / SPI / Modbus-RTU transactions) is still pending; HAL classes are stubs that track a `healthy_` flag and feed the `*_OK` status bits. Firmware logic, wire format, and tests already run against the Rev B.1 data model.
 
@@ -22,8 +22,8 @@ COATHEAL runs on a **Raspberry Pi 4 Model B (8 GB)** and interfaces with the fol
 | UV irradiance | GUVA-S12SD analog photodiode through ADS1015 ADC (12-bit) | I2C | 1 | Stub — ADS1015 driver pending |
 | Real-time clock | External RTC (DS3231 carried from Rev B) | I2C | 1 | Stub (system clock fallback) |
 | Sample heaters | 5 W @ 24 V DC polyimide film (Kapton) through 6-ch MOSFET module | GPIO PWM | 6 (samples 0–5) | `LibgpiodPwmController` implemented; pin mapping TBD |
-| Steppers | OMC 17E19S2504BSM5-150RS integrated ball-screw NEMA-17 (1 mm lead) | STEP/DIR/EN + TMC5160 SPI | 2 | `StepperChannel` implemented; `Tmc5160Driver` SPI pass stubbed |
-| Stepper drivers | TinyTronics QHV5160 (TMC5160) | SPI1 (`/dev/spidev1.0`) + STEP/DIR/EN | 2 | Stub |
+| Steppers | OMC 17E19S2504BSM5-150RS integrated ball-screw NEMA-17 (1 mm lead) | STEP/DIR/EN + TMC2240 SPI | 2 | `StepperChannel` implemented; `Tmc2240Driver` SPI pass stubbed |
+| Stepper drivers | TinyTronics QHV5160 (TMC2240) | SPI1 (`/dev/spidev1.0`) + STEP/DIR/EN | 2 | Stub |
 | HAT | Adafruit Pi-EzConnect Terminal Block Breakout | pass-through | 1 | — |
 | 5 V rail | Pololu D24V50F5 step-down (5 V / 5 A) from 28.8 V gondola rail | — | 1 | HW |
 | Connectors | XT60U | — | 8 | HW |
@@ -36,9 +36,14 @@ There are **no BME280, no MIKROE-2815 / MAX31865 SPI PT100, no box heater, and n
 
 ## Sensors
 
-### MS5803-01BA — Ambient Pressure + Temperature (I2C)
+### MS5803-01BA — Ambient Pressure + Box Temperature (I2C)
 
-Single I2C sensor (GY-MS5803-01BA module on a breakout) providing ambient temperature and absolute pressure. The part's 10–1300 mbar range natively covers stratospheric float (~5–10 mbar is out of spec but usable with derated accuracy; the `P_AMBIENT_OK` status bit flags out-of-range reads). **There is no humidity channel** — `SensorSnapshot::ambient_humidity_pct` was removed at Rev B.1.
+Single I2C sensor (GY-MS5803-01BA module on a breakout) mounted **inside the electronics enclosure**. It serves a dual role at Rev B.1:
+
+- **Pressure** reading = true ambient. The BEXUS gondola is unpressurised, so enclosure pressure equals external ambient pressure. The 10–1300 mbar part range natively covers stratospheric float (~5–10 mbar is out of spec but usable with derated accuracy; the `P_AMBIENT_OK` status bit flags out-of-range reads).
+- **Temperature** reading = **box / enclosure interior temperature** (the sensor is inside the box). There is no separate box temperature sensor in Rev B.1; the MS5803 covers both roles. The on-wire field is still `ambient_temp_c` and must be collected / stored / sent on every tick so the ground operator can watch enclosure thermal conditions.
+
+There is **no humidity channel** — `SensorSnapshot::ambient_humidity_pct` was removed at Rev B.1.
 
 | Parameter | Value |
 |---|---|
@@ -146,14 +151,14 @@ Heater duty cycles are output through a 6-channel 5 V MOSFET module driven by GP
 
 ### Steppers
 
-Both motors at Rev B.1 are **OMC 17E19S2504BSM5-150RS NEMA-17 integrated ball-screw stepper motors** with a **1 mm lead** on a 150 mm screw. One full revolution = 200 full-steps = **1 mm linear pull** (exact). Both motors are driven by a **TinyTronics QHV5160 (TMC5160)** stepper driver configured via SPI and operated via STEP/DIR/EN after setup.
+Both motors at Rev B.1 are **OMC 17E19S2504BSM5-150RS NEMA-17 integrated ball-screw stepper motors** with a **1 mm lead** on a 150 mm screw. One full revolution = 200 full-steps = **1 mm linear pull** (exact). Both motors are driven by a **TinyTronics QHV5160 (TMC2240)** stepper driver configured via SPI and operated via STEP/DIR/EN after setup.
 
 | Channel | Motor | Driver | Samples | Role |
 |---|---|---|---|---|
-| 0 | OMC 17E19S2504BSM5-150RS (1 mm lead) | TMC5160 on SPI1 (`/dev/spidev1.0`, CS on `motor0.cs_line`) | 0, 1, 2, 3 | Pull actuator for samples 0–3 (heated + measured) |
-| 1 | OMC 17E19S2504BSM5-150RS (1 mm lead) | TMC5160 on SPI (separate CS line) | 4, 5, 6, 7 | Pull actuator for samples 4–7 (samples 4–5 heated+measured, 6–7 measured only) |
+| 0 | OMC 17E19S2504BSM5-150RS (1 mm lead) | TMC2240 on SPI1 (`/dev/spidev1.0`, CS on `motor0.cs_line`) | 0, 1, 2, 3 | Pull actuator for samples 0–3 (heated + measured) |
+| 1 | OMC 17E19S2504BSM5-150RS (1 mm lead) | TMC2240 on SPI (separate CS line) | 4, 5, 6, 7 | Pull actuator for samples 4–7 (samples 4–5 heated+measured, 6–7 measured only) |
 
-Both channels construct a `Tmc5160Driver` with distinct SPI chip-select lines. The previous Rev B plan to drive motor 1 with an A4988/DRV8825 is retired — `motor1.driver=a4988` strings in old INI snippets are vestigial.
+Both channels construct a `Tmc2240Driver` with distinct SPI chip-select lines. The previous Rev B plan to drive motor 1 with an A4988/DRV8825 is retired — `motor1.driver=a4988` strings in old INI snippets are vestigial.
 
 ### Motion envelope
 
@@ -186,7 +191,7 @@ Both channels construct a `Tmc5160Driver` with distinct SPI chip-select lines. T
 | Gondola rail | 28.8 V DC from the BEXUS power umbilical |
 | 5 V rail | Pololu D24V50F5 step-down, 5 V / 5 A (supplies Pi + sensors) |
 | Heater voltage | 24 V DC directly from the gondola rail through the 6-channel MOSFET module |
-| Stepper VM | 28.8 V gondola rail into each TMC5160 (VM tolerates 8–60 V) |
+| Stepper VM | 28.8 V gondola rail into each TMC2240 (VM tolerates 8–60 V) |
 | Connectors | XT60 (gondola rail in, Pi 5 V out, heater bus) |
 | Energy budget | 150 Wh team allocation (BEXUS User Manual §5.2); firmware latches heaters at 130 Wh |
 | Peak current | ≤3 A (SED §C.3); scheduler cap of 4 × 5 W = 20 W combined thermal draw leaves generous margin |
@@ -201,8 +206,8 @@ The Pi-EzConnect HAT is a straight pass-through — terminal block numbers match
 |---|---|---|---|
 | Heartbeat LED | 17 | `hal.status_led_line` | 330 Ω to LED |
 | Mode LED | 27 | `hal.mode_led_line` | 330 Ω to LED |
-| Motor 0 STEP | 5 | `motor0.step_line` (default; legacy `stepper.step_line`) | TMC5160 STEP |
-| Motor 0 DIR | 6 | `motor0.dir_line` (default; legacy `stepper.dir_line`) | TMC5160 DIR |
+| Motor 0 STEP | 5 | `motor0.step_line` (default; legacy `stepper.step_line`) | TMC2240 STEP |
+| Motor 0 DIR | 6 | `motor0.dir_line` (default; legacy `stepper.dir_line`) | TMC2240 DIR |
 | Motor 0 /EN | 13 | `motor0.enable_line` (default; legacy `stepper.enable_line`) | Active-low |
 | Motor 0 CS (SPI1) | 8 | `motor0.cs_line` | SPI1 CE0 |
 | Motor 1 STEP | TBD | `motor1.step_line` | Currently aliased to motor 0 on bench — real pin pending |
@@ -211,7 +216,7 @@ The Pi-EzConnect HAT is a straight pass-through — terminal block numbers match
 | Motor 1 CS (SPI) | TBD | (no key yet) | pending |
 | Heater PWM 0..5 | TBD × 6 | (no keys yet) | 6-channel MOSFET module gates |
 | I2C (MS5803, ADS1015, INA3221 ×2, RTC) | BCM 2 / 3 | — | Pi native `/dev/i2c-1` |
-| SPI1 (TMC5160 config) | BCM 19/20/21 | — | `/dev/spidev1.0` |
+| SPI1 (TMC2240 config) | BCM 19/20/21 | — | `/dev/spidev1.0` |
 | USB-RS485 (PT100 collectors) | USB | — | `/dev/ttyUSB0` |
 
 ---
@@ -231,7 +236,7 @@ Wire each LED anode through a ~330 Ω series resistor to the listed BCM GPIO, ca
 
 | Component | File | Status | Pending work |
 |---|---|---|---|
-| `SpiAdapter` | [`hal/spi_adapter.hpp`](../onboard/include/coatheal/hal/spi_adapter.hpp) | Stub | TMC5160 SPI configuration pass |
+| `SpiAdapter` | [`hal/spi_adapter.hpp`](../onboard/include/coatheal/hal/spi_adapter.hpp) | Stub | TMC2240 SPI configuration pass |
 | `I2cAdapter` | [`hal/i2c_adapter.hpp`](../onboard/include/coatheal/hal/i2c_adapter.hpp) | Stub | MS5803, ADS1015, RTC drivers |
 | [`Ina3221Adapter`](../onboard/include/coatheal/hal/ina3221_adapter.hpp) | [`hal/ina3221_adapter.cpp`](../onboard/src/hal/ina3221_adapter.cpp) | Stub — reads zero, `healthy_ = true` | Real I2C read of bus+shunt voltage per channel, 2 chips (0x40 / 0x41), 3 channels each |
 | `RtcAdapter` | [`hal/rtc_adapter.hpp`](../onboard/include/coatheal/hal/rtc_adapter.hpp) | Stub (system clock) | DS3231 I2C driver |
@@ -239,7 +244,7 @@ Wire each LED anode through a ~330 Ω series resistor to the listed BCM GPIO, ca
 | `SimulatedPwmController` | [`hal/pwm_controller.hpp`](../onboard/include/coatheal/hal/pwm_controller.hpp) | Implemented (bench) | — |
 | `GpioStatusLed` / `SimulatedStatusLed` | [`hal/status_led.hpp`](../onboard/include/coatheal/hal/status_led.hpp) | Implemented | — |
 | `Rs485ModbusAdapter` | *not yet created* | Planned | MS5803 + 2 × 4-ch PT100 collector drivers |
-| `Tmc5160Driver` | [`tmc5160_driver.hpp`](../onboard/include/coatheal/tmc5160_driver.hpp) | Partial — SPI config falls back to plain `GpioStepDirStepperDriver` off-sim | Real SPI register load |
+| `Tmc2240Driver` | [`tmc2240_driver.hpp`](../onboard/include/coatheal/tmc2240_driver.hpp) | Partial — SPI config falls back to plain `GpioStepDirStepperDriver` off-sim | Real SPI register load |
 | `StepperChannel` × 2 | [`stepper_channel.hpp`](../onboard/include/coatheal/stepper_channel.hpp) | Implemented | RT pulse thread opt-in once wiring is confirmed |
 
 ### Writing a HAL driver
@@ -272,7 +277,7 @@ Resolved since Rev B:
 2. Box temperature sensor — **absent by design**; the 2 × 4-ch Modbus PT100 collectors cover the 8 samples exactly and no channel remains for a box probe.
 3. Humidity — removed; MS5803-01BA has no humidity output and BME280 is not carried.
 4. Second stepper role — motor 0 owns samples 0–3, motor 1 owns samples 4–7 (samples 6–7 unheated).
-5. Both steppers use TMC5160 — no A4988/DRV8825 in the Rev B.1 BOM.
+5. Both steppers use TMC2240 — no A4988/DRV8825 in the Rev B.1 BOM.
 6. RTC — DS3231-class part retained.
 7. Stepper linear calibration — **1 mm / revolution exactly** (OMC integrated ball screw, 1 mm lead). The Rev B "1–2 mm" wording is retired.
 
@@ -282,4 +287,4 @@ Still open:
 2. **6 INA3221 channels for 8 samples.** Samples 6 and 7 have no resistance-measurement channel; they are pulled but their microcrack formation is not instrumented. Accepted at Rev B.1 — if deemed insufficient, a third INA3221 at 0x42/0x43 would cover them.
 3. **`motor0.*` / `motor1.*` / `pull.*` INI keys** are parsed but not yet wired into `StepperChannelConfig`. `SystemController::Initialize()` uses compiled-in defaults.
 4. **RS485 transceiver form factor** — Rev B.1 BOM carries 2 × USB-to-RS485 dongles, so `/dev/ttyUSB0` is the committed path. A UART + MAX485 option is no longer being tracked.
-5. **Real TMC5160 SPI bring-up** — register load is currently bypassed.
+5. **Real TMC2240 SPI bring-up** — register load is currently bypassed.

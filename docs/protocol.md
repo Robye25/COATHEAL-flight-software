@@ -89,7 +89,7 @@ Each token flips between `<NAME>_OK` and `<NAME>_FAIL`, except `HEATER_ACTIVE` /
 | `SD_OK` / `SD_FAIL` | Primary SD-card CSV log healthy. |
 | `USB_OK` / `USB_FAIL` | Secondary USB mirror log healthy. |
 | `I2C_OK` / `I2C_FAIL` | I2C bus (MS5803, ADS1015, INA3221 ×2, RTC) healthy. |
-| `SPI_OK` / `SPI_FAIL` | SPI bus (TMC5160 configuration) healthy. |
+| `SPI_OK` / `SPI_FAIL` | SPI bus (TMC2240 configuration) healthy. |
 | `LINK_OK` / `LINK_FAIL` | Telemetry link (last ACK received successfully). |
 | `T_AMBIENT_OK` / `T_AMBIENT_FAIL` | MS5803 temperature inside `sensor.ambient_temp_*` window. |
 | `P_AMBIENT_OK` / `P_AMBIENT_FAIL` | MS5803 pressure inside `sensor.ambient_pressure_*` window. |
@@ -273,7 +273,7 @@ Aliases: `ON` = `FORCE_START`, `OFF` = `FORCE_STOP`, `RESET` = `RESET_CTRL`.
 
 ## Stepper motors (sample-pulling actuators)
 
-Two OMC 17E19S2504BSM5-150RS integrated ball-screw NEMA-17 motors (1 mm lead), each driven by a **TMC5160**. Motor 0 owns samples 0–3, motor 1 owns samples 4–7. Only one motor may pull at a time — `MotionLock` enforces this, and the heater scheduler zeros all duty while the lock is held (`HEATER_INHIBITED`).
+Two OMC 17E19S2504BSM5-150RS integrated ball-screw NEMA-17 motors (1 mm lead), each driven by a **TMC2240**. Motor 0 owns samples 0–3, motor 1 owns samples 4–7. Only one motor may pull at a time — `MotionLock` enforces this, and the heater scheduler zeros all duty while the lock is held (`HEATER_INHIBITED`).
 
 ### Motion envelope
 

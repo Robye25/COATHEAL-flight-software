@@ -16,7 +16,7 @@ Committed as `89393b7` on `rev-b-integration`. Summary of changes vs. Rev B:
 4. **No humidity.** MS5803-01BA replaces BME280; the new sensor has no humidity output. `SensorSnapshot::ambient_humidity_pct` is deleted.
 5. **Power budget:** nominal heater 5 W (was 10 W), max thermal 20 W (was 40 W). `power.max_active_heaters=4` unchanged. `power.energy_budget_wh=130.0` unchanged.
 6. **Stepper lead screw.** Both motors are now OMC 17E19S2504BSM5-150RS — integrated ball-screw, **1 mm lead**. One revolution = 200 full-steps = **1 mm linear** exactly (the previous "1–2 mm" wording is retired).
-7. **Both motors are TMC5160.** Motor 1 no longer uses A4988/DRV8825; both channels construct a `Tmc5160Driver` with distinct CS lines. `motor1.driver=a4988` strings in INI/docs are vestigial.
+7. **Both motors are TMC2240.** Motor 1 no longer uses A4988/DRV8825; both channels construct a `Tmc2240Driver` with distinct CS lines. `motor1.driver=a4988` strings in INI/docs are vestigial.
 8. **UV sensor: analog GUVA-S12SD through an ADS1015 (12-bit) ADC.** Not ADS1115, not BPW21.
 9. **Ambient env: MS5803-01BA** on I2C, range 10–1300 mbar (covers stratospheric float natively — no BME280 backup needed and BME280 is not carried).
 10. **INA3221 science role.** The two INA3221 chips are repurposed as the **sample-resistance instrument** used to detect microcrack formation during pulls. 2 chips × 3 channels = 6 of the 8 samples monitored. New `SensorSnapshot::sample_resistance_ohm` vector, new wire-format `RESISTANCE=` segment, new `RESISTANCE_OK`/`RESISTANCE_FAIL` STATUS bit driven from `Ina3221Adapter::healthy()`.
@@ -41,7 +41,7 @@ Committed as `89393b7` on `rev-b-integration`. Summary of changes vs. Rev B:
 1. Real I2C driver for INA3221 (stub today).
 2. Real I2C drivers for MS5803-01BA, ADS1015, DS3231.
 3. `Rs485ModbusAdapter` + driver for the 2 × 4-ch PT100 collectors over USB-RS485.
-4. TMC5160 SPI configuration pass — falls back to plain `GpioStepDirStepperDriver` on non-simulated builds today.
+4. TMC2240 SPI configuration pass — falls back to plain `GpioStepDirStepperDriver` on non-simulated builds today.
 5. Wire `motor0.*` / `motor1.*` / `pull.*` INI keys through `config.cpp` into `StepperChannelConfig`. Today these keys are parsed-and-ignored and `SystemController::Initialize()` uses compiled-in defaults.
 6. GPIO mapping of the 6-channel MOSFET module.
 7. SED revision request (see [SED-Compliance-Report.md §5](SED-Compliance-Report.md)).
@@ -83,7 +83,7 @@ All three flying phases (`ASCENT` / `FLOAT` / `DESCENT`) share the same thermal 
 | Microstepping | **4× (800 µsteps/rev)** default; 5× (1000 µsteps/rev) accepted |
 | One pull cycle | 200 full-steps forward (1 rev ≈ 1–2 mm), hold `pull.hold_s` (5 s default), retract to 0 |
 
-Motor 0: Pololu 2851 NEMA-17, driven by **TMC5160** on SPI1 (`/dev/spidev1.0`) with run current 1.5 A RMS, hold current 30 %, stealthChop on. Motor 1: Adafruit 1918 NEMA-17, driven by A4988/DRV8825 (plain STEP/DIR/EN). See [`onboard/src/tmc5160_driver.cpp`](../onboard/src/tmc5160_driver.cpp) for the exact register values.
+Motor 0: Pololu 2851 NEMA-17, driven by **TMC2240** on SPI1 (`/dev/spidev1.0`) with run current 1.5 A RMS, hold current 30 %, stealthChop on. Motor 1: Adafruit 1918 NEMA-17, driven by A4988/DRV8825 (plain STEP/DIR/EN). See [`onboard/src/tmc2240_driver.cpp`](../onboard/src/tmc2240_driver.cpp) for the exact register values.
 
 ## 4. Software surface
 
@@ -91,7 +91,7 @@ Motor 0: Pololu 2851 NEMA-17, driven by **TMC5160** on SPI1 (`/dev/spidev1.0`) w
 
 - `onboard/include/coatheal/motion_lock.hpp` + `onboard/src/motion_lock.cpp` — heater↔motor mutex.
 - `onboard/include/coatheal/stepper_channel.hpp` + `onboard/src/stepper_channel.cpp` — per-motor owner with trapezoidal ramp and optional RT pulse thread.
-- `onboard/include/coatheal/tmc5160_driver.hpp` + `onboard/src/tmc5160_driver.cpp` — boot-time SPI configuration pass wrapping the STEP/DIR/EN base driver.
+- `onboard/include/coatheal/tmc2240_driver.hpp` + `onboard/src/tmc2240_driver.cpp` — boot-time SPI configuration pass wrapping the STEP/DIR/EN base driver.
 
 ### New commands (all reversible, all newline-terminated)
 
@@ -162,7 +162,7 @@ pull.microstep=4
 pull.travel_full_steps=200
 pull.hold_s=5.0
 
-motor0.driver=tmc5160
+motor0.driver=tmc2240
 motor0.spi_device=/dev/spidev1.0
 motor0.cs_line=8
 motor0.step_line, motor0.dir_line, motor0.enable_line
@@ -187,7 +187,7 @@ The Rev B rework was parallelised across four isolated git worktrees, merged seq
 |---|---|---|
 | A | Thermal / phase refactor — floor controller, new enum, 9-channel duty vector | `merge: Agent A — thermal/phase refactor to +5C floor, 8 samples` |
 | D | Safety interlocks — `MotionLock`, `HeaterScheduler` interlock, paranoid test set | `merge: Agent D — MotionLock + heater interlock` |
-| B | Motion systems — dual `StepperChannel`, TMC5160 driver, trapezoidal ramp, PULL commands | `merge: Agent B — dual stepper channels + TMC5160 + pull commands` |
+| B | Motion systems — dual `StepperChannel`, TMC2240 driver, trapezoidal ramp, PULL commands | `merge: Agent B — dual stepper channels + TMC2240 + pull commands` |
 | C | Telemetry / ground-station — 8-sample DATA frame, dual STEPPER segments, EVT,PULL, GS UI | `merge: Agent C — 8-sample telemetry, dual-stepper segments, PULL events, GS UI` |
 | Orchestrator | Integration — `system_controller.cpp` wiring, config accepts new keys, legacy tests updated | `integration: wire Rev B — MotionLock, dual stepper, PULL events, 8 samples` |
 
