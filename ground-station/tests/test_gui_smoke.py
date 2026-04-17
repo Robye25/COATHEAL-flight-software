@@ -35,12 +35,13 @@ class GuiSmoke(unittest.TestCase):
                          firewall_check=False)
         try:
             line = (
-                "DATA,sess-smoke,3,2026-04-13T12:00:00Z,1,-25.0,180.0,20.0,0.5,4.0,"
-                "-29.5,-29.7,-29.9,-30.0,-30.1,-30.2,-30.0,-29.8,-29.6,"
-                "HEATER_DUTY=0.10|0.20|0.30|0.40|0.50|0.60|0.70|0.80|0.90|0.15,"
-                "PHASE=FLOAT_HOLD_+70C,MODE=RUN,"
-                "STATUS=SD_OK|USB_OK|I2C_OK|SPI_OK|LINK_OK,"
-                "STEPPER=pos:500|tgt:800|hz:400|us:16|en:1|mv:1|hold:0|hold_s:0|pulses:500|src:phase:FLOAT_HOLD"
+                "DATA,sess-smoke,3,2026-04-13T12:00:00Z,1,-25.0,180.0,0.5,"
+                "-29.5,-29.7,-29.9,-30.0,-30.1,-30.2,-30.0,-29.8,"
+                "HEATER_DUTY=0.10|0.20|0.30|0.40|0.50|0.60,"
+                "RESISTANCE=10.0|10.1|10.2|10.3|10.4|10.5|-|-,"
+                "PHASE=FLOAT,MODE=RUN,"
+                "STATUS=SD_OK|USB_OK|I2C_OK|SPI_OK|LINK_OK|RESISTANCE_OK,"
+                "STEPPER=pos:500|tgt:800|hz:400|us:16|en:1|mv:1|hold:0|hold_s:0|pulses:500|src:phase:FLOAT"
             )
             pkt = parse_telemetry_csv(line)
             # Should not raise.

@@ -32,12 +32,14 @@ class LivePlotter:
         # Thread-safe: network thread appends, main thread pops
         self._buf: collections.deque = collections.deque()
         self._seq: list[int] = []
-        self._box_temp: list[float] = []
+        self._amb_temp: list[float] = []
         self._pressure: list[float] = []
 
         self._fig, (self._ax_temp, self._ax_pressure) = plt.subplots(2, 1, figsize=(10, 7))
 
-        (self._temp_line,) = self._ax_temp.plot([], [], label="Box Temp [C]")
+        # Rev-B.1: box-temp trace removed (no box sensor). Ambient temp is
+        # the only single-value scalar we still plot here.
+        (self._temp_line,) = self._ax_temp.plot([], [], label="Ambient Temp [C]")
         self._ax_temp.set_ylabel("Temperature [C]")
         self._ax_temp.grid(True)
         self._ax_temp.legend(loc="best")
@@ -50,9 +52,9 @@ class LivePlotter:
 
         self._fig.tight_layout()
 
-    def push(self, seq: int, box_temp_c: float, pressure_mbar: float) -> None:
+    def push(self, seq: int, ambient_temp_c: float, pressure_mbar: float) -> None:
         """Called from network thread. deque.append is thread-safe."""
-        self._buf.append((seq, box_temp_c, pressure_mbar))
+        self._buf.append((seq, ambient_temp_c, pressure_mbar))
 
     def tick(self) -> None:
         """Called from main thread only. Drains buffer and redraws at up to 20 fps."""
@@ -60,17 +62,17 @@ class LivePlotter:
         while self._buf:
             seq, temp, pres = self._buf.popleft()
             self._seq.append(seq)
-            self._box_temp.append(temp)
+            self._amb_temp.append(temp)
             self._pressure.append(pres)
             changed = True
 
         if changed:
             if len(self._seq) > 600:
                 self._seq = self._seq[-600:]
-                self._box_temp = self._box_temp[-600:]
+                self._amb_temp = self._amb_temp[-600:]
                 self._pressure = self._pressure[-600:]
 
-            self._temp_line.set_data(self._seq, self._box_temp)
+            self._temp_line.set_data(self._seq, self._amb_temp)
             self._pressure_line.set_data(self._seq, self._pressure)
 
             self._ax_temp.relim()
@@ -282,19 +284,17 @@ class TelemetryServer:
                     "rtc_valid",
                     "ambient_temp_c",
                     "ambient_pressure_mbar",
-                    "ambient_humidity_pct",
                     "uv",
-                    "box_temp_c",
                     "sample_temps_c",
                     "heater_duty",
+                    "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7",
                     "phase",
                     "status",
                 ],
-                # Rev-B adds new in-memory fields (`steppers`, `stepper`,
-                # `mode`) that we keep out of the persisted CSV schema so
-                # existing log-replay tooling keeps working byte-for-byte.
-                # `extrasaction='ignore'` lets us pass the full asdict()
-                # without it raising on the additions.
+                # Rev-B.1: CSV v4 — dropped humidity + box_temp_c, added
+                # r0..r7 resistance columns. `extrasaction='ignore'` lets
+                # us pass the full asdict() without it raising on the
+                # additional in-memory fields (`steppers`, `stepper`, …).
                 extrasaction="ignore",
             )
             if first:
@@ -378,8 +378,11 @@ class TelemetryServer:
                         continue
 
                     self._last_packet_time = time.time()
-                    if packet.box_temp_c > self.alert_temp_c:
-                        print(f"[alert] box temp high: {packet.box_temp_c:.2f} C")
+                    # Rev-B.1: no box sensor. Use the hottest sample
+                    # reading as the over-temperature trigger instead.
+                    hot = max(packet.sample_temps_c) if packet.sample_temps_c else None
+                    if hot is not None and hot > self.alert_temp_c:
+                        print(f"[alert] sample temp high: {hot:.2f} C")
 
                     is_duplicate = False
                     with self._lock:
@@ -402,15 +405,23 @@ class TelemetryServer:
                     row = asdict(packet)
                     row["sample_temps_c"] = "|".join(f"{x:.2f}" for x in packet.sample_temps_c)
                     row["heater_duty"] = "|".join(f"{x:.3f}" for x in packet.heater_duty)
+                    # Rev-B.1: one resistance column per sample.
+                    for i in range(8):
+                        if i < len(packet.sample_resistance_ohm):
+                            v = packet.sample_resistance_ohm[i]
+                            row[f"r{i}"] = "" if v is None else f"{v:.3f}"
+                        else:
+                            row[f"r{i}"] = ""
                     writer.writerow(row)
                     f.flush()
 
                     if self._plotter is not None:
-                        self._plotter.push(packet.seq, packet.box_temp_c, packet.ambient_pressure_mbar)
+                        self._plotter.push(packet.seq, packet.ambient_temp_c, packet.ambient_pressure_mbar)
 
+                    hot_str = f"{hot:.2f}C" if hot is not None else "—"
                     print(
                         f"[telemetry] session={packet.session_id} seq={packet.seq} phase={packet.phase} "
-                        f"P={packet.ambient_pressure_mbar:.1f}mbar Tbox={packet.box_temp_c:.2f}C"
+                        f"P={packet.ambient_pressure_mbar:.1f}mbar Thot={hot_str}"
                     )
 
     def _append_pull_log(self, pull: PullEvent, raw_line: str) -> None:

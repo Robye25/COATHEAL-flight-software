@@ -26,22 +26,22 @@ class TelemetryPacket:
     rtc_valid: int
     ambient_temp_c: float
     ambient_pressure_mbar: float
-    ambient_humidity_pct: float
     uv: float
-    box_temp_c: float
     sample_temps_c: List[float]
     heater_duty: List[float]
+    # Rev-B.1: one resistance value per sample (`None` when the channel is
+    # unmeasured — wire representation is a literal '-'). When the onboard
+    # omits the RESISTANCE= segment entirely this stays an empty list.
+    sample_resistance_ohm: List[Optional[float]]
     phase: str
     status: str
     mode: str = ""
     # Rev-B: multi-motor snapshot list. `steppers[0]` = M0, `steppers[1]` = M1.
-    # Length: 0 (legacy log with no stepper segment), 1 (legacy single
-    # STEPPER=... segment), or 2+ (new STEPPER0=/STEPPER1=... segments).
-    # Entries are dicts matching the StepperSnapshot field set, with an
-    # extra 'motor_id' key carrying the index.
+    # Length: 0 (no stepper segment), 1 (legacy single STEPPER=... segment),
+    # or 2+ (new STEPPER0=/STEPPER1=... segments). Entries are dicts matching
+    # the StepperSnapshot field set, with an extra 'motor_id' key.
     steppers: List[Dict] = field(default_factory=list)
-    # Legacy accessor. Mirrors `steppers[0]` when present so existing callers
-    # (`pkt.stepper.position`, etc.) keep working.
+    # Legacy accessor. Mirrors `steppers[0]` when present.
     stepper: Optional[StepperSnapshot] = None
 
 
@@ -102,7 +102,10 @@ def _snapshot_to_dict(snap: StepperSnapshot, motor_id: int) -> Dict:
 
 def parse_telemetry_csv(line: str) -> TelemetryPacket:
     parts = [p.strip() for p in line.strip().split(',')]
-    if len(parts) < 13:
+    # Rev-B.1 fixed prefix = DATA + 7 scalar columns = 8 tokens before the
+    # first sample. Plus at least HEATER_DUTY + PHASE + STATUS = 3 trailing
+    # tokens. Minimum well-formed frame is 11 tokens.
+    if len(parts) < 11:
         raise TelemetryParseError("telemetry packet too short")
 
     if parts[0] != "DATA":
@@ -114,9 +117,7 @@ def parse_telemetry_csv(line: str) -> TelemetryPacket:
     rtc_valid = int(parts[4])
     ambient_temp_c = float(parts[5])
     ambient_pressure_mbar = float(parts[6])
-    ambient_humidity_pct = float(parts[7])
-    uv = float(parts[8])
-    box_temp_c = float(parts[9])
+    uv = float(parts[7])
 
     heater_field_index = None
     for idx, token in enumerate(parts):
@@ -127,7 +128,9 @@ def parse_telemetry_csv(line: str) -> TelemetryPacket:
     if heater_field_index is None:
         raise TelemetryParseError("missing HEATER_DUTY field")
 
-    sample_tokens = parts[10:heater_field_index]
+    # Everything between the fixed prefix (index 8) and HEATER_DUTY= is a
+    # sample temperature. Sample count is inferred — works for any N.
+    sample_tokens = parts[8:heater_field_index]
     sample_temps_c = [float(x) for x in sample_tokens]
 
     heater_values_text = parts[heater_field_index].split('=', 1)[1]
@@ -136,10 +139,7 @@ def parse_telemetry_csv(line: str) -> TelemetryPacket:
     phase = ""
     status = ""
     mode = ""
-    # Collect both old-style single STEPPER= and new-style STEPPERn=
-    # segments. Indexed entries win over the legacy unindexed segment if
-    # both are somehow present (shouldn't happen, but the behaviour is
-    # deterministic: new log schema always takes precedence).
+    sample_resistance_ohm: List[Optional[float]] = []
     legacy_stepper: Optional[StepperSnapshot] = None
     indexed_steppers: Dict[int, StepperSnapshot] = {}
     for token in parts[heater_field_index + 1 :]:
@@ -149,19 +149,32 @@ def parse_telemetry_csv(line: str) -> TelemetryPacket:
             mode = token.split('=', 1)[1]
         elif token.startswith("STATUS="):
             status = token.split('=', 1)[1]
+        elif token.startswith("RESISTANCE="):
+            # Rev-B.1: pipe-separated resistance values, one per sample. A
+            # literal '-' means the channel is unmeasured on this onboard.
+            raw = token.split('=', 1)[1]
+            if raw == "":
+                sample_resistance_ohm = []
+            else:
+                for piece in raw.split('|'):
+                    if piece == "" or piece == "-":
+                        sample_resistance_ohm.append(None)
+                    else:
+                        try:
+                            sample_resistance_ohm.append(float(piece))
+                        except ValueError as exc:
+                            raise TelemetryParseError(
+                                f"invalid RESISTANCE value {piece!r}: {exc}"
+                            ) from exc
         elif token.startswith("STEPPER="):
             legacy_stepper = _parse_stepper_segment(token.split('=', 1)[1])
         elif token.startswith("STEPPER"):
-            # STEPPER<digits>=...  — Rev-B dual-motor form. Anything after
-            # STEPPER up to the '=' is a non-negative integer motor id.
+            # STEPPER<digits>=...  — Rev-B dual-motor form.
             eq = token.find('=')
             if eq <= len("STEPPER"):
-                # Not a well-formed STEPPER<n>= segment; drop silently for
-                # forward-compat.
                 continue
             suffix = token[len("STEPPER"):eq]
             if not suffix.isdigit():
-                # Unknown variant (e.g. STEPPERX=...) — ignore.
                 continue
             motor_id = int(suffix)
             indexed_steppers[motor_id] = _parse_stepper_segment(token[eq + 1:])
@@ -169,8 +182,6 @@ def parse_telemetry_csv(line: str) -> TelemetryPacket:
     if not phase or not status:
         raise TelemetryParseError("missing PHASE or STATUS field")
 
-    # Build ordered snapshot list. Prefer indexed entries; otherwise fall
-    # back to the single legacy STEPPER= segment as motor_id=0.
     steppers_list: List[Dict] = []
     primary_snapshot: Optional[StepperSnapshot] = None
     if indexed_steppers:
@@ -190,11 +201,10 @@ def parse_telemetry_csv(line: str) -> TelemetryPacket:
         rtc_valid=rtc_valid,
         ambient_temp_c=ambient_temp_c,
         ambient_pressure_mbar=ambient_pressure_mbar,
-        ambient_humidity_pct=ambient_humidity_pct,
         uv=uv,
-        box_temp_c=box_temp_c,
         sample_temps_c=sample_temps_c,
         heater_duty=heater_duty,
+        sample_resistance_ohm=sample_resistance_ohm,
         phase=phase,
         status=status,
         mode=mode,
@@ -368,12 +378,10 @@ def parse_command_response(line: str) -> CommandResponse:
 # Each returns (ok, normalised_or_error). Used by GUI before enabling Send and
 # by CLI before wire-encoding. Single source of truth for bounds.
 
-def validate_heater_index(idx: int, count: int = 9) -> Tuple[bool, str]:
+def validate_heater_index(idx: int, count: int = 6) -> Tuple[bool, str]:
     """Validate a heater index.
 
-    Rev-B heater channels: 0..7 = sample heaters, 8 = electronics BOX
-    heater. Total count = 9. Existing call sites that passed ``count=10``
-    (legacy 9 samples + box) keep working because they override explicitly.
+    Rev-B.1 heater channels: 0..5 (six sample-bank heaters, no BOX).
     """
     if not isinstance(idx, int) or idx < 0 or idx >= count:
         return False, f"index must be in [0, {count - 1}]"
