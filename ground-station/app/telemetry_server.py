@@ -274,6 +274,20 @@ class TelemetryServer:
         buffer = ""
         first = not self.log_path.exists()
 
+        # Rev-B.1 CSV v5: adds `mode` + per-sample `sample_0..7` columns and
+        # per-motor `stepperN_*` columns so an offline analyst can answer "is
+        # HEATER_INHIBITED because motor 0 is moving?" from the CSV alone
+        # without re-parsing the raw frame (Agent C, 2026-04-17).
+        sample_cols = [f"sample_{i}" for i in range(8)]
+        heater_cols = [f"h{i}" for i in range(6)]
+        r_cols = [f"r{i}" for i in range(8)]
+        stepper_cols = []
+        for m in (0, 1):
+            for suffix in (
+                "position", "target", "hz", "microstep",
+                "enabled", "moving", "holding", "hold_s", "pulses",
+            ):
+                stepper_cols.append(f"stepper{m}_{suffix}")
         with self.log_path.open("a", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(
                 f,
@@ -286,15 +300,18 @@ class TelemetryServer:
                     "ambient_pressure_mbar",
                     "uv",
                     "sample_temps_c",
+                    *sample_cols,
                     "heater_duty",
-                    "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7",
+                    *heater_cols,
+                    *r_cols,
                     "phase",
+                    "mode",
                     "status",
+                    *stepper_cols,
                 ],
-                # Rev-B.1: CSV v4 — dropped humidity + box_temp_c, added
-                # r0..r7 resistance columns. `extrasaction='ignore'` lets
-                # us pass the full asdict() without it raising on the
-                # additional in-memory fields (`steppers`, `stepper`, …).
+                # `extrasaction='ignore'` lets us pass the full asdict()
+                # without it raising on the additional in-memory fields
+                # (`steppers`, `stepper`, …).
                 extrasaction="ignore",
             )
             if first:
@@ -357,8 +374,37 @@ class TelemetryServer:
                             print(f"[telemetry][evt-parse-error] {exc}: {line}")
                             continue
                         self._last_packet_time = time.time()
-                        self._append_pull_log(pull, line)
-                        ack_line = build_ack(pull.session_id, 0)
+                        # Rev-B.1 dedup fix (Agent C, 2026-04-17): track
+                        # EVT,PULL by (session, pull_id) so the same event
+                        # replayed from the onboard queue doesn't land in
+                        # the pulls CSV multiple times. Key is independent
+                        # of the telemetry-queue seq, which we don't see on
+                        # the wire.
+                        dup_key = (pull.session_id, int(pull.pull_id))
+                        with self._lock:
+                            seen_pulls = getattr(
+                                self, "_seen_pull_ids",
+                                None)
+                            if seen_pulls is None:
+                                seen_pulls = set()
+                                self._seen_pull_ids = seen_pulls
+                            is_dup_pull = dup_key in seen_pulls
+                            if not is_dup_pull:
+                                seen_pulls.add(dup_key)
+                        if not is_dup_pull:
+                            self._append_pull_log(pull, line)
+                        # ACK with a sentinel "infinity" seq so the
+                        # onboard's queue-drain ACK guard
+                        # (`ack.seq >= frame.seq`) is satisfied regardless
+                        # of the seq the EVT frame was enqueued with. The
+                        # EVT,PULL wire format does not carry its queue
+                        # seq, so we cannot echo it; but any value >= the
+                        # frame's seq causes the onboard to dequeue. Zero
+                        # (the previous implementation) failed that guard,
+                        # leaving EVT frames stuck and replayed forever.
+                        # The onboard's Acknowledge() path is idempotent
+                        # wrt higher-than-latest seqs. (Agent C, 2026-04-17)
+                        ack_line = build_ack(pull.session_id, 2**63 - 1)
                         try:
                             conn.sendall(ack_line.encode("utf-8"))
                         except OSError:
@@ -405,13 +451,56 @@ class TelemetryServer:
                     row = asdict(packet)
                     row["sample_temps_c"] = "|".join(f"{x:.2f}" for x in packet.sample_temps_c)
                     row["heater_duty"] = "|".join(f"{x:.3f}" for x in packet.heater_duty)
-                    # Rev-B.1: one resistance column per sample.
+                    # Rev-B.1: also emit one column per sample/heater so the
+                    # CSV is self-describing and easy to plot directly. Fills
+                    # a `-` placeholder when the wire frame is short so no
+                    # downstream column is blank in a well-formed packet.
+                    for i in range(8):
+                        if i < len(packet.sample_temps_c):
+                            row[f"sample_{i}"] = f"{packet.sample_temps_c[i]:.2f}"
+                        else:
+                            row[f"sample_{i}"] = "-"
+                    for i in range(6):
+                        if i < len(packet.heater_duty):
+                            row[f"h{i}"] = f"{packet.heater_duty[i]:.3f}"
+                        else:
+                            row[f"h{i}"] = "-"
+                    # Resistance: one column per sample. Unmeasured channels
+                    # (wire placeholder "-") map to `None` in the packet, and
+                    # render here as "-" so the column is never blank.
                     for i in range(8):
                         if i < len(packet.sample_resistance_ohm):
                             v = packet.sample_resistance_ohm[i]
-                            row[f"r{i}"] = "" if v is None else f"{v:.3f}"
+                            row[f"r{i}"] = "-" if v is None else f"{v:.3f}"
                         else:
-                            row[f"r{i}"] = ""
+                            row[f"r{i}"] = "-"
+                    # Per-motor stepper snapshot expansion. `steppers` is a
+                    # list of dicts ordered by motor id; we emit only the
+                    # slots the frame carries — missing motors render as "-".
+                    motor_snaps = {s.get("motor_id", i): s
+                                   for i, s in enumerate(packet.steppers)}
+                    for m in (0, 1):
+                        snap = motor_snaps.get(m)
+                        for key, suffix in (
+                            ("position", "position"),
+                            ("target", "target"),
+                            ("hz", "hz"),
+                            ("microstep", "microstep"),
+                            ("enabled", "enabled"),
+                            ("moving", "moving"),
+                            ("holding", "holding"),
+                            ("hold_s", "hold_s"),
+                            ("pulses", "pulses"),
+                        ):
+                            val = snap.get(key) if snap is not None else None
+                            if val is None:
+                                row[f"stepper{m}_{suffix}"] = "-"
+                            elif isinstance(val, bool):
+                                row[f"stepper{m}_{suffix}"] = "1" if val else "0"
+                            elif isinstance(val, float):
+                                row[f"stepper{m}_{suffix}"] = f"{val:.3f}"
+                            else:
+                                row[f"stepper{m}_{suffix}"] = str(val)
                     writer.writerow(row)
                     f.flush()
 
