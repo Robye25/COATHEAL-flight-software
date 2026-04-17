@@ -127,19 +127,46 @@ bool SystemController::Initialize(std::string* error) {
     drivers.emplace_back(std::make_unique<SimulatedStepperDriver>());
     drivers.emplace_back(std::make_unique<SimulatedStepperDriver>());
   } else {
-    // Motor 0: TMC2240 (SPI1 + STEP/DIR/EN on the HAT). Falls back to a
-    // plain GPIO driver until the TMC2240 SPI setup path is exercised on
-    // real hardware.
-    drivers.emplace_back(std::make_unique<GpioStepDirStepperDriver>(
-        config_.runtime.gpio_chip, config_.stepper.step_line,
-        config_.stepper.dir_line, config_.stepper.enable_line,
-        config_.stepper.invert_direction, config_.stepper.enable_active_low));
-    // Motor 1: A4988/DRV8825 plain STEP/DIR/EN. Pin mapping is TBD; uses the
-    // legacy stepper pins as a safe bench default until `motor1.*` lands.
-    drivers.emplace_back(std::make_unique<GpioStepDirStepperDriver>(
-        config_.runtime.gpio_chip, config_.stepper.step_line,
-        config_.stepper.dir_line, config_.stepper.enable_line,
-        config_.stepper.invert_direction, config_.stepper.enable_active_low));
+    // Rev B.1: both motors are driven by TMC2240 steppers on SPI1. Motor 0
+    // uses /dev/spidev1.0 (CE0), motor 1 uses /dev/spidev1.1 (CE1). The
+    // pulse scheduler still toggles STEP/DIR/EN via libgpiod, so the TMC
+    // driver only programs current/chopper registers. On SPI bring-up
+    // failure we log a loud warning and fall back to a plain STEP/DIR/EN
+    // driver so the tick loop keeps running for GS diagnostics (motor
+    // will run at the driver's power-on current, which is safer-low on
+    // the SilentStepStick-2240 modules we are flying).
+    auto build_tmc_or_fallback =
+        [&](const char* motor_label, const std::string& spi_device,
+            std::size_t cs_line) -> std::unique_ptr<StepperDriver> {
+      Tmc2240Config tcfg;
+      tcfg.spi_device = spi_device;
+      tcfg.cs_line = cs_line;
+      tcfg.step_line = config_.stepper.step_line;
+      tcfg.dir_line = config_.stepper.dir_line;
+      tcfg.enable_line = config_.stepper.enable_line;
+      tcfg.invert_direction = config_.stepper.invert_direction;
+      tcfg.enable_active_low = config_.stepper.enable_active_low;
+      tcfg.microstep = 4;  // Rev-B default; channel schedules the 5× rate.
+      tcfg.run_current_a_rms = 2.0;
+      tcfg.hold_current_frac = 0.30;
+      tcfg.stealth_chop = true;
+      auto tmc = std::make_unique<Tmc2240Driver>(tcfg);
+      if (tmc->healthy()) {
+        return tmc;
+      }
+      std::cerr << "[system] " << motor_label
+                << ": TMC2240 SPI bring-up on " << spi_device
+                << " failed; falling back to bare STEP/DIR/EN driver."
+                << " Motor will run without SPI current control." << '\n';
+      return std::make_unique<GpioStepDirStepperDriver>(
+          config_.runtime.gpio_chip, config_.stepper.step_line,
+          config_.stepper.dir_line, config_.stepper.enable_line,
+          config_.stepper.invert_direction, config_.stepper.enable_active_low);
+    };
+    drivers.emplace_back(build_tmc_or_fallback(
+        "motor0", "/dev/spidev1.0", /*cs_line=*/0));
+    drivers.emplace_back(build_tmc_or_fallback(
+        "motor1", "/dev/spidev1.1", /*cs_line=*/1));
   }
 
   stepper_ = std::make_unique<StepperController>(
