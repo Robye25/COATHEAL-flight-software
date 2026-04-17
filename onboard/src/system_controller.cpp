@@ -188,6 +188,16 @@ bool SystemController::Initialize(std::string* error) {
   stepper_ = std::make_unique<StepperController>(
       std::move(channel_cfgs), std::move(drivers), config_.bend);
 
+  // Routing fix (Agent C, 2026-04-17): StepperController owns its own
+  // MotionLock, and that is the one every StepperChannel actually takes on
+  // ArmPullCycle. The SystemController::motion_lock_ member was a parallel,
+  // never-acquired lock — so both the HeaterScheduler interlock and the
+  // EVT,PULL edge detector were silently no-ops in bench mode. Retarget
+  // them to the authoritative lock now that stepper_ exists.
+  MotionLock* const authoritative_lock = stepper_->motion_lock();
+  scheduler_.SetMotionLock(authoritative_lock);
+  active_motion_lock_ = authoritative_lock;
+
   // One PullState entry per channel for EVT,PULL edge detection in Run().
   pull_state_.resize(stepper_->channel_count());
 
@@ -418,9 +428,15 @@ int SystemController::Run() {
     // Rev B: emit EVT,PULL after each motor finishes a pull cycle. The Rev A
     // heating-cycle aggregator is retired with the +70 C activation ramp.
     //
-    // A pull starts when the channel first appears `moving` while the
-    // MotionLock reports that motor as holder. It completes on the falling
-    // edge of `moving` — that moment we emit the event.
+    // A pull starts when the MotionLock transitions to this motor (rising
+    // edge of the lock holder) and completes when the channel releases it
+    // again (kIdle at retract end). The earlier implementation gated on
+    // `moving==true`, which misses pulls whose outgoing-leg motion completes
+    // between two telemetry ticks — common at tick_hz=2 + 100 full-steps/s.
+    // Using the lock as the authoritative "pull in progress" signal is
+    // also tick-rate-independent and matches the heater-interlock contract
+    // (HeaterScheduler zeros duty while the lock is held; the pull-event
+    // emitter must bracket exactly the same window). (Agent C, 2026-04-17.)
     if (stepper_ && !record.steppers.empty()) {
       if (pull_state_.size() != record.steppers.size()) {
         pull_state_.resize(record.steppers.size());
@@ -428,14 +444,26 @@ int SystemController::Run() {
       for (std::size_t i = 0; i < record.steppers.size(); ++i) {
         PullState& ps = pull_state_[i];
         const StepperStatus& s = record.steppers[i];
-        const bool lock_held_now = (motion_lock_.holder() == static_cast<int>(i));
+        // Use the authoritative lock exposed by the StepperController (see
+        // Initialize() for the routing fix). Fall back to the local member
+        // so this still works in unit harnesses that do not construct the
+        // stepper.
+        MotionLock* const lock =
+            (active_motion_lock_ != nullptr) ? active_motion_lock_
+                                             : &motion_lock_;
+        const bool lock_held_now =
+            (lock->holder() == static_cast<int>(i));
 
-        if (!ps.was_moving && s.moving && lock_held_now) {
-          ps.was_moving = true;
+        if (!ps.lock_held && lock_held_now) {
+          // Rising edge: pull just started. Snapshot the reference position
+          // so `steps_moved` reports net travel during the whole cycle.
           ps.lock_held = true;
+          ps.was_moving = true;  // maintained for back-compat
           ps.start_ts = snapshot.timestamp_utc;
           ps.start_pos = s.position_steps;
-        } else if (ps.was_moving && !s.moving) {
+        } else if (ps.lock_held && !lock_held_now) {
+          // Falling edge: pull completed; motor released the lock in
+          // StepperChannel::Tick once the retract leg finished.
           HeatingPullEvent pev;
           pev.pull_id = next_pull_id_++;
           pev.motor_id = static_cast<int>(i);
@@ -460,8 +488,8 @@ int SystemController::Run() {
           // crack-formation decay step on this pull.
           sensor_manager_.NotePullCompleted(static_cast<int>(i));
 
-          ps.was_moving = false;
           ps.lock_held = false;
+          ps.was_moving = false;
         }
       }
     }
@@ -880,7 +908,17 @@ std::string SystemController::HandleCommandLine(const std::string& line) {
     case CommandType::kPullExecute: {
       if (!stepper_) return Nack(cmd_name, "stepper unavailable");
       std::string err;
-      if (!stepper_->ExecutePull(command.motor_id, &err)) return Nack(cmd_name, err);
+      // Routing fix (Agent C, 2026-04-17): use the non-blocking ArmPull
+      // path and let the main loop's Tick() drive the pull to completion.
+      // The previous `ExecutePull` helper pumped Tick() synchronously here,
+      // which meant that by the time we ACK'd, the channel was already
+      // back to `moving=false` — so the `was_moving && !moving` edge
+      // detector in the telemetry emitter (see further down in this file)
+      // never fired and EVT,PULL frames were never emitted. The MotionLock
+      // + heater interlock also barely had time to engage. With arm-only
+      // dispatch, the next tick sees `moving=true`, subsequent ticks hold
+      // HEATER_INHIBITED, and the falling edge publishes EVT,PULL.
+      if (!stepper_->ArmPull(command.motor_id, &err)) return Nack(cmd_name, err);
       return Ack(cmd_name, "pull executed");
     }
 

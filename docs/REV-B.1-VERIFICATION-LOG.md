@@ -258,7 +258,63 @@ Fixes applied (tight, no refactor):
 All 10 ctest tests pass post-fix.
 
 ### Agent C — Integration Tester
-_Filled in on completion._
+_Completed 2026-04-17 against Pi `169.254.10.10` baseline commit `d3208ec`.
+Bench-mode onboard + GS CLI (TCP 4010/5010 to avoid collision with Agent B)._
+
+**Results:**
+
+| Test | Result | Notes |
+|---|---|---|
+| T1 — DATA frame field population | **PASS** | 30 rows, all columns populated (incl. `mode`, `sample_0..7`, `h0..5`, `r0..7`, `stepperN_*`). Samples 6 & 7 render `-`. |
+| T2 — flight-safe command ACKs | **PASS** | 10/10 (`PING`, `STATUS`, `FORCE_START`, `FORCE_STOP`, `HEATERS_OFF`, `RESET_CTRL`, `SET_TICK_HZ 2/1`, `RADIO_SILENCE/RESUME`). |
+| T3 — stepper commands per motor | **PASS** | 14/14 across motors 0 and 1. |
+| T4 — PULL cycle + EVT,PULL emission | **PASS** | motor-0 samples `0|1|2|3`, motor-1 samples `4|5|6|7` landed in `ground_telemetry_pulls.csv`. |
+| T5 — HEATER_INHIBITED interlock | **PASS** | During a pull, every DATA tick carried `HEATER_INHIBITED` and all six heater duties were zero; heaters resumed after release. |
+| T6 — link loss + replay | **PASS** | 30-s GS outage, onboard queue replayed 144 rows over span 147 on restart (EVT-interleave gap ≤ 2). |
+| T7 — resistance decay | **PASS** | r0 95.00 → 81.45 Ω over 3 motor-0 pulls (expected 95·(0.95)³ ≈ 81.45). r4 decayed on motor-1 pulls; r6/r7 stayed `-`. |
+| T8 — GUI smoke | SKIP | no X11 forwarding from headless Windows SSH session. |
+
+**Bugs found and fixed (all on rev-b-integration / this worktree):**
+
+1. *GS CSV missing columns.* `ground-station/app/telemetry_server.py` header omitted
+   `mode`, `sample_0..7`, `h0..5`, and `stepperN_*` — `extrasaction='ignore'`
+   silently dropped them. Added explicit column set and row expansion; new
+   regression test `ground-station/tests/test_telemetry_server_csv.py`.
+2. *Samples 6 & 7 resistance not '-' on wire.* `onboard/src/sensor_manager.cpp`
+   seeded all 8 slots with 100 Ω so the serializer's `> 0.0` guard passed on
+   the two unmeasured channels. Added `kResistanceChannelCount=6` and zero
+   the trailing slots at construction; motor-1 decay stops at index 6.
+   Regression test: `tests/unit/test_sensor_manager_rev_b.cpp`.
+3. *PULL_EXECUTE blocked the command thread.* `SystemController::HandleCommand`
+   called `ExecutePull` (synchronous pump at 1 kHz for up to 60 s), so by the
+   time the ACK returned the channel was back to idle — the telemetry-tick
+   edge detector never fired. Switched to `ArmPull`; main-loop `Tick()` now
+   drives the pull asynchronously.
+4. *Wrong MotionLock wired to interlock + edge detector.* `SystemController`
+   owned its own `MotionLock motion_lock_`, but every `StepperChannel`
+   actually acquires the lock inside `StepperController`. The heater
+   interlock and `EVT,PULL` detector watched a lock nothing ever held.
+   Fix: `Initialize()` now repoints `scheduler_.SetMotionLock(...)` and
+   `active_motion_lock_` at `stepper_->motion_lock()`.
+5. *Pull-event edge detector missed fast pulls.* Rising edge required
+   `moving==true` in a sampled tick, but at `tick_hz=2.0` the outgoing leg
+   completes between samples. Switched to a lock-edge detector: rising when
+   this motor becomes the lock holder, falling when the lock is released.
+6. *EVT,PULL replayed forever.* GS ACK'd pull events with `seq=0`, which is
+   < the real queue seq, so the onboard rejected the ACK and left the frame
+   in the queue. Fixed by ACKing with a sentinel "infinity" seq and
+   deduplicating in the GS by `(session_id, pull_id)`.
+
+**Files changed:** `ground-station/app/telemetry_server.py`,
+`ground-station/tests/test_telemetry_server_csv.py` (new),
+`onboard/include/coatheal/sensor_manager.hpp`,
+`onboard/include/coatheal/system_controller.hpp`,
+`onboard/src/sensor_manager.cpp`, `onboard/src/system_controller.cpp`,
+`tests/CMakeLists.txt`, `tests/unit/test_sensor_manager_rev_b.cpp` (new).
+
+**Not in scope / left as-is:** the two pre-existing stepper ctest failures
+(`coatheal_stepper_tests`, `coatheal_stepper_rev_b_tests`) are Agent B's
+perf scope — both fail at baseline `d3208ec`, not regressions from this pass.
 
 ---
 

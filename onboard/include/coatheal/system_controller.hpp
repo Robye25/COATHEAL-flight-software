@@ -56,7 +56,12 @@ class SystemController {
   StateManager state_manager_;
   ThermalController thermal_controller_;
   // MotionLock must be declared BEFORE scheduler_ so the scheduler ctor can
-  // take its address (member-init order is declaration order).
+  // take its address (member-init order is declaration order). Note: this
+  // lock is ONLY used as a fallback for test harnesses that never construct
+  // the StepperController. In production, `active_motion_lock_` is
+  // repointed at `stepper_->motion_lock()` in Initialize() so the heater
+  // interlock and pull-event edge detector observe the same lock every
+  // StepperChannel actually acquires. (Agent C, 2026-04-17 routing fix.)
   MotionLock motion_lock_;
   HeaterScheduler scheduler_;
   StorageManager storage_manager_;
@@ -87,6 +92,10 @@ class SystemController {
   };
   std::vector<PullState> pull_state_;
   std::uint32_t next_pull_id_ = 1;
+
+  // Points at the MotionLock the stepper actually uses (see Initialize()
+  // for the routing rationale). nullptr until Initialize() runs.
+  MotionLock* active_motion_lock_ = nullptr;
 };
 
 }  // namespace coatheal

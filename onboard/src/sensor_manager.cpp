@@ -29,13 +29,27 @@ SensorManager::SensorManager(const OnboardConfig& config,
       // Init samples at the floor so the simulation cooldown drives PID
       // activation as soon as ambient pulls them below the hysteresis band.
       sample_temps_c_(kSampleCount, config.phase.sample_floor_c),
-      sample_resistance_ohm_(kSampleCount, kInitialResistanceOhm) {}
+      sample_resistance_ohm_(kSampleCount, kInitialResistanceOhm) {
+  // Rev B.1 canonical wire form: 8 sample columns, 6 measured resistance
+  // channels (two INA3221 chips × 3 channels). Samples 6 and 7 are pulled
+  // but have no INA3221 channel assigned, so they must serialize as the
+  // literal "-" placeholder. The telemetry layer writes "-" when the value
+  // is <= 0.0, so we zero those slots here (Agent C, 2026-04-17 bug fix).
+  for (std::size_t i = kResistanceChannelCount;
+       i < sample_resistance_ohm_.size(); ++i) {
+    sample_resistance_ohm_[i] = 0.0;
+  }
+}
 
 void SensorManager::NotePullCompleted(int motor_id) {
   // Rev B.1 simulation: a pull on motor 0 stresses samples 0..3, motor 1
   // stresses 4..7. Each pull knocks the resistance of all its samples
   // down by kResistanceDecayPerPull (multiplicative). The real instrument
   // will measure this directly on the INA3221; today it's synthetic.
+  //
+  // Samples 6 and 7 have no INA3221 channel (only 6 of 8 are wired), so the
+  // decay skips them — they stay at zero and continue to serialize as "-"
+  // on the wire regardless of how many pulls motor 1 executes.
   std::size_t start = 0;
   std::size_t end = 0;
   if (motor_id == 0) {
@@ -43,7 +57,7 @@ void SensorManager::NotePullCompleted(int motor_id) {
     end = 4;
   } else if (motor_id == 1) {
     start = 4;
-    end = kSampleCount;
+    end = kResistanceChannelCount;  // stops at 6; 6 and 7 stay unmeasured
   } else {
     return;
   }
