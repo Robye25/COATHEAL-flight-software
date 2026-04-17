@@ -225,7 +225,37 @@ Each agent reports into section 4 of this log.
   listen fd and breaks the loop, but a spurious EAGAIN burns CPU.
 
 ### Agent B — Performance & Realtime Reviewer
-_Filled in on completion._
+
+Measured on the Pi 4 (g++14 -O2 -g -DCOATHEAL_PERF_TRACE, 5-min bench each).
+Raw logs in `/tmp/coatheal_perf/` on the Pi; summary in `SUMMARY.txt`.
+
+Tick-loop breakdown (1 Hz, avg µs / p99 ≈1.5 ms, max ≈1.5 ms):
+overrides ~0, sensor_snapshot ~35, phase ~0, thermal ~1, scheduler ~4,
+pwm+stepper ~2, serialize ~100, storage_write ~110, queue+drain ~630,
+pull/LED/notify ~2. At 5 Hz: avg ~800 µs, p99 ~1 ms, rare 4.6 ms outlier.
+Enqueue-only: p99 265 µs (1 Hz) / 220 µs (5 Hz) — far under 50 ms.
+
+Pulse-thread jitter @ 400 µstep/s (simulated driver, cruise samples only):
+p99 jitter 350 µs, max 4.56 ms (one outlier) — PASS the 5 ms threshold.
+Flagged: `StepperChannel::PulseThreadBody` never clears `moving_` when the
+target is reached, so Snapshot().moving stays true in pulse-thread mode.
+Not a perf threshold miss; left for a follow-up correctness fix.
+
+Watchdog margin: worst tick observed 5.9 ms pre-fix, 1.5 ms post-fix →
+WatchdogSec=10 s gives >1700× margin, far above the required 3×.
+
+Fixes applied (tight, no refactor):
+- `heater_scheduler`: pre-reserved scratch vectors (`scratch_clamped_`,
+  `scratch_ranked_`, `scratch_scheduled_`) so `Schedule()` no longer heap-
+  allocs on steady state. Before: 3 vec allocs/tick. After: 0. Wall time
+  unchanged (~3 µs) — the threshold this fix satisfies is the per-tick-
+  allocation rule, not latency.
+- `system_controller`: `record.steppers.reserve(channel_count)` before the
+  two `push_back`s; eliminates the inner realloc. Also added the perf
+  instrumentation gated on `#ifdef COATHEAL_PERF_TRACE` so flight builds
+  are unaffected.
+
+All 10 ctest tests pass post-fix.
 
 ### Agent C — Integration Tester
 _Filled in on completion._

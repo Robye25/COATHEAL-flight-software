@@ -80,6 +80,13 @@ class HeaterScheduler {
   // transitions. Also feeds the heater_inhibited() / last_inhibited()
   // getters consumed by StatusFlags.
   bool last_inhibited_ = false;
+
+  // Pre-reserved scratch vectors so Schedule() no longer heap-allocates on
+  // the steady-state tick path. Grown lazily to `requested.size()` on the
+  // first call and then reused. Agent B perf fix.
+  std::vector<double> scratch_clamped_;
+  std::vector<std::pair<std::size_t, double>> scratch_ranked_;
+  std::vector<double> scratch_scheduled_;
 };
 
 }  // namespace coatheal
