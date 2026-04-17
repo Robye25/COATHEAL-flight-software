@@ -74,11 +74,12 @@ PyQtGraph-based scrolling plot. Each trace is a pre-created `PlotDataItem` (curv
 
 #### Heater Duties Panel (left dock)
 
-**Rev-B:** 9 `HeaterCell` widgets. Labels `H0–H7` (the 8 sample heaters) are
-colored from the `HEATER_COLORS` amber-orange palette; `BOX` (the electronics
-box heater, index 8) is colored cyan and sits on its own row spanning both
-columns. Each cell has a 0–100 % progress bar, a readout of `duty | temp`,
-and a `Set` / `Off` action row.
+**Rev B.1:** 6 `HeaterCell` widgets, labelled `H0–H5`, coloured from the
+`HEATER_COLORS` amber-orange palette. Each cell has a 0–100 % progress bar,
+a readout of `duty | temp`, and a `Set` / `Off` action row. There is **no
+BOX bar** (the electronics-box heater was removed at Rev B.1 — see
+[docs/CHANGELOG-RevB.md](CHANGELOG-RevB.md)). Samples 6 and 7 are pulled but
+unheated and so have no heater cell.
 
 #### Motor Dock (right dock, "Motors" tab)
 
@@ -102,28 +103,42 @@ Buttons for every command. Dangerous commands (`FORCE_STOP`, `HEATERS_OFF`, `RES
 
 #### Temperature Plot (center tab)
 
-Box temperature and all sample temperatures plotted over sequence number. One trace per channel, auto-colored.
+**Rev B.1:** 8 sample temperature traces (`S0..S7`) over sequence number. One
+trace per channel, auto-colored. There is no box-temperature trace (no box
+sensor at Rev B.1).
 
 #### Pressure Plot (center tab)
 
-Ambient pressure (mbar) over sequence number. Useful for observing ascent/float/descent transitions.
+Ambient pressure (mbar) from the MS5803-01BA over sequence number. Useful for
+observing ascent/float/descent transitions.
 
 #### Heater Duties Plot (center tab)
 
-All 10 heater duty cycles (0.0–1.0) as line traces over sequence number.
+**Rev B.1:** 6 heater duty-cycle traces (`H0..H5`, 0.0–1.0) over sequence
+number.
+
+#### Resistance Plot (center tab)
+
+**Rev B.1:** up to 8 sample-resistance traces (ohms) from the two INA3221
+chips, over sequence number. Samples 6 and 7 typically have no trace (no
+INA3221 channel assigned — the wire value is `-`). Step changes in these
+traces correspond to microcrack events and should line up with `EVT,PULL`
+rows in the Pull-events tab.
 
 #### Environment Plot (center tab)
 
-Ambient humidity (%) and UV × 100 over sequence number.
+**Rev B.1:** UV only. The humidity trace was removed because the MS5803-01BA
+ambient sensor has no humidity output.
 
 #### Values Panel (right, resizable)
 
-Latest value for every telemetry field, updated on each packet. **Rev-B**
-adds rows for 8 samples (S0–S7), a `MOTORS` section with per-motor state
-(M0 and M1 each surface pos/tgt, Hz · µstep, mode, src), and broken-out
-indicator rows for the new STATUS bits `RS485_OK/FAIL` and
-`HEATER_INHIBITED/HEATER_ACTIVE`. Status flags are color-coded green / red
-/ amber.
+Latest value for every telemetry field, updated on each packet. **Rev B.1**
+rows: 8 sample temperatures (S0–S7), 6 heater duties (H0–H5), 8 sample
+resistances (R0–R7, `-` for unmeasured), ambient T + P (no humidity, no box
+T), UV, a `MOTORS` section with per-motor state (M0 and M1 each surface
+pos/tgt, Hz · µstep, mode, src), and broken-out indicator rows for the
+STATUS bits `RS485_OK/FAIL`, `HEATER_INHIBITED/HEATER_ACTIVE`, and
+`RESISTANCE_OK/FAIL`. Status flags are colour-coded green / red / amber.
 
 #### Log Panel (bottom dock)
 
@@ -137,8 +152,8 @@ Five status widgets at the bottom edge:
 |---|---|
 | Phase | Current mission phase string, color-coded per phase |
 | SEQ | Latest sequence number |
-| Pressure | Ambient pressure in mbar |
-| Box Temp | Electronics box temperature in °C |
+| Pressure | Ambient pressure in mbar (MS5803-01BA) |
+| Samples | Mean sample temperature across the 6 heated samples, in °C (Rev B.1 replaces the Rev B `Box Temp` widget, which is gone with the box sensor) |
 | LINK | `LINK: OK` (green) / `LINK: FAIL` (red) / `LINK: —` (disconnected) |
 | Rate | Packet rate and age ("X.X s ago") |
 
@@ -162,26 +177,28 @@ Pure-Python wire protocol primitives. No I/O — only parsing and building.
 
 ### `TelemetryPacket` (dataclass)
 
-Holds all fields from a decoded DATA frame:
+Holds all fields from a decoded DATA frame. Rev B.1 drops `ambient_humidity_pct`
+and `box_temp_c` and adds `sample_resistance_ohm`. The parser continues to
+accept Rev A / Rev B frames — legacy fields are populated with sentinel
+values (`0.0`) for back-compat on log replay.
 
-| Field | Type |
-|---|---|
-| `session_id` | `str` |
-| `seq` | `int` |
-| `timestamp` | `str` (ISO-8601) |
-| `rtc_valid` | `int` (0 or 1) |
-| `ambient_temp_c` | `float` |
-| `ambient_pressure_mbar` | `float` |
-| `ambient_humidity_pct` | `float` |
-| `uv` | `float` |
-| `box_temp_c` | `float` |
-| `sample_temps_c` | `List[float]` |
-| `heater_duty` | `List[float]` |
-| `phase` | `str` |
-| `status` | `str` |
-| `mode` | `str` (Rev-B: populated from `MODE=` token) |
-| `steppers` | `List[Dict]` (Rev-B: 0, 1, or 2+ motor snapshots) |
-| `stepper` | `StepperSnapshot` or `None` (legacy; mirrors `steppers[0]`) |
+| Field | Type | Notes |
+|---|---|---|
+| `session_id` | `str` | |
+| `seq` | `int` | |
+| `timestamp` | `str` | ISO-8601 |
+| `rtc_valid` | `int` | 0 or 1 |
+| `ambient_temp_c` | `float` | MS5803-01BA |
+| `ambient_pressure_mbar` | `float` | MS5803-01BA |
+| `uv` | `float` | GUVA-S12SD via ADS1015 |
+| `sample_temps_c` | `List[float]` | 8 channels at Rev B.1 |
+| `heater_duty` | `List[float]` | 6 channels at Rev B.1 |
+| `sample_resistance_ohm` | `List[Optional[float]]` | **Rev B.1.** 8 entries; `None` (or `-` on the wire) where unmeasured |
+| `phase` | `str` | `BOOT` / `ASCENT` / `FLOAT` / `DESCENT` / `LANDED` / `STOPPED` |
+| `mode` | `str` | `STANDBY` / `RUN` / `SAFE` |
+| `status` | `str` | 13 pipe-separated tokens at Rev B.1 (adds `RESISTANCE_OK`) |
+| `steppers` | `List[Dict]` | Two motor snapshots |
+| `stepper` | `StepperSnapshot` or `None` | Legacy; mirrors `steppers[0]` |
 
 ### `parse_telemetry_csv(line) → TelemetryPacket`
 

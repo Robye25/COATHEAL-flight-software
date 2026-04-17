@@ -2,7 +2,49 @@
 
 **Date:** 2026-04-17
 **Branch:** `rev-b-integration`
-**Scope:** Flight-software changes landed after the Rev A +70 °C mission was retired in favour of a floor-only thermal policy and a dual-stepper mechanical-pull experiment.
+**Scope:** Flight-software changes landed after the Rev A +70 °C mission was retired in favour of a floor-only thermal policy and a dual-stepper mechanical-pull experiment. The Rev B.1 delta below narrows the design further: 6 heaters, no box, INA3221 science path.
+
+---
+
+## Rev B.1 delta (2026-04-17)
+
+Committed as `89393b7` on `rev-b-integration`. Summary of changes vs. Rev B:
+
+1. **Heaters: 6, not 9.** 5 W @ 24 V DC polyimide film heaters on samples 0–5. Samples 6 and 7 are pulled by motor 1 but **unheated** (PT100 read only). `hardware.heater_count=6`.
+2. **No electronics-box heater.** `hardware.electronics_heater_index` defaults to `SIZE_MAX` sentinel meaning "no box heater"; `deprioritize_electronics` is a no-op in that branch. `phase.box_target_c`, `pid.box_*`, and `heater.max_box_temp_c` were removed from the config schema.
+3. **No box temperature sensor.** The two 4-channel Modbus PT100 collectors give exactly 8 channels = 8 samples, with none left for a box probe. `SensorSnapshot::box_temp_c` is deleted.
+4. **No humidity.** MS5803-01BA replaces BME280; the new sensor has no humidity output. `SensorSnapshot::ambient_humidity_pct` is deleted.
+5. **Power budget:** nominal heater 5 W (was 10 W), max thermal 20 W (was 40 W). `power.max_active_heaters=4` unchanged. `power.energy_budget_wh=130.0` unchanged.
+6. **Stepper lead screw.** Both motors are now OMC 17E19S2504BSM5-150RS — integrated ball-screw, **1 mm lead**. One revolution = 200 full-steps = **1 mm linear** exactly (the previous "1–2 mm" wording is retired).
+7. **Both motors are TMC5160.** Motor 1 no longer uses A4988/DRV8825; both channels construct a `Tmc5160Driver` with distinct CS lines. `motor1.driver=a4988` strings in INI/docs are vestigial.
+8. **UV sensor: analog GUVA-S12SD through an ADS1015 (12-bit) ADC.** Not ADS1115, not BPW21.
+9. **Ambient env: MS5803-01BA** on I2C, range 10–1300 mbar (covers stratospheric float natively — no BME280 backup needed and BME280 is not carried).
+10. **INA3221 science role.** The two INA3221 chips are repurposed as the **sample-resistance instrument** used to detect microcrack formation during pulls. 2 chips × 3 channels = 6 of the 8 samples monitored. New `SensorSnapshot::sample_resistance_ohm` vector, new wire-format `RESISTANCE=` segment, new `RESISTANCE_OK`/`RESISTANCE_FAIL` STATUS bit driven from `Ina3221Adapter::healthy()`.
+11. **Wire-format change:** DATA frame drops humidity + box_temp, adds `RESISTANCE=` segment after `HEATER_DUTY=`, STATUS bitfield gains trailing `RESISTANCE_OK`. The legacy single-`STEPPER=` fallback in the onboard serializer is retired (Rev B.1 is a breaking wire change); `STEPPER0=…` / `STEPPER1=…` indexed form is always emitted. Downlink bandwidth test is re-baselined against the slimmer frame.
+
+### Files touched (see commit `89393b7`)
+
+- `config/onboard.example.ini`, `config/onboard.debug.ini` — removed box/humidity keys; heater_count=6; heater_nominal_w=5; max_thermal_w=20; new stepper/pull envelope comments.
+- `onboard/include/coatheal/config.hpp` — new defaults and `electronics_heater_index = SIZE_MAX` sentinel.
+- `onboard/include/coatheal/hal/ina3221_adapter.hpp` + `onboard/src/hal/ina3221_adapter.cpp` — new HAL stub.
+- `onboard/include/coatheal/sensor_manager.hpp` + `onboard/src/sensor_manager.cpp` — `sample_resistance_ohm`, `NotePullCompleted(motor_id)`, removal of `ambient_humidity_pct` / `box_temp_c`.
+- `onboard/include/coatheal/status_flags.hpp` + `onboard/src/status_flags.cpp` — new `resistance_ok` bit.
+- `onboard/include/coatheal/telemetry.hpp` + `onboard/src/telemetry.cpp` — `RESISTANCE=` segment, dropped humidity / box_temp columns, legacy `STEPPER=` serializer path retired.
+- `onboard/include/coatheal/thermal_controller.hpp` + `onboard/src/thermal_controller.cpp` — 6-channel floor controller, box PID deleted.
+- `onboard/src/heater_scheduler.cpp` — 5 W / 20 W defaults; box-index sentinel handling.
+- `onboard/src/system_controller.cpp` — `ina_` HAL instance wired to `SensorManager`, `record.status.resistance_ok = ina_.healthy()`, `NotePullCompleted` fed from the `EVT,PULL` edge.
+- `onboard/src/config.cpp` — schema changes; `SIZE_MAX` sentinel accepted.
+- `tests/unit/*` + `tests/downlink_bandwidth_test.cpp` — retuned to 6/8/5 W semantics and the slimmer frame.
+
+### Known follow-ups (open tickets)
+
+1. Real I2C driver for INA3221 (stub today).
+2. Real I2C drivers for MS5803-01BA, ADS1015, DS3231.
+3. `Rs485ModbusAdapter` + driver for the 2 × 4-ch PT100 collectors over USB-RS485.
+4. TMC5160 SPI configuration pass — falls back to plain `GpioStepDirStepperDriver` on non-simulated builds today.
+5. Wire `motor0.*` / `motor1.*` / `pull.*` INI keys through `config.cpp` into `StepperChannelConfig`. Today these keys are parsed-and-ignored and `SystemController::Initialize()` uses compiled-in defaults.
+6. GPIO mapping of the 6-channel MOSFET module.
+7. SED revision request (see [SED-Compliance-Report.md §5](SED-Compliance-Report.md)).
 
 ---
 
