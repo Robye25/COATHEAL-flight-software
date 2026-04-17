@@ -18,6 +18,8 @@ struct StatusFlags {
   bool rs485_ok = true;              // RS-485 bus healthy (stepper link, etc.)
   bool heater_inhibited = false;     // true while a pull cycle is active
                                      // (Agent D's scheduler sets this)
+  bool resistance_ok = true;         // Rev B.1: INA3221 sample-resistance
+                                     // instrument healthy (I2C 0x40/0x41)
 };
 
 std::string ToStatusBitfield(const StatusFlags& flags);

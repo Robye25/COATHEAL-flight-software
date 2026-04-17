@@ -207,15 +207,11 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
 
     } else if (key == "phase.sample_floor_c") {
       if (!parse_double(key, value, &config->phase.sample_floor_c, line_no)) return false;
-    } else if (key == "phase.box_target_c") {
-      if (!parse_double(key, value, &config->phase.box_target_c, line_no)) return false;
     } else if (key == "phase.uniformity_tolerance_c") {
       if (!parse_double(key, value, &config->phase.uniformity_tolerance_c, line_no)) return false;
 
     } else if (key == "heater.max_sample_temp_c") {
       if (!parse_double(key, value, &config->heater_safety.max_sample_temp_c, line_no)) return false;
-    } else if (key == "heater.max_box_temp_c") {
-      if (!parse_double(key, value, &config->heater_safety.max_box_temp_c, line_no)) return false;
 
     } else if (key == "sensor.ambient_temp_min_c") {
       if (!parse_double(key, value, &config->sensor_range.ambient_temp_min_c, line_no)) return false;
@@ -250,12 +246,6 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
       if (!parse_double(key, value, &config->pid.ki, line_no)) return false;
     } else if (key == "pid.kd") {
       if (!parse_double(key, value, &config->pid.kd, line_no)) return false;
-    } else if (key == "pid.box_kp") {
-      if (!parse_double(key, value, &config->pid.box_kp, line_no)) return false;
-    } else if (key == "pid.box_ki") {
-      if (!parse_double(key, value, &config->pid.box_ki, line_no)) return false;
-    } else if (key == "pid.box_kd") {
-      if (!parse_double(key, value, &config->pid.box_kd, line_no)) return false;
 
     } else if (key == "hardware.heater_count") {
       if (!parse_size_t(key, value, &config->hardware.heater_count, line_no)) return false;
@@ -336,7 +326,10 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
     return false;
   }
 
-  if (config->hardware.electronics_heater_index >= config->hardware.heater_count) {
+  // Rev B.1: SIZE_MAX is the sentinel for "no electronics-box heater". Any
+  // other value must still be a valid channel index.
+  if (config->hardware.electronics_heater_index != static_cast<std::size_t>(-1) &&
+      config->hardware.electronics_heater_index >= config->hardware.heater_count) {
     if (error != nullptr) {
       *error = "electronics heater index out of range";
     }

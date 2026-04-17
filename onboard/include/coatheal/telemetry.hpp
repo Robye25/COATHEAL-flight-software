@@ -16,10 +16,13 @@ struct SensorSnapshot {
   std::string timestamp_utc;
   double ambient_temp_c = 0.0;
   double ambient_pressure_mbar = 1013.25;
-  double ambient_humidity_pct = 0.0;
   double uv = 0.0;
-  double box_temp_c = 0.0;
   std::vector<double> sample_temps_c;
+  // Rev B.1: per-sample resistance (ohms) from the two INA3221 instruments.
+  // Same index space as `sample_temps_c`. Samples with no INA3221 channel
+  // (6 and 7 on the Rev B.1 BOM) are reported as 0.0 here and serialized
+  // as "-" in the wire frame.
+  std::vector<double> sample_resistance_ohm;
 };
 
 struct TelemetryRecord {
@@ -29,14 +32,8 @@ struct TelemetryRecord {
   SensorSnapshot sensors;
   std::vector<double> heater_duty;
   StatusFlags status;
-  // Legacy single-motor handle. `system_controller.cpp` still writes to this
-  // (it belongs to another agent's scope); when `steppers` is empty we fall
-  // back to serializing this one with the legacy `STEPPER=` segment, so
-  // pre-dual-motor callers keep working byte-for-byte.
-  StepperStatus stepper;
-  // Rev-B: vector of motor snapshots. `steppers[0]` = M0, `steppers[1]` = M1.
-  // When non-empty, each motor is emitted as a `STEPPER<n>=...` segment and
-  // the legacy `stepper` field is ignored.
+  // Rev B: vector of motor snapshots. `steppers[0]` = M0, `steppers[1]` = M1.
+  // Each motor is emitted as a `STEPPER<n>=...` segment on the wire.
   std::vector<StepperStatus> steppers;
 };
 

@@ -22,13 +22,16 @@ struct ControlOverrides {
   std::optional<PidGains> pid_override;
 };
 
-// Rev B floor controller:
+// Rev B.1 floor controller:
 //   * Per-sample PID setpoint = phase.sample_floor_c (shared across
 //     ASCENT/FLOAT/DESCENT).
 //   * PID is only active when sample < (floor - hysteresis); once sample
 //     reaches floor it switches off, duty goes to 0, and the integrator is
 //     frozen. kFloorHysteresisC defines the dead-band.
-//   * Box PID is unchanged (tracks phase.box_target_c continuously).
+//   * 6 heaters drive samples 0..5 1:1 (heater[i] <-> sample[i]). Samples 6
+//     and 7 are pulled but unheated — PT100 measured only.
+//   * No electronics-box heater. `electronics_heater_index == SIZE_MAX` is
+//     the sentinel; no box PID exists.
 //   * kBoot / kLanded / kStopped force zero output.
 class ThermalController {
  public:
@@ -38,6 +41,8 @@ class ThermalController {
 
   void Reset();
 
+  // Returns a duty vector of size heater_count (=6 in Rev B.1). Index i is
+  // the duty for heater i, which corresponds to sample[i].
   std::vector<double> ComputeRequestedDuty(MissionPhase phase,
                                            const SensorSnapshot& sensors,
                                            double dt_seconds,
@@ -49,7 +54,8 @@ class ThermalController {
   // even though the Rev B thermal goal is a floor, not a ceiling).
   bool overtemp_latched() const { return overtemp_latched_; }
 
-  // True while sample spread stayed within uniformity_tolerance_c this tick.
+  // True while sample spread across the controlled (heated) samples stayed
+  // within uniformity_tolerance_c this tick.
   bool uniformity_ok() const { return uniformity_ok_; }
 
   const std::vector<bool>& channel_latched() const { return channel_latched_; }
@@ -63,7 +69,6 @@ class ThermalController {
 
   OnboardConfig config_;
   std::vector<PidController> sample_pids_;
-  PidController box_pid_;
   std::vector<bool> channel_latched_;
   std::vector<bool> sample_heating_;
   bool overtemp_latched_ = false;

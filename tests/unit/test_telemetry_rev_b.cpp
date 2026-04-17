@@ -1,17 +1,15 @@
-// Rev-B telemetry serializer coverage.
+// Rev-B.1 telemetry serializer coverage.
 //
 // Exercises `SerializeTelemetryDataFrame` + `SerializeTelemetryPullEventFrame`
-// against the wire contract documented in `docs/protocol.md`:
+// against the wire contract:
 //
-//   * 8 sample_i columns, 9 HEATER_DUTY= values (8 sample + 1 BOX);
-//   * legacy single-STEPPER path when `record.steppers` is empty;
+//   * 8 sample_i columns, heater_count (=6) HEATER_DUTY= values;
+//   * no humidity column, no box_temp column;
+//   * RESISTANCE= carries 8 pipe-separated values; unmeasured samples "-";
 //   * dual STEPPER0=/STEPPER1= path when `record.steppers` is populated;
-//   * STATUS bitfield includes the new RS485 + HEATER_{INHIBITED,ACTIVE}
-//     suffixes;
+//   * STATUS bitfield includes RS485, HEATER_{INHIBITED,ACTIVE}, and the
+//     new RESISTANCE_{OK,FAIL} suffix;
 //   * EVT,PULL frame round-trips with both populated and empty samples.
-//
-// Kept in its own translation unit so `tests/unit/test_suite.cpp` is not
-// touched (that file is owned by another agent).
 
 #include <cassert>
 #include <cstdint>
@@ -32,17 +30,19 @@ TelemetryRecord MakeBaseRecord() {
   r.sensors.timestamp_utc = "2026-04-16T12:00:00Z";
   r.sensors.ambient_temp_c = -10.23;
   r.sensors.ambient_pressure_mbar = 140.12;
-  r.sensors.ambient_humidity_pct = 12.4;
   r.sensors.uv = 0.00012;
-  r.sensors.box_temp_c = 3.10;
-  // Rev-B: 8 sample temps.
+  // Rev-B.1: 8 sample temps, 6 heater duties.
   r.sensors.sample_temps_c = {5.1, 5.2, 5.0, 5.3, 5.1, 5.2, 5.0, 5.3};
-  // Rev-B: 9 heater duties (8 sample + BOX).
-  r.heater_duty = {0.25, 0.0, 0.25, 0.0, 0.0, 0.0, 0.0, 0.0, 0.05};
+  // Rev-B.1: sample_resistance_ohm has 8 entries; last two are 0.0 so they
+  // serialize as "-" (samples 6 and 7 are unheated and have no INA3221
+  // channel assigned).
+  r.sensors.sample_resistance_ohm = {100.0, 99.0, 98.5, 98.0, 97.5, 97.0, 0.0, 0.0};
+  r.heater_duty = {0.25, 0.0, 0.25, 0.0, 0.0, 0.0};
   // Default flags are already mostly `true`; make sure the Rev-B additions
   // are at their default so the wire bit count is exercised.
   r.status.rs485_ok = true;
   r.status.heater_inhibited = false;
+  r.status.resistance_ok = true;
   return r;
 }
 
@@ -50,25 +50,36 @@ bool Contains(const std::string& hay, const std::string& needle) {
   return hay.find(needle) != std::string::npos;
 }
 
-void TestLegacySingleStepperStillWorks() {
+void TestDataFrameLacksHumidityAndBoxTemp() {
   TelemetryRecord r = MakeBaseRecord();
-  r.stepper.position_steps = 100;
-  r.stepper.target_steps = 200;
-  r.stepper.step_hz = 400.0;
-  r.stepper.microstep = 16;
-  r.stepper.enabled = true;
-  r.stepper.moving = true;
-  r.stepper.last_source = "cmd:MOVE";
-  // Do NOT populate `r.steppers` — serializer must emit legacy STEPPER=.
+  StepperStatus m0;
+  m0.position_steps = 10;
+  r.steppers = {m0};
   const std::string line = SerializeTelemetryDataFrame(r, "sess-b");
-  assert(Contains(line, ",STEPPER=pos:100|tgt:200|hz:400"));
-  assert(!Contains(line, ",STEPPER0=")); // no indexed form
-  assert(!Contains(line, ",STEPPER1="));
-  // Heater count is 9 in the wire form.
-  assert(Contains(line, "HEATER_DUTY=0.250|0.000|0.250|0.000|0.000|0.000|0.000|0.000|0.050"));
-  // STATUS contains the Rev-B bits.
-  assert(Contains(line, "RS485_OK"));
-  assert(Contains(line, "HEATER_ACTIVE"));
+  // No humidity, no box_temp columns anywhere.
+  // The pre-sample fields are now: rtc_valid,ambient_temp,pressure,uv
+  // followed immediately by the 8 sample columns.
+  // Quick structural check: the 5th through 8th comma-delimited fields
+  // should be the four non-sample scalar fields (ts/rtc/temp/pressure/uv).
+  // We count commas up to the HEATER_DUTY marker.
+  // Count commas before HEATER_DUTY= token.
+  const std::size_t h = line.find("HEATER_DUTY=");
+  assert(h != std::string::npos);
+  std::size_t commas_before = 0;
+  for (std::size_t i = 0; i < h; ++i) if (line[i] == ',') ++commas_before;
+  // Expected leading commas up to HEATER_DUTY=:
+  //   DATA<1>sess-b<2>seq<3>ts<4>rtc<5>t<6>p<7>uv<8..15>sample_0..7<16>HEATER_DUTY=
+  // That is 16 commas total *including* the leading one before HEATER_DUTY.
+  assert(commas_before == 16);
+}
+
+void TestResistanceColumn() {
+  TelemetryRecord r = MakeBaseRecord();
+  StepperStatus m0;
+  r.steppers = {m0};
+  const std::string line = SerializeTelemetryDataFrame(r, "sess-b");
+  // Six measured values (100..97) plus two "-" placeholders.
+  assert(Contains(line, "RESISTANCE=100.000|99.000|98.500|98.000|97.500|97.000|-|-"));
 }
 
 void TestDualStepperEmitsIndexedSegments() {
@@ -88,13 +99,22 @@ void TestDualStepperEmitsIndexedSegments() {
   const std::string line = SerializeTelemetryDataFrame(r, "sess-b");
   assert(Contains(line, ",STEPPER0=pos:100|tgt:200"));
   assert(Contains(line, ",STEPPER1=pos:-50|tgt:-50"));
-  assert(!Contains(line, ",STEPPER=pos:")); // unindexed form suppressed
   assert(Contains(line, "HEATER_INHIBITED"));
-  // Sample count via comma count: 10 leading fixed columns + 8 samples
-  // + HEATER_DUTY + PHASE + MODE + STATUS + STEPPER0 + STEPPER1 = 23 commas.
-  std::size_t commas = 0;
-  for (char c : line) if (c == ',') ++commas;
-  assert(commas == 23);
+  // Heater-duty count should be 6 in the wire form.
+  assert(Contains(line, "HEATER_DUTY=0.250|0.000|0.250|0.000|0.000|0.000"));
+  assert(Contains(line, "RS485_OK"));
+  assert(Contains(line, "RESISTANCE_OK"));
+}
+
+void TestResistanceFailStatus() {
+  TelemetryRecord r = MakeBaseRecord();
+  r.status.resistance_ok = false;
+  // With the instrument down, the simulator/controller would have zeroed
+  // the resistance vector; test the wire form.
+  r.sensors.sample_resistance_ohm.assign(8, 0.0);
+  const std::string line = SerializeTelemetryDataFrame(r, "sess-b");
+  assert(Contains(line, "RESISTANCE_FAIL"));
+  assert(Contains(line, "RESISTANCE=-|-|-|-|-|-|-|-"));
 }
 
 void TestPullEventFrameSerialization() {
@@ -124,8 +144,10 @@ void TestPullEventEmptySamplesRendersDash() {
 }  // namespace
 
 int main() {
-  TestLegacySingleStepperStillWorks();
+  TestDataFrameLacksHumidityAndBoxTemp();
+  TestResistanceColumn();
   TestDualStepperEmitsIndexedSegments();
+  TestResistanceFailStatus();
   TestPullEventFrameSerialization();
   TestPullEventEmptySamplesRendersDash();
   return 0;

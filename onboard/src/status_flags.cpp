@@ -17,7 +17,8 @@ std::string ToStatusBitfield(const StatusFlags& flags) {
       << (flags.overtemp_ok ? "OVERTEMP_OK" : "OVERTEMP_FAIL") << '|'
       << (flags.energy_ok ? "ENERGY_OK" : "ENERGY_FAIL") << '|'
       << (flags.rs485_ok ? "RS485_OK" : "RS485_FAIL") << '|'
-      << (flags.heater_inhibited ? "HEATER_INHIBITED" : "HEATER_ACTIVE");
+      << (flags.heater_inhibited ? "HEATER_INHIBITED" : "HEATER_ACTIVE") << '|'
+      << (flags.resistance_ok ? "RESISTANCE_OK" : "RESISTANCE_FAIL");
   return oss.str();
 }
 

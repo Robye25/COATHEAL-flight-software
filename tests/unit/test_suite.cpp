@@ -36,13 +36,12 @@ void TestPidBoundsAndAntiWindup() {
 void TestHeaterSchedulerCap() {
   coatheal::PowerConfig power;
   power.max_active_heaters = 4;
-  power.heater_nominal_w = 10.0;
-  power.max_thermal_w = 40.0;
+  power.heater_nominal_w = 5.0;
+  power.max_thermal_w = 20.0;
 
-  // Rev B: 8 sample heaters + 1 electronics BOX = 9 channels; electronics
-  // heater lives at index 8.
-  coatheal::HeaterScheduler scheduler(power, 8);
-  std::vector<double> requested(9, 1.0);
+  // Rev B.1: 6 sample heaters, no box heater. Use SIZE_MAX sentinel.
+  coatheal::HeaterScheduler scheduler(power, static_cast<std::size_t>(-1));
+  std::vector<double> requested(6, 1.0);
 
   const std::vector<double> scheduled = scheduler.Schedule(requested, true);
   int active = 0;
@@ -55,7 +54,7 @@ void TestHeaterSchedulerCap() {
   }
 
   assert(active <= 4);
-  assert(power_sum <= 40.0 + 1e-6);
+  assert(power_sum <= 20.0 + 1e-6);
 }
 
 void TestCommandParser() {
@@ -88,16 +87,16 @@ void TestHeaterSchedulerEnergyBudget() {
   // (BEXUS User Manual §5.2 — 150 Wh per-team allocation).
   coatheal::PowerConfig power;
   power.max_active_heaters = 4;
-  power.heater_nominal_w = 10.0;
-  power.max_thermal_w = 40.0;
-  power.energy_budget_wh = 0.05;  // tiny budget so the test runs fast: 0.05 Wh
+  power.heater_nominal_w = 5.0;
+  power.max_thermal_w = 20.0;
+  power.energy_budget_wh = 0.02;  // tiny budget so the test runs fast: 0.02 Wh
 
-  // Rev B: 9 channels (8 samples + 1 BOX).
-  coatheal::HeaterScheduler scheduler(power, 8);
-  std::vector<double> requested(9, 1.0);
+  // Rev B.1: 6 channels (6 heated samples, no box heater).
+  coatheal::HeaterScheduler scheduler(power, static_cast<std::size_t>(-1));
+  std::vector<double> requested(6, 1.0);
 
-  // 40 W * dt / 3600 — at dt=1 s we burn 40/3600 ≈ 0.0111 Wh per tick.
-  // After 5 ticks we should hit 0.0556 Wh, exceeding the 0.05 Wh budget.
+  // 20 W * dt / 3600 — at dt=1 s we burn 20/3600 ≈ 0.00556 Wh per tick.
+  // After 4 ticks we should hit 0.0222 Wh, exceeding the 0.02 Wh budget.
   bool latched = false;
   for (int tick = 0; tick < 10; ++tick) {
     auto out = scheduler.Schedule(requested, true, 1.0);
@@ -123,7 +122,7 @@ void TestHeaterSchedulerEnergyBudget() {
 
   // Budget disabled (== 0) should never latch even after many ticks.
   power.energy_budget_wh = 0.0;
-  coatheal::HeaterScheduler unbounded(power, 8);
+  coatheal::HeaterScheduler unbounded(power, static_cast<std::size_t>(-1));
   for (int tick = 0; tick < 100; ++tick) {
     unbounded.Schedule(requested, true, 1.0);
     assert(!unbounded.is_budget_exhausted());
@@ -138,11 +137,11 @@ void TestVacuumRegime() {
   config.transition.ascent_to_float_mbar = 140.0;
   config.transition.float_to_descent_mbar = 300.0;
   config.transition.descent_to_landed_mbar = 800.0;
-  config.hardware.heater_count = 9;
-  config.hardware.electronics_heater_index = 8;
+  config.hardware.heater_count = 6;
+  config.hardware.electronics_heater_index = static_cast<std::size_t>(-1);
 
   coatheal::SensorManager sensors(config, nullptr, nullptr, nullptr);
-  std::vector<double> heater_duty(9, 0.0);
+  std::vector<double> heater_duty(6, 0.0);
 
   // Step the simulator forward at 1 Hz for 20 minutes — long enough for
   // pressure to descend below the 140 mbar ascent->float threshold and reach
@@ -182,15 +181,15 @@ void TestTelemetrySerializer() {
   record.sensors.rtc_valid = true;
   record.sensors.ambient_temp_c = -40.0;
   record.sensors.ambient_pressure_mbar = 120.0;
-  record.sensors.ambient_humidity_pct = 15.0;
   record.sensors.uv = 1.2;
-  record.sensors.box_temp_c = 5.5;
   record.sensors.sample_temps_c = {7.0, 6.5, 7.2};
+  record.sensors.sample_resistance_ohm = {100.0, 99.5, 0.0};
   record.heater_duty = {0.1, 0.2, 0.3};
 
   const std::string frame = coatheal::SerializeTelemetryDataFrame(record, "session-abc");
   assert(frame.rfind("DATA,session-abc,42,", 0) == 0);
   assert(frame.find("HEATER_DUTY=") != std::string::npos);
+  assert(frame.find("RESISTANCE=") != std::string::npos);
   assert(frame.find("STATUS=") != std::string::npos);
 }
 
@@ -257,27 +256,22 @@ void TestConfigParsesReliabilityFields() {
   out << "storage.queue_dir=logs/q\n";
   out << "storage.queue_retention_hours=72\n";
   out << "storage.queue_max_bytes=1024\n";
-  // Rev B phase keys: floor-only thermal policy.
+  // Rev B.1 phase keys: floor-only thermal policy (no box_target_c).
   out << "phase.sample_floor_c=5\n";
-  out << "phase.box_target_c=0\n";
   out << "phase.uniformity_tolerance_c=2\n";
   out << "transition.ascent_to_float_mbar=100\n";
   out << "transition.float_to_descent_mbar=300\n";
   out << "transition.descent_to_landed_mbar=800\n";
   out << "power.max_active_heaters=4\n";
-  out << "power.max_thermal_w=40\n";
+  out << "power.max_thermal_w=20\n";
   out << "power.max_system_w=48.23\n";
-  out << "power.heater_nominal_w=10\n";
+  out << "power.heater_nominal_w=5\n";
   out << "power.energy_budget_wh=130.0\n";
   out << "pid.kp=0.2\n";
   out << "pid.ki=0.02\n";
   out << "pid.kd=0.03\n";
-  out << "pid.box_kp=0.15\n";
-  out << "pid.box_ki=0.01\n";
-  out << "pid.box_kd=0.02\n";
-  // Rev B hardware: 9 heaters (8 samples + BOX at idx 8).
-  out << "hardware.heater_count=9\n";
-  out << "hardware.electronics_heater_index=8\n";
+  // Rev B.1 hardware: 6 heaters, no box heater (default SIZE_MAX sentinel).
+  out << "hardware.heater_count=6\n";
   out.close();
 
   coatheal::OnboardConfig cfg;
@@ -287,8 +281,10 @@ void TestConfigParsesReliabilityFields() {
   assert(cfg.storage.queue_max_bytes == 1024U);
   assert(!cfg.runtime.use_simulated_pwm);
   assert(std::fabs(cfg.power.energy_budget_wh - 130.0) < 1e-9);
-  assert(cfg.hardware.heater_count == 9U);
-  assert(cfg.hardware.electronics_heater_index == 8U);
+  assert(cfg.hardware.heater_count == 6U);
+  assert(cfg.hardware.electronics_heater_index == static_cast<std::size_t>(-1));
+  assert(std::fabs(cfg.power.heater_nominal_w - 5.0) < 1e-9);
+  assert(std::fabs(cfg.power.max_thermal_w - 20.0) < 1e-9);
 
   std::error_code ec;
   std::filesystem::remove(cfg_path, ec);

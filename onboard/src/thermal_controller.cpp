@@ -8,15 +8,10 @@ namespace coatheal {
 
 ThermalController::ThermalController(const OnboardConfig& config)
     : config_(config),
-      box_pid_({config.pid.box_kp, config.pid.box_ki, config.pid.box_kd},
-               0.0, 1.0, -10.0, 10.0),
       channel_latched_(config.hardware.heater_count, false),
       sample_heating_(config.hardware.heater_count, false) {
-  const std::size_t samples = config_.hardware.heater_count > 0
-                                  ? config_.hardware.heater_count - 1
-                                  : 0;
-  sample_pids_.reserve(samples);
-  for (std::size_t i = 0; i < samples; ++i) {
+  sample_pids_.reserve(config_.hardware.heater_count);
+  for (std::size_t i = 0; i < config_.hardware.heater_count; ++i) {
     sample_pids_.emplace_back(PidGains{config.pid.kp, config.pid.ki, config.pid.kd},
                               0.0, 1.0, -10.0, 10.0);
   }
@@ -26,7 +21,6 @@ void ThermalController::Reset() {
   for (auto& pid : sample_pids_) {
     pid.Reset();
   }
-  box_pid_.Reset();
   std::fill(channel_latched_.begin(), channel_latched_.end(), false);
   std::fill(sample_heating_.begin(), sample_heating_.end(), false);
   overtemp_latched_ = false;
@@ -67,29 +61,29 @@ std::vector<double> ThermalController::ComputeRequestedDuty(
   }
   std::vector<double> duty(heater_count, 0.0);
 
-  // Per-channel over-temp latch (defense-in-depth; Rev B is a floor
-  // controller but we still cut off any channel that pegs the RTD).
-  const std::size_t elec_idx = config_.hardware.electronics_heater_index;
-  for (std::size_t i = 0; i < sensors.sample_temps_c.size() && i < heater_count; ++i) {
-    if (i == elec_idx) continue;
-    if (sensors.sample_temps_c[i] > config_.heater_safety.max_sample_temp_c) {
+  // Per-channel over-temp latch (defense-in-depth; Rev B.1 is a floor
+  // controller but we still cut off any heated channel that pegs the RTD).
+  for (std::size_t i = 0; i < heater_count; ++i) {
+    if (i < sensors.sample_temps_c.size() &&
+        sensors.sample_temps_c[i] > config_.heater_safety.max_sample_temp_c) {
       channel_latched_[i] = true;
     }
-  }
-  if (elec_idx < heater_count &&
-      sensors.box_temp_c > config_.heater_safety.max_box_temp_c) {
-    channel_latched_[elec_idx] = true;
   }
   overtemp_latched_ = std::any_of(channel_latched_.begin(), channel_latched_.end(),
                                   [](bool v) { return v; });
 
   // Uniformity monitor: flag spread > tolerance during any heating phase.
+  // Rev B.1: only the 6 heated samples (index < heater_count) participate.
   uniformity_ok_ = true;
-  if (ShouldHeatPhase(phase) && !sensors.sample_temps_c.empty()) {
-    const auto [lo, hi] = std::minmax_element(sensors.sample_temps_c.begin(),
-                                              sensors.sample_temps_c.end());
-    if ((*hi - *lo) > config_.phase.uniformity_tolerance_c) {
-      uniformity_ok_ = false;
+  if (ShouldHeatPhase(phase) && !sensors.sample_temps_c.empty() && heater_count > 0) {
+    const std::size_t end = std::min(heater_count, sensors.sample_temps_c.size());
+    if (end > 0) {
+      const auto begin_it = sensors.sample_temps_c.begin();
+      const auto end_it = begin_it + static_cast<std::ptrdiff_t>(end);
+      const auto [lo, hi] = std::minmax_element(begin_it, end_it);
+      if ((*hi - *lo) > config_.phase.uniformity_tolerance_c) {
+        uniformity_ok_ = false;
+      }
     }
   }
 
@@ -105,9 +99,8 @@ std::vector<double> ThermalController::ComputeRequestedDuty(
   // Per-sample floor PID with hysteresis. The PID output is only applied
   // (and the integrator only accumulates) while the sample is below the
   // on_threshold; once it reaches off_threshold we freeze the controller.
+  // Rev B.1: heater[i] drives sample[i]; there is no box heater slot.
   for (std::size_t i = 0; i < sample_pids_.size() && i < heater_count; ++i) {
-    // Skip the electronics heater slot (samples occupy [0, elec_idx)).
-    if (i == elec_idx) continue;
     const double measured = (i < sensors.sample_temps_c.size())
                                 ? sensors.sample_temps_c[i]
                                 : floor_c;  // no data -> assume at floor
@@ -130,12 +123,6 @@ std::vector<double> ThermalController::ComputeRequestedDuty(
     } else {
       duty[i] = 0.0;
     }
-  }
-
-  // Box PID is unchanged — continuously tracks box_target_c.
-  if (elec_idx < heater_count) {
-    duty[elec_idx] = box_pid_.Update(config_.phase.box_target_c,
-                                     sensors.box_temp_c, dt_seconds);
   }
 
   if (overrides.all_heaters_override.has_value()) {

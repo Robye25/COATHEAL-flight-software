@@ -50,7 +50,7 @@ bool ParseIndex(const std::string& text, std::size_t* out) {
 SystemController::SystemController(OnboardConfig config)
     : config_(std::move(config)),
       command_server_(config_.comms.command_port),
-      sensor_manager_(config_, &spi_, &i2c_, &rtc_),
+      sensor_manager_(config_, &spi_, &i2c_, &rtc_, &ina_),
       state_manager_(config_),
       thermal_controller_(config_),
       scheduler_(config_.power, config_.hardware.electronics_heater_index,
@@ -254,10 +254,10 @@ int SystemController::Run() {
     record.status.uniformity_ok = thermal_controller_.uniformity_ok();
     record.status.energy_ok = !scheduler_.is_budget_exhausted();
     record.status.heater_inhibited = scheduler_.heater_inhibited();
+    record.status.resistance_ok = ina_.healthy();
     if (stepper_) {
       // Rev B: one snapshot per channel drives the STEPPER0=/STEPPER1=
-      // telemetry segments. Legacy `record.stepper` is left default — the
-      // serializer prefers `steppers` when non-empty.
+      // telemetry segments.
       record.steppers.clear();
       for (std::size_t i = 0; i < stepper_->channel_count(); ++i) {
         record.steppers.push_back(stepper_->Snapshot(static_cast<int>(i)));
@@ -324,6 +324,10 @@ int SystemController::Run() {
           evt_frame.frame = evt_line;
           std::string evt_error;
           telemetry_queue_.Enqueue(evt_frame, &evt_error);
+
+          // Rev B.1: feed the resistance simulator so the plotter sees the
+          // crack-formation decay step on this pull.
+          sensor_manager_.NotePullCompleted(static_cast<int>(i));
 
           ps.was_moving = false;
           ps.lock_held = false;
