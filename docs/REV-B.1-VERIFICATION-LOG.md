@@ -168,7 +168,61 @@ Each agent reports into section 4 of this log.
 ## 4. Agent reports
 
 ### Agent A — Correctness Auditor
-_Filled in on completion._
+**Status:** DONE 2026-04-17. Branch: `rev-b-integration`.
+
+**Scope delivered.**
+1. **Real TMC2240 SPI writes.** `onboard/src/tmc2240_driver.cpp` now issues the
+   5-byte datagram `[addr|0x80][b3..b0]` via `SPI_IOC_MESSAGE(1)` against
+   `/dev/spidev1.x` in SPI mode 3 (CPOL=1/CPHA=1), 8 bits/word, 1 MHz. fd is
+   opened in the ctor and released in the dtor (RAII), with
+   non-copy/non-move enforced. Errors are logged to stderr, never thrown —
+   `healthy()` stays `false` and the caller falls back. Non-Linux hosts
+   (`__has_include(<linux/spi/spidev.h>)` guard) still compile with the SPI
+   path stubbed, so CI stays green.
+2. **SystemController wiring.** `Initialize()` now constructs a
+   `Tmc2240Driver` per motor (spidev1.0 / spidev1.1) on non-simulated builds.
+   If SPI bring-up fails, a loud `[system]` warning is logged and a plain
+   `GpioStepDirStepperDriver` is swapped in so the tick loop keeps running
+   for GS diagnostics.
+3. **Static fix (high severity).** `StepperChannel::ArmPullCycle` read
+   `enabled_` without holding `mu_` — TOCTOU against `SetEnabled`. Now
+   wrapped in a lock.
+
+**Pi build & test.** `cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake
+--build build --parallel 3` succeeded (EXIT=0) on `coatheal@169.254.10.10`
+(g++ 14.2.0, cmake 3.31.6). `ctest --output-on-failure` reports
+**10/10 passed, 0 failed** (0.17 s wall). Matrix:
+
+| # | Test | Result |
+|---|------|--------|
+| 1 | coatheal_unit_tests | PASS |
+| 2 | coatheal_state_machine_tests | PASS |
+| 3 | coatheal_safety_tests | PASS |
+| 4 | coatheal_downlink_bandwidth | PASS |
+| 5 | coatheal_status_led_test | PASS |
+| 6 | coatheal_stepper_tests | PASS |
+| 7 | coatheal_phase_rev_b_tests | PASS |
+| 8 | coatheal_safety_rev_b_tests | PASS |
+| 9 | coatheal_stepper_rev_b_tests | PASS |
+| 10 | coatheal_telemetry_rev_b_tests | PASS |
+
+**Remaining static-review findings (non-blocking).**
+- **HIGH — fixed**: TOCTOU on `StepperChannel::enabled_` in `ArmPullCycle`
+  (`onboard/src/stepper_channel.cpp:355`). Fixed inline.
+- **MED**: `HeaterScheduler::Schedule` allocates 3–4 `std::vector<double>`
+  per tick in the hot path (`onboard/src/heater_scheduler.cpp:48,59,62,73,88`).
+  Move to pre-allocated members.
+- **MED**: `StepperChannel::SetMicrostep` rescales `position_`/`target_` via
+  `int64 * double` then `llround`; loses precision at large positions
+  (`onboard/src/stepper_channel.cpp:332-334`). Rarely hit in flight, but
+  should scale in integer math.
+- **LOW**: `TelemetryClient::SendFrameAwaitAck` uses a `thread_local`
+  back-off counter that never resets on successful send
+  (`telemetry_client.cpp:576-578` — owned by Agent B, not touched here).
+- **LOW**: `CommandServer::RunLoop` tight-loops `continue` on `accept()`
+  EINTR/EAGAIN without a sleep or `errno` inspection
+  (`command_server.cpp:111-115`). Safe today because `Stop()` closes the
+  listen fd and breaks the loop, but a spurious EAGAIN burns CPU.
 
 ### Agent B — Performance & Realtime Reviewer
 _Filled in on completion._

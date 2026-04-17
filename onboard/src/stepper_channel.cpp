@@ -352,9 +352,15 @@ bool StepperChannel::SetEnabled(bool enable) {
 }
 
 bool StepperChannel::ArmPullCycle(std::string* error) {
-  if (!enabled_) {
-    if (error) *error = "channel disabled";
-    return false;
+  // Read `enabled_` under mu_ — it is not atomic and another thread may be
+  // flipping it via SetEnabled(). Grab the motion lock AFTER confirming we are
+  // enabled so we don't briefly hold the lock only to release it.
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!enabled_) {
+      if (error) *error = "channel disabled";
+      return false;
+    }
   }
   if (lock_ != nullptr) {
     if (!lock_->TryAcquire(cfg_.channel_id)) {

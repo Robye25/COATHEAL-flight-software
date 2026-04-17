@@ -25,6 +25,7 @@ struct Tmc2240Config {
   double hold_current_frac = 0.30;  // IHOLD = 30% of IRUN on IC scale.
   int microstep = 4;                // default per REV-B.1 motion spec.
   bool stealth_chop = true;         // quiet, low-torque-ripple mode.
+  std::uint32_t spi_speed_hz = 1000000;  // 1 MHz (TMC2240 §5.3 max).
 };
 
 // TMC2240 driver. Programs the IC over SPI at construction time, then operates
@@ -32,32 +33,34 @@ struct Tmc2240Config {
 // not used — we pulse STEP ourselves so the microstep schedule is identical to
 // the A4988 path and testable in simulation).
 //
-// Register values written on Init() — see TMC2240 datasheet rev. 1.17 table
-// 5.1 (general config) and §7 (current control):
-//   GCONF      (0x00) = 0x00000004
-//       bit 2 = en_pwm_mode  -> stealthChop (set when stealth_chop=true)
-//   CHOPCONF   (0x6C) = 0x000100C3  (TOFF=3, TBL=2, CHM=0, HSTRT/HEND safe)
-//                                    MRES field (bits 24-27) per microstep:
-//                                      4×  -> 0x7 (8 microsteps per step unused,
-//                                                  IC internal)
-//                                      5×  -> 0x6 (10 mdegr — see note below)
-//                                    Note: TMC2240 MRES is 2^n; we use the
-//                                    closest power-of-2 tier and document the
-//                                    effective divisor in the runtime log.
-//   IHOLD_IRUN (0x10) = (IHOLDDELAY=6 << 16) | (IRUN=<scaled 0..31> << 8)
-//                                   | IHOLD=<scaled 0..31>
-//                      where IRUN = round(run_current_a_rms / 2.2 A * 31)
-//                            IHOLD = round(IRUN * hold_current_frac)
-//   TPOWERDOWN (0x11) = 0x0000000A   (~170 ms before entering hold current)
-//   PWMCONF    (0x70) = 0xC10D0024   (stealthChop autoscale, PWM_REG=4)
+// Register values written on Reinitialize() — see TMC2240 datasheet rev.1.03:
+//   GCONF      (0x00)   bit 2 = en_pwm_mode -> stealthChop.
+//   IHOLD_IRUN (0x10)   (IHOLDDELAY<<16) | (IRUN<<8) | IHOLD
+//                       IRUN scaled 0..31 over ~2.1 A RMS full-scale
+//                       (0.075 Ω external sense, QHV2240-style boards).
+//   TPOWERDOWN (0x11)   0x0A (~170 ms before hold-current decay).
+//   CHOPCONF   (0x6C)   MRES[27:24] native microsteps (power-of-two),
+//                       TOFF=3, TBL=2, HSTRT=4, HEND=1.
+//   PWMCONF    (0x70)   0xC10D0024 (stealthChop autoscale, PWM_REG=4).
 //
-// Writes are 40-bit (1 address byte + 4 data bytes). The register programmer
-// is implemented in the .cpp; if the SPI bus is unavailable (bench builds) the
-// driver still constructs but reports healthy()=false, matching the pattern
-// used by GpioStepDirStepperDriver.
+// 5-byte SPI datagram:
+//   [ addr | 0x80 ] [ data[31:24] ] [ data[23:16] ] [ data[15:8] ] [ data[7:0] ]
+// Clocked at up to 1 MHz in SPI mode 3 (CPOL=1, CPHA=1), 8 bits/word.
+//
+// If the SPI device cannot be opened or any ioctl fails, the driver reports
+// healthy()=false and returns false from all hardware ops. It does NOT throw.
+// SystemController may fall back to a plain GPIO STEP/DIR/EN driver so the
+// tick loop still runs for diagnostics.
 class Tmc2240Driver : public StepperDriver {
  public:
   explicit Tmc2240Driver(const Tmc2240Config& cfg);
+  ~Tmc2240Driver() override;
+
+  // Non-copyable, non-movable (owns an SPI file descriptor).
+  Tmc2240Driver(const Tmc2240Driver&) = delete;
+  Tmc2240Driver& operator=(const Tmc2240Driver&) = delete;
+  Tmc2240Driver(Tmc2240Driver&&) = delete;
+  Tmc2240Driver& operator=(Tmc2240Driver&&) = delete;
 
   bool Enable(bool enable) override;
   bool Step(bool direction_forward) override;
@@ -65,19 +68,24 @@ class Tmc2240Driver : public StepperDriver {
   bool healthy() const override { return healthy_; }
   std::uint64_t pulses_issued() const override { return pulses_; }
 
-  // Low-level: re-program the IC registers (also called by the ctor). Exposed
-  // so operators can re-assert safe register state after a brown-out.
+  // Re-run the register programming (ctor calls this). Useful after a brown-out.
   bool Reinitialize();
 
   const Tmc2240Config& config() const { return cfg_; }
 
- private:
-  bool WriteRegister(std::uint8_t address, std::uint32_t value);
+  // Unit-test hooks. Pure functions; independent of SPI access so the host
+  // bench build can verify the encoded register values.
   static std::uint32_t EncodeIholdIrun(double run_a_rms, double hold_frac);
   static std::uint32_t EncodeChopconf(int microstep_divisor);
   static std::uint32_t EncodeGconf(bool stealth_chop);
 
+ private:
+  bool OpenSpi();
+  void CloseSpi();
+  bool WriteRegister(std::uint8_t address, std::uint32_t value);
+
   Tmc2240Config cfg_;
+  int spi_fd_ = -1;
   bool healthy_ = false;
   int microstep_ = 1;
   std::uint64_t pulses_ = 0;
