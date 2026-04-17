@@ -20,17 +20,19 @@ coatheal::TelemetryRecord MakeRealisticRecord(std::uint64_t seq) {
   r.sensors.timestamp_utc = "2026-04-13T12:00:00Z";
   r.sensors.ambient_temp_c = -55.23;
   r.sensors.ambient_pressure_mbar = 140.12;
-  r.sensors.ambient_humidity_pct = 12.4;
   r.sensors.uv = 0.00012;
-  r.sensors.box_temp_c = -5.10;
+  // Rev B.1: 8 PT100 sample temperatures, 6 heater duties (5 W each).
   r.sensors.sample_temps_c = {
-      -30.12, -30.23, -30.01, -30.30, -30.11, -30.22, -30.05, -30.33, -30.17};
-  r.heater_duty = {0.250, 0.000, 0.250, 0.000, 0.000, 0.000, 0.000, 0.000, 0.000, 0.000};
+      -30.12, -30.23, -30.01, -30.30, -30.11, -30.22, -30.05, -30.33};
+  r.sensors.sample_resistance_ohm = {
+      100.00, 99.80, 99.55, 99.40, 99.20, 99.05, 0.0, 0.0};
+  r.heater_duty = {0.250, 0.000, 0.250, 0.000, 0.000, 0.000};
   r.status.sd_ok = true;
   r.status.usb_ok = true;
   r.status.i2c_ok = true;
   r.status.spi_ok = true;
   r.status.link_ok = true;
+  r.status.resistance_ok = true;
   return r;
 }
 

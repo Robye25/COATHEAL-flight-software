@@ -38,10 +38,9 @@ struct StorageConfig {
 };
 
 struct PhaseConfig {
-  // Rev B: single cold-protection floor shared across ASCENT/FLOAT/DESCENT.
-  // Samples must never drop below this value; box tracks its own target.
+  // Rev B.1: single cold-protection floor shared across ASCENT/FLOAT/DESCENT.
+  // Samples must never drop below this value. There is no box heater.
   double sample_floor_c = 5.0;
-  double box_target_c = 0.0;
   double uniformity_tolerance_c = 2.0;
 };
 
@@ -56,7 +55,6 @@ struct TransitionConfig {
 
 struct HeaterSafetyConfig {
   double max_sample_temp_c = 85.0;
-  double max_box_temp_c = 60.0;
 };
 
 struct SensorRangeConfig {
@@ -67,10 +65,12 @@ struct SensorRangeConfig {
 };
 
 struct PowerConfig {
+  // Rev B.1: 5 W polyimide film heaters @ 24 V DC; at most 4 energised at once
+  // => 20 W combined thermal draw ceiling.
   std::size_t max_active_heaters = 4;
-  double max_thermal_w = 40.0;
+  double max_thermal_w = 20.0;
   double max_system_w = 48.23;
-  double heater_nominal_w = 10.0;
+  double heater_nominal_w = 5.0;
   // BEXUS User Manual §5.2: each team is allocated 150 Wh for the full flight.
   // Pi 4 + sensors consume ~5–10 W continuously, so the heater share is lower.
   // 0 disables enforcement (back-compat).
@@ -81,15 +81,14 @@ struct PidConfig {
   double kp = 0.20;
   double ki = 0.02;
   double kd = 0.03;
-  double box_kp = 0.15;
-  double box_ki = 0.01;
-  double box_kd = 0.02;
 };
 
 struct HardwareConfig {
-  // Rev B: 8 sample heaters + 1 electronics heater = 9 PWM channels.
-  std::size_t heater_count = 9;
-  std::size_t electronics_heater_index = 8;
+  // Rev B.1: 6 sample heaters on 6 of the 8 samples (samples 6 and 7 are
+  // pulled but unheated). No electronics-box heater — `electronics_heater_index`
+  // defaults to SIZE_MAX as a sentinel meaning "no box heater".
+  std::size_t heater_count = 6;
+  std::size_t electronics_heater_index = static_cast<std::size_t>(-1);
 };
 
 struct StepperConfig {

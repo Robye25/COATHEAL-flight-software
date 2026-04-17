@@ -22,11 +22,10 @@ namespace {
 
 coatheal::OnboardConfig MakeConfig() {
   coatheal::OnboardConfig cfg;
-  // Rev B: 8 sample heaters + 1 electronics BOX heater = 9 channels total.
-  cfg.hardware.heater_count = 9;
-  cfg.hardware.electronics_heater_index = 8;
+  // Rev B.1: 6 sample heaters drive 6 of the 8 samples; no box heater.
+  cfg.hardware.heater_count = 6;
+  cfg.hardware.electronics_heater_index = static_cast<std::size_t>(-1);
   cfg.heater_safety.max_sample_temp_c = 85.0;
-  cfg.heater_safety.max_box_temp_c = 60.0;
   cfg.phase.uniformity_tolerance_c = 2.0;
   // Rev B stores the flying-phase target in `sample_floor_c` (floor policy).
   cfg.phase.sample_floor_c = 5.0;
@@ -36,7 +35,6 @@ coatheal::OnboardConfig MakeConfig() {
 coatheal::SensorSnapshot MakeSnapshot(std::size_t n, double value) {
   coatheal::SensorSnapshot s;
   s.sample_temps_c.assign(n, value);
-  s.box_temp_c = 20.0;
   s.ambient_temp_c = -40.0;
   s.ambient_pressure_mbar = 500.0;
   return s;

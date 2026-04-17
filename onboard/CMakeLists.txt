@@ -26,6 +26,7 @@ add_library(coatheal_onboard_core
   src/telemetry_client.cpp
   src/thermal_controller.cpp
   src/hal/i2c_adapter.cpp
+  src/hal/ina3221_adapter.cpp
   src/hal/pwm_controller.cpp
   src/hal/rtc_adapter.cpp
   src/hal/spi_adapter.cpp

@@ -27,19 +27,26 @@ void AppendStepperSegment(std::ostringstream& oss, const StepperStatus& st,
 
 }  // namespace
 
+// Rev B.1 DATA-frame schema:
+//   DATA,<session>,<seq>,<ts>,<rtc_valid>,<ambient_temp_c>,
+//        <ambient_pressure_mbar>,<uv>,<sample_0>...<sample_N>,
+//        HEATER_DUTY=d0|d1|...,
+//        RESISTANCE=r0|r1|...   (- for unmeasured samples),
+//        PHASE=...,MODE=...,STATUS=...,
+//        STEPPER0=...,STEPPER1=...
+// Humidity and box_temp are gone (no BME280, no box sensor). RESISTANCE is
+// new (INA3221 sample-resistance instrument).
 std::string SerializeTelemetryDataFrame(const TelemetryRecord& record,
                                         const std::string& session_id) {
   std::ostringstream oss;
   oss << "DATA," << session_id << ',' << record.seq << ',' << record.sensors.timestamp_utc << ','
       << (record.sensors.rtc_valid ? 1 : 0) << ',' << std::fixed << std::setprecision(2)
       << record.sensors.ambient_temp_c << ',' << record.sensors.ambient_pressure_mbar << ','
-      << record.sensors.ambient_humidity_pct << ',' << record.sensors.uv << ','
-      << record.sensors.box_temp_c;
+      << record.sensors.uv;
 
-  // Rev-B: 8 sample_i columns (index 0..7). Heater duty has 9 values
-  // (index 0..7 = sample heaters, index 8 = electronics BOX). The ground
-  // parser (`parse_telemetry_csv`) locates HEATER_DUTY= by token name, so
-  // the sample count is inferred from position, not a hardcoded constant.
+  // Rev-B.1: 8 sample_i columns. Heater duty has heater_count (=6) values.
+  // The ground parser locates HEATER_DUTY= by token name, so the sample
+  // count is inferred from position, not a hardcoded constant.
   for (double temp : record.sensors.sample_temps_c) {
     oss << ',' << temp;
   }
@@ -52,31 +59,31 @@ std::string SerializeTelemetryDataFrame(const TelemetryRecord& record,
     oss << std::setprecision(3) << record.heater_duty[i];
   }
 
+  // Rev B.1: RESISTANCE= carries one pipe-separated value per sample. The
+  // two INA3221 chips cover 6 of 8 samples; unmeasured samples (6, 7) are
+  // emitted as "-" so the column count always equals sample_temps_c.size().
+  oss << ",RESISTANCE=";
+  const std::size_t nres = record.sensors.sample_resistance_ohm.size();
+  const std::size_t nsamp = record.sensors.sample_temps_c.size();
+  for (std::size_t i = 0; i < nsamp; ++i) {
+    if (i != 0) {
+      oss << '|';
+    }
+    if (i < nres && record.sensors.sample_resistance_ohm[i] > 0.0) {
+      oss << std::setprecision(3) << record.sensors.sample_resistance_ohm[i];
+    } else {
+      oss << '-';
+    }
+  }
+
   oss << ",PHASE=" << ToString(record.phase) << ",MODE=" << ToString(record.mode)
       << ",STATUS=" << ToStatusBitfield(record.status);
 
-  // Dual-stepper telemetry: one STEPPER<n>= segment per motor. Order is
-  // stable (index 0 = M0, 1 = M1, ...). Legacy single-STEPPER= parsing
-  // still works on old logs; ground station `parse_telemetry_csv` accepts
-  // both forms.
-  if (!record.steppers.empty()) {
-    for (std::size_t i = 0; i < record.steppers.size(); ++i) {
-      AppendStepperSegment(oss, record.steppers[i], static_cast<int>(i));
-    }
-  } else {
-    // Legacy single-stepper path (Agent D has not yet migrated to the
-    // vector field). Emit the un-suffixed `STEPPER=` segment that every
-    // pre-Rev-B log carries.
-    const StepperStatus& st = record.stepper;
-    oss << ",STEPPER=pos:" << st.position_steps << "|tgt:" << st.target_steps
-        << "|hz:" << std::setprecision(2) << st.step_hz
-        << "|us:" << st.microstep
-        << "|en:" << (st.enabled ? 1 : 0)
-        << "|mv:" << (st.moving ? 1 : 0)
-        << "|hold:" << (st.holding ? 1 : 0)
-        << "|hold_s:" << std::setprecision(2) << st.hold_remaining_s
-        << "|pulses:" << st.pulses_total
-        << "|src:" << (st.last_source.empty() ? std::string("-") : st.last_source);
+  // Rev B.1 dual-stepper telemetry: one STEPPER<n>= segment per motor. The
+  // legacy single-STEPPER= path has been retired — Rev B.1 is a breaking
+  // wire change anyway, and ground parsers already accept the indexed form.
+  for (std::size_t i = 0; i < record.steppers.size(); ++i) {
+    AppendStepperSegment(oss, record.steppers[i], static_cast<int>(i));
   }
   return oss.str();
 }

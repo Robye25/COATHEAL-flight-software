@@ -1,6 +1,6 @@
-// REV B safety interlocks (Agent D).
+// REV B.1 safety interlocks (Agent D).
 //
-// These tests enforce the heater↔motor mutex from the 2-motor + pull-cycle
+// These tests enforce the heater<->motor mutex from the 2-motor + pull-cycle
 // design:
 //   1. MotionLock is strictly one-holder-at-a-time.
 //   2. Release by a non-holder is a no-op (cannot be spoofed).
@@ -14,6 +14,7 @@
 #include <atomic>
 #include <cassert>
 #include <cmath>
+#include <cstddef>
 #include <iostream>
 #include <thread>
 #include <vector>
@@ -23,6 +24,10 @@
 #include "coatheal/motion_lock.hpp"
 
 namespace {
+
+// Rev B.1 has no electronics-box heater — pass the SIZE_MAX sentinel so the
+// scheduler's `deprioritize_electronics` flag becomes a no-op.
+constexpr std::size_t kNoBoxHeater = static_cast<std::size_t>(-1);
 
 void TestMotionLockBasic() {
   coatheal::MotionLock lock;
@@ -112,8 +117,10 @@ void TestMotionLockConcurrency() {
 
 coatheal::PowerConfig MakePower() {
   coatheal::PowerConfig p;
+  // Rev B.1: 4 heaters simultaneously × 5 W each = 20 W ceiling. Tests that
+  // previously asserted "3 heaters @ 30 W" are retuned to the real spec.
   p.max_active_heaters = 3;
-  p.heater_nominal_w = 30.0;  // "3 heaters @ 30 W" from the spec
+  p.heater_nominal_w = 5.0;
   p.max_thermal_w = 150.0;    // generous; we want the request to pass through
   p.energy_budget_wh = 0.0;   // disable budget for this test
   return p;
@@ -122,10 +129,10 @@ coatheal::PowerConfig MakePower() {
 void TestSchedulerInhibitedWhenLocked() {
   const auto power = MakePower();
   coatheal::MotionLock lock;
-  coatheal::HeaterScheduler sched(power, /*electronics_heater_index=*/9, &lock);
+  coatheal::HeaterScheduler sched(power, kNoBoxHeater, &lock);
 
-  // 10 channels, request 3 heaters at full duty (full 30 W each).
-  std::vector<double> requested(10, 0.0);
+  // Rev B.1 heater count is 6. Request 3 heaters at full duty.
+  std::vector<double> requested(6, 0.0);
   requested[0] = 1.0;
   requested[1] = 1.0;
   requested[2] = 1.0;
@@ -143,7 +150,7 @@ void TestSchedulerInhibitedWhenLocked() {
     total_w += out[i] * power.heater_nominal_w;
   }
   assert(active == 3);
-  assert(std::fabs(total_w - 90.0) < 1e-6);  // 3 * 30 W
+  assert(std::fabs(total_w - 15.0) < 1e-6);  // 3 * 5 W
   assert(!sched.heater_inhibited());
   assert(!sched.last_inhibited());
 
@@ -162,7 +169,7 @@ void TestSchedulerInhibitedWhenLocked() {
 
   // Also check the scheduler does not silently let a "cheeky" tiny request
   // through: even a 0.001 duty is zeroed while the lock is held.
-  std::vector<double> sneaky(10, 0.001);
+  std::vector<double> sneaky(6, 0.001);
   auto sneaky_out = sched.Schedule(sneaky, true, 1.0);
   for (double d : sneaky_out) {
     assert(d == 0.0);
@@ -182,7 +189,7 @@ void TestSchedulerInhibitedWhenLocked() {
     total_after += resumed[i] * power.heater_nominal_w;
   }
   assert(active_after == 3);
-  assert(std::fabs(total_after - 90.0) < 1e-6);
+  assert(std::fabs(total_after - 15.0) < 1e-6);
   assert(!sched.heater_inhibited());
   assert(!sched.last_inhibited());
 }
@@ -191,8 +198,8 @@ void TestSchedulerNullLockIsAlwaysFree() {
   // Contract says a null MotionLock* behaves as "always free". This is the
   // bench-mode path and also what Agent B's test stub will rely on.
   const auto power = MakePower();
-  coatheal::HeaterScheduler sched(power, 9, nullptr);
-  std::vector<double> requested(10, 1.0);
+  coatheal::HeaterScheduler sched(power, kNoBoxHeater, nullptr);
+  std::vector<double> requested(6, 1.0);
   auto out = sched.Schedule(requested, true, 1.0);
   int active = 0;
   for (double d : out) if (d > 1e-9) ++active;
@@ -200,16 +207,16 @@ void TestSchedulerNullLockIsAlwaysFree() {
   assert(!sched.heater_inhibited());
 }
 
-// Extra paranoid test: even with an extreme request (all 10 heaters at
+// Extra paranoid test: even with an extreme request (all 6 heaters at
 // 100 %), the scheduler must emit all zeros while the lock is held. This
 // defends against a future "clamp instead of zero" regression.
 void TestSchedulerZeroIsZero_NoSoftClamp() {
   const auto power = MakePower();
   coatheal::MotionLock lock;
-  coatheal::HeaterScheduler sched(power, 9, &lock);
+  coatheal::HeaterScheduler sched(power, kNoBoxHeater, &lock);
 
   assert(lock.TryAcquire(1));
-  std::vector<double> requested(10, 1.0);
+  std::vector<double> requested(6, 1.0);
   auto out = sched.Schedule(requested, false, 1.0);
   // Sum of duties must be exactly zero — not small, not 20 %, ZERO.
   double sum = 0.0;

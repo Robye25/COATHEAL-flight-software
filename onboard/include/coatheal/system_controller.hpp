@@ -21,6 +21,7 @@
 #include "coatheal/telemetry_queue.hpp"
 #include "coatheal/thermal_controller.hpp"
 #include "coatheal/hal/i2c_adapter.hpp"
+#include "coatheal/hal/ina3221_adapter.hpp"
 #include "coatheal/hal/pwm_controller.hpp"
 #include "coatheal/hal/rtc_adapter.hpp"
 #include "coatheal/hal/spi_adapter.hpp"
@@ -46,6 +47,7 @@ class SystemController {
   SpiAdapter spi_;
   I2cAdapter i2c_;
   RtcAdapter rtc_;
+  Ina3221Adapter ina_;
 
   std::unique_ptr<PwmController> pwm_;
   std::unique_ptr<StatusLed> status_led_;  // heartbeat, toggled each tick
