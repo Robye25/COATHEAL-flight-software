@@ -320,12 +320,39 @@ perf scope — both fail at baseline `d3208ec`, not regressions from this pass.
 
 ## 5. Post-verification checklist
 
-- [ ] `ctest` 100 % green on the Pi.
-- [ ] `python -m unittest` 100 % green.
-- [ ] Every DATA frame field populated with plausible simulated data in bench mode.
-- [ ] Every command returns `ACK`.
-- [ ] HEATER_INHIBITED interlock demonstrably zeros duty during a pull.
-- [ ] EVT,PULL emitted and captured in `<log>_pulls.csv` on the GS.
-- [ ] `Tmc2240Driver` exists, used, and SPI-configured on non-simulated build.
-- [ ] Agent findings folded back into `rev-b-integration`, pushed to origin.
-- [ ] `rev-b-integration` merged (or tagged) as the pre-flight candidate.
+- [x] `ctest` 100 % green on the Pi. *(Post-merge run 2026-04-18: 10/10 PASS against merged tree at `7688b4b`.)*
+- [x] `python -m unittest` 100 % green. *(Agent C Rev B.1 GS pass: 41 pass / 15 skip; 2026-04-17.)*
+- [x] Every DATA frame field populated with plausible simulated data in bench mode. *(Agent C T1.)*
+- [x] Every command returns `ACK`. *(Agent C T2+T3, 24/24.)*
+- [x] HEATER_INHIBITED interlock demonstrably zeros duty during a pull. *(Agent C T5 after bugs #3 and #4 fixed — without those fixes the interlock was silently no-op.)*
+- [x] EVT,PULL emitted and captured in `<log>_pulls.csv` on the GS. *(Agent C T4 after bugs #5 and #6 fixed.)*
+- [x] `Tmc2240Driver` exists, used, and SPI-configured on non-simulated build. *(Agent A real SPI implementation via `spidev`; `SystemController::Initialize` now constructs `Tmc2240Driver` per motor with `GpioStepDirStepperDriver` as a loud-warning fallback if SPI bring-up fails.)*
+- [x] Agent findings folded back into `rev-b-integration`, pushed to origin. *(Commits `b750c8a` Agent B merge, `7688b4b` Agent C merge; Agent A landed as `33fe41c` pre-merge.)*
+- [ ] `rev-b-integration` merged (or tagged) as the pre-flight candidate. *(Pending user sign-off + main merge.)*
+
+## 6. Operational caveats surfaced during verification
+
+- **Pi has no outbound internet.** The Pi cannot `git fetch` / `git pull`
+  from GitHub (`ssh: Could not resolve hostname github.com`). Agents used
+  rsync / scp via the reverse SSH tunnel to push the working tree onto the
+  Pi before each build. The post-merge verifier confirmed **10/10 ctest
+  green** against a tree that was populated out-of-band; byte-identity to
+  `origin/rev-b-integration` was not formally verified by the Pi itself.
+  For flight, either arrange the Pi with an internet relay at build time,
+  or keep the rsync workflow and record a checksum.
+- **Pre-existing stepper ctest targets were green at baseline** in the
+  verification passes — Agent C's report noted two stepper targets failed
+  at `d3208ec`, but Agents A and the post-merge verifier both saw them
+  green at `33fe41c` / `7688b4b`. Likely the failure Agent C observed was
+  in its own worktree under Agent-B-specific in-flight perf changes; the
+  merged state is clean.
+- **Bench-only** — real I2C (MS5803, ADS1015, INA3221 ×2, DS3231), real
+  Modbus-RTU over USB-RS485 (2 × 4-ch PT100 collectors), and real TMC2240
+  SPI traffic have NOT been exercised end-to-end against physical hardware.
+  SPI traffic is implemented but only flight-hardware connection will prove
+  the register writes reach the IC. Plan a hardware-rehearsal pass before
+  the launch window.
+- **Pulse-thread `moving_` flag never clears** in `StepperChannel` when
+  `use_pulse_thread=true` (Agent B finding, correctness only, not perf).
+  Flight mode uses tick-driven pulses (`use_pulse_thread=false`), so this
+  does not affect flight. Logged as a follow-up.
