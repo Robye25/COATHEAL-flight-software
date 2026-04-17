@@ -29,15 +29,15 @@ python gui_app.py [--host <onboard-ip>] [--tel-port 4000] [--cmd-port 5000]
 | Panel | Location | Description |
 |---|---|---|
 | **Connection** | Left dock | Onboard IP, telemetry port, command port; Start/Stop button; connection status |
-| **Heater Duties** | Left dock | 10 animated progress bars (H0–H8 = samples, BOX = electronics) |
+| **Heater Duties** | Left dock | 6 animated progress bars (H0–H5 = sample-bank heaters) |
 | **Commands** | Left dock | Buttons for every command; dangerous commands require confirmation dialog |
-| **Temperature** | Center tab | Live PyQtGraph plot — box temp + up to 9 sample temps |
+| **Temperature** | Center tab | Live PyQtGraph plot — up to 8 sample temps |
 | **Pressure** | Center tab | Live pressure trace |
-| **Heater Duties** | Center tab | All 10 heater duty traces over time |
-| **Environment** | Center tab | Humidity and UV (×100) |
+| **Heater Duties** | Center tab | All 6 heater duty traces over time |
+| **Resistance** | Center tab | 8 sample-resistance traces from the INA3221 (channels with no coverage stay empty) |
 | **Values** | Right panel | Latest value for every telemetry field; status flags color-coded |
 | **Log** | Bottom dock | Timestamped scrolling log; auto-scroll toggle; save to file |
-| **Status bar** | Bottom edge | Phase (color-coded), SEQ, pressure, box temp, LINK status, staleness |
+| **Status bar** | Bottom edge | Phase (color-coded), SEQ, pressure, hottest sample, LINK status, staleness |
 
 ### Command Buttons
 
@@ -50,7 +50,7 @@ python gui_app.py [--host <onboard-ip>] [--tel-port 4000] [--cmd-port 5000]
 **Debug** (ARM DEBUG token required first):
 - `ARM DEBUG <token>`, `DISARM DEBUG`
 - `BENCH ON` / `BENCH OFF`
-- `SET HEATER DUTY <index> <duty>` — index 0–9, duty 0.0–1.0
+- `SET HEATER DUTY <index> <duty>` — index 0–5, duty 0.0–1.0
 - `SET ALL DUTY <duty>`
 - `CLEAR OVERRIDES`
 
@@ -76,7 +76,7 @@ python main.py telemetry-server [OPTIONS]
 | `--port` | `4000` | TCP telemetry port |
 | `--log` | `logs/ground_telemetry.csv` | CSV output path |
 | `--plot` | off | Enable live matplotlib plot (basic; use GUI for full visualization) |
-| `--alert-temp-c` | `80.0` | Box temperature alert threshold (°C) |
+| `--alert-temp-c` | `80.0` | Hottest-sample temperature alert threshold (°C) |
 | `--timeout-s` | `10.0` | Seconds before stale connection is closed |
 | `--no-discovery-enabled` | — | Disable UDP discovery beacon |
 | `--discovery-port` | `4100` | UDP discovery port |

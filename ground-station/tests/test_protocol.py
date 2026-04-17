@@ -13,43 +13,35 @@ from app.protocol import (
 )
 
 
-# Legacy Rev-A data frame: 9 sample temps, no stepper segment, short
-# STATUS flag list. Every line here must still parse after the Rev-B
-# rewrite — old SD-card CSV logs go through this path.
-LEGACY_DATA_9_SAMPLES = (
-    "DATA,session-1,1,2026-03-31T12:00:00Z,1,-30.00,150.00,20.00,1.23,5.00,"
-    "-30.00,-30.10,-29.90,-29.80,-29.70,-29.60,-29.50,-29.40,-29.30,"
-    "HEATER_DUTY=0.5|0.5|0.0|0.0|0.0|0.0|0.0|0.0|0.0|0.0,"
-    "PHASE=ASCENT_HOLD_-30C,STATUS=SD_OK|USB_OK|I2C_OK|SPI_OK|LINK_OK"
-)
-
-# Three-sample legacy frame (unit-test style, short arity). Kept to exercise
-# the "sample count inferred from HEATER_DUTY position" path.
+# Rev-B.1 baseline frame (no RESISTANCE= segment). The ground parser must
+# accept this so older pre-resistance logs keep replaying.
 LEGACY_DATA = (
-    "DATA,session-1,1,2026-03-31T12:00:00Z,1,-30.00,150.00,20.00,1.23,5.00,"
+    "DATA,session-1,1,2026-03-31T12:00:00Z,1,-30.00,150.00,1.23,"
     "-30.00,-30.10,-29.90,HEATER_DUTY=0.5|0.5|0.0,"
-    "PHASE=ASCENT_HOLD_-30C,STATUS=SD_OK|USB_OK|I2C_OK|SPI_OK|LINK_OK"
+    "PHASE=ASCENT,STATUS=SD_OK|USB_OK|I2C_OK|SPI_OK|LINK_OK"
 )
 
-# Legacy single-STEPPER frame. Must still parse, and `packet.steppers`
-# should be a 1-element list mirroring `packet.stepper`.
+# Rev-B.1 single-STEPPER legacy frame. `packet.steppers` should be a
+# 1-element list mirroring `packet.stepper`.
 STEPPER_DATA = (
-    "DATA,sess-2,7,2026-04-13T01:02:03Z,1,-25.00,180.00,22.00,0.80,4.00,"
+    "DATA,sess-2,7,2026-04-13T01:02:03Z,1,-25.00,180.00,0.80,"
     "-30.00,-29.80,-29.90,HEATER_DUTY=0.10|0.20|0.30,"
-    "PHASE=ASCENT_HOLD_-30C,MODE=RUN,"
+    "PHASE=ASCENT,MODE=RUN,"
     "STATUS=SD_OK|USB_OK|I2C_OK|SPI_OK|LINK_OK|T_AMBIENT_OK|P_AMBIENT_OK,"
     "STEPPER=pos:1234|tgt:2000|hz:800|us:16|en:1|mv:1|hold:0|hold_s:0|pulses:1234|src:cmd:MOVE"
 )
 
-# Rev-B production frame: 8 sample temps + 9 heater duties + dual-motor
-# STEPPER0/STEPPER1 segments + new phase token + new STATUS bits.
+# Rev-B.1 production frame: 8 sample temps, 6 heater duties, RESISTANCE=
+# with a mix of real values and '-' for the two unmeasured samples,
+# dual-motor STEPPER0/STEPPER1, RESISTANCE_OK in STATUS.
 DUAL_STEPPER_DATA = (
-    "DATA,sess-b,42,2026-04-16T10:20:30Z,1,-10.00,140.00,18.00,0.01,3.00,"
+    "DATA,sess-b,42,2026-04-16T10:20:30Z,1,-10.00,140.00,0.01,"
     "-5.00,-5.10,-5.20,-5.30,-5.40,-5.50,-5.60,-5.70,"
-    "HEATER_DUTY=0.00|0.10|0.20|0.30|0.40|0.50|0.60|0.70|0.05,"
+    "HEATER_DUTY=0.00|0.10|0.20|0.30|0.40|0.50,"
+    "RESISTANCE=10.5|11.0|9.8|10.1|10.7|10.3|-|-,"
     "PHASE=FLOAT,MODE=RUN,"
     "STATUS=SD_OK|USB_OK|I2C_OK|SPI_OK|LINK_OK|T_AMBIENT_OK|P_AMBIENT_OK"
-    "|UNIFORMITY_OK|OVERTEMP_OK|ENERGY_OK|RS485_OK|HEATER_INHIBITED,"
+    "|UNIFORMITY_OK|OVERTEMP_OK|ENERGY_OK|RS485_OK|HEATER_INHIBITED|RESISTANCE_OK,"
     "STEPPER0=pos:100|tgt:200|hz:400|us:16|en:1|mv:1|hold:0|hold_s:0|pulses:100|src:cmd:MOVE,"
     "STEPPER1=pos:-50|tgt:-50|hz:200|us:8|en:1|mv:0|hold:1|hold_s:3.5|pulses:50|src:phase:FLOAT"
 )
@@ -60,19 +52,13 @@ class DataFrameTests(unittest.TestCase):
         pkt = parse_telemetry_csv(LEGACY_DATA)
         self.assertEqual(pkt.session_id, "session-1")
         self.assertEqual(pkt.seq, 1)
-        self.assertEqual(pkt.phase, "ASCENT_HOLD_-30C")
+        self.assertEqual(pkt.phase, "ASCENT")
         self.assertEqual(len(pkt.heater_duty), 3)
         self.assertIsNone(pkt.stepper)
         self.assertEqual(pkt.steppers, [])
         self.assertEqual(pkt.mode, "")
-
-    def test_parse_legacy_9_samples_frame(self) -> None:
-        # Rev-A 9-sample frame must still round-trip; old SD logs need it.
-        pkt = parse_telemetry_csv(LEGACY_DATA_9_SAMPLES)
-        self.assertEqual(len(pkt.sample_temps_c), 9)
-        self.assertEqual(len(pkt.heater_duty), 10)
-        self.assertEqual(pkt.phase, "ASCENT_HOLD_-30C")
-        self.assertEqual(pkt.steppers, [])
+        # Rev-B.1: missing RESISTANCE= segment surfaces as empty list.
+        self.assertEqual(pkt.sample_resistance_ohm, [])
 
     def test_parse_invalid_packet(self) -> None:
         with self.assertRaises(TelemetryParseError):
@@ -110,14 +96,14 @@ class DataFrameTests(unittest.TestCase):
         with self.assertRaises(TelemetryParseError):
             parse_telemetry_csv(line)
 
-    # ── Rev-B: dual stepper + 8-sample frame ─────────────────────────────
+    # ── Rev-B.1: dual stepper + 8-sample + resistance frame ──────────────
     def test_parse_dual_stepper_frame(self) -> None:
         pkt = parse_telemetry_csv(DUAL_STEPPER_DATA)
         self.assertEqual(pkt.session_id, "sess-b")
         self.assertEqual(pkt.seq, 42)
         self.assertEqual(pkt.phase, "FLOAT")
         self.assertEqual(len(pkt.sample_temps_c), 8)
-        self.assertEqual(len(pkt.heater_duty), 9)
+        self.assertEqual(len(pkt.heater_duty), 6)
         # Two motors, in index order.
         self.assertEqual(len(pkt.steppers), 2)
         self.assertEqual(pkt.steppers[0]["motor_id"], 0)
@@ -131,9 +117,10 @@ class DataFrameTests(unittest.TestCase):
         self.assertIsNotNone(pkt.stepper)
         assert isinstance(pkt.stepper, StepperSnapshot)
         self.assertEqual(pkt.stepper.position, 100)
-        # New STATUS bits are in the status string verbatim.
+        # Rev-B.1 STATUS bits are in the status string verbatim.
         self.assertIn("RS485_OK", pkt.status)
         self.assertIn("HEATER_INHIBITED", pkt.status)
+        self.assertIn("RESISTANCE_OK", pkt.status)
 
     def test_dual_stepper_handles_out_of_order_indices(self) -> None:
         # If M1's segment comes before M0's on the wire, the parser sorts
@@ -151,6 +138,52 @@ class DataFrameTests(unittest.TestCase):
         self.assertEqual(pkt.steppers[0]["position"], -50)
         self.assertEqual(pkt.steppers[1]["motor_id"], 1)
         self.assertEqual(pkt.steppers[1]["position"], 100)
+
+
+class ResistanceTests(unittest.TestCase):
+    """Rev-B.1: the `RESISTANCE=` segment + `RESISTANCE_OK` STATUS bit."""
+
+    def test_parse_resistance_happy_path(self) -> None:
+        pkt = parse_telemetry_csv(DUAL_STEPPER_DATA)
+        self.assertEqual(len(pkt.sample_resistance_ohm), 8)
+        # First six channels are measured; values are floats.
+        for i, expected in enumerate([10.5, 11.0, 9.8, 10.1, 10.7, 10.3]):
+            self.assertAlmostEqual(pkt.sample_resistance_ohm[i], expected)
+        # Last two are '-' on the wire → None in the packet.
+        self.assertIsNone(pkt.sample_resistance_ohm[6])
+        self.assertIsNone(pkt.sample_resistance_ohm[7])
+
+    def test_parse_resistance_all_dashes(self) -> None:
+        # All channels unmeasured: 8 '-' entries → list of 8 Nones.
+        line = DUAL_STEPPER_DATA.replace(
+            "RESISTANCE=10.5|11.0|9.8|10.1|10.7|10.3|-|-",
+            "RESISTANCE=-|-|-|-|-|-|-|-",
+        )
+        pkt = parse_telemetry_csv(line)
+        self.assertEqual(len(pkt.sample_resistance_ohm), 8)
+        self.assertTrue(all(v is None for v in pkt.sample_resistance_ohm))
+
+    def test_missing_resistance_segment_back_compat(self) -> None:
+        # Onboard pre-RESISTANCE build: segment absent entirely. Parser
+        # must still succeed and expose an empty list.
+        self.assertEqual(parse_telemetry_csv(LEGACY_DATA).sample_resistance_ohm, [])
+
+    def test_resistance_ok_status_bit(self) -> None:
+        pkt = parse_telemetry_csv(DUAL_STEPPER_DATA)
+        self.assertIn("RESISTANCE_OK", pkt.status)
+        # RESISTANCE_FAIL variant: flip the bit and re-parse.
+        fail_line = DUAL_STEPPER_DATA.replace("RESISTANCE_OK", "RESISTANCE_FAIL")
+        pkt_fail = parse_telemetry_csv(fail_line)
+        self.assertIn("RESISTANCE_FAIL", pkt_fail.status)
+        self.assertNotIn("RESISTANCE_OK", pkt_fail.status)
+
+    def test_invalid_resistance_rejected(self) -> None:
+        # Non-numeric, non-dash value must raise.
+        line = DUAL_STEPPER_DATA.replace(
+            "RESISTANCE=10.5|11.0", "RESISTANCE=10.5|nope"
+        )
+        with self.assertRaises(TelemetryParseError):
+            parse_telemetry_csv(line)
 
 
 class PullEventTests(unittest.TestCase):
@@ -213,13 +246,13 @@ class ValidatorTests(unittest.TestCase):
         self.assertFalse(validate_duty("xx")[0])
 
     def test_heater_index(self) -> None:
-        # Rev-B: 9 heater channels (0..7 samples + 8 BOX). Default count=9.
+        # Rev-B.1: 6 heater channels (0..5). No box heater.
         self.assertTrue(validate_heater_index(0)[0])
-        self.assertTrue(validate_heater_index(8)[0])
-        self.assertFalse(validate_heater_index(9)[0])
+        self.assertTrue(validate_heater_index(5)[0])
+        self.assertFalse(validate_heater_index(6)[0])
         self.assertFalse(validate_heater_index(-1)[0])
         # Explicit count still honoured for callers that pre-set it.
-        self.assertTrue(validate_heater_index(9, count=10)[0])
+        self.assertTrue(validate_heater_index(6, count=8)[0])
 
     def test_tick_hz(self) -> None:
         self.assertTrue(validate_tick_hz(0.1)[0])

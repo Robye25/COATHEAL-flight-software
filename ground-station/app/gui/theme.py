@@ -7,10 +7,20 @@ MAX_POINTS = 1200                     # rolling plot window depth (~20 min at 1 
 
 HEATER_COLORS = [
     "#e74c3c", "#e67e22", "#f1c40f", "#2ecc71", "#1abc9c",
-    "#3498db", "#9b59b6", "#e91e63", "#00bcd4",
+    "#3498db",
 ]
-# Rev-B: 8 sample heaters (H0..H7) + 1 electronics box heater (BOX). 9 total.
-HEATER_LABELS = [f"H{i}" for i in range(8)] + ["BOX"]
+# Rev-B.1: 6 sample-bank heaters (H0..H5). Box heater removed along with
+# the box-temperature sensor.
+HEATER_LABELS = [f"H{i}" for i in range(6)]
+
+# Rev-B.1: 8 sample resistance traces, sharing the 6-entry HEATER_COLORS
+# palette. Channels 6 and 7 are unmeasured on the flight hardware (no
+# INA3221 coverage) and render as dashed placeholders when absent.
+RESISTANCE_COLORS = [
+    "#e74c3c", "#e67e22", "#f1c40f", "#2ecc71", "#1abc9c",
+    "#3498db", "#9b59b6", "#e91e63",
+]
+RESISTANCE_LABELS = [f"R{i}" for i in range(8)]
 
 PHASE_COLORS = {
     # Rev-A phase strings (kept for replay of old logs).

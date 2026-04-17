@@ -221,9 +221,7 @@ class HeaterCell(QFrame):
         header = QHBoxLayout()
         label_text = HEATER_LABELS[idx]
         self._label = QLabel(label_text)
-        # BOX gets a distinct cyan; the 8 sample heaters share the amber-ish
-        # HEATER_COLORS palette.
-        color = "#00bcd4" if label_text == "BOX" else HEATER_COLORS[idx % len(HEATER_COLORS)]
+        color = HEATER_COLORS[idx % len(HEATER_COLORS)]
         self._label.setStyleSheet(f"font-weight: bold; color: {color};")
         header.addWidget(self._label); header.addStretch()
         self._dot = StatusDot(8); self._dot.set_color("#333"); header.addWidget(self._dot)
@@ -294,9 +292,8 @@ class HeaterPanel(QGroupBox):
         )
         outer.addWidget(self._banner)
 
-        # Rev-B: 9 heater cells (8 samples + BOX). Lay them out in 2
-        # columns so the dock width stays constant; the final row holds
-        # BOX alone, spanning both columns for emphasis.
+        # Rev-B.1: 6 heater cells (H0..H5). Box heater has been removed
+        # from the flight hardware. Laid out 3x2 (two columns).
         grid = QGridLayout(); grid.setSpacing(4)
         self._cells: list[HeaterCell] = []
         num_cells = len(HEATER_LABELS)
@@ -305,11 +302,7 @@ class HeaterPanel(QGroupBox):
             cell.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
             cell.set_requested.connect(self._set_one)
             cell.off_requested.connect(lambda idx: self._set_one(idx, 0.0))
-            if HEATER_LABELS[i] == "BOX":
-                # BOX on its own row, spanning both columns.
-                grid.addWidget(cell, i // 2, 0, 1, 2)
-            else:
-                grid.addWidget(cell, i // 2, i % 2)
+            grid.addWidget(cell, i // 2, i % 2)
             self._cells.append(cell)
         grid.setColumnStretch(0, 1); grid.setColumnStretch(1, 1)
         outer.addLayout(grid)
@@ -376,14 +369,14 @@ class HeaterPanel(QGroupBox):
         self._disp.send(f"SET_ALL_DUTY {d}", tag=self)
 
     def update_from_packet(self, pkt: TelemetryPacket) -> None:
-        # Rev-B: 9 cells — H0..H7 (sample heaters) + BOX (electronics,
-        # index 8). Pad the duty list if the wire frame is short.
+        # Rev-B.1: 6 cells (H0..H5, no box). Heater-to-sample mapping is
+        # 1:1 for the first 6 samples; remaining samples (6, 7) are still
+        # monitored but not actively heated.
         n = len(self._cells)
         duties = pkt.heater_duty + [0.0] * (n - len(pkt.heater_duty))
         temps = list(pkt.sample_temps_c)
-        box_idx = n - 1
         for i in range(n):
-            t = pkt.box_temp_c if i == box_idx else (temps[i] if i < len(temps) else None)
+            t = temps[i] if i < len(temps) else None
             self._cells[i].update_live(duties[i], t)
 
 

@@ -43,16 +43,15 @@ class TelemetryReceiver(QThread):
     connection_changed = pyqtSignal(bool, str)
     status_changed     = pyqtSignal(str)  # "listening" | "connected" | "stale" | "searching"
 
-    # CSV v3 — v2 (single stepper) columns remain at their fixed positions
-    # so existing post-flight parsers stay valid, and a second block of
-    # `m1_*` columns is appended for the Rev-B second motor. When a frame
-    # only carries one motor (legacy DATA or the new DATA if M1 was
-    # omitted), the `m1_*` cells are written empty.
+    # CSV v4 (Rev B.1): drop humidity + box_temp_c; add r0..r7 columns for
+    # the new INA3221 sample-resistance instrument. This is a breaking
+    # change — pre-Rev B.1 CSVs cannot be appended to a v4 file.
     CSV_FIELDS = [
         "session_id", "seq", "timestamp", "rtc_valid",
-        "ambient_temp_c", "ambient_pressure_mbar", "ambient_humidity_pct",
-        "uv", "box_temp_c", "sample_temps_c", "heater_duty", "phase", "status",
-        "mode",
+        "ambient_temp_c", "ambient_pressure_mbar",
+        "uv", "sample_temps_c", "heater_duty",
+        "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7",
+        "phase", "status", "mode",
         # Motor 0 (legacy column names kept).
         "stepper_pos", "stepper_tgt", "stepper_hz", "stepper_us",
         "stepper_en", "stepper_mv", "stepper_hold", "stepper_hold_s",
@@ -266,15 +265,21 @@ def _packet_to_csv_row(pkt: TelemetryPacket) -> dict:
         "rtc_valid": pkt.rtc_valid,
         "ambient_temp_c": pkt.ambient_temp_c,
         "ambient_pressure_mbar": pkt.ambient_pressure_mbar,
-        "ambient_humidity_pct": pkt.ambient_humidity_pct,
         "uv": pkt.uv,
-        "box_temp_c": pkt.box_temp_c,
         "sample_temps_c": "|".join(f"{x:.2f}" for x in pkt.sample_temps_c),
         "heater_duty":    "|".join(f"{x:.3f}" for x in pkt.heater_duty),
         "phase": pkt.phase,
         "status": pkt.status,
         "mode": pkt.mode,
     }
+    # r0..r7: one column per sample. Empty string for unmeasured (None) or
+    # when the onboard omitted the segment entirely.
+    for i in range(8):
+        if i < len(pkt.sample_resistance_ohm):
+            v = pkt.sample_resistance_ohm[i]
+            row[f"r{i}"] = "" if v is None else f"{v:.3f}"
+        else:
+            row[f"r{i}"] = ""
     row.update(_motor_cells(m0, "stepper"))
     row.update(_motor_cells(m1, "m1"))
     return row

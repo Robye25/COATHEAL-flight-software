@@ -91,13 +91,18 @@ class ValuesPanel(QScrollArea):
         self._row("timestamp", "time UTC"); self._row("rtc_valid", "rtc_valid"); self._row("session_id", "session")
 
         self._section("ENVIRONMENT")
-        for k, l in [("ambient_temp_c", "amb T °C"), ("ambient_pressure_mbar", "pressure mbar"),
-                     ("ambient_humidity_pct", "humidity %"), ("uv", "UV"), ("box_temp_c", "box T °C")]:
+        for k, l in [("ambient_temp_c", "amb T °C"),
+                     ("ambient_pressure_mbar", "pressure mbar"),
+                     ("uv", "UV")]:
             self._row(k, l)
 
         self._section("SAMPLES")
         for i in range(8):
             self._row(f"sample_{i}", f"sample {i} °C")
+
+        self._section("RESISTANCE")
+        for i in range(8):
+            self._row(f"resistance_{i}", f"R{i} Ω")
 
         self._section("MOTORS")
         for m in range(2):
@@ -112,6 +117,7 @@ class ValuesPanel(QScrollArea):
         # without scanning the whole bitfield string.
         self._row("rs485", "RS-485")
         self._row("heater_inhibit", "heater inhibit")
+        self._row("resistance_ok", "resistance")
 
         self._lay.addStretch()
 
@@ -139,12 +145,19 @@ class ValuesPanel(QScrollArea):
         f["session_id"].setText(pkt.session_id[:12])
         f["ambient_temp_c"].setText(f"{pkt.ambient_temp_c:.2f}")
         f["ambient_pressure_mbar"].setText(f"{pkt.ambient_pressure_mbar:.1f}")
-        f["ambient_humidity_pct"].setText(f"{pkt.ambient_humidity_pct:.1f}")
         f["uv"].setText(f"{pkt.uv:.3f}")
-        f["box_temp_c"].setText(f"{pkt.box_temp_c:.2f}")
         for i in range(8):
             if i < len(pkt.sample_temps_c):
                 f[f"sample_{i}"].setText(f"{pkt.sample_temps_c[i]:.2f}")
+        # Rev-B.1: 8 resistance rows. A literal '-' on the wire surfaces
+        # as None here; show an em-dash so the operator knows it's an
+        # unmeasured channel rather than a broken sensor.
+        for i in range(8):
+            if i < len(pkt.sample_resistance_ohm):
+                v = pkt.sample_resistance_ohm[i]
+                f[f"resistance_{i}"].setText("—" if v is None else f"{v:.2f}")
+            else:
+                f[f"resistance_{i}"].setText("—")
         # Two-motor rendering; missing motors show "—".
         for m in range(2):
             if m < len(pkt.steppers):
@@ -174,6 +187,17 @@ class ValuesPanel(QScrollArea):
             "font-family: monospace; font-size: 11px; color: "
             + ("#f39c12" if hi else "#2ecc71") + ";"
         )
+        # Rev-B.1: RESISTANCE_OK / RESISTANCE_FAIL reflects the INA3221
+        # instrument health. If neither bit is in the status string we
+        # treat it as "unknown" to stay visually quiet on legacy replays.
+        res_ok = "RESISTANCE_OK" in pkt.status
+        res_fail = "RESISTANCE_FAIL" in pkt.status
+        f["resistance_ok"].setText("OK" if res_ok else ("FAIL" if res_fail else "—"))
+        f["resistance_ok"].setStyleSheet(
+            "font-family: monospace; font-size: 11px; color: "
+            + ("#2ecc71" if res_ok else "#e74c3c" if res_fail else "#888")
+            + ";"
+        )
 
 
 # ── Preflight checklist ───────────────────────────────────────────────────────
@@ -188,7 +212,7 @@ class PreflightPanel(QWidget):
         for key, label in [
             ("rtc",        "RTC reporting valid"),
             ("ambient",    "Ambient sensors in-range"),
-            ("heaters",    "9 heater duties reporting"),
+            ("heaters",    "6 heater duties reporting"),
             ("stepper_en", "Stepper enabled"),
             ("link",       "Telemetry link healthy"),
             ("uniformity", "Specimen uniformity OK"),
@@ -208,7 +232,7 @@ class PreflightPanel(QWidget):
             dot.set_color("#2ecc71" if good else "#e74c3c")
         mark("rtc", bool(pkt.rtc_valid))
         mark("ambient", "T_AMBIENT_FAIL" not in pkt.status and "P_AMBIENT_FAIL" not in pkt.status)
-        mark("heaters", len(pkt.heater_duty) >= 9)
+        mark("heaters", len(pkt.heater_duty) >= 6)
         mark("stepper_en", pkt.stepper is not None and pkt.stepper.enabled)
         mark("link", link_ok)
         mark("uniformity", "UNIFORMITY_FAIL" not in pkt.status)
