@@ -1,4 +1,4 @@
-# System Architecture
+# System Architecture (Rev B.1)
 
 ## Overview
 
@@ -13,39 +13,45 @@ COATHEAL uses a client–server architecture over TCP/IP. The onboard C++ applic
 │  │                                                                     │   │
 │  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────────┐  │   │
 │  │  │SensorManager │  │ StateManager │  │    ThermalController     │  │   │
-│  │  │  BME280 (I2C)│  │ Phase FSM    │  │  Sample PID (×9)         │  │   │
-│  │  │  PT100s (SPI)│  │ Pressure     │  │  Box PID (×1)            │  │   │
-│  │  │  ADS1115 (I2C│  │ transitions  │  └─────────────┬────────────┘  │   │
-│  │  │  RTC (I2C)   │  └──────────────┘                │               │   │
-│  │  └──────┬───────┘                        ┌──────────▼──────────┐   │   │
-│  │         │ SensorSnapshot                 │  HeaterScheduler    │   │   │
-│  │         │                                │  max 4 active / 40W │   │   │
-│  │         └──────────────────────┐         └──────────┬──────────┘   │   │
-│  │                                │                    │ duty[10]      │   │
-│  │  ┌──────────────────────────┐  │         ┌──────────▼──────────┐   │   │
-│  │  │   StorageManager         │  │         │ PwmController        │   │   │
-│  │  │  SD: primary.csv         │◄─┤         │ (Simulated / GPIO)   │   │   │
-│  │  │  USB: mirror.csv         │  │         └─────────────────────┘   │   │
-│  │  └──────────────────────────┘  │                                   │   │
-│  │                                │ TelemetryRecord                   │   │
-│  │  ┌──────────────────────────┐  │                                   │   │
-│  │  │   TelemetryQueue         │◄─┘                                   │   │
-│  │  │  Disk-based durable FIFO │                                      │   │
-│  │  └───────────┬──────────────┘                                      │   │
-│  │              │ drain each tick                                      │   │
-│  │  ┌───────────▼──────────────┐   ┌──────────────────────────────┐  │   │
-│  │  │   TelemetryClient (TCP)  ├───►  CommandServer (TCP :5000)   │  │   │
-│  │  │  :4000, ACK-based        │   │  Handles commands in thread  │  │   │
-│  │  │  UDP discovery on :4100  │   └──────────────────────────────┘  │   │
-│  │  └──────────────────────────┘                                      │   │
+│  │  │ MS5803   I2C │  │ Phase FSM    │  │  Sample PID (×6)         │  │   │
+│  │  │ PT100×8  RS485│ │ Pressure-    │  │  (no box PID)            │  │   │
+│  │  │ ADS1015  I2C │  │ driven       │  └─────────────┬────────────┘  │   │
+│  │  │ INA3221×2 I2C│  │ transitions  │                │               │   │
+│  │  │ RTC      I2C │  └──────┬───────┘                │               │   │
+│  │  └──────┬───────┘         │                ┌───────▼──────────┐    │   │
+│  │         │ SensorSnapshot  │                │ HeaterScheduler  │    │   │
+│  │         │ + resistance    │                │ 4 active / 20 W  │    │   │
+│  │         │                 │                │ MotionLock gate  │    │   │
+│  │         └─────────────────┤                └──────┬───────────┘    │   │
+│  │                           │                       │ duty[6]        │   │
+│  │  ┌──────────────────────┐ │                ┌──────▼──────────┐     │   │
+│  │  │ StorageManager       │◄┤                │ PwmController   │     │   │
+│  │  │  SD: primary.csv     │ │                │ (GPIO / sim)    │     │   │
+│  │  │  USB: mirror.csv     │ │                └─────────────────┘     │   │
+│  │  └──────────────────────┘ │                                        │   │
+│  │                           │                ┌─────────────────┐     │   │
+│  │  ┌──────────────────────┐ │                │ StepperChannel  │     │   │
+│  │  │ TelemetryQueue       │◄┤                │  ×2 (TMC5160)   │     │   │
+│  │  │ durable disk FIFO    │ │                │  MotionLock     │     │   │
+│  │  └──────────┬───────────┘ │                │  EVT,PULL edge  │     │   │
+│  │             │             │                └─────────────────┘     │   │
+│  │  ┌──────────▼───────────┐ │                                        │   │
+│  │  │ TelemetryClient (TCP)├─┤   ┌──────────────────────────────┐     │   │
+│  │  │ :4000, ACK-based     │ │   │  CommandServer (TCP :5000)   │     │   │
+│  │  │ UDP discovery :4100  │ │   │  Handles commands in thread  │     │   │
+│  │  └──────────────────────┘ │   └──────────────────────────────┘     │   │
+│  │                                                                     │   │
+│  │  HAL adapters: SpiAdapter, I2cAdapter, RtcAdapter,                  │   │
+│  │  Ina3221Adapter (sample-resistance science instrument, stub),       │   │
+│  │  LibgpiodPwmController, GpioStatusLed, Rs485ModbusAdapter (planned) │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────────────┘
-                             │ TCP :4000 (telemetry)
+                             │ TCP :4000 (telemetry, DATA + EVT,PULL)
                              │ TCP :5000 (commands)
                              │ UDP :4100 (discovery)
                              ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                        Ground Station (Windows/Linux PC)                     │
+│                        Ground Station (Windows / Linux PC)                  │
 │                                                                             │
 │  ┌────────────────────────────────────────────────────────────────────┐    │
 │  │                         gui_app.py (PyQt6)                         │    │
@@ -53,15 +59,14 @@ COATHEAL uses a client–server architecture over TCP/IP. The onboard C++ applic
 │  │  MainWindow (main thread)                                          │    │
 │  │  ┌──────────────┐  ┌──────────────────┐  ┌──────────────────────┐ │    │
 │  │  │ Control Dock │  │  Plot Tabs       │  │  Values Panel        │ │    │
-│  │  │ Connection   │  │  (PyQtGraph)     │  │  (every telemetry    │ │    │
-│  │  │ Heater Bars  │  │  Temperature     │  │   field live)        │ │    │
-│  │  │ Commands     │  │  Pressure        │  └──────────────────────┘ │    │
-│  │  └──────────────┘  │  Heater Duties   │                           │    │
-│  │                    │  Environment     │  ┌──────────────────────┐ │    │
-│  │                    └──────────────────┘  │  Log Dock            │ │    │
-│  │                                          │  (timestamped events)│ │    │
-│  │  ┌──────────────────────────────────┐    └──────────────────────┘ │    │
-│  │  │ TelemetryReceiver (QThread)      │                             │    │
+│  │  │ Connection   │  │  Sample temps    │  │  (every telemetry    │ │    │
+│  │  │ Heater bars  │  │  Pressure        │  │   field live)        │ │    │
+│  │  │ (6 × H0..H5) │  │  Heater duties   │  └──────────────────────┘ │    │
+│  │  │ Commands     │  │  Resistance      │                           │    │
+│  │  └──────────────┘  └──────────────────┘  ┌──────────────────────┐ │    │
+│  │                                          │  Pull events dock    │ │    │
+│  │  ┌──────────────────────────────────┐    │  (EVT,PULL table)    │ │    │
+│  │  │ TelemetryReceiver (QThread)      │    └──────────────────────┘ │    │
 │  │  │  TCP :4000 server                │                             │    │
 │  │  │  Parse → ACK → CSV → signal      │                             │    │
 │  │  └──────────────────────────────────┘                             │    │
@@ -73,89 +78,92 @@ COATHEAL uses a client–server architecture over TCP/IP. The onboard C++ applic
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
+The Rev B "Box PID (×1)" block is removed at Rev B.1: there is no electronics-box heater, no box temperature sensor, and no box PID. The ambient trace no longer includes humidity.
+
 ---
 
-## Onboard Subsystems
+## Onboard subsystems
 
-### Main Loop (`SystemController::Run`)
+### Main loop (`SystemController::Run`)
 
 Runs at `tick_hz` (default 1 Hz). Each tick:
 
-1. Apply queued state/control overrides (from commands received between ticks)
-2. Read sensor snapshot (SensorManager)
-3. Update mission phase (StateManager)
-4. Compute requested heater duties (ThermalController)
-5. Schedule constrained duties (HeaterScheduler)
-6. Apply duties to PWM hardware
-7. Serialize telemetry record (Telemetry)
-8. Write to both storage paths (StorageManager)
-9. Enqueue telemetry frame (TelemetryQueue)
-10. Drain queue to ground station (TelemetryClient)
+1. Apply queued state/control overrides (from commands received between ticks).
+2. Read sensor snapshot (`SensorManager`) — temperatures, pressure, UV, **sample resistance**.
+3. Update mission phase (`StateManager`) — pressure-driven FSM.
+4. Compute requested heater duties (`ThermalController`) — 6 per-sample PIDs.
+5. Schedule constrained duties (`HeaterScheduler`) — 4-active / 20 W / 130 Wh / MotionLock gate.
+6. Apply duties to PWM hardware (6 channels).
+7. Tick both stepper channels (`StepperChannel::Tick`).
+8. Build `TelemetryRecord` + status flags including `RESISTANCE_OK`.
+9. Serialize DATA frame (`SerializeTelemetryDataFrame`) with `RESISTANCE=` segment.
+10. Write to both storage paths (`StorageManager`).
+11. Enqueue to `TelemetryQueue` and drain to ground (`TelemetryClient`).
+12. Detect `moving`-edge falls per channel → emit `EVT,PULL,…`; feed `SensorManager::NotePullCompleted`.
 
-### Command Handling
+### Command handling
 
-`CommandServer` runs a background thread listening on TCP port 5000. When a command arrives, it calls the handler registered by `SystemController::HandleCommandLine`. Safe commands (PING, STATUS, FORCE_START) take effect immediately or set a thread-safe override flag. The override is applied at the top of the next main loop tick.
+`CommandServer` runs a background thread listening on TCP port 5000. On each connection it reads one line, passes it to `SystemController::HandleCommandLine`, writes the response, and closes. Safe commands take effect immediately or set a thread-safe override flag; the override is consumed at the top of the next main-loop tick.
 
-### Telemetry Reliability
+### Telemetry reliability
 
-The onboard writes every frame to a durable disk queue before attempting to send. On each tick, `DrainTelemetryQueue` iterates all pending frames, sends each one, and waits for a per-frame ACK. Successfully ACK'd frames are removed. If the link is down, frames accumulate on disk (up to 72 hours / 8 GiB) and are replayed when the link is restored.
+Every frame (DATA and `EVT,PULL`) is written to the durable disk queue before being sent. On each tick, `DrainTelemetryQueue` iterates all pending frames, sends each one, and waits for a per-frame ACK. Successfully ACK'd frames are removed. If the link is down, frames accumulate on disk (up to 72 h / 8 GiB) and are replayed when the link is restored.
 
-### Phase State Machine
+### Phase state machine (Rev B)
 
 ```
-            power-on
-               │
-               ▼
-        ┌─────────────┐
-        │ ASCENT_HOLD │  target: −30 °C
-        └──────┬──────┘
-               │ P < 140 mbar  OR  FORCE_START
-               ▼
-     ┌──────────────────┐
-     │ ACTIVATION_RAMP  │  ramp: 0.85 °C/s → +70 °C
-     └────────┬─────────┘
-              │ ramp complete
-              ▼
-        ┌────────────┐
-        │ FLOAT_HOLD │  target: +70 °C for 90 min
-        └─────┬──────┘
-              │ P > 300 mbar  OR  timeout
-              ▼
-      ┌───────────────┐
-      │ DESCENT_FLOOR │  floor: −20 °C
-      └───────┬───────┘
-              │ float duration elapsed
-              ▼
-          ┌─────────┐
-          │ STOPPED │
-          └─────────┘
+         power-on
+            │
+            ▼
+       ┌─────────┐
+       │  BOOT   │  heaters off (SystemMode = STANDBY / SAFE stays here)
+       └────┬────┘
+            │ SystemMode → RUN
+            ▼
+       ┌─────────┐
+       │ ASCENT  │  floor +5 °C, per-sample PIDs with 0.5 °C hysteresis
+       └────┬────┘
+            │ P ≤ 100 mbar
+            ▼
+       ┌─────────┐
+       │  FLOAT  │  pulls happen here (MotionLock + HEATER_INHIBITED)
+       └────┬────┘
+            │ P ≥ 300 mbar
+            ▼
+       ┌─────────┐
+       │ DESCENT │  floor +5 °C
+       └────┬────┘
+            │ P ≥ 800 mbar
+            ▼
+       ┌─────────┐
+       │ LANDED  │  heaters off
+       └─────────┘
 
   FORCE_STOP / SHUTDOWN_SAFE → STOPPED (from any state)
-  RESET_CTRL → resets thermal controller, stays in current phase
+  RESET_CTRL → resets per-sample PID integrators, stays in current phase
 ```
 
 ---
 
-## Ground Station Threading
-
-The GUI uses two threads to keep network I/O separate from the Qt event loop:
+## Ground-station threading
 
 | Thread | Responsibility |
 |---|---|
-| **Main thread** | Qt event loop — all widget updates, plot redraws |
-| **TelemetryReceiver (QThread)** | TCP server socket — `accept()`, `recv()`, parse, ACK, CSV write |
+| Main thread | Qt event loop — all widget updates, plot redraws |
+| `TelemetryReceiver` (QThread) | TCP server socket — `accept()`, `recv()`, parse, ACK, CSV write |
 
-Data crosses the boundary via Qt signals:
+Signals across the boundary (queued connection):
 
-- `packet_received(TelemetryPacket)` — delivered to main thread via queued connection; updates all plots and value panels
-- `connection_changed(bool, str)` — updates connection label and status bar
-- `log_message(str)` — appends to log panel
+- `packet_received(TelemetryPacket)` → `_on_packet` — updates sample/heater/resistance plots and value panels.
+- `pull_event(PullEvent)` → populates the Pull events table and appends to `<log>_pulls.csv`.
+- `connection_changed(bool, str)` → status bar.
+- `log_message(str)` → log panel.
 
-Commands are sent synchronously from the main thread (`CommandSender.send()`) as one-shot TCP connections. Because commands are infrequent and have a 3-second timeout, blocking the main thread briefly is acceptable.
+Commands are sent synchronously from the main thread (`CommandSender.send()`) as one-shot TCP connections with a 3-second timeout.
 
 ---
 
-## Network Topology
+## Network topology
 
 | Port | Protocol | Direction | Purpose |
 |---|---|---|---|
@@ -163,30 +171,34 @@ Commands are sent synchronously from the main thread (`CommandSender.send()`) as
 | 5000 | TCP | Laptop → Pi | Command uplink (laptop connects in) |
 | 4100 | UDP broadcast | Both | Discovery beacons |
 
-The Pi acts as a TCP **client** for telemetry (it connects to the ground station). The Pi acts as a TCP **server** for commands (it listens on port 5000). This design means the ground station only needs one inbound firewall rule (port 4000) and one outbound connection (port 5000).
+The Pi acts as a TCP **client** for telemetry and **server** for commands.
 
 ---
 
-## Data Flow Summary
+## Data-flow summary (Rev B.1)
 
 ```
-Sensors → SensorSnapshot → StateManager → MissionPhase
-                       ↓
-               ThermalController → duty[10]
-                       ↓
-               HeaterScheduler → constrained_duty[10]
-                       ↓
-               PwmController → GPIO/Simulated
-                       ↓
-               TelemetryRecord → serialize → frame string
-                       ↓
-               StorageManager (SD + USB CSV)
-                       ↓
-               TelemetryQueue (disk, durable)
-                       ↓
-               TelemetryClient → TCP → TelemetryReceiver
-                                           ↓
-                                       ACK → parse → CSV
-                                           ↓
-                                   Qt signals → GUI panels
+Sensors → SensorSnapshot (temps, P, T, UV, resistance) → StateManager → MissionPhase
+                     ↓
+             ThermalController → duty[6]
+                     ↓
+             HeaterScheduler → constrained_duty[6]          MotionLock → (pull active?)
+                     ↓                                              ↓
+             PwmController (6 ch) → GPIO/Simulated     heater_inhibited → STATUS bit
+                     ↓
+             StepperChannel ×2 → TMC5160 → STEP/DIR/EN
+                     ↓
+             TelemetryRecord → SerializeTelemetryDataFrame
+                     │   columns: temps(8), HEATER_DUTY=(6), RESISTANCE=(8),
+                     │            PHASE, MODE, STATUS(13), STEPPER0, STEPPER1
+                     ↓
+             StorageManager (SD + USB CSV) ← also receives EVT,PULL strings
+                     ↓
+             TelemetryQueue (disk, durable)
+                     ↓
+             TelemetryClient → TCP → TelemetryReceiver
+                                         ↓
+                                     ACK → parse → CSV
+                                         ↓
+                                 Qt signals → GUI panels
 ```
