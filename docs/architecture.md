@@ -31,7 +31,7 @@ COATHEAL uses a client–server architecture over TCP/IP. The onboard C++ applic
 │  │  └──────────────────────┘ │                                        │   │
 │  │                           │                ┌─────────────────┐     │   │
 │  │  ┌──────────────────────┐ │                │ StepperChannel  │     │   │
-│  │  │ TelemetryQueue       │◄┤                │  ×2 (TMC5160)   │     │   │
+│  │  │ TelemetryQueue       │◄┤                │  ×2 (TMC2240)   │     │   │
 │  │  │ durable disk FIFO    │ │                │  MotionLock     │     │   │
 │  │  └──────────┬───────────┘ │                │  EVT,PULL edge  │     │   │
 │  │             │             │                └─────────────────┘     │   │
@@ -186,7 +186,7 @@ Sensors → SensorSnapshot (temps, P, T, UV, resistance) → StateManager → Mi
                      ↓                                              ↓
              PwmController (6 ch) → GPIO/Simulated     heater_inhibited → STATUS bit
                      ↓
-             StepperChannel ×2 → TMC5160 → STEP/DIR/EN
+             StepperChannel ×2 → TMC2240 → STEP/DIR/EN
                      ↓
              TelemetryRecord → SerializeTelemetryDataFrame
                      │   columns: temps(8), HEATER_DUTY=(6), RESISTANCE=(8),

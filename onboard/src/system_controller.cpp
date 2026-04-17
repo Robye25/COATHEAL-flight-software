@@ -12,7 +12,7 @@
 #include "coatheal/sd_notify.hpp"
 #include "coatheal/stepper_channel.hpp"
 #include "coatheal/telemetry.hpp"
-#include "coatheal/tmc5160_driver.hpp"
+#include "coatheal/tmc2240_driver.hpp"
 
 namespace coatheal {
 namespace {
@@ -93,7 +93,7 @@ bool SystemController::Initialize(std::string* error) {
   mode_led_->Set(StatusLed::Pattern::kSolid);
 
   // Rev B: two stepper channels. Motor 0 drives samples 0..3 (high-torque
-  // Pololu 2851 via TMC5160 on SPI1), motor 1 drives samples 4..7 (Adafruit
+  // Pololu 2851 via TMC2240 on SPI1), motor 1 drives samples 4..7 (Adafruit
   // 1918 via A4988/DRV8825 STEP/DIR/EN). The MotionLock is owned by this
   // controller and shared with the heater scheduler for the interlock.
   //
@@ -127,8 +127,8 @@ bool SystemController::Initialize(std::string* error) {
     drivers.emplace_back(std::make_unique<SimulatedStepperDriver>());
     drivers.emplace_back(std::make_unique<SimulatedStepperDriver>());
   } else {
-    // Motor 0: TMC5160 (SPI1 + STEP/DIR/EN on the HAT). Falls back to a
-    // plain GPIO driver until the TMC5160 SPI setup path is exercised on
+    // Motor 0: TMC2240 (SPI1 + STEP/DIR/EN on the HAT). Falls back to a
+    // plain GPIO driver until the TMC2240 SPI setup path is exercised on
     // real hardware.
     drivers.emplace_back(std::make_unique<GpioStepDirStepperDriver>(
         config_.runtime.gpio_chip, config_.stepper.step_line,

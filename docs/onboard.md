@@ -285,7 +285,7 @@ Hardware Abstraction Layer in [`onboard/src/hal/`](../onboard/src/hal/) and [`on
 
 | Adapter | Status | Description |
 |---|---|---|
-| `SpiAdapter` | Stub | Tracks `healthy_`; no real SPI reads. Shared with `Tmc5160Driver`. |
+| `SpiAdapter` | Stub | Tracks `healthy_`; no real SPI reads. Shared with `Tmc2240Driver`. |
 | `I2cAdapter` | Stub | Shared by MS5803-01BA, ADS1015, RTC. |
 | `RtcAdapter` | Stub (system clock) | DS3231 driver pending. |
 | `Ina3221Adapter` | Stub — returns zeros | Two chips at I2C 0x40 / 0x41, channels 1..3. `SensorSnapshot::sample_resistance_ohm` is filled from the INA3221 instrument; in stub mode SensorManager synthesises resistance decay from `NotePullCompleted` edges. |
@@ -301,7 +301,7 @@ Hardware Abstraction Layer in [`onboard/src/hal/`](../onboard/src/hal/) and [`on
 - **INA3221 I2C driver** — real reads for the sample-resistance instrument.
 - **DS3231 I2C driver** — RTC sync.
 - **`Rs485ModbusAdapter`** — 2 × 4-ch PT100 collectors over USB-RS485 (`/dev/ttyUSB0`).
-- **TMC5160 SPI configuration pass** — `Tmc5160Driver` currently falls back to plain `GpioStepDirStepperDriver` outside simulation.
+- **TMC2240 SPI configuration pass** — `Tmc2240Driver` currently falls back to plain `GpioStepDirStepperDriver` outside simulation.
 - **GPIO pin mapping** — heater MOSFET gates and per-motor STEP/DIR/EN pins.
 
 See [docs/hardware.md](hardware.md) for interface specifications.

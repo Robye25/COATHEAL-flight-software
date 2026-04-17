@@ -9,7 +9,7 @@ COATHEAL is a BEXUS high-altitude balloon experiment investigating thermal self-
 │  │   coatheal_onboard (C++)   │  │  TCP/IP │  │   gui_app.py  (PyQt6)      │  │
 │  │  - Mission phase FSM       │◄─┼─────────┼─►│  - Live plots (PyQtGraph)  │  │
 │  │  - 6-channel floor PID     │  │  :4000  │  │  - Command buttons         │  │
-│  │  - Dual stepper (TMC5160)  │  │  :5000  │  │  - Heater duty bars (H0..5)│  │
+│  │  - Dual stepper (TMC2240)  │  │  :5000  │  │  - Heater duty bars (H0..5)│  │
 │  │  - Durable telemetry queue │  │         │  │  - Resistance / pull pane  │  │
 │  │  - Dual CSV logging        │  │         │  │  - Status & log panels     │  │
 │  └────────────────────────────┘  │         │  └────────────────────────────┘  │
@@ -105,7 +105,7 @@ Transitions are pressure-based and can be overridden by ground command (`FORCE_S
 | Ambient P + T | GY-MS5803-01BA | 1 | I2C (no humidity) |
 | UV | GUVA-S12SD + ADS1015 (12-bit) | 1 | Analog → I2C |
 | Sample resistance | INA3221 (addr 0x40 / 0x41) | **2 chips × 3 ch = 6 samples** | I2C — science instrument |
-| Steppers | OMC 17E19S2504BSM5-150RS ball-screw NEMA-17 (1 mm lead) | **2** | 2 × TMC5160 SPI + STEP/DIR/EN |
+| Steppers | OMC 17E19S2504BSM5-150RS ball-screw NEMA-17 (1 mm lead) | **2** | 2 × TMC2240 SPI + STEP/DIR/EN |
 | Power | Pololu D24V50F5 (5 V / 5 A) from 28.8 V rail | — | XT60 connectors |
 
 ## Command Summary

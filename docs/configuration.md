@@ -197,19 +197,19 @@ Rev B.1 accepts and ignores these keys; `StepperChannelConfig` uses compiled-in 
 
 ## `[motor0]`, `[motor1]` — dual-stepper (parsed, not yet wired)
 
-Both motors are OMC 17E19S2504BSM5-150RS integrated ball-screw NEMA-17 (1 mm lead) driven by a TMC5160. The Rev B `motor1.driver=a4988` wording is retired — both channels are TMC5160.
+Both motors are OMC 17E19S2504BSM5-150RS integrated ball-screw NEMA-17 (1 mm lead) driven by a TMC2240. The Rev B `motor1.driver=a4988` wording is retired — both channels are TMC2240.
 
 | Key | Typical value | Description |
 |---|---|---|
-| `motor0.driver` | `tmc5160` | Always TMC5160 at Rev B.1 (SPI config + STEP/DIR/EN). |
-| `motor0.spi_device` | `/dev/spidev1.0` | SPI bus for TMC5160 register load. |
+| `motor0.driver` | `tmc2240` | Always TMC2240 at Rev B.1 (SPI config + STEP/DIR/EN). |
+| `motor0.spi_device` | `/dev/spidev1.0` | SPI bus for TMC2240 register load. |
 | `motor0.cs_line` | `8` | BCM GPIO for SPI1 CE0. |
 | `motor0.step_line` / `dir_line` / `enable_line` | `5` / `6` / `13` | STEP/DIR/EN pins (distinct per motor on flight wiring). |
-| `motor0.run_current_a_rms` | `1.5` | TMC5160 run current (A RMS). |
+| `motor0.run_current_a_rms` | `1.5` | TMC2240 run current (A RMS). |
 | `motor0.hold_current_frac` | `0.30` | Hold current as a fraction of run. |
 | `motor0.stealth_chop` | `1` | StealthChop on. |
 | `motor0.samples` | `0,1,2,3` | Specimen indices owned by motor 0. |
-| `motor1.driver` | `tmc5160` | Same driver as motor 0 at Rev B.1. |
+| `motor1.driver` | `tmc2240` | Same driver as motor 0 at Rev B.1. |
 | `motor1.step_line` / `dir_line` / `enable_line` | TBD | Distinct pins; compiled-in bench defaults alias to motor 0 pins today. |
 | `motor1.samples` | `4,5,6,7` | Motor 1 owns samples 4–7 (6 and 7 unheated). |
 
