@@ -105,3 +105,14 @@ add_executable(coatheal_enqueue_throughput_bench
 )
 
 target_link_libraries(coatheal_enqueue_throughput_bench PRIVATE coatheal_onboard_core)
+
+# Rev B.1 sensor-manager regression (Agent C, 2026-04-17): samples 6 and 7
+# must seed to zero so the telemetry layer emits "-" on the wire.
+add_executable(coatheal_sensor_manager_rev_b_tests
+  unit/test_sensor_manager_rev_b.cpp
+)
+
+target_link_libraries(coatheal_sensor_manager_rev_b_tests PRIVATE coatheal_onboard_core)
+
+add_test(NAME coatheal_sensor_manager_rev_b_tests
+  COMMAND coatheal_sensor_manager_rev_b_tests)
