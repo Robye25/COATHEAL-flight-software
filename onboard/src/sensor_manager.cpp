@@ -81,7 +81,7 @@ SensorSnapshot SensorManager::ReadSnapshot(MissionPhase phase,
   pressure_mbar_ = std::clamp(pressure_mbar_, 5.0, 1013.25);
 
   double ambient_temp = -40.0;
-  if (phase == MissionPhase::kFloat) {
+  if (phase == MissionPhase::kFloat || phase == MissionPhase::kPreFloat) {
     ambient_temp = -55.0;
   } else if (phase == MissionPhase::kDescent) {
     ambient_temp = -15.0;
@@ -103,7 +103,7 @@ SensorSnapshot SensorManager::ReadSnapshot(MissionPhase phase,
   snapshot.timestamp_utc = rtc_ != nullptr ? rtc_->NowUtcIso8601() : "1970-01-01T00:00:00Z";
   snapshot.ambient_temp_c = ambient_temp;
   snapshot.ambient_pressure_mbar = pressure_mbar_;
-  snapshot.uv = phase == MissionPhase::kFloat ? 1.8 : 0.4;
+  snapshot.uv = (phase == MissionPhase::kFloat || phase == MissionPhase::kPreFloat) ? 1.8 : 0.4;
   snapshot.sample_temps_c = sample_temps_c_;
 
   // Rev B.1 INA3221 sample resistance. When the adapter is absent or has

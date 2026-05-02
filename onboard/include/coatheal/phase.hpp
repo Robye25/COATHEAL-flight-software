@@ -4,12 +4,13 @@
 
 namespace coatheal {
 
-// Rev B mission FSM. All flying phases (ASCENT/FLOAT/DESCENT) share a single
-// thermal policy (floor >= +5 C) — the enum is retained per-stage so motor
-// pull sequencing at FLOAT can be wired by other subsystems.
+// Rev C mission FSM. All flying phases share a single thermal policy
+// (floor >= +5 C). PRE_FLOAT runs the mechanical fatigue pull sequence
+// near float altitude; FLOAT is monitoring-only after pulls complete.
 enum class MissionPhase {
   kBoot,
   kAscent,
+  kPreFloat,   // Fatigue pull sequence near float altitude
   kFloat,
   kDescent,
   kLanded,
@@ -22,6 +23,8 @@ inline std::string ToString(MissionPhase phase) {
       return "BOOT";
     case MissionPhase::kAscent:
       return "ASCENT";
+    case MissionPhase::kPreFloat:
+      return "PRE_FLOAT";
     case MissionPhase::kFloat:
       return "FLOAT";
     case MissionPhase::kDescent:

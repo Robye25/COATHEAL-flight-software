@@ -90,6 +90,7 @@ bool StepperController::ResolvePhaseBend(MissionPhase phase,
                                          double* hold_s) const {
   switch (phase) {
     case MissionPhase::kBoot:
+    case MissionPhase::kPreFloat:  // Rev C: FatigueSequencer owns the motors
       return false;
     case MissionPhase::kAscent:
       *steps = schedule_.ascent_steps;

@@ -10,6 +10,7 @@
 #include "coatheal/command_parser.hpp"
 #include "coatheal/command_server.hpp"
 #include "coatheal/config.hpp"
+#include "coatheal/fatigue_sequencer.hpp"
 #include "coatheal/heater_scheduler.hpp"
 #include "coatheal/motion_lock.hpp"
 #include "coatheal/sensor_manager.hpp"
@@ -68,6 +69,7 @@ class SystemController {
   TelemetryQueue telemetry_queue_;
   TelemetryClient telemetry_client_;
   std::unique_ptr<StepperController> stepper_;
+  std::unique_ptr<FatigueSequencer> fatigue_sequencer_;
 
   std::atomic<bool> running_{true};
   std::atomic<bool> debug_armed_{false};

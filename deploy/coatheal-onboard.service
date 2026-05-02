@@ -10,8 +10,9 @@ NotifyAccess=main
 User=coatheal
 WorkingDirectory=/bexus/code/coatheal
 Environment=COATHEAL_ENV=flight
-ExecStartPre=/bexus/code/coatheal/scripts/preflight_healthcheck.sh /bexus/code/coatheal/config/onboard.example.ini
-ExecStart=/bexus/code/coatheal/build/onboard/coatheal_onboard --config /bexus/code/coatheal/config/onboard.example.ini
+EnvironmentFile=-/etc/coatheal/env
+ExecStartPre=/bexus/code/coatheal/scripts/preflight_healthcheck.sh ${COATHEAL_CONFIG}
+ExecStart=/bexus/code/coatheal/build/onboard/coatheal_onboard --config ${COATHEAL_CONFIG}
 Restart=always
 RestartSec=2
 # Integration can flap a lot; don't let systemd give up.

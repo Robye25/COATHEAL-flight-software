@@ -6,6 +6,9 @@ StateManager::StateManager(const OnboardConfig& config) : config_(config) {}
 
 void StateManager::Reset() {
   phase_ = MissionPhase::kBoot;
+  debounce_pre_float_ = 0;
+  debounce_descent_ = 0;
+  debounce_landed_ = 0;
 }
 
 MissionPhase StateManager::Update(double pressure_mbar,
@@ -25,12 +28,16 @@ MissionPhase StateManager::Update(double pressure_mbar,
     // FORCE_STOP short-circuits straight to DESCENT so heaters/motors follow
     // the descent policy; a subsequent SHUTDOWN_SAFE takes us to STOPPED.
     phase_ = MissionPhase::kDescent;
+    debounce_pre_float_ = 0;
+    debounce_descent_ = 0;
     return phase_;
   }
 
   if (overrides.force_start && phase_ == MissionPhase::kBoot) {
     phase_ = MissionPhase::kAscent;
   }
+
+  const int required = std::max(1, config_.transition.debounce_samples);
 
   switch (phase_) {
     case MissionPhase::kBoot:
@@ -40,20 +47,59 @@ MissionPhase StateManager::Update(double pressure_mbar,
       break;
 
     case MissionPhase::kAscent:
-      if (pressure_mbar <= config_.transition.ascent_to_float_mbar) {
+      // Rev C: transition to PRE_FLOAT when pressure drops below threshold
+      // for `debounce_samples` consecutive ticks.
+      if (pressure_mbar <= config_.transition.pre_float_mbar) {
+        ++debounce_pre_float_;
+        if (debounce_pre_float_ >= required) {
+          phase_ = MissionPhase::kPreFloat;
+          debounce_pre_float_ = 0;
+        }
+      } else {
+        debounce_pre_float_ = 0;
+      }
+      break;
+
+    case MissionPhase::kPreFloat:
+      // PRE_FLOAT -> FLOAT is driven by the fatigue sequencer completion
+      // signal, NOT by pressure. However, if pressure rises significantly
+      // (rapid descent detected), we skip to DESCENT for safety.
+      if (overrides.fatigue_complete) {
         phase_ = MissionPhase::kFloat;
+        debounce_descent_ = 0;
+      } else if (pressure_mbar >= config_.transition.float_to_descent_mbar) {
+        // Emergency: balloon burst during fatigue sequence. Abort to DESCENT.
+        ++debounce_descent_;
+        if (debounce_descent_ >= required) {
+          phase_ = MissionPhase::kDescent;
+          debounce_descent_ = 0;
+        }
+      } else {
+        debounce_descent_ = 0;
       }
       break;
 
     case MissionPhase::kFloat:
       if (pressure_mbar >= config_.transition.float_to_descent_mbar) {
-        phase_ = MissionPhase::kDescent;
+        ++debounce_descent_;
+        if (debounce_descent_ >= required) {
+          phase_ = MissionPhase::kDescent;
+          debounce_descent_ = 0;
+        }
+      } else {
+        debounce_descent_ = 0;
       }
       break;
 
     case MissionPhase::kDescent:
       if (pressure_mbar >= config_.transition.descent_to_landed_mbar) {
-        phase_ = MissionPhase::kLanded;
+        ++debounce_landed_;
+        if (debounce_landed_ >= required) {
+          phase_ = MissionPhase::kLanded;
+          debounce_landed_ = 0;
+        }
+      } else {
+        debounce_landed_ = 0;
       }
       break;
 
@@ -66,3 +112,4 @@ MissionPhase StateManager::Update(double pressure_mbar,
 }
 
 }  // namespace coatheal
+
