@@ -41,12 +41,12 @@ PHASE_COLORS = {
 MODE_COLORS = {"STANDBY": "#7f8c8d", "RUN": "#2ecc71", "SAFE": "#e74c3c"}
 
 # Temperature / pressure thresholds used by the plots. These mirror the onboard
-# config defaults (phase.activation_target_c=70, heater.max_sample_temp_c=85,
-# phase.uniformity_tolerance_c=2, transition.ascent_to_activation_mbar=100).
-ACTIVATION_TARGET_C = 70.0
+# Rev C config defaults (phase.sample_floor_c=5, heater.max_sample_temp_c=85,
+# phase.uniformity_tolerance_c=2, transition.pre_float_mbar=150).
+SAMPLE_FLOOR_C = 5.0
 OVERTEMP_CUTOFF_C = 85.0
 UNIFORMITY_BAND_C = 2.0
-ACTIVATION_PRESSURE_MBAR = 100.0
+PRE_FLOAT_PRESSURE_MBAR = 150.0
 
 
 def phase_color(phase: str) -> str:

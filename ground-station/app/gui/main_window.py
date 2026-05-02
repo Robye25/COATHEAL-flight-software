@@ -354,7 +354,7 @@ def run_gui(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--bind", default="0.0.0.0")
     parser.add_argument("--tel-port", type=int, default=4000)
     parser.add_argument("--cmd-port", type=int, default=5000)
-    parser.add_argument("--host", default="169.254.10.10")
+    parser.add_argument("--host", default="")
     parser.add_argument("--log", type=Path, default=Path("logs/ground_telemetry.csv"))
     parser.add_argument("--no-firewall-check", action="store_true",
                         help="Skip the Windows firewall / network-profile auto-check at startup.")

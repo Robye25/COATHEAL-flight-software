@@ -21,8 +21,9 @@ from PyQt6.QtWidgets import QTabWidget, QVBoxLayout, QWidget
 
 from ..protocol import TelemetryPacket
 from .theme import (
-    ACTIVATION_PRESSURE_MBAR, ACTIVATION_TARGET_C, HEATER_COLORS, HEATER_LABELS,
-    MAX_POINTS, OVERTEMP_CUTOFF_C, RESISTANCE_COLORS, RESISTANCE_LABELS,
+    HEATER_COLORS, HEATER_LABELS,
+    MAX_POINTS, OVERTEMP_CUTOFF_C, PRE_FLOAT_PRESSURE_MBAR,
+    RESISTANCE_COLORS, RESISTANCE_LABELS, SAMPLE_FLOOR_C,
     UNIFORMITY_BAND_C,
 )
 
@@ -125,17 +126,17 @@ class PlotTabs(QTabWidget):
         self._temp = LivePlotWidget("Specimen Temperature", "temperature", "°C")
         for i in range(8):
             self._temp.add_curve(f"S{i}", RESISTANCE_COLORS[i % len(RESISTANCE_COLORS)])
-        self._temp.add_threshold(ACTIVATION_TARGET_C, "#2ecc71", f"target {ACTIVATION_TARGET_C:.0f}°C")
+        self._temp.add_threshold(SAMPLE_FLOOR_C, "#2ecc71", f"floor {SAMPLE_FLOOR_C:.0f}°C")
         self._temp.add_threshold(OVERTEMP_CUTOFF_C, "#e74c3c", f"over-T {OVERTEMP_CUTOFF_C:.0f}°C")
-        self._temp.add_threshold(ACTIVATION_TARGET_C + UNIFORMITY_BAND_C, "#3498db",
+        self._temp.add_threshold(SAMPLE_FLOOR_C + UNIFORMITY_BAND_C, "#3498db",
                                  f"unif +{UNIFORMITY_BAND_C:.0f}°C")
-        self._temp.add_threshold(ACTIVATION_TARGET_C - UNIFORMITY_BAND_C, "#3498db",
+        self._temp.add_threshold(SAMPLE_FLOOR_C - UNIFORMITY_BAND_C, "#3498db",
                                  f"unif -{UNIFORMITY_BAND_C:.0f}°C")
 
         self._pressure = LivePlotWidget("Ambient Pressure", "pressure", "mbar")
         self._pressure.add_curve("ambient", "#3498db", width=2)
-        self._pressure.add_threshold(ACTIVATION_PRESSURE_MBAR, "#f39c12",
-                                     f"activation {ACTIVATION_PRESSURE_MBAR:.0f} mbar")
+        self._pressure.add_threshold(PRE_FLOAT_PRESSURE_MBAR, "#f39c12",
+                                     f"pre-float {PRE_FLOAT_PRESSURE_MBAR:.0f} mbar")
 
         self._heaters = LivePlotWidget("Heater Duty", "duty", "%")
         # Rev-B.1: 6 heater traces (H0..H5). Box heater is gone.
