@@ -129,7 +129,7 @@ class ConnectionPanel(QGroupBox):
 
 # ── Mode / Safety ─────────────────────────────────────────────────────────────
 class ModePanel(QGroupBox):
-    PHASES = ["ASCENT", "PRE_FLOAT", "ACTIVATION", "FLOAT", "DESCENT", "STOPPED"]
+    PHASES = ["BOOT", "ASCENT", "PRE_FLOAT", "FLOAT", "DESCENT", "LANDED", "STOPPED"]
 
     def __init__(self, dispatcher: CommandDispatcher, parent=None):
         super().__init__("Mode / Phase", parent)
@@ -382,8 +382,8 @@ class HeaterPanel(QGroupBox):
 
 # ── Stepper ──────────────────────────────────────────────────────────────────
 class StepperPanel(QGroupBox):
-    BEND_PRESETS = [("Ascent", "ASCENT_HOLD"), ("Activation", "ACTIVATION_RAMP"),
-                    ("Float", "FLOAT_HOLD"), ("Descent", "DESCENT_FLOOR")]
+    BEND_PRESETS = [("Ascent", "ASCENT"), ("Pre-Float", "PRE_FLOAT"),
+                    ("Float", "FLOAT"), ("Descent", "DESCENT")]
 
     def __init__(self, dispatcher: CommandDispatcher, parent=None):
         super().__init__("Stepper", parent)
