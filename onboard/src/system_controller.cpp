@@ -12,6 +12,7 @@
 #include <thread>
 
 #include "coatheal/hal/stepper_driver.hpp"
+#include "coatheal/fatigue_sequencer.hpp"
 #include "coatheal/sd_notify.hpp"
 #include "coatheal/stepper_channel.hpp"
 #include "coatheal/telemetry.hpp"
@@ -201,6 +202,10 @@ bool SystemController::Initialize(std::string* error) {
   // One PullState entry per channel for EVT,PULL edge detection in Run().
   pull_state_.resize(stepper_->channel_count());
 
+  // Rev C: create the fatigue sequencer for PRE_FLOAT phase.
+  fatigue_sequencer_ = std::make_unique<FatigueSequencer>(
+      config_.fatigue, stepper_.get());
+
   if (!storage_manager_.Initialize(error)) {
     return false;
   }
@@ -319,6 +324,7 @@ int SystemController::Run() {
       state_overrides_.reset_control = false;
       state_overrides_.shutdown_safe = false;
       state_overrides_.secondary_cycle = false;
+      state_overrides_.fatigue_complete = false;
     }
 
     if (state_overrides.reset_control) {
@@ -339,6 +345,16 @@ int SystemController::Run() {
           std::chrono::steady_clock::now());
     }
 
+    // Rev C: tick the fatigue sequencer during PRE_FLOAT. When the sequence
+    // completes, set the override so the next state_manager Update() will
+    // transition to FLOAT.
+    if (phase == MissionPhase::kPreFloat && fatigue_sequencer_) {
+      if (fatigue_sequencer_->Tick(tick_duration.count())) {
+        std::lock_guard<std::mutex> lock(overrides_mu_);
+        state_overrides_.fatigue_complete = true;
+      }
+    }
+
     const bool heaters_allowed = (current_mode == SystemMode::kRun);
     ControlOverrides effective_control = control_overrides;
     if (!heaters_allowed) {
@@ -354,8 +370,8 @@ int SystemController::Run() {
     // heater during any flying phase (not just the removed ramp). All three
     // flying phases share the same +5 C floor policy.
     const bool any_flying_phase =
-        (phase == MissionPhase::kAscent || phase == MissionPhase::kFloat ||
-         phase == MissionPhase::kDescent);
+        (phase == MissionPhase::kAscent || phase == MissionPhase::kPreFloat ||
+         phase == MissionPhase::kFloat || phase == MissionPhase::kDescent);
     const std::vector<double> scheduled_duty = scheduler_.Schedule(
         requested_duty, heaters_allowed && any_flying_phase,
         tick_duration.count());
@@ -568,7 +584,13 @@ bool SystemController::DrainTelemetryQueue(bool* link_ok, std::string* error) {
     return true;
   }
 
+  // Rev C: limit drain to a small batch per tick so the control loop is not
+  // blocked by a large backlog (the Pi was accumulating 12k+ frames).
+  constexpr std::size_t kMaxDrainPerTick = 10;
+  std::size_t drained = 0;
+
   for (const QueuedTelemetryFrame& frame : pending) {
+    if (drained >= kMaxDrainPerTick) break;
     TelemetryAck ack;
     if (!telemetry_client_.SendFrameAwaitAck(frame.frame, &ack)) {
       if (error != nullptr) {
@@ -591,6 +613,7 @@ bool SystemController::DrainTelemetryQueue(bool* link_ok, std::string* error) {
     if (link_ok != nullptr) {
       *link_ok = true;
     }
+    ++drained;
   }
 
   return true;
@@ -650,6 +673,16 @@ std::string SystemController::HandleCommandLine(const std::string& line) {
       return Ack(cmd_name, "control loop reset queued");
 
     case CommandType::kShutdownSafe:
+      // Graceful shutdown: heaters off, flush data, then stop the process.
+      // Unlike ENTER_SAFE, this actually triggers the STOPPED transition via
+      // state_overrides_.shutdown_safe, which StateManager handles.
+      set_state_override([&]() {
+        control_overrides_.heaters_off = true;
+        state_overrides_.shutdown_safe = true;
+      });
+      storage_manager_.FlushAndSync();
+      return Ack(cmd_name, "shutdown initiated");
+
     case CommandType::kEnterSafe:
       mode_.store(SystemMode::kSafe);
       set_state_override([&]() { control_overrides_.heaters_off = true; });

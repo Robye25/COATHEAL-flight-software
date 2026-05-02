@@ -32,6 +32,7 @@ PHASE_COLORS = {
     # no setpoint suffix).
     "BOOT":            "#7f8c8d",
     "ASCENT":          "#3498db",
+    "PRE_FLOAT":       "#f39c12",
     "FLOAT":           "#2ecc71",
     "DESCENT":         "#9b59b6",
     "LANDED":          "#34495e",

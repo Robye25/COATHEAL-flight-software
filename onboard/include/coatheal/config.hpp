@@ -45,12 +45,35 @@ struct PhaseConfig {
 };
 
 struct TransitionConfig {
-  // Pressure thresholds in mbar. Ascent->Float at low pressure (float
-  // altitude), Float->Descent on re-pressurisation, Descent->Landed once
+  // Pressure thresholds in mbar. Ascent->PreFloat at low pressure (near float
+  // altitude), PreFloat->Float when fatigue sequence completes (not pressure-
+  // driven), Float->Descent on re-pressurisation, Descent->Landed once
   // near-surface pressure is recovered.
-  double ascent_to_float_mbar = 100.0;
+  double pre_float_mbar = 150.0;
+  double ascent_to_float_mbar = 100.0;  // legacy fallback; PRE_FLOAT now gates
   double float_to_descent_mbar = 300.0;
   double descent_to_landed_mbar = 800.0;
+  // Number of consecutive pressure samples that must satisfy a threshold before
+  // the state machine commits to the transition. Prevents single bad readings
+  // from causing irreversible phase changes. Especially important near the
+  // 300 mbar sensor accuracy boundary (±6 mbar).
+  int debounce_samples = 5;
+};
+
+// Rev C: mechanical fatigue pull sequence parameters for PRE_FLOAT phase.
+// One batch at a time: pull-release-pull-release (fatigue), then soak (hold).
+struct FatigueConfig {
+  // Number of pull-release cycles per motor batch during PRE_FLOAT.
+  int fatigue_cycles = 30;
+  // Travel distance for each fatigue pull (full steps). 200 = ~1 rev = 1-2 mm.
+  int fatigue_travel_full_steps = 200;
+  // Hold time at end of each fatigue pull before release (seconds).
+  double fatigue_pull_hold_s = 2.0;
+  // Soak (final pull) hold duration after all fatigue cycles (seconds).
+  // Default 900 s = 15 minutes.
+  double soak_hold_s = 900.0;
+  // Soak travel distance (full steps) — usually same as fatigue.
+  int soak_travel_full_steps = 200;
 };
 
 struct HeaterSafetyConfig {
@@ -134,6 +157,7 @@ struct OnboardConfig {
   StorageConfig storage;
   PhaseConfig phase;
   TransitionConfig transition;
+  FatigueConfig fatigue;
   PowerConfig power;
   PidConfig pid;
   HardwareConfig hardware;

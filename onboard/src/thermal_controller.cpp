@@ -36,6 +36,7 @@ void ThermalController::UpdatePid(PidGains gains) {
 bool ThermalController::ShouldHeatPhase(MissionPhase phase) const {
   switch (phase) {
     case MissionPhase::kAscent:
+    case MissionPhase::kPreFloat:
     case MissionPhase::kFloat:
     case MissionPhase::kDescent:
       return true;

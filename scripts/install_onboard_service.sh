@@ -58,6 +58,13 @@ for unit in "${UNITS[@]}"; do
   $SUDO chmod 0644 "$SYSTEMD_DIR/$unit"
 done
 
+# Write the config path into the environment file read by the service unit.
+# This allows the same .service file to work with any config without edits.
+$SUDO mkdir -p /etc/coatheal
+echo "COATHEAL_CONFIG=$CONFIG_PATH" | $SUDO tee /etc/coatheal/env >/dev/null
+$SUDO chmod 0644 /etc/coatheal/env
+echo "[install-service] config path written to /etc/coatheal/env"
+
 $SUDO systemctl daemon-reload
 
 # Flight + link-watch on by default; debug installed but left disabled.

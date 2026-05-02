@@ -129,7 +129,7 @@ class ConnectionPanel(QGroupBox):
 
 # ── Mode / Safety ─────────────────────────────────────────────────────────────
 class ModePanel(QGroupBox):
-    PHASES = ["ASCENT", "ACTIVATION", "FLOAT", "DESCENT", "STOPPED"]
+    PHASES = ["ASCENT", "PRE_FLOAT", "ACTIVATION", "FLOAT", "DESCENT", "STOPPED"]
 
     def __init__(self, dispatcher: CommandDispatcher, parent=None):
         super().__init__("Mode / Phase", parent)

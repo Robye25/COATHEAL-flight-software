@@ -393,18 +393,16 @@ class TelemetryServer:
                                 seen_pulls.add(dup_key)
                         if not is_dup_pull:
                             self._append_pull_log(pull, line)
-                        # ACK with a sentinel "infinity" seq so the
-                        # onboard's queue-drain ACK guard
-                        # (`ack.seq >= frame.seq`) is satisfied regardless
-                        # of the seq the EVT frame was enqueued with. The
-                        # EVT,PULL wire format does not carry its queue
-                        # seq, so we cannot echo it; but any value >= the
-                        # frame's seq causes the onboard to dequeue. Zero
-                        # (the previous implementation) failed that guard,
-                        # leaving EVT frames stuck and replayed forever.
-                        # The onboard's Acknowledge() path is idempotent
-                        # wrt higher-than-latest seqs. (Agent C, 2026-04-17)
-                        ack_line = build_ack(pull.session_id, 2**63 - 1)
+                        # Rev C fix: the previous 2**63-1 ACK was nuclear —
+                        # it caused Acknowledge() to delete ALL queued frames
+                        # (seq <= 2^63-1 is always true). ACK with 0 is safe:
+                        # it won't remove any queued DATA frames (their seqs
+                        # start at 1). EVT,PULL events are already deduplicated
+                        # on the ground by (session_id, pull_id), so replays
+                        # from the queue are harmless. The proper long-term fix
+                        # is to embed the queue seq in the EVT wire format or
+                        # give EVT frames a separate dequeue path.
+                        ack_line = build_ack(pull.session_id, 0)
                         try:
                             conn.sendall(ack_line.encode("utf-8"))
                         except OSError:

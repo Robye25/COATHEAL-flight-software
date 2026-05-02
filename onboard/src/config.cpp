@@ -222,12 +222,27 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
     } else if (key == "sensor.ambient_pressure_max_mbar") {
       if (!parse_double(key, value, &config->sensor_range.ambient_pressure_max_mbar, line_no)) return false;
 
+    } else if (key == "transition.pre_float_mbar") {
+      if (!parse_double(key, value, &config->transition.pre_float_mbar, line_no)) return false;
     } else if (key == "transition.ascent_to_float_mbar") {
       if (!parse_double(key, value, &config->transition.ascent_to_float_mbar, line_no)) return false;
     } else if (key == "transition.float_to_descent_mbar") {
       if (!parse_double(key, value, &config->transition.float_to_descent_mbar, line_no)) return false;
     } else if (key == "transition.descent_to_landed_mbar") {
       if (!parse_double(key, value, &config->transition.descent_to_landed_mbar, line_no)) return false;
+    } else if (key == "transition.debounce_samples") {
+      if (!parse_int(key, value, &config->transition.debounce_samples, line_no)) return false;
+
+    } else if (key == "fatigue.fatigue_cycles") {
+      if (!parse_int(key, value, &config->fatigue.fatigue_cycles, line_no)) return false;
+    } else if (key == "fatigue.fatigue_travel_full_steps") {
+      if (!parse_int(key, value, &config->fatigue.fatigue_travel_full_steps, line_no)) return false;
+    } else if (key == "fatigue.fatigue_pull_hold_s") {
+      if (!parse_double(key, value, &config->fatigue.fatigue_pull_hold_s, line_no)) return false;
+    } else if (key == "fatigue.soak_hold_s") {
+      if (!parse_double(key, value, &config->fatigue.soak_hold_s, line_no)) return false;
+    } else if (key == "fatigue.soak_travel_full_steps") {
+      if (!parse_int(key, value, &config->fatigue.soak_travel_full_steps, line_no)) return false;
 
     } else if (key == "power.max_active_heaters") {
       if (!parse_size_t(key, value, &config->power.max_active_heaters, line_no)) return false;

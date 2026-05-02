@@ -1,6 +1,6 @@
-// Rev B.1 refactor tests: floor-only thermal policy, simplified phase FSM,
-// and duty vector sizing (6 heaters drive 6 of the 8 samples one-to-one;
-// samples 6 and 7 are pulled but unheated).
+// Rev C refactor tests: floor-only thermal policy, simplified phase FSM with
+// PRE_FLOAT and pressure debounce, and duty vector sizing (6 heaters drive
+// 6 of the 8 samples one-to-one; samples 6 and 7 are pulled but unheated).
 #include <cassert>
 #include <chrono>
 #include <iostream>
@@ -15,14 +15,16 @@ namespace {
 
 coatheal::OnboardConfig MakeConfig() {
   coatheal::OnboardConfig cfg;
-  // Rev B.1 defaults should already be set; pin them here for readability.
+  // Rev C defaults should already be set; pin them here for readability.
   cfg.hardware.heater_count = 6;
   cfg.hardware.electronics_heater_index = static_cast<std::size_t>(-1);
   cfg.phase.sample_floor_c = 5.0;
   cfg.phase.uniformity_tolerance_c = 2.0;
+  cfg.transition.pre_float_mbar = 150.0;
   cfg.transition.ascent_to_float_mbar = 100.0;
   cfg.transition.float_to_descent_mbar = 300.0;
   cfg.transition.descent_to_landed_mbar = 800.0;
+  cfg.transition.debounce_samples = 5;
   // Healthy overtemp ceilings so nothing latches in these tests.
   cfg.heater_safety.max_sample_temp_c = 85.0;
   return cfg;
@@ -35,18 +37,26 @@ coatheal::SensorSnapshot SnapshotWithSamples(double sample_c,
   return s;
 }
 
-void TestRevBDefaults() {
+void TestRevCDefaults() {
   coatheal::OnboardConfig cfg;
   assert(cfg.hardware.heater_count == 6);
   assert(cfg.hardware.electronics_heater_index == static_cast<std::size_t>(-1));
   assert(cfg.phase.sample_floor_c == 5.0);
+  assert(cfg.transition.pre_float_mbar == 150.0);
   assert(cfg.transition.ascent_to_float_mbar == 100.0);
   assert(cfg.transition.float_to_descent_mbar == 300.0);
   assert(cfg.transition.descent_to_landed_mbar == 800.0);
+  assert(cfg.transition.debounce_samples == 5);
   // Rev B.1 power defaults: 5 W @ 24 V, 20 W combined ceiling, 4 active.
   assert(cfg.power.heater_nominal_w == 5.0);
   assert(cfg.power.max_thermal_w == 20.0);
   assert(cfg.power.max_active_heaters == 4);
+  // Rev C fatigue defaults.
+  assert(cfg.fatigue.fatigue_cycles == 30);
+  assert(cfg.fatigue.fatigue_travel_full_steps == 200);
+  assert(cfg.fatigue.fatigue_pull_hold_s == 2.0);
+  assert(cfg.fatigue.soak_hold_s == 900.0);
+  assert(cfg.fatigue.soak_travel_full_steps == 200);
 }
 
 void TestDutyVectorSizeIsSix() {
@@ -139,13 +149,14 @@ void TestNoHeatInBootLandedStopped() {
 }
 
 void TestAllFlyingPhasesShareFloor() {
-  // ASCENT/FLOAT/DESCENT all demand heat when sample is below floor.
+  // ASCENT/PRE_FLOAT/FLOAT/DESCENT all demand heat when sample is below floor.
   const auto cfg = MakeConfig();
   coatheal::ThermalController tc(cfg);
   coatheal::ControlOverrides ov;
   const auto cold = SnapshotWithSamples(-5.0, 8);
 
   for (auto phase : {coatheal::MissionPhase::kAscent,
+                     coatheal::MissionPhase::kPreFloat,
                      coatheal::MissionPhase::kFloat,
                      coatheal::MissionPhase::kDescent}) {
     tc.Reset();
@@ -156,33 +167,126 @@ void TestAllFlyingPhasesShareFloor() {
   }
 }
 
-void TestPhaseTransitionsViaPressure() {
+void TestPhaseTransitionsWithDebounce() {
+  // Rev C: transitions require `debounce_samples` consecutive qualifying
+  // pressure readings. Single readings do NOT trigger transition.
   auto cfg = MakeConfig();
+  cfg.transition.debounce_samples = 3;  // smaller for test speed
   coatheal::StateManager sm(cfg);
   const std::vector<double> samples(8, 5.0);
   const auto t0 = std::chrono::steady_clock::now();
 
-  // First Update leaves BOOT immediately.
+  // First Update leaves BOOT immediately -> ASCENT.
   auto p = sm.Update(900.0, samples, {}, t0);
   assert(p == coatheal::MissionPhase::kAscent);
 
-  // 150 mbar: still in ascent (above 100 mbar threshold).
-  p = sm.Update(150.0, samples, {}, t0);
+  // 1 tick at 100 mbar: still ASCENT (need 3 consecutive).
+  p = sm.Update(100.0, samples, {}, t0);
   assert(p == coatheal::MissionPhase::kAscent);
 
-  // 100 mbar: reaches ascent->float threshold (<=).
+  // 2nd tick at 100 mbar: still ASCENT.
   p = sm.Update(100.0, samples, {}, t0);
-  assert(p == coatheal::MissionPhase::kFloat);
+  assert(p == coatheal::MissionPhase::kAscent);
 
-  // Still at float altitude — no timed expiry, stays in FLOAT.
+  // 3rd tick at 100 mbar: NOW transitions to PRE_FLOAT.
+  p = sm.Update(100.0, samples, {}, t0);
+  assert(p == coatheal::MissionPhase::kPreFloat);
+
+  // PRE_FLOAT doesn't transition to FLOAT on pressure alone.
+  p = sm.Update(50.0, samples, {}, t0);
+  assert(p == coatheal::MissionPhase::kPreFloat);
+
+  // PRE_FLOAT -> FLOAT requires fatigue_complete signal.
+  coatheal::StateOverrides ov;
+  ov.fatigue_complete = true;
+  p = sm.Update(50.0, samples, ov, t0);
+  assert(p == coatheal::MissionPhase::kFloat);
+}
+
+void TestDebounceResetOnBounce() {
+  // If pressure bounces above threshold mid-debounce, counter resets.
+  auto cfg = MakeConfig();
+  cfg.transition.debounce_samples = 3;
+  coatheal::StateManager sm(cfg);
+  const std::vector<double> samples(8, 5.0);
+  const auto t0 = std::chrono::steady_clock::now();
+
+  // Enter ASCENT.
+  sm.Update(900.0, samples, {}, t0);
+
+  // 2 ticks below threshold.
+  sm.Update(100.0, samples, {}, t0);
+  sm.Update(100.0, samples, {}, t0);
+
+  // Bounce above threshold — counter should reset.
+  auto p = sm.Update(200.0, samples, {}, t0);
+  assert(p == coatheal::MissionPhase::kAscent);
+
+  // Need 3 NEW consecutive ticks below threshold.
+  sm.Update(100.0, samples, {}, t0);
+  sm.Update(100.0, samples, {}, t0);
+  p = sm.Update(100.0, samples, {}, t0);
+  assert(p == coatheal::MissionPhase::kPreFloat);
+}
+
+void TestPreFloatAbortOnDescentPressure() {
+  // If pressure rises rapidly during PRE_FLOAT (balloon burst), abort to DESCENT.
+  auto cfg = MakeConfig();
+  cfg.transition.debounce_samples = 2;
+  coatheal::StateManager sm(cfg);
+  const std::vector<double> samples(8, 5.0);
+  const auto t0 = std::chrono::steady_clock::now();
+
+  // Enter ASCENT, then PRE_FLOAT.
+  sm.Update(900.0, samples, {}, t0);
+  sm.Update(100.0, samples, {}, t0);
+  auto p = sm.Update(100.0, samples, {}, t0);
+  assert(p == coatheal::MissionPhase::kPreFloat);
+
+  // 1 tick at descent pressure — not enough.
+  p = sm.Update(350.0, samples, {}, t0);
+  assert(p == coatheal::MissionPhase::kPreFloat);
+
+  // 2nd tick at descent pressure — abort to DESCENT.
+  p = sm.Update(350.0, samples, {}, t0);
+  assert(p == coatheal::MissionPhase::kDescent);
+}
+
+void TestFullPhaseTransitionSequence() {
+  // Complete flight sequence: BOOT -> ASCENT -> PRE_FLOAT -> FLOAT -> DESCENT -> LANDED.
+  auto cfg = MakeConfig();
+  cfg.transition.debounce_samples = 1;  // instant transitions for this test
+  coatheal::StateManager sm(cfg);
+  const std::vector<double> samples(8, 5.0);
+  const auto t0 = std::chrono::steady_clock::now();
+
+  // BOOT -> ASCENT
+  auto p = sm.Update(900.0, samples, {}, t0);
+  assert(p == coatheal::MissionPhase::kAscent);
+
+  // ASCENT -> PRE_FLOAT at 150 mbar
+  p = sm.Update(150.0, samples, {}, t0);
+  assert(p == coatheal::MissionPhase::kPreFloat);
+
+  // Still PRE_FLOAT without fatigue_complete.
   p = sm.Update(80.0, samples, {}, t0);
+  assert(p == coatheal::MissionPhase::kPreFloat);
+
+  // PRE_FLOAT -> FLOAT on fatigue_complete.
+  coatheal::StateOverrides ov;
+  ov.fatigue_complete = true;
+  p = sm.Update(80.0, samples, ov, t0);
   assert(p == coatheal::MissionPhase::kFloat);
 
-  // Re-pressurises past 300 mbar -> DESCENT.
+  // Still at float altitude — stays in FLOAT.
+  p = sm.Update(60.0, samples, {}, t0);
+  assert(p == coatheal::MissionPhase::kFloat);
+
+  // FLOAT -> DESCENT at 300 mbar.
   p = sm.Update(300.0, samples, {}, t0);
   assert(p == coatheal::MissionPhase::kDescent);
 
-  // Surface pressure recovered -> LANDED.
+  // DESCENT -> LANDED at 800 mbar.
   p = sm.Update(800.0, samples, {}, t0);
   assert(p == coatheal::MissionPhase::kLanded);
 
@@ -204,13 +308,16 @@ void TestShutdownSafeGoesToStopped() {
 }  // namespace
 
 int main() {
-  TestRevBDefaults();
+  TestRevCDefaults();
   TestDutyVectorSizeIsSix();
   TestFloorHysteresisCycle();
   TestNoHeatInBootLandedStopped();
   TestAllFlyingPhasesShareFloor();
-  TestPhaseTransitionsViaPressure();
+  TestPhaseTransitionsWithDebounce();
+  TestDebounceResetOnBounce();
+  TestPreFloatAbortOnDescentPressure();
+  TestFullPhaseTransitionSequence();
   TestShutdownSafeGoesToStopped();
-  std::cout << "Rev B.1 phase/thermal tests passed.\n";
+  std::cout << "Rev C phase/thermal tests passed.\n";
   return 0;
 }
