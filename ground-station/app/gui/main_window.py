@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
 
 from ..protocol import CommandResponse, TelemetryPacket
 from . import firewall
-from .dispatch import CommandDispatcher, TelemetryReceiver
+from .dispatch import CommandDispatcher, DemoTelemetryReceiver, TelemetryReceiver
 from .discovery import GsBeacon, OnboardListener, DISCOVERY_PORT_DEFAULT
 from .panels_control import (
     CommandPanel, ConnectionPanel, EmergencyBar, HeaterPanel, ModePanel,
@@ -31,17 +31,27 @@ from .widgets import Toast
 
 class MainWindow(QMainWindow):
     def __init__(self, *, bind: str, tel_port: int, cmd_port: int, cmd_host: str,
-                 log_path: Path, firewall_check: bool = True):
+                 log_path: Path, firewall_check: bool = True,
+                 demo_mode: bool = False, demo_rate_hz: float = 2.0,
+                 demo_speed: float = 2.0):
         super().__init__()
-        self.setWindowTitle("COATHEAL Ground Station")
+        self.setWindowTitle(
+            "COATHEAL Ground Station - DEMO"
+            if demo_mode else "COATHEAL Ground Station"
+        )
         self.resize(1500, 920)
 
         self._settings = QSettings("COATHEAL", "GroundStation")
         self._log_path = log_path
         self._receiver: Optional[TelemetryReceiver] = None
         self._link_ok = False
+        self._demo_mode = bool(demo_mode)
+        self._demo_rate_hz = float(demo_rate_hz)
+        self._demo_speed = float(demo_speed)
+        self._beacon = None
+        self._listener = None
 
-        self._dispatcher = CommandDispatcher(cmd_host, cmd_port)
+        self._dispatcher = CommandDispatcher(cmd_host, cmd_port, demo_mode=self._demo_mode)
         self._dispatcher.response_received.connect(self._on_response)
 
         pg.setConfigOption("background", "#0d0d0d")
@@ -142,18 +152,22 @@ class MainWindow(QMainWindow):
         self._build_shortcuts()
 
         # ── discovery: beacon + passive listener start immediately ──
-        self._beacon = GsBeacon(
-            tel_port=tel_port, cmd_port=cmd_port,
-            priority=self._connection.current_priority(),
-            discovery_port=DISCOVERY_PORT_DEFAULT,
-        )
-        self._beacon.log_message.connect(self._log.append)
-        self._listener = OnboardListener(discovery_port=DISCOVERY_PORT_DEFAULT)
-        self._listener.log_message.connect(self._log.append)
-        self._listener.onboard_discovered.connect(self._on_onboard_discovered)
-        self._listener.peer_gs_seen.connect(self._on_peer_gs_seen)
-        self._beacon.start()
-        self._listener.start()
+        if not self._demo_mode:
+            self._beacon = GsBeacon(
+                tel_port=tel_port, cmd_port=cmd_port,
+                priority=self._connection.current_priority(),
+                discovery_port=DISCOVERY_PORT_DEFAULT,
+            )
+            self._beacon.log_message.connect(self._log.append)
+            self._listener = OnboardListener(discovery_port=DISCOVERY_PORT_DEFAULT)
+            self._listener.log_message.connect(self._log.append)
+            self._listener.onboard_discovered.connect(self._on_onboard_discovered)
+            self._listener.peer_gs_seen.connect(self._on_peer_gs_seen)
+            self._beacon.start()
+            self._listener.start()
+        else:
+            self._log.append("[demo] UDP discovery disabled")
+            self._top.set_discovery("demo source", "#2ecc71")
 
         # Auto-start the TCP telemetry acceptor on :tel_port so the operator
         # doesn't have to click "Start Telemetry" for plug-and-play. The
@@ -163,7 +177,7 @@ class MainWindow(QMainWindow):
 
         # ── restore geometry ──
         # ── firewall / network-profile auto-configure (Windows only) ──
-        if firewall_check:
+        if firewall_check and not self._demo_mode:
             try:
                 fw_result = firewall.check_and_prompt(self)
             except Exception as exc:  # never block GUI startup on this
@@ -187,7 +201,10 @@ class MainWindow(QMainWindow):
                     "to run scripts/configure_firewall.ps1 manually"
                 )
         else:
-            self._log.append("[firewall] check skipped (--no-firewall-check)")
+            if self._demo_mode:
+                self._log.append("[firewall] skipped in demo mode")
+            else:
+                self._log.append("[firewall] check skipped (--no-firewall-check)")
 
         geo = self._settings.value("window/geometry")
         if geo:
@@ -202,7 +219,14 @@ class MainWindow(QMainWindow):
         if self._receiver is not None and self._receiver.isRunning():
             self._log.append("[telemetry] receiver already running — ignoring")
             return
-        self._receiver = TelemetryReceiver(bind, tel_port, self._log_path)
+        if self._demo_mode:
+            self._receiver = DemoTelemetryReceiver(
+                self._log_path,
+                rate_hz=self._demo_rate_hz,
+                speed=self._demo_speed,
+            )
+        else:
+            self._receiver = TelemetryReceiver(bind, tel_port, self._log_path)
         self._receiver.packet_received.connect(self._on_packet)
         self._receiver.pull_event.connect(self._on_pull_event)
         self._receiver.log_message.connect(self._log.append)
@@ -355,18 +379,32 @@ def run_gui(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--tel-port", type=int, default=4000)
     parser.add_argument("--cmd-port", type=int, default=5000)
     parser.add_argument("--host", default="")
-    parser.add_argument("--log", type=Path, default=Path("logs/ground_telemetry.csv"))
+    parser.add_argument("--log", type=Path, default=None)
     parser.add_argument("--no-firewall-check", action="store_true",
                         help="Skip the Windows firewall / network-profile auto-check at startup.")
+    parser.add_argument("--demo", action="store_true",
+                        help="Run a self-contained presentation demo without onboard hardware.")
+    parser.add_argument("--demo-rate-hz", type=float, default=2.0,
+                        help="Packets per second generated in --demo mode.")
+    parser.add_argument("--demo-speed", type=float, default=2.0,
+                        help="Mission-profile speed multiplier in --demo mode.")
     args = parser.parse_args(argv)
 
     app = QApplication.instance() or QApplication([])
     from .theme import apply_dark_palette
     apply_dark_palette(app)
 
+    log_path = args.log or Path(
+        "logs/demo_telemetry.csv" if args.demo else "logs/ground_telemetry.csv"
+    )
+    cmd_host = "demo-source" if args.demo and not args.host else args.host
+
     win = MainWindow(bind=args.bind, tel_port=args.tel_port,
-                     cmd_port=args.cmd_port, cmd_host=args.host,
-                     log_path=args.log,
-                     firewall_check=not args.no_firewall_check)
+                     cmd_port=args.cmd_port, cmd_host=cmd_host,
+                     log_path=log_path,
+                     firewall_check=not args.no_firewall_check,
+                     demo_mode=args.demo,
+                     demo_rate_hz=args.demo_rate_hz,
+                     demo_speed=args.demo_speed)
     win.show()
     return app.exec()
