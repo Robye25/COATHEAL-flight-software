@@ -15,9 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Deque, Optional
 
-from PyQt6.QtCore import QObject, QRunnable, QThread, QThreadPool, QTimer, pyqtSignal
+from PyQt6.QtCore import QObject, QRunnable, QThread, QThreadPool, pyqtSignal
 
-from ..demo import DemoTelemetryScenario, demo_command_response
 from ..protocol import (
     CommandResponse,
     PullEvent,
@@ -230,99 +229,6 @@ class TelemetryReceiver(QThread):
                     self.packet_received.emit(pkt)
 
 
-class DemoTelemetryReceiver(QThread):
-    """Self-contained telemetry source for stand demos without onboard hardware."""
-
-    packet_received    = pyqtSignal(object)
-    pull_event         = pyqtSignal(object)
-    log_message        = pyqtSignal(str)
-    connection_changed = pyqtSignal(bool, str)
-    status_changed     = pyqtSignal(str)
-
-    CSV_FIELDS = TelemetryReceiver.CSV_FIELDS
-
-    def __init__(
-        self,
-        log_path: Path,
-        *,
-        rate_hz: float = 2.0,
-        speed: float = 2.0,
-        parent=None,
-    ) -> None:
-        super().__init__(parent)
-        self._log_path = log_path
-        self._rate_hz = max(0.1, float(rate_hz))
-        self._speed = max(0.1, float(speed))
-        self._stop_flag = threading.Event()
-
-    def stop(self) -> None:
-        self._stop_flag.set()
-
-    def run(self) -> None:
-        scenario = DemoTelemetryScenario(tick_hz=self._rate_hz, speed=self._speed)
-        interval_s = 1.0 / self._rate_hz
-        self._log_path.parent.mkdir(parents=True, exist_ok=True)
-        write_header = not self._log_path.exists()
-
-        self.connection_changed.emit(True, "demo://local-simulator")
-        self.status_changed.emit("connected")
-        self.log_message.emit(
-            f"[demo] self-contained telemetry active "
-            f"({self._rate_hz:.1f} Hz, {self._speed:.1f}x profile)"
-        )
-        try:
-            with self._log_path.open("a", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=self.CSV_FIELDS)
-                if write_header:
-                    writer.writeheader()
-
-                while not self._stop_flag.is_set():
-                    pkt = scenario.next_packet()
-                    writer.writerow(_packet_to_csv_row(pkt))
-                    f.flush()
-                    self.packet_received.emit(pkt)
-
-                    for ev in scenario.drain_pull_events():
-                        self._append_pull_log(ev)
-                        self.pull_event.emit(ev)
-                        self.log_message.emit(
-                            f"[demo][pull] motor={ev.motor_id} pull_id={ev.pull_id} "
-                            f"steps={ev.steps_moved} hold={ev.hold_s:.1f}s "
-                            f"samples={'|'.join(str(s) for s in ev.samples) or '-'}"
-                        )
-
-                    self._stop_flag.wait(interval_s)
-        except OSError as exc:
-            self.log_message.emit(f"[demo] log writer stopped: {exc}")
-        finally:
-            self.connection_changed.emit(False, "")
-            self.status_changed.emit("searching")
-            self.log_message.emit("[demo] telemetry stopped")
-
-    def _append_pull_log(self, ev: PullEvent) -> None:
-        pull_path = self._log_path.with_name(self._log_path.stem + "_pulls.csv")
-        first = not pull_path.exists()
-        try:
-            with pull_path.open("a", newline="", encoding="utf-8") as pf:
-                writer = csv.writer(pf)
-                if first:
-                    writer.writerow([
-                        "session_id", "pull_id", "motor_id", "start_ts",
-                        "steps_moved", "hold_s", "samples",
-                    ])
-                writer.writerow([
-                    ev.session_id,
-                    ev.pull_id,
-                    ev.motor_id,
-                    ev.start_ts,
-                    ev.steps_moved,
-                    f"{ev.hold_s:.2f}",
-                    "|".join(str(s) for s in ev.samples),
-                ])
-        except OSError as exc:
-            self.log_message.emit(f"[demo] pull log skipped: {exc}")
-
-
 def _motor_cells(m: Optional[dict], prefix: str) -> dict:
     """Flatten a stepper snapshot dict into CSV cells.
 
@@ -426,18 +332,10 @@ class CommandDispatcher(QObject):
 
     response_received = pyqtSignal(str, object, float, object)  # cmd, CommandResponse, ms, tag
 
-    def __init__(
-        self,
-        host: str,
-        port: int,
-        history_size: int = 200,
-        *,
-        demo_mode: bool = False,
-    ):
+    def __init__(self, host: str, port: int, history_size: int = 200):
         super().__init__()
         self.host = host
         self.port = port
-        self._demo_mode = bool(demo_mode)
         self._pool = QThreadPool.globalInstance()
         self._history: Deque[CommandHistoryEntry] = deque(maxlen=history_size)
         self.response_received.connect(self._on_response)
@@ -447,20 +345,8 @@ class CommandDispatcher(QObject):
         self.port = port
 
     def send(self, command: str, tag: Optional[object] = None, timeout: float = 3.0) -> None:
-        if self._demo_mode:
-            QTimer.singleShot(
-                80,
-                lambda cmd=command, response_tag=tag: self._emit_demo_response(cmd, response_tag),
-            )
-            return
         job = _SendJob(self.host, self.port, command, timeout, tag, self.response_received.emit)
         self._pool.start(job)
-
-    def _emit_demo_response(self, command: str, tag: Optional[object]) -> None:
-        name, body = demo_command_response(command)
-        raw = f"ACK,{name},{body}"
-        resp = CommandResponse(ok=True, command=name, body=body, raw=raw)
-        self.response_received.emit(command, resp, 80.0, tag)
 
     def _on_response(self, cmd: str, resp: CommandResponse, ms: float, _tag) -> None:
         ts = datetime.now().strftime("%H:%M:%S")
