@@ -53,6 +53,15 @@ python gui_app.py --host 169.254.10.10
 
 The GUI connects to the onboard over Ethernet, displays live telemetry plots (sample temperatures, ambient pressure, heater duties, sample resistance, stepper state), and provides one-click command buttons. See [docs/ground-station.md](docs/ground-station.md) for full details.
 
+For a presentation stand with no Raspberry Pi connected, run:
+
+```bash
+cd ground-station
+python demo_app.py
+```
+
+This launches the same GUI with synthetic telemetry and local command ACKs.
+
 ## Quick Start — Onboard (Raspberry Pi)
 
 ```bash

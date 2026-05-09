@@ -28,6 +28,21 @@ python gui_app.py [--host <ip>] [--tel-port 4000] [--cmd-port 5000]
 
 Default host is `169.254.10.10` (link-local Ethernet to Pi).
 
+For a laptop-only stand demo:
+
+```bash
+python demo_app.py
+# equivalent:
+python gui_app.py --demo
+```
+
+`--demo` replaces the TCP receiver with an internal Rev-C telemetry generator
+and makes GUI commands return local ACKs. The generated stream exercises the
+same plots and panels as flight telemetry: pressure, the `PRE_FLOAT` fatigue
+sequence, eight sample temperatures near the +5 C floor, six heater duties,
+sample resistance, dual stepper snapshots, and `EVT,PULL` rows. By default it
+writes `logs/demo_telemetry.csv`; override with `--log`.
+
 ### Threading Model
 
 | Thread | Responsibility |
