@@ -4,6 +4,7 @@
 Usage:
     cd ground-station
     python gui_app.py [--tel-port 4000] [--cmd-port 5000] [--host 169.254.10.10]
+    python gui_app.py --demo
 
 All real code lives in `app/gui/`. This file stays as a stable entry point so
 launch commands and shortcuts don't break when the UI is refactored.

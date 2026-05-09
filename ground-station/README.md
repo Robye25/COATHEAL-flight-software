@@ -24,6 +24,30 @@ python gui_app.py [--host <onboard-ip>] [--tel-port 4000] [--cmd-port 5000]
 
 **Default:** `python gui_app.py` connects to `169.254.10.10` on the standard ports.
 
+### Stand Demo Mode (No Raspberry Pi)
+
+For public demonstrations or a presentation stand, launch the self-contained
+simulator:
+
+```bash
+python demo_app.py
+# or
+python gui_app.py --demo
+```
+
+Demo mode feeds the normal GUI with synthetic Rev-B.1 telemetry: pressure
+profile, sample temperatures, heater duty cycles, resistance changes, two
+stepper motors, and pull events. It also returns local ACKs for command
+buttons, so the interface stays responsive without an onboard Raspberry Pi.
+
+Useful tuning flags:
+
+| Option | Default | Description |
+|---|---|---|
+| `--demo-rate-hz` | `2.0` | Generated telemetry packets per second |
+| `--demo-speed` | `2.0` | Mission-profile speed multiplier |
+| `--log` | `logs/demo_telemetry.csv` | Demo CSV output path |
+
 ### GUI Panels
 
 | Panel | Location | Description |
