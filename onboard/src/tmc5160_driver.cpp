@@ -8,9 +8,7 @@
 #include <iostream>
 #include <thread>
 
-#ifdef COATHEAL_HAS_LIBGPIOD
-#include <gpiod.h>
-#endif
+#include "coatheal/hal/gpio_output.hpp"
 
 #if defined(__linux__) && __has_include(<linux/spi/spidev.h>)
 #  define COATHEAL_HAS_SPIDEV 1
@@ -123,39 +121,20 @@ bool Tmc5160Driver::OpenSpi() {
 
 bool Tmc5160Driver::OpenGpio() {
 #ifdef COATHEAL_HAS_LIBGPIOD
-  auto* chip = gpiod_chip_open(cfg_.gpio_chip.c_str());
-  if (chip == nullptr) return false;
-  gpio_chip_handle_ = chip;
-  auto* cs = gpiod_chip_get_line(chip, static_cast<unsigned int>(cfg_.cs_line));
-  auto* step = gpiod_chip_get_line(chip, static_cast<unsigned int>(cfg_.step_line));
-  auto* dir = gpiod_chip_get_line(chip, static_cast<unsigned int>(cfg_.dir_line));
-  auto* enable =
-      gpiod_chip_get_line(chip, static_cast<unsigned int>(cfg_.enable_line));
-  if (cs == nullptr || step == nullptr || dir == nullptr || enable == nullptr) {
-    CloseGpio();
-    return false;
-  }
   const int disabled = cfg_.enable_active_low ? 1 : 0;
-  if (gpiod_line_request_output(cs, "coatheal-tmc-cs", 1) < 0) {
+  cs_handle_ =
+      RequestGpioOutput(cfg_.gpio_chip, cfg_.cs_line, "coatheal-tmc-cs", true);
+  step_handle_ = RequestGpioOutput(
+      cfg_.gpio_chip, cfg_.step_line, "coatheal-tmc-step", false);
+  dir_handle_ = RequestGpioOutput(
+      cfg_.gpio_chip, cfg_.dir_line, "coatheal-tmc-dir", false);
+  enable_handle_ = RequestGpioOutput(
+      cfg_.gpio_chip, cfg_.enable_line, "coatheal-tmc-enable", disabled != 0);
+  if (cs_handle_ == nullptr || step_handle_ == nullptr ||
+      dir_handle_ == nullptr || enable_handle_ == nullptr) {
     CloseGpio();
     return false;
   }
-  cs_handle_ = cs;
-  if (gpiod_line_request_output(step, "coatheal-tmc-step", 0) < 0) {
-    CloseGpio();
-    return false;
-  }
-  step_handle_ = step;
-  if (gpiod_line_request_output(dir, "coatheal-tmc-dir", 0) < 0) {
-    CloseGpio();
-    return false;
-  }
-  dir_handle_ = dir;
-  if (gpiod_line_request_output(enable, "coatheal-tmc-enable", disabled) < 0) {
-    CloseGpio();
-    return false;
-  }
-  enable_handle_ = enable;
   gpio_healthy_ = true;
   return true;
 #else
@@ -175,27 +154,19 @@ void Tmc5160Driver::CloseSpi() {
 void Tmc5160Driver::CloseGpio() {
 #ifdef COATHEAL_HAS_LIBGPIOD
   if (cs_handle_ != nullptr) {
-    gpiod_line_set_value(static_cast<gpiod_line*>(cs_handle_), 1);
-    gpiod_line_release(static_cast<gpiod_line*>(cs_handle_));
-    cs_handle_ = nullptr;
+    SetGpioOutput(static_cast<GpioOutput*>(cs_handle_), true);
   }
   if (step_handle_ != nullptr) {
-    gpiod_line_set_value(static_cast<gpiod_line*>(step_handle_), 0);
-    gpiod_line_release(static_cast<gpiod_line*>(step_handle_));
-    step_handle_ = nullptr;
+    SetGpioOutput(static_cast<GpioOutput*>(step_handle_), false);
   }
-  if (dir_handle_ != nullptr) {
-    gpiod_line_release(static_cast<gpiod_line*>(dir_handle_));
-    dir_handle_ = nullptr;
-  }
-  if (enable_handle_ != nullptr) {
-    gpiod_line_release(static_cast<gpiod_line*>(enable_handle_));
-    enable_handle_ = nullptr;
-  }
-  if (gpio_chip_handle_ != nullptr) {
-    gpiod_chip_close(static_cast<gpiod_chip*>(gpio_chip_handle_));
-    gpio_chip_handle_ = nullptr;
-  }
+  ReleaseGpioOutput(static_cast<GpioOutput*>(cs_handle_));
+  ReleaseGpioOutput(static_cast<GpioOutput*>(step_handle_));
+  ReleaseGpioOutput(static_cast<GpioOutput*>(dir_handle_));
+  ReleaseGpioOutput(static_cast<GpioOutput*>(enable_handle_));
+  cs_handle_ = nullptr;
+  step_handle_ = nullptr;
+  dir_handle_ = nullptr;
+  enable_handle_ = nullptr;
 #endif
   gpio_healthy_ = false;
 }
@@ -224,14 +195,14 @@ bool Tmc5160Driver::WriteRegister(std::uint8_t address, std::uint32_t value) {
   bool cs_released = false;
 #ifdef COATHEAL_HAS_LIBGPIOD
   if (!gpio_healthy_ || cs_handle_ == nullptr ||
-      gpiod_line_set_value(static_cast<gpiod_line*>(cs_handle_), 0) < 0) {
+      !SetGpioOutput(static_cast<GpioOutput*>(cs_handle_), false)) {
     gpio_healthy_ = false;
     healthy_ = false;
     return false;
   }
   rc = ::ioctl(spi_fd_, SPI_IOC_MESSAGE(1), &xfer);
   cs_released =
-      gpiod_line_set_value(static_cast<gpiod_line*>(cs_handle_), 1) == 0;
+      SetGpioOutput(static_cast<GpioOutput*>(cs_handle_), true);
 #else
   return false;
 #endif
@@ -278,7 +249,7 @@ bool Tmc5160Driver::Enable(bool enable) {
 #ifdef COATHEAL_HAS_LIBGPIOD
   const int value = enable ? (cfg_.enable_active_low ? 0 : 1)
                            : (cfg_.enable_active_low ? 1 : 0);
-  if (gpiod_line_set_value(static_cast<gpiod_line*>(enable_handle_), value) < 0) {
+  if (!SetGpioOutput(static_cast<GpioOutput*>(enable_handle_), value != 0)) {
     gpio_healthy_ = false;
     healthy_ = false;
     return false;
@@ -293,8 +264,8 @@ bool Tmc5160Driver::Step(bool direction_forward) {
 #ifdef COATHEAL_HAS_LIBGPIOD
   const bool physical_direction = direction_forward != cfg_.invert_direction;
   if (physical_direction != last_direction_forward_) {
-    if (gpiod_line_set_value(static_cast<gpiod_line*>(dir_handle_),
-                             physical_direction ? 1 : 0) < 0) {
+    if (!SetGpioOutput(static_cast<GpioOutput*>(dir_handle_),
+                       physical_direction)) {
       gpio_healthy_ = false;
       healthy_ = false;
       return false;
@@ -302,13 +273,13 @@ bool Tmc5160Driver::Step(bool direction_forward) {
     last_direction_forward_ = physical_direction;
     std::this_thread::sleep_for(std::chrono::microseconds(2));
   }
-  if (gpiod_line_set_value(static_cast<gpiod_line*>(step_handle_), 1) < 0) {
+  if (!SetGpioOutput(static_cast<GpioOutput*>(step_handle_), true)) {
     gpio_healthy_ = false;
     healthy_ = false;
     return false;
   }
   std::this_thread::sleep_for(std::chrono::microseconds(2));
-  if (gpiod_line_set_value(static_cast<gpiod_line*>(step_handle_), 0) < 0) {
+  if (!SetGpioOutput(static_cast<GpioOutput*>(step_handle_), false)) {
     gpio_healthy_ = false;
     healthy_ = false;
     return false;

@@ -51,7 +51,6 @@ class LibgpiodPwmController : public PwmController {
   std::atomic<bool> running_{false};
   std::thread worker_;
   mutable std::mutex mu_;
-  void* chip_handle_ = nullptr;
   std::vector<void*> line_handles_;
 
   void PwmLoop();

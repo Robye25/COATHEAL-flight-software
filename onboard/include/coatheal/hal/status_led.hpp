@@ -59,10 +59,8 @@ class SimulatedStatusLed : public StatusLed {
   unsigned toggle_count_ = 0;
 };
 
-// Real libgpiod-backed LED driver. Follows the same ownership boundary as
-// LibgpiodPwmController: the chip path is remembered and a healthy flag is
-// reported based on whether libgpiod is available at build time. Actual line
-// request happens in the constructor when libgpiod is linked in.
+// Real libgpiod-backed LED driver. The line is requested low in the
+// constructor and healthy() reflects both request and write failures.
 class GpioStatusLed : public StatusLed {
  public:
   GpioStatusLed(std::string chip, std::size_t line, std::string label);
@@ -86,8 +84,7 @@ class GpioStatusLed : public StatusLed {
   int blink_hz_ = 0;
   Pattern pattern_ = Pattern::kOff;
   bool healthy_ = false;
-  void* line_handle_ = nullptr;  // libgpiod_line* opaque pointer
-  void* chip_handle_ = nullptr;  // libgpiod_chip* opaque pointer
+  void* line_handle_ = nullptr;  // GpioOutput* opaque pointer
 };
 
 }  // namespace coatheal

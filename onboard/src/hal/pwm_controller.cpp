@@ -5,9 +5,7 @@
 #include <cmath>
 #include <utility>
 
-#ifdef COATHEAL_HAS_LIBGPIOD
-#include <gpiod.h>
-#endif
+#include "coatheal/hal/gpio_output.hpp"
 
 namespace coatheal {
 
@@ -36,24 +34,17 @@ LibgpiodPwmController::LibgpiodPwmController(
   if (output_lines_.size() != channels || output_lines_.empty()) {
     return;
   }
-  auto* chip = gpiod_chip_open(chip_.c_str());
-  if (chip == nullptr) {
-    return;
-  }
-  chip_handle_ = chip;
   line_handles_.reserve(channels);
   const int off_value = active_high_ ? 0 : 1;
   for (const std::size_t offset : output_lines_) {
-    gpiod_line* line = gpiod_chip_get_line(chip, static_cast<unsigned int>(offset));
-    if (line == nullptr ||
-        gpiod_line_request_output(line, "coatheal-heater", off_value) < 0) {
+    auto* line = RequestGpioOutput(
+        chip_, offset, "coatheal-heater", off_value != 0);
+    if (line == nullptr) {
       AllOff();
       for (void* handle : line_handles_) {
-        gpiod_line_release(static_cast<gpiod_line*>(handle));
+        ReleaseGpioOutput(static_cast<GpioOutput*>(handle));
       }
       line_handles_.clear();
-      gpiod_chip_close(chip);
-      chip_handle_ = nullptr;
       return;
     }
     line_handles_.push_back(line);
@@ -74,13 +65,9 @@ LibgpiodPwmController::~LibgpiodPwmController() {
   AllOff();
 #ifdef COATHEAL_HAS_LIBGPIOD
   for (void* handle : line_handles_) {
-    gpiod_line_release(static_cast<gpiod_line*>(handle));
+    ReleaseGpioOutput(static_cast<GpioOutput*>(handle));
   }
   line_handles_.clear();
-  if (chip_handle_ != nullptr) {
-    gpiod_chip_close(static_cast<gpiod_chip*>(chip_handle_));
-    chip_handle_ = nullptr;
-  }
 #endif
 }
 
@@ -100,8 +87,8 @@ bool LibgpiodPwmController::WriteLine(std::size_t channel, bool on) {
   if (channel >= line_handles_.size()) return false;
   const int physical_value = on ? (active_high_ ? 1 : 0)
                                 : (active_high_ ? 0 : 1);
-  if (gpiod_line_set_value(
-          static_cast<gpiod_line*>(line_handles_[channel]), physical_value) < 0) {
+  if (!SetGpioOutput(static_cast<GpioOutput*>(line_handles_[channel]),
+                     physical_value != 0)) {
     healthy_ = false;
     return false;
   }
