@@ -17,7 +17,7 @@
 
 namespace coatheal {
 
-// Per-motor REV-B configuration. Everything a channel needs to own one motor
+// Per-motor configuration. Everything a channel needs to own one motor
 // end-to-end: driver handle, full-step kinematic limits, microstep divisor,
 // accel/decel profile, and the sample indices it pulls.
 struct StepperChannelConfig {
@@ -26,7 +26,7 @@ struct StepperChannelConfig {
   // Full-step motor nameplate. 200 for NEMA-17.
   int full_steps_per_rev = 200;
 
-  // Pull-rate ceiling in *full-steps per second*. REV-B caps this at 100 Hz
+  // Pull-rate ceiling in full-steps per second. Rev C defaults to 100 Hz
   // (≈30 rpm) — ClampHz() enforces it against commanded speeds.
   double max_step_hz = 100.0;
 
@@ -35,10 +35,10 @@ struct StepperChannelConfig {
   double default_step_hz = 100.0;
 
   // Trapezoidal acceleration in full-steps/s². Default 200 gives a 0.5 s
-  // ramp from 0 to 100 Hz, matching the REV-B mechanical envelope.
+  // ramp from 0 to 100 Hz, matching the Rev C mechanical envelope.
   double accel_steps_per_s2 = 200.0;
 
-  // Microstep divisor. 4 (REV-B default) or 5 are the only values accepted by
+  // Microstep divisor. 4 (Rev C default) or 5 are the only values accepted by
   // StepperChannel::SetMicrostep unless `allow_extended_microstep` is true
   // (which enables any divisor in [1, 32]).
   int microstep = 4;

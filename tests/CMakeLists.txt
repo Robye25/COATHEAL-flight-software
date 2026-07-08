@@ -46,49 +46,48 @@ target_link_libraries(coatheal_stepper_tests PRIVATE coatheal_onboard_core)
 
 add_test(NAME coatheal_stepper_tests COMMAND coatheal_stepper_tests)
 
-# Rev B phase/thermal tests. Built as a standalone executable that links
-# only the files it needs, so it compiles even while system_controller.cpp
-# still references the old API (the orchestrator wires that in at merge).
-add_executable(coatheal_phase_rev_b_tests
-  unit/test_phase_rev_b.cpp
+# Rev C phase/thermal tests. Built as a standalone executable that links
+# only the files it needs.
+add_executable(coatheal_phase_rev_c_tests
+  unit/test_phase_rev_c.cpp
   ${CMAKE_SOURCE_DIR}/onboard/src/state_manager.cpp
   ${CMAKE_SOURCE_DIR}/onboard/src/thermal_controller.cpp
   ${CMAKE_SOURCE_DIR}/onboard/src/pid_controller.cpp
   ${CMAKE_SOURCE_DIR}/onboard/src/config.cpp
 )
 
-target_include_directories(coatheal_phase_rev_b_tests PRIVATE
+target_include_directories(coatheal_phase_rev_c_tests PRIVATE
   ${CMAKE_SOURCE_DIR}/onboard/include
 )
 
-add_test(NAME coatheal_phase_rev_b_tests COMMAND coatheal_phase_rev_b_tests)
+add_test(NAME coatheal_phase_rev_c_tests COMMAND coatheal_phase_rev_c_tests)
 
-# Rev B safety interlock tests (Agent D).
-add_executable(coatheal_safety_rev_b_tests
-  unit/test_safety_rev_b.cpp
+# Rev C safety interlock tests.
+add_executable(coatheal_safety_rev_c_tests
+  unit/test_safety_rev_c.cpp
 )
 
-target_link_libraries(coatheal_safety_rev_b_tests PRIVATE coatheal_onboard_core)
+target_link_libraries(coatheal_safety_rev_c_tests PRIVATE coatheal_onboard_core)
 
-add_test(NAME coatheal_safety_rev_b_tests COMMAND coatheal_safety_rev_b_tests)
+add_test(NAME coatheal_safety_rev_c_tests COMMAND coatheal_safety_rev_c_tests)
 
-# Rev B dual-stepper tests (Agent B).
-add_executable(coatheal_stepper_rev_b_tests
-  unit/test_stepper_rev_b.cpp
+# Rev C dual-stepper tests.
+add_executable(coatheal_stepper_rev_c_tests
+  unit/test_stepper_rev_c.cpp
 )
 
-target_link_libraries(coatheal_stepper_rev_b_tests PRIVATE coatheal_onboard_core)
+target_link_libraries(coatheal_stepper_rev_c_tests PRIVATE coatheal_onboard_core)
 
-add_test(NAME coatheal_stepper_rev_b_tests COMMAND coatheal_stepper_rev_b_tests)
+add_test(NAME coatheal_stepper_rev_c_tests COMMAND coatheal_stepper_rev_c_tests)
 
-# Rev B telemetry serializer tests (Agent C).
-add_executable(coatheal_telemetry_rev_b_tests
-  unit/test_telemetry_rev_b.cpp
+# Rev C telemetry serializer tests.
+add_executable(coatheal_telemetry_rev_c_tests
+  unit/test_telemetry_rev_c.cpp
 )
 
-target_link_libraries(coatheal_telemetry_rev_b_tests PRIVATE coatheal_onboard_core)
+target_link_libraries(coatheal_telemetry_rev_c_tests PRIVATE coatheal_onboard_core)
 
-add_test(NAME coatheal_telemetry_rev_b_tests COMMAND coatheal_telemetry_rev_b_tests)
+add_test(NAME coatheal_telemetry_rev_c_tests COMMAND coatheal_telemetry_rev_c_tests)
 
 # Agent B — pulse-thread jitter bench. Not registered as a ctest (it takes
 # several seconds and is a timing measurement, not a correctness check).
@@ -106,13 +105,13 @@ add_executable(coatheal_enqueue_throughput_bench
 
 target_link_libraries(coatheal_enqueue_throughput_bench PRIVATE coatheal_onboard_core)
 
-# Rev B.1 sensor-manager regression (Agent C, 2026-04-17): samples 6 and 7
-# must seed to zero so the telemetry layer emits "-" on the wire.
-add_executable(coatheal_sensor_manager_rev_b_tests
-  unit/test_sensor_manager_rev_b.cpp
+# Rev C sensor-manager regression: samples 6 and 7 must seed to zero so the
+# telemetry layer emits "-" on the wire.
+add_executable(coatheal_sensor_manager_rev_c_tests
+  unit/test_sensor_manager_rev_c.cpp
 )
 
-target_link_libraries(coatheal_sensor_manager_rev_b_tests PRIVATE coatheal_onboard_core)
+target_link_libraries(coatheal_sensor_manager_rev_c_tests PRIVATE coatheal_onboard_core)
 
-add_test(NAME coatheal_sensor_manager_rev_b_tests
-  COMMAND coatheal_sensor_manager_rev_b_tests)
+add_test(NAME coatheal_sensor_manager_rev_c_tests
+  COMMAND coatheal_sensor_manager_rev_c_tests)

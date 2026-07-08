@@ -62,7 +62,7 @@ std::vector<double> ThermalController::ComputeRequestedDuty(
   }
   std::vector<double> duty(heater_count, 0.0);
 
-  // Per-channel over-temp latch (defense-in-depth; Rev B.1 is a floor
+  // Per-channel over-temp latch. Rev C fallback is a floor
   // controller but we still cut off any heated channel that pegs the RTD).
   for (std::size_t i = 0; i < heater_count; ++i) {
     if (i < sensors.sample_temps_c.size() &&
@@ -74,7 +74,7 @@ std::vector<double> ThermalController::ComputeRequestedDuty(
                                   [](bool v) { return v; });
 
   // Uniformity monitor: flag spread > tolerance during any heating phase.
-  // Rev B.1: only the 6 heated samples (index < heater_count) participate.
+  // Only the 6 heated samples (index < heater_count) participate.
   uniformity_ok_ = true;
   if (ShouldHeatPhase(phase) && !sensors.sample_temps_c.empty() && heater_count > 0) {
     const std::size_t end = std::min(heater_count, sensors.sample_temps_c.size());
@@ -105,7 +105,7 @@ std::vector<double> ThermalController::ComputeRequestedDuty(
     // Per-sample floor PID with hysteresis. The PID output is only applied
     // (and the integrator only accumulates) while the sample is below the
     // on_threshold; once it reaches off_threshold we freeze the controller.
-    // Rev B.1: heater[i] drives sample[i]; there is no box heater slot.
+    // heater[i] drives sample[i]; there is no box heater slot.
     for (std::size_t i = 0; i < sample_pids_.size() && i < heater_count; ++i) {
       const double measured = (i < sensors.sample_temps_c.size())
                                   ? sensors.sample_temps_c[i]

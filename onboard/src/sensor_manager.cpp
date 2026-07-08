@@ -8,11 +8,7 @@
 namespace coatheal {
 
 namespace {
-// Starting resistance of each crystalline sample before any pulls (ohms).
 constexpr double kInitialResistanceOhm = 100.0;
-// Fraction of resistance lost per simulated pull event. A real microcrack
-// population decays resistance over many pulls; 5 % per pull is a plausible
-// placeholder that gives the ground plotter something to watch.
 constexpr double kResistanceDecayPerPull = 0.05;
 }  // namespace
 
@@ -26,30 +22,20 @@ SensorManager::SensorManager(const OnboardConfig& config,
       i2c_(i2c),
       rtc_(rtc),
       ina_(ina),
-      // Init samples at the floor so the simulation cooldown drives PID
-      // activation as soon as ambient pulls them below the hysteresis band.
-      sample_temps_c_(kSampleCount, config.phase.sample_floor_c),
-      sample_resistance_ohm_(kSampleCount, kInitialResistanceOhm) {
-  // Rev B.1 canonical wire form: 8 sample columns, 6 measured resistance
-  // channels (two INA3221 chips × 3 channels). Samples 6 and 7 are pulled
-  // but have no INA3221 channel assigned, so they must serialize as the
-  // literal "-" placeholder. The telemetry layer writes "-" when the value
-  // is <= 0.0, so we zero those slots here (Agent C, 2026-04-17 bug fix).
-  for (std::size_t i = kResistanceChannelCount;
-       i < sample_resistance_ohm_.size(); ++i) {
-    sample_resistance_ohm_[i] = 0.0;
+      sample_temps_c_(config.hardware.sample_count, config.phase.sample_floor_c),
+      sample_resistance_ohm_(config.hardware.sample_count, kInitialResistanceOhm) {
+  if (config_.sensors.resistance_source != "simulated") {
+    for (double& value : sample_resistance_ohm_) {
+      value = 0.0;
+    }
   }
 }
 
 void SensorManager::NotePullCompleted(int motor_id) {
-  // Rev B.1 simulation: a pull on motor 0 stresses samples 0..3, motor 1
-  // stresses 4..7. Each pull knocks the resistance of all its samples
-  // down by kResistanceDecayPerPull (multiplicative). The real instrument
-  // will measure this directly on the INA3221; today it's synthetic.
-  //
-  // Samples 6 and 7 have no INA3221 channel (only 6 of 8 are wired), so the
-  // decay skips them — they stay at zero and continue to serialize as "-"
-  // on the wire regardless of how many pulls motor 1 executes.
+  if (config_.sensors.resistance_source != "simulated") {
+    return;
+  }
+
   std::size_t start = 0;
   std::size_t end = 0;
   if (motor_id == 0) {
@@ -57,7 +43,7 @@ void SensorManager::NotePullCompleted(int motor_id) {
     end = 4;
   } else if (motor_id == 1) {
     start = 4;
-    end = kResistanceChannelCount;  // stops at 6; 6 and 7 stay unmeasured
+    end = sample_resistance_ohm_.size();
   } else {
     return;
   }
@@ -71,9 +57,9 @@ SensorSnapshot SensorManager::ReadSnapshot(MissionPhase phase,
                                            double dt_seconds) {
   const double dt = dt_seconds <= 1e-6 ? 1.0 : dt_seconds;
 
-  // Coarse pressure profile model for simulation and bench testing.
-  // Floor is 5 mbar per BEXUS User Manual §5.6 — the experiment acceptance
-  // pressure level — so vacuum-regime tests exercise the real flight envelope.
+  // Simulation model used until final DPS310/DAQ132M/ADS1115 drivers are
+  // bench-validated. Keep values deterministic and in the expected flight
+  // ranges so command, logging, fallback, and GUI behavior can be tested.
   if (phase == MissionPhase::kDescent || phase == MissionPhase::kLanded) {
     pressure_descending_ = false;
   }
@@ -89,43 +75,47 @@ SensorSnapshot SensorManager::ReadSnapshot(MissionPhase phase,
     ambient_temp = 0.0;
   }
 
-  // Rev B.1: heaters 0..5 drive samples 0..5 one-to-one. Samples 6 and 7 are
-  // pulled but unheated — they just cool toward ambient.
   for (std::size_t i = 0; i < sample_temps_c_.size(); ++i) {
     const double duty = (i < heater_duty.size()) ? heater_duty[i] : 0.0;
-    const double heating = duty * 5.0 * dt;  // 5 W nominal heater
+    const double heating = duty * 5.0 * dt;
     const double cooling = (sample_temps_c_[i] - ambient_temp) * 0.03 * dt;
     sample_temps_c_[i] += heating - cooling;
   }
 
   SensorSnapshot snapshot;
   snapshot.rtc_valid = rtc_ != nullptr ? rtc_->valid() : false;
-  snapshot.timestamp_utc = rtc_ != nullptr ? rtc_->NowUtcIso8601() : "1970-01-01T00:00:00Z";
+  snapshot.timestamp_utc = rtc_ != nullptr ? rtc_->NowUtcIso8601()
+                                           : "1970-01-01T00:00:00Z";
   snapshot.ambient_temp_c = ambient_temp;
   snapshot.ambient_pressure_mbar = pressure_mbar_;
-  snapshot.uv = (phase == MissionPhase::kFloat || phase == MissionPhase::kPreFloat) ? 1.8 : 0.4;
+  snapshot.uv = (phase == MissionPhase::kFloat || phase == MissionPhase::kPreFloat)
+                    ? 1.8
+                    : 0.4;
   snapshot.sample_temps_c = sample_temps_c_;
 
-  // Rev B.1 INA3221 sample resistance. When the adapter is absent or has
-  // faulted, emit zeros and flip the status bit so the ground sees the
-  // truth instead of stale values.
-  resistance_ok_ = (ina_ != nullptr) && ina_->healthy();
-  if (resistance_ok_) {
+  if (config_.sensors.resistance_source == "disabled") {
+    resistance_ok_ = true;
+    snapshot.sample_resistance_ohm.assign(sample_temps_c_.size(), 0.0);
+  } else if (config_.sensors.resistance_source == "simulated") {
+    resistance_ok_ = true;
+    snapshot.sample_resistance_ohm = sample_resistance_ohm_;
+  } else if (ina_ != nullptr && ina_->healthy()) {
+    resistance_ok_ = true;
     snapshot.sample_resistance_ohm = sample_resistance_ohm_;
   } else {
+    resistance_ok_ = false;
     snapshot.sample_resistance_ohm.assign(sample_temps_c_.size(), 0.0);
   }
 
-  // Range checks: do not mutate raw readings; only flip status bits so the
-  // ground sees an honest out-of-range sample.
-  t_ambient_ok_ = (snapshot.ambient_temp_c >= config_.sensor_range.ambient_temp_min_c) &&
-                  (snapshot.ambient_temp_c <= config_.sensor_range.ambient_temp_max_c);
-  p_ambient_ok_ = (snapshot.ambient_pressure_mbar >= config_.sensor_range.ambient_pressure_min_mbar) &&
-                  (snapshot.ambient_pressure_mbar <= config_.sensor_range.ambient_pressure_max_mbar);
+  t_ambient_ok_ =
+      (snapshot.ambient_temp_c >= config_.sensor_range.ambient_temp_min_c) &&
+      (snapshot.ambient_temp_c <= config_.sensor_range.ambient_temp_max_c);
+  p_ambient_ok_ =
+      (snapshot.ambient_pressure_mbar >= config_.sensor_range.ambient_pressure_min_mbar) &&
+      (snapshot.ambient_pressure_mbar <= config_.sensor_range.ambient_pressure_max_mbar);
 
   if (spi_ != nullptr && i2c_ != nullptr) {
     if (!spi_->healthy() || !i2c_->healthy()) {
-      // Keep data running but avoid NaNs in case hardware probing fails.
       snapshot.uv = 0.0;
     }
   }

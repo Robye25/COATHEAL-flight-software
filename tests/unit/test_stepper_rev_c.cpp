@@ -1,6 +1,6 @@
-// REV-B stepper unit tests.
+// Rev C stepper unit tests.
 //
-// Covers the five acceptance criteria from Agent B's spec:
+// Covers the dual-motor motion requirements:
 //   (a) trapezoidal accel/decel curve is monotonic ramp-up then ramp-down,
 //   (b) commands with id argument parse correctly,
 //   (c) id defaulting to 0 for legacy (no-id) form,
@@ -260,7 +260,7 @@ void TestPullCycleAcquiresLock() {
   auto ch1 = MakeChannel(1, &lock);
 
   // Verify samples mapping — we built both with 0..3 by default; overwrite
-  // channel 1's config here to model the REV-B 4..7 split.
+  // channel 1's config here to model the Rev C 4..7 split.
   // (We re-create ch1 with explicit samples to keep the test self-contained.)
   auto drv1 = std::make_unique<SimulatedStepperDriver>();
   auto cfg1 = MakeChannelCfg(1, {4, 5, 6, 7});
@@ -327,6 +327,6 @@ int main() {
   TestMotionLockExclusion();
   TestPullCycleAcquiresLock();
   TestControllerMultiChannelDispatch();
-  std::cout << "REV-B stepper tests passed" << std::endl;
+  std::cout << "Rev C stepper tests passed" << std::endl;
   return 0;
 }

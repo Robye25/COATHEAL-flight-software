@@ -206,7 +206,7 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
     return true;
   };
 
-  // REV-B: stepper / PULL_* commands accept an optional leading motor_id
+  // Stepper / PULL_* commands accept an optional leading motor_id
   // argument. The parser peels it into `command.motor_id` and leaves the
   // remaining tokens in `args` so the legacy dispatch surface ("args[0] is
   // the numeric payload") continues to work unchanged.
@@ -271,7 +271,7 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
     case CommandType::kStepperDisable:
     case CommandType::kPullArm:
     case CommandType::kPullExecute:
-      // REV-B: accept an optional motor id. Legacy arity: 0. New: 1.
+      // Accept an optional motor id. Legacy arity: 0. New: 1.
       maybe_extract_id(0, 0);
       if (!require_args(0)) {
         return result;
@@ -281,7 +281,7 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
     case CommandType::kStepperRotate:
     case CommandType::kStepperSetSpeed:
     case CommandType::kStepperSetMicrostep:
-      // REV-B arity (after id-peel): 1 (the value).
+      // Arity after id-peel: 1 (the value).
       maybe_extract_id(1, 1);
       if (!require_args(1)) {
         return result;
@@ -289,7 +289,7 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
       break;
     case CommandType::kStepperMoveTo:
     case CommandType::kStepperBend:
-      // REV-B arity (after id-peel): 1 or 2 (steps, [hold_s]).
+      // Arity after id-peel: 1 or 2 (steps, [hold_s]).
       maybe_extract_id(1, 2);
       if (command.args.size() < 1 || command.args.size() > 2) {
         result.error = "invalid argument count for " + command.name;

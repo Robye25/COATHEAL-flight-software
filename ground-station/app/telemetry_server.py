@@ -39,7 +39,7 @@ class LivePlotter:
 
         self._fig, (self._ax_temp, self._ax_pressure) = plt.subplots(2, 1, figsize=(10, 7))
 
-        # Rev-B.1: box-temp trace removed (no box sensor). Ambient temp is
+        # No box-temperature trace. Ambient temperature is
         # the only single-value scalar we still plot here.
         (self._temp_line,) = self._ax_temp.plot([], [], label="Ambient Temp [C]")
         self._ax_temp.set_ylabel("Temperature [C]")
@@ -281,7 +281,7 @@ class TelemetryServer:
         buffer = ""
         first = not self.log_path.exists()
 
-        # Rev-B.1 CSV v5: adds `mode` + per-sample `sample_0..7` columns and
+        # CSV v5: adds `mode` + per-sample `sample_0..7` columns and
         # per-motor `stepperN_*` columns so an offline analyst can answer "is
         # HEATER_INHIBITED because motor 0 is moving?" from the CSV alone
         # without re-parsing the raw frame (Agent C, 2026-04-17).
@@ -381,7 +381,7 @@ class TelemetryServer:
                             print(f"[telemetry][evt-parse-error] {exc}: {line}")
                             continue
                         self._last_packet_time = time.time()
-                        # Rev-B.1 dedup fix (Agent C, 2026-04-17): track
+                        # Track
                         # EVT,PULL by (session, pull_id) so the same event
                         # replayed from the onboard queue doesn't land in
                         # the pulls CSV multiple times. Key is independent
@@ -429,7 +429,7 @@ class TelemetryServer:
                         continue
 
                     self._last_packet_time = time.time()
-                    # Rev-B.1: no box sensor. Use the hottest sample
+                    # No box sensor. Use the hottest sample
                     # reading as the over-temperature trigger instead.
                     hot = max(packet.sample_temps_c) if packet.sample_temps_c else None
                     if hot is not None and hot > self.alert_temp_c:
@@ -456,7 +456,7 @@ class TelemetryServer:
                     row = asdict(packet)
                     row["sample_temps_c"] = "|".join(f"{x:.2f}" for x in packet.sample_temps_c)
                     row["heater_duty"] = "|".join(f"{x:.3f}" for x in packet.heater_duty)
-                    # Rev-B.1: also emit one column per sample/heater so the
+                    # Also emit one column per sample/heater so the
                     # CSV is self-describing and easy to plot directly. Fills
                     # a `-` placeholder when the wire frame is short so no
                     # downstream column is blank in a well-formed packet.

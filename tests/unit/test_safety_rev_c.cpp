@@ -1,4 +1,4 @@
-// REV B.1 safety interlocks (Agent D).
+// Rev C safety interlocks.
 //
 // These tests enforce the heater<->motor mutex from the 2-motor + pull-cycle
 // design:
@@ -25,8 +25,8 @@
 
 namespace {
 
-// Rev B.1 has no electronics-box heater — pass the SIZE_MAX sentinel so the
-// scheduler's `deprioritize_electronics` flag becomes a no-op.
+// Rev C has no electronics-box heater, so pass the SIZE_MAX sentinel and let
+// the scheduler's `deprioritize_electronics` flag become a no-op.
 constexpr std::size_t kNoBoxHeater = static_cast<std::size_t>(-1);
 
 void TestMotionLockBasic() {
@@ -117,8 +117,7 @@ void TestMotionLockConcurrency() {
 
 coatheal::PowerConfig MakePower() {
   coatheal::PowerConfig p;
-  // Rev B.1: 4 heaters simultaneously × 5 W each = 20 W ceiling. Tests that
-  // previously asserted "3 heaters @ 30 W" are retuned to the real spec.
+  // Rev C: at most 4 heaters simultaneously, 5 W each.
   p.max_active_heaters = 3;
   p.heater_nominal_w = 5.0;
   p.max_thermal_w = 150.0;    // generous; we want the request to pass through
@@ -131,7 +130,7 @@ void TestSchedulerInhibitedWhenLocked() {
   coatheal::MotionLock lock;
   coatheal::HeaterScheduler sched(power, kNoBoxHeater, &lock);
 
-  // Rev B.1 heater count is 6. Request 3 heaters at full duty.
+  // Rev C heater count is 6. Request 3 heaters at full duty.
   std::vector<double> requested(6, 0.0);
   requested[0] = 1.0;
   requested[1] = 1.0;
@@ -238,6 +237,6 @@ int main() {
   TestSchedulerInhibitedWhenLocked();
   TestSchedulerNullLockIsAlwaysFree();
   TestSchedulerZeroIsZero_NoSoftClamp();
-  std::cout << "test_safety_rev_b: OK\n";
+  std::cout << "test_safety_rev_c: OK\n";
   return 0;
 }

@@ -18,10 +18,8 @@ struct SensorSnapshot {
   double ambient_pressure_mbar = 1013.25;
   double uv = 0.0;
   std::vector<double> sample_temps_c;
-  // Rev B.1: per-sample resistance (ohms) from the two INA3221 instruments.
-  // Same index space as `sample_temps_c`. Samples with no INA3221 channel
-  // (6 and 7 on the Rev B.1 BOM) are reported as 0.0 here and serialized
-  // as "-" in the wire frame.
+  // Compatibility field. The final Rev C BOM has no resistance instrument, so
+  // disabled readings are reported as 0.0 here and serialized as "-".
   std::vector<double> sample_resistance_ohm;
 };
 
@@ -32,7 +30,7 @@ struct TelemetryRecord {
   SensorSnapshot sensors;
   std::vector<double> heater_duty;
   StatusFlags status;
-  // Rev B: vector of motor snapshots. `steppers[0]` = M0, `steppers[1]` = M1.
+  // Vector of motor snapshots. `steppers[0]` = M0, `steppers[1]` = M1.
   // Each motor is emitted as a `STEPPER<n>=...` segment on the wire.
   std::vector<StepperStatus> steppers;
 };
@@ -56,7 +54,7 @@ struct HeatingCycleEvent {
 std::string SerializeHeatingCycleEvent(const HeatingCycleEvent& event,
                                        const std::string& session_id);
 
-// Rev-B: one-per-pull completion event emitted by the stepper subsystem.
+// One-per-pull completion event emitted by the stepper subsystem.
 // A "pull" is a single bend-and-hold motion applied to one or more specimens.
 // `samples` carries the specimen indices touched by the pull; the ground
 // wire encoding is pipe-separated (e.g. "0|1|2|3").

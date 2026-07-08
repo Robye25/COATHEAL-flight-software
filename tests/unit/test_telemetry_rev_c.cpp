@@ -1,4 +1,4 @@
-// Rev-B.1 telemetry serializer coverage.
+// Rev C telemetry serializer coverage.
 //
 // Exercises `SerializeTelemetryDataFrame` + `SerializeTelemetryPullEventFrame`
 // against the wire contract:
@@ -31,15 +31,14 @@ TelemetryRecord MakeBaseRecord() {
   r.sensors.ambient_temp_c = -10.23;
   r.sensors.ambient_pressure_mbar = 140.12;
   r.sensors.uv = 0.00012;
-  // Rev-B.1: 8 sample temps, 6 heater duties.
+  // Rev C: 8 sample temps, 6 heater duties.
   r.sensors.sample_temps_c = {5.1, 5.2, 5.0, 5.3, 5.1, 5.2, 5.0, 5.3};
-  // Rev-B.1: sample_resistance_ohm has 8 entries; last two are 0.0 so they
-  // serialize as "-" (samples 6 and 7 are unheated and have no INA3221
-  // channel assigned).
+  // Rev C keeps the compatibility resistance field. Values of 0.0 serialize
+  // as "-" because the final BOM has no resistance instrument.
   r.sensors.sample_resistance_ohm = {100.0, 99.0, 98.5, 98.0, 97.5, 97.0, 0.0, 0.0};
   r.heater_duty = {0.25, 0.0, 0.25, 0.0, 0.0, 0.0};
-  // Default flags are already mostly `true`; make sure the Rev-B additions
-  // are at their default so the wire bit count is exercised.
+  // Default flags are already mostly `true`; make sure the compatibility
+  // additions are at their default so the wire bit count is exercised.
   r.status.rs485_ok = true;
   r.status.heater_inhibited = false;
   r.status.resistance_ok = true;

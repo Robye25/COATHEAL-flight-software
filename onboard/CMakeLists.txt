@@ -19,7 +19,7 @@ add_library(coatheal_onboard_core
   src/status_flags.cpp
   src/stepper_controller.cpp
   src/stepper_channel.cpp
-  src/tmc2240_driver.cpp
+  src/tmc5160_driver.cpp
   src/storage_manager.cpp
   src/system_controller.cpp
   src/telemetry.cpp

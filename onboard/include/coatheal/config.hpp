@@ -2,7 +2,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <array>
 #include <string>
+#include <vector>
 
 namespace coatheal {
 
@@ -49,8 +51,9 @@ struct StorageConfig {
 };
 
 struct PhaseConfig {
-  // Rev B.1: single cold-protection floor shared across ASCENT/FLOAT/DESCENT.
-  // Samples must never drop below this value. There is no box heater.
+  // Rev C fallback floor shared across ASCENT/FLOAT/DESCENT. Connected
+  // operation is manual-first; the floor controller runs only in fallback or
+  // legacy autonomous mode. There is no box heater.
   double sample_floor_c = 5.0;
   double uniformity_tolerance_c = 2.0;
 };
@@ -99,8 +102,8 @@ struct SensorRangeConfig {
 };
 
 struct PowerConfig {
-  // Rev B.1: 5 W polyimide film heaters @ 24 V DC; at most 4 energised at once
-  // => 20 W combined thermal draw ceiling.
+  // Final BOM: 5 W polyimide film heaters; at most 4 energized at once,
+  // yielding the default 20 W combined thermal draw ceiling.
   std::size_t max_active_heaters = 4;
   double max_thermal_w = 20.0;
   double max_system_w = 48.23;
@@ -109,6 +112,8 @@ struct PowerConfig {
   // Pi 4 + sensors consume ~5–10 W continuously, so the heater share is lower.
   // 0 disables enforcement (back-compat).
   double energy_budget_wh = 0.0;
+  double logic_regulator_v = 5.0;
+  double stepper_regulator_v = 12.0;
 };
 
 struct PidConfig {
@@ -118,21 +123,55 @@ struct PidConfig {
 };
 
 struct HardwareConfig {
-  // Rev B.1: 6 sample heaters on 6 of the 8 samples (samples 6 and 7 are
-  // pulled but unheated). No electronics-box heater — `electronics_heater_index`
-  // defaults to SIZE_MAX as a sentinel meaning "no box heater".
+  // Final BOM: 8 PT100 sample channels and 6 heated samples. Samples 6 and 7
+  // are pulled but unheated. No electronics-box heater; SIZE_MAX means absent.
+  std::size_t sample_count = 8;
   std::size_t heater_count = 6;
   std::size_t electronics_heater_index = static_cast<std::size_t>(-1);
 };
 
+struct SensorHardwareConfig {
+  std::string sample_temperature_source = "daq132m_modbus";
+  std::string daq132m_device = "/dev/ttyUSB0";
+  int daq132m_baud = 9600;
+  std::string daq132m_parity = "N";
+  int daq132m_data_bits = 8;
+  int daq132m_stop_bits = 1;
+  int daq132m_slave_id = 1;
+  int daq132m_register_base = 0;
+  int daq132m_register_count = 8;
+  double daq132m_c_per_count = 0.1;
+
+  bool rtd_click_enabled = false;
+  std::string rtd_click_spi_device = "/dev/spidev0.0";
+  std::size_t rtd_click_cs_line = 18;
+  std::size_t rtd_click_drdy_line = 22;
+  int rtd_click_wires = 3;
+
+  std::string pressure_source = "dps310";
+  int dps310_i2c_addr = 0x77;
+
+  std::string uv_source = "guva_s12sd_ads1115";
+  int ads1115_i2c_addr = 0x48;
+  int uv_ads1115_channel = 0;
+  double uv_full_scale_v = 4.096;
+
+  std::string resistance_source = "disabled";
+};
+
+struct HeaterOutputConfig {
+  std::vector<std::size_t> output_lines;
+  double pwm_frequency_hz = 10.0;
+  bool active_high = true;
+};
+
 struct StepperConfig {
-  // Driver is unspecified at SED v2.0. These defaults match a generic STEP/
-  // DIR/EN driver (A4988, DRV8825, TMC2209 legacy mode) and are fully
-  // overridable from onboard.ini once the hardware is chosen.
+  // Shared motion defaults. Per-motor TMC5160 SPI and GPIO wiring live in
+  // MotorConfig and are loaded from motor0.* / motor1.* keys.
   int steps_per_rev = 200;           // NEMA 17 full-step default
-  int microstep = 16;                // common default for bending actuator
-  double default_step_hz = 400.0;    // pulse rate used by Tick()
-  double max_step_hz = 4000.0;       // hard ceiling (SetSpeed clamp)
+  int microstep = 4;
+  double default_step_hz = 100.0;
+  double max_step_hz = 100.0;
   std::int64_t max_position_steps = 200000;  // absolute travel limit
   std::size_t step_line = 5;         // GPIO lines (BCM) — see docs/hardware.md
   std::size_t dir_line = 6;
@@ -140,6 +179,30 @@ struct StepperConfig {
   bool invert_direction = false;
   bool enable_active_low = true;     // most step/dir drivers have active-low /EN
   bool enable_on_boot = false;       // stay de-energised until commanded
+};
+
+struct PullConfig {
+  double max_step_hz = 100.0;
+  double accel_steps_per_s2 = 200.0;
+  int microstep = 4;
+  int travel_full_steps = 200;
+  double hold_s = 5.0;
+};
+
+struct MotorConfig {
+  std::string driver = "tmc5160";
+  std::string spi_device = "/dev/spidev1.0";
+  std::size_t cs_line = 0;
+  std::size_t step_line = 5;
+  std::size_t dir_line = 6;
+  std::size_t enable_line = 13;
+  bool invert_direction = false;
+  bool enable_active_low = true;
+  double run_current_a_rms = 2.0;
+  double hold_current_frac = 0.30;
+  bool stealth_chop = true;
+  std::uint32_t spi_speed_hz = 1000000;
+  std::vector<std::size_t> samples;
 };
 
 struct BendScheduleConfig {
@@ -173,11 +236,17 @@ struct OnboardConfig {
   PowerConfig power;
   PidConfig pid;
   HardwareConfig hardware;
+  SensorHardwareConfig sensors;
+  HeaterOutputConfig heaters;
   HeaterSafetyConfig heater_safety;
   SensorRangeConfig sensor_range;
   HalConfig hal;
   StepperConfig stepper;
+  PullConfig pull;
+  std::array<MotorConfig, 2> motors;
   BendScheduleConfig bend;
+
+  OnboardConfig();
 };
 
 bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::string* error);

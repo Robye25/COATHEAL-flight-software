@@ -40,7 +40,7 @@ void TestHeaterSchedulerCap() {
   power.heater_nominal_w = 5.0;
   power.max_thermal_w = 20.0;
 
-  // Rev B.1: 6 sample heaters, no box heater. Use SIZE_MAX sentinel.
+  // Rev C: 6 sample heaters, no box heater. Use SIZE_MAX sentinel.
   coatheal::HeaterScheduler scheduler(power, static_cast<std::size_t>(-1));
   std::vector<double> requested(6, 1.0);
 
@@ -102,7 +102,7 @@ void TestHeaterSchedulerEnergyBudget() {
   power.max_thermal_w = 20.0;
   power.energy_budget_wh = 0.02;  // tiny budget so the test runs fast: 0.02 Wh
 
-  // Rev B.1: 6 channels (6 heated samples, no box heater).
+  // Rev C: 6 channels (6 heated samples, no box heater).
   coatheal::HeaterScheduler scheduler(power, static_cast<std::size_t>(-1));
   std::vector<double> requested(6, 1.0);
 
@@ -275,7 +275,7 @@ void TestConfigParsesReliabilityFields() {
   out << "storage.queue_dir=logs/q\n";
   out << "storage.queue_retention_hours=72\n";
   out << "storage.queue_max_bytes=1024\n";
-  // Rev B.1 phase keys: floor-only thermal policy (no box_target_c).
+  // Rev C phase keys: floor-only fallback thermal policy (no box target).
   out << "phase.sample_floor_c=5\n";
   out << "phase.uniformity_tolerance_c=2\n";
   out << "transition.ascent_to_float_mbar=100\n";
@@ -286,11 +286,66 @@ void TestConfigParsesReliabilityFields() {
   out << "power.max_system_w=48.23\n";
   out << "power.heater_nominal_w=5\n";
   out << "power.energy_budget_wh=130.0\n";
+  out << "power.logic_regulator_v=5.0\n";
+  out << "power.stepper_regulator_v=12.0\n";
   out << "pid.kp=0.2\n";
   out << "pid.ki=0.02\n";
   out << "pid.kd=0.03\n";
-  // Rev B.1 hardware: 6 heaters, no box heater (default SIZE_MAX sentinel).
+  // Final BOM: 8 samples, 6 heaters, no box heater.
+  out << "hardware.sample_count=8\n";
   out << "hardware.heater_count=6\n";
+  out << "sensor.sample_temperature_source=daq132m_modbus\n";
+  out << "sensor.daq132m_device=/dev/ttyUSB0\n";
+  out << "sensor.daq132m_baud=9600\n";
+  out << "sensor.daq132m_parity=N\n";
+  out << "sensor.daq132m_data_bits=8\n";
+  out << "sensor.daq132m_stop_bits=1\n";
+  out << "sensor.daq132m_slave_id=1\n";
+  out << "sensor.daq132m_register_base=0\n";
+  out << "sensor.daq132m_register_count=8\n";
+  out << "sensor.daq132m_c_per_count=0.1\n";
+  out << "sensor.rtd_click_enabled=false\n";
+  out << "sensor.rtd_click_spi_device=/dev/spidev0.0\n";
+  out << "sensor.rtd_click_cs_line=18\n";
+  out << "sensor.rtd_click_drdy_line=22\n";
+  out << "sensor.rtd_click_wires=3\n";
+  out << "sensor.pressure_source=dps310\n";
+  out << "sensor.dps310_i2c_addr=0x77\n";
+  out << "sensor.uv_source=guva_s12sd_ads1115\n";
+  out << "sensor.ads1115_i2c_addr=0x48\n";
+  out << "sensor.uv_ads1115_channel=0\n";
+  out << "sensor.uv_full_scale_v=4.096\n";
+  out << "sensor.resistance_source=disabled\n";
+  out << "heater.output_lines=12,20,21,23,24,25\n";
+  out << "heater.pwm_frequency_hz=10.0\n";
+  out << "heater.active_high=true\n";
+  out << "pull.max_step_hz=100.0\n";
+  out << "pull.accel_steps_per_s2=200.0\n";
+  out << "pull.microstep=4\n";
+  out << "pull.travel_full_steps=200\n";
+  out << "pull.hold_s=5.0\n";
+  out << "motor0.driver=tmc5160\n";
+  out << "motor0.spi_device=/dev/spidev0.0\n";
+  out << "motor0.cs_line=8\n";
+  out << "motor0.step_line=5\n";
+  out << "motor0.dir_line=6\n";
+  out << "motor0.enable_line=13\n";
+  out << "motor0.run_current_a_rms=2.0\n";
+  out << "motor0.hold_current_frac=0.30\n";
+  out << "motor0.stealth_chop=true\n";
+  out << "motor0.spi_speed_hz=1000000\n";
+  out << "motor0.samples=0,1,2,3\n";
+  out << "motor1.driver=tmc5160\n";
+  out << "motor1.spi_device=/dev/spidev0.1\n";
+  out << "motor1.cs_line=7\n";
+  out << "motor1.step_line=19\n";
+  out << "motor1.dir_line=26\n";
+  out << "motor1.enable_line=16\n";
+  out << "motor1.run_current_a_rms=2.0\n";
+  out << "motor1.hold_current_frac=0.30\n";
+  out << "motor1.stealth_chop=true\n";
+  out << "motor1.spi_speed_hz=1000000\n";
+  out << "motor1.samples=4,5,6,7\n";
   out.close();
 
   coatheal::OnboardConfig cfg;
@@ -306,10 +361,33 @@ void TestConfigParsesReliabilityFields() {
   assert(cfg.manual.link_loss_fallback_enabled);
   assert(std::fabs(cfg.manual.link_loss_fallback_s - 12.5) < 1e-9);
   assert(std::fabs(cfg.power.energy_budget_wh - 130.0) < 1e-9);
+  assert(std::fabs(cfg.power.logic_regulator_v - 5.0) < 1e-9);
+  assert(std::fabs(cfg.power.stepper_regulator_v - 12.0) < 1e-9);
+  assert(cfg.hardware.sample_count == 8U);
   assert(cfg.hardware.heater_count == 6U);
   assert(cfg.hardware.electronics_heater_index == static_cast<std::size_t>(-1));
   assert(std::fabs(cfg.power.heater_nominal_w - 5.0) < 1e-9);
   assert(std::fabs(cfg.power.max_thermal_w - 20.0) < 1e-9);
+  assert(cfg.sensors.sample_temperature_source == "daq132m_modbus");
+  assert(cfg.sensors.daq132m_device == "/dev/ttyUSB0");
+  assert(cfg.sensors.daq132m_register_count == 8);
+  assert(cfg.sensors.dps310_i2c_addr == 0x77);
+  assert(cfg.sensors.ads1115_i2c_addr == 0x48);
+  assert(cfg.sensors.uv_ads1115_channel == 0);
+  assert(cfg.sensors.resistance_source == "disabled");
+  assert(cfg.heaters.output_lines.size() == 6U);
+  assert(cfg.heaters.output_lines[0] == 12U);
+  assert(cfg.heaters.output_lines[5] == 25U);
+  assert(std::fabs(cfg.heaters.pwm_frequency_hz - 10.0) < 1e-9);
+  assert(cfg.heaters.active_high);
+  assert(cfg.pull.microstep == 4);
+  assert(cfg.pull.travel_full_steps == 200);
+  assert(cfg.motors[0].driver == "tmc5160");
+  assert(cfg.motors[0].spi_device == "/dev/spidev0.0");
+  assert(cfg.motors[0].samples == std::vector<std::size_t>({0, 1, 2, 3}));
+  assert(cfg.motors[1].driver == "tmc5160");
+  assert(cfg.motors[1].spi_device == "/dev/spidev0.1");
+  assert(cfg.motors[1].samples == std::vector<std::size_t>({4, 5, 6, 7}));
 
   std::error_code ec;
   std::filesystem::remove(cfg_path, ec);

@@ -97,7 +97,7 @@ bool StepperController::ResolvePhaseBend(MissionPhase phase,
       *hold_s = schedule_.ascent_hold_s;
       return true;
     case MissionPhase::kFloat:
-      // Activation-ramp schedule collapsed into the float phase in Rev B.
+      // Legacy phase-bend schedule maps float motion to the FLOAT phase.
       *steps = schedule_.float_steps;
       *hold_s = schedule_.float_hold_s;
       return true;
@@ -176,7 +176,7 @@ bool StepperController::SetEnabled(bool enable) {
   return SetEnabled(0, enable, &err);
 }
 
-// ---- REV-B multi-motor surface ----
+// ---- Multi-motor surface ----
 bool StepperController::MoveSteps(int motor_id, std::int64_t delta_steps,
                                   std::string* error) {
   StepperChannel* ch = ChannelById(motor_id);

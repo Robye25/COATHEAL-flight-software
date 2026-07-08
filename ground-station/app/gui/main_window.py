@@ -105,7 +105,7 @@ class MainWindow(QMainWindow):
         self._values = ValuesPanel()
         self._preflight = PreflightPanel()
         self._history = CmdHistoryPanel()
-        # Rev-B: dedicated dual-motor dashboard. It reads `packet.steppers[0]`
+        # Dedicated dual-motor dashboard. It reads `packet.steppers[0]`
         # and `[1]` and is independent from the command-side StepperPanel.
         self._motors = MotorPanel()
         self._history.reissue_requested.connect(lambda cmd: self._dispatcher.send(cmd, tag=self._history))

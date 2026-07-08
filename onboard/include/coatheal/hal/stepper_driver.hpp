@@ -6,34 +6,21 @@
 
 namespace coatheal {
 
-// Driver-agnostic stepper interface. Concrete drivers (A4988, DRV8825,
-// TMC2209, …) all expose a STEP/DIR/EN pin triplet plus an optional microstep
-// selector, so the controller only needs: pulse a step, flip direction, gate
-// enable, and be told the microstep ratio. Real pulse timing is backend-
-// specific; the simulated driver just counts pulses.
+// Driver-agnostic stepper interface. The final TMC5160 path exposes
+// STEP/DIR/EN plus SPI configuration, but the controller only needs this small
+// motion surface. Real pulse timing is backend-specific; the simulated driver
+// just counts pulses.
 class StepperDriver {
  public:
   virtual ~StepperDriver() = default;
 
-  // Enable/disable the driver's power stage (holding torque off when false).
   virtual bool Enable(bool enable) = 0;
-
-  // Issue one step pulse in the given direction. Returns false on hardware
-  // fault.
   virtual bool Step(bool direction_forward) = 0;
-
-  // Microstep divisor (1 = full step, 2 = half, … 32). Ignored by drivers
-  // without software-selectable microstepping.
   virtual void SetMicrostep(int divisor) = 0;
-
   virtual bool healthy() const = 0;
-
-  // Monotonically-counted pulses issued since construction (useful for tests
-  // and for sanity cross-checks against the controller's position).
   virtual std::uint64_t pulses_issued() const = 0;
 };
 
-// No-op implementation used on bench/CI. Tracks pulses and state in memory.
 class SimulatedStepperDriver : public StepperDriver {
  public:
   SimulatedStepperDriver();
@@ -55,11 +42,8 @@ class SimulatedStepperDriver : public StepperDriver {
   std::uint64_t pulses_ = 0;
 };
 
-// Step/DIR/EN backend. Common to almost every hobby/industrial stepper driver
-// (A4988, DRV8825, TMC2208/2209 in legacy mode, …). The actual GPIO writes
-// are left as a build-time stub until the driver choice is finalized; see
-// LibgpiodPwmController for the same pattern. Real pulse generation will
-// need a dedicated timer/thread once the driver is known.
+// STEP/DIR/EN backend used by the TMC5160 fallback path. Real GPIO pulse
+// generation requires a bench-validated Pi timing backend.
 class GpioStepDirStepperDriver : public StepperDriver {
  public:
   GpioStepDirStepperDriver(std::string chip,

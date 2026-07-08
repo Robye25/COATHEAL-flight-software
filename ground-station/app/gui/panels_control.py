@@ -302,7 +302,7 @@ class HeaterPanel(QGroupBox):
         )
         outer.addWidget(self._banner)
 
-        # Rev-B.1: 6 heater cells (H0..H5). Box heater has been removed
+        # Final BOM: 6 heater cells (H0..H5). Box heater is absent.
         # from the flight hardware. Laid out 3x2 (two columns).
         grid = QGridLayout(); grid.setSpacing(4)
         self._cells: list[HeaterCell] = []
@@ -367,7 +367,7 @@ class HeaterPanel(QGroupBox):
         self._disp.send(f"SET_ALL_DUTY {d}", tag=self)
 
     def update_from_packet(self, pkt: TelemetryPacket) -> None:
-        # Rev-B.1: 6 cells (H0..H5, no box). Heater-to-sample mapping is
+        # Six cells (H0..H5, no box). Heater-to-sample mapping is
         # 1:1 for the first 6 samples; remaining samples (6, 7) are still
         # monitored but not actively heated.
         n = len(self._cells)
@@ -520,7 +520,7 @@ class StepperPanel(QGroupBox):
         self._disp.send("STEPPER_STOP", tag=self._stop)
 
     def update_from_packet(self, pkt: TelemetryPacket) -> None:
-        # Rev-B: show a compact one-liner per motor if dual; otherwise fall
+        # Show a compact one-liner per motor if dual; otherwise fall
         # back to the legacy single-motor rendering via `pkt.stepper`.
         if pkt.steppers:
             lines = []

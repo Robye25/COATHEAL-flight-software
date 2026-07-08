@@ -23,7 +23,7 @@ struct ControlOverrides {
   std::optional<PidGains> pid_override;
 };
 
-// Rev B.1 floor controller:
+// Rev C fallback floor controller:
 //   * Per-sample PID setpoint = phase.sample_floor_c (shared across
 //     ASCENT/FLOAT/DESCENT).
 //   * PID is only active when sample < (floor - hysteresis); once sample
@@ -42,7 +42,7 @@ class ThermalController {
 
   void Reset();
 
-  // Returns a duty vector of size heater_count (=6 in Rev B.1). Index i is
+  // Returns a duty vector of size heater_count (=6). Index i is
   // the duty for heater i, which corresponds to sample[i].
   std::vector<double> ComputeRequestedDuty(MissionPhase phase,
                                            const SensorSnapshot& sensors,
@@ -52,7 +52,7 @@ class ThermalController {
   void UpdatePid(PidGains gains);
 
   // Per-channel over-temperature latch (kept from Rev A for defense-in-depth
-  // even though the Rev B thermal goal is a floor, not a ceiling).
+  // even though the fallback thermal goal is a floor, not a ceiling).
   bool overtemp_latched() const { return overtemp_latched_; }
 
   // True while sample spread across the controlled (heated) samples stayed

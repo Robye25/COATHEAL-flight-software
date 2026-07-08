@@ -43,9 +43,9 @@ class TelemetryReceiver(QThread):
     connection_changed = pyqtSignal(bool, str)
     status_changed     = pyqtSignal(str)  # "listening" | "connected" | "stale" | "searching"
 
-    # CSV v4 (Rev B.1): drop humidity + box_temp_c; add r0..r7 columns for
-    # the new INA3221 sample-resistance instrument. This is a breaking
-    # change — pre-Rev B.1 CSVs cannot be appended to a v4 file.
+    # CSV v4: no humidity or box_temp_c; keep r0..r7 compatibility columns for
+    # optional/simulated resistance data. This is a breaking
+    # change; older CSVs cannot be appended to a v4 file.
     CSV_FIELDS = [
         "session_id", "seq", "timestamp", "rtc_valid",
         "ambient_temp_c", "ambient_pressure_mbar",
@@ -56,7 +56,7 @@ class TelemetryReceiver(QThread):
         "stepper_pos", "stepper_tgt", "stepper_hz", "stepper_us",
         "stepper_en", "stepper_mv", "stepper_hold", "stepper_hold_s",
         "stepper_pulses", "stepper_src",
-        # Motor 1 (Rev-B addition).
+        # Motor 1.
         "m1_pos", "m1_tgt", "m1_hz", "m1_us",
         "m1_en", "m1_mv", "m1_hold", "m1_hold_s",
         "m1_pulses", "m1_src",

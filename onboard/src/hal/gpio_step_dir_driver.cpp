@@ -17,10 +17,9 @@ GpioStepDirStepperDriver::GpioStepDirStepperDriver(std::string chip,
       invert_direction_(invert_direction),
       enable_active_low_(enable_active_low) {
 #ifdef COATHEAL_HAS_LIBGPIOD
-  // Ownership boundary: real GPIO acquisition + pulse timing are finalized
-  // once the concrete driver IC is chosen (A4988 / DRV8825 / TMC2209 all use
-  // the same STEP/DIR/EN triplet but need different pulse widths and a
-  // dedicated RT thread). Matches the LibgpiodPwmController stub pattern.
+  // Ownership boundary: real GPIO acquisition + pulse timing are finalized in
+  // the Pi bench backend. The TMC5160 path uses this as a STEP/DIR/EN fallback
+  // when SPI current-control bring-up fails.
   healthy_ = true;
 #else
   healthy_ = false;

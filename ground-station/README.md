@@ -34,7 +34,7 @@ python gui_app.py [--host <onboard-ip>] [--tel-port 4000] [--cmd-port 5000]
 | **Temperature** | Center tab | Live PyQtGraph plot — up to 8 sample temps |
 | **Pressure** | Center tab | Live pressure trace |
 | **Heater Duties** | Center tab | All 6 heater duty traces over time |
-| **Resistance** | Center tab | 8 sample-resistance traces from the INA3221 (channels with no coverage stay empty) |
+| **Resistance** | Center tab | Compatibility traces; final BOM normally emits `-` because no resistance instrument is carried |
 | **Values** | Right panel | Latest value for every telemetry field; status flags color-coded |
 | **Log** | Bottom dock | Timestamped scrolling log; auto-scroll toggle; save to file |
 | **Status bar** | Bottom edge | Phase (color-coded), SEQ, pressure, hottest sample, LINK status, staleness |

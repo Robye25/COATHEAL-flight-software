@@ -1,206 +1,107 @@
-# System Architecture (Rev B.1)
+# System Architecture (Rev C)
 
-## Overview
+COATHEAL uses a TCP/IP client-server architecture. The Raspberry Pi runs the
+C++ onboard process. The laptop runs the Python/PyQt ground station.
 
-COATHEAL uses a client-server architecture over TCP/IP. The onboard C++ application is manual-first on the Raspberry Pi 4: while the telemetry link is healthy, operators command phase, heaters, and motors from the ground station. The onboard keeps safety interlocks, logging, telemetry replay, watchdog recovery, and link-loss fallback. If an established link is lost, it can resume pressure phase tracking and the +5 C floor controller until operators reconnect.
+Rev C is manual-first. Operators command phase, heaters, and motor pulls while
+the ground link is healthy. The onboard software keeps safety interlocks,
+telemetry durability, logging, watchdog recovery, and link-loss fallback.
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                          Raspberry Pi 4 (Onboard)                           │
-│                                                                             │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │                       SystemController                              │   │
-│  │                                                                     │   │
-│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────────┐  │   │
-│  │  │SensorManager │  │ StateManager │  │    ThermalController     │  │   │
-│  │  │ MS5803   I2C │  │ Phase FSM    │  │  Sample PID (×6)         │  │   │
-│  │  │ PT100×8  RS485│ │ Pressure-    │  │  (no box PID)            │  │   │
-│  │  │ ADS1015  I2C │  │ driven       │  └─────────────┬────────────┘  │   │
-│  │  │ INA3221×2 I2C│  │ transitions  │                │               │   │
-│  │  │ RTC      I2C │  └──────┬───────┘                │               │   │
-│  │  └──────┬───────┘         │                ┌───────▼──────────┐    │   │
-│  │         │ SensorSnapshot  │                │ HeaterScheduler  │    │   │
-│  │         │ + resistance    │                │ 4 active / 20 W  │    │   │
-│  │         │                 │                │ MotionLock gate  │    │   │
-│  │         └─────────────────┤                └──────┬───────────┘    │   │
-│  │                           │                       │ duty[6]        │   │
-│  │  ┌──────────────────────┐ │                ┌──────▼──────────┐     │   │
-│  │  │ StorageManager       │◄┤                │ PwmController   │     │   │
-│  │  │  SD: primary.csv     │ │                │ (GPIO / sim)    │     │   │
-│  │  │  USB: mirror.csv     │ │                └─────────────────┘     │   │
-│  │  └──────────────────────┘ │                                        │   │
-│  │                           │                ┌─────────────────┐     │   │
-│  │  ┌──────────────────────┐ │                │ StepperChannel  │     │   │
-│  │  │ TelemetryQueue       │◄┤                │  ×2 (TMC2240)   │     │   │
-│  │  │ durable disk FIFO    │ │                │  MotionLock     │     │   │
-│  │  └──────────┬───────────┘ │                │  EVT,PULL edge  │     │   │
-│  │             │             │                └─────────────────┘     │   │
-│  │  ┌──────────▼───────────┐ │                                        │   │
-│  │  │ TelemetryClient (TCP)├─┤   ┌──────────────────────────────┐     │   │
-│  │  │ :4000, ACK-based     │ │   │  CommandServer (TCP :5000)   │     │   │
-│  │  │ UDP discovery :4100  │ │   │  Handles commands in thread  │     │   │
-│  │  └──────────────────────┘ │   └──────────────────────────────┘     │   │
-│  │                                                                     │   │
-│  │  HAL adapters: SpiAdapter, I2cAdapter, RtcAdapter,                  │   │
-│  │  Ina3221Adapter (sample-resistance science instrument, stub),       │   │
-│  │  LibgpiodPwmController, GpioStatusLed, Rs485ModbusAdapter (planned) │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────────────┘
-                             │ TCP :4000 (telemetry, DATA + EVT,PULL)
-                             │ TCP :5000 (commands)
-                             │ UDP :4100 (discovery)
-                             ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                        Ground Station (Windows / Linux PC)                  │
-│                                                                             │
-│  ┌────────────────────────────────────────────────────────────────────┐    │
-│  │                         gui_app.py (PyQt6)                         │    │
-│  │                                                                    │    │
-│  │  MainWindow (main thread)                                          │    │
-│  │  ┌──────────────┐  ┌──────────────────┐  ┌──────────────────────┐ │    │
-│  │  │ Control Dock │  │  Plot Tabs       │  │  Values Panel        │ │    │
-│  │  │ Connection   │  │  Sample temps    │  │  (every telemetry    │ │    │
-│  │  │ Heater bars  │  │  Pressure        │  │   field live)        │ │    │
-│  │  │ (6 × H0..H5) │  │  Heater duties   │  └──────────────────────┘ │    │
-│  │  │ Commands     │  │  Resistance      │                           │    │
-│  │  └──────────────┘  └──────────────────┘  ┌──────────────────────┐ │    │
-│  │                                          │  Pull events dock    │ │    │
-│  │  ┌──────────────────────────────────┐    │  (EVT,PULL table)    │ │    │
-│  │  │ TelemetryReceiver (QThread)      │    └──────────────────────┘ │    │
-│  │  │  TCP :4000 server                │                             │    │
-│  │  │  Parse → ACK → CSV → signal      │                             │    │
-│  │  └──────────────────────────────────┘                             │    │
-│  │  ┌──────────────────────────────────┐                             │    │
-│  │  │ CommandSender                    │                             │    │
-│  │  │  One-shot TCP :5000              │                             │    │
-│  │  └──────────────────────────────────┘                             │    │
-│  └────────────────────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────────────────┘
+```text
+Raspberry Pi 4
+  coatheal_onboard
+    SystemController
+      CommandServer :5000
+      TelemetryClient :4000 + UDP discovery :4100
+      TelemetryQueue + StorageManager
+      SensorManager
+        DAQ132M over USB-RS485 Modbus: PT100 samples 0..7
+        DPS310 over I2C: pressure + ambient temperature
+        ADS1115 over I2C: GUVA-S12SD UV analog input
+        optional RTD Click over SPI for bench PT100 validation
+      ThermalController
+        6 sample floor PIDs, used only during fallback/autonomous mode
+      HeaterScheduler
+        4 active / 20 W / energy budget / MotionLock gate
+      PwmController
+        H0..H5 MOSFET input mapping
+      StepperController
+        M0 + M1 TMC5160 motor channels
+
+Ground station laptop
+  gui_app.py
+    TelemetryReceiver TCP server :4000
+    CommandSender one-shot TCP client :5000
+    Discovery beacons UDP :4100
+    Live plots, command buttons, CSV logs, ACK cursor
 ```
 
-The Rev B "Box PID (×1)" block is removed at Rev B.1: there is no electronics-box heater, no box temperature sensor, and no box PID. The ambient trace no longer includes humidity.
+## Runtime Data Flow
 
----
-
-## Onboard subsystems
-
-### Main loop (`SystemController::Run`)
-
-Runs at `tick_hz` (default 1 Hz). Each tick:
-
-1. Apply queued state/control overrides (from commands received between ticks).
-2. Read sensor snapshot (`SensorManager`) — temperatures, pressure, UV, **sample resistance**.
-3. Track link state; if manual-first link-loss fallback is active, update mission phase (`StateManager`) from pressure.
-4. Compute requested heater duties (`ThermalController`) — manual duty overrides while connected; +5 C floor PID only in fallback or legacy autonomous mode.
-5. Schedule constrained duties (`HeaterScheduler`) — 4-active / 20 W / 130 Wh / MotionLock gate.
-6. Apply duties to PWM hardware (6 channels).
-7. Tick both stepper channels (`StepperChannel::Tick`) without phase-entry setpoints in manual-first mode.
-8. Build `TelemetryRecord` + status flags including `RESISTANCE_OK`.
-9. Serialize DATA frame (`SerializeTelemetryDataFrame`) with `RESISTANCE=` segment.
-10. Write to both storage paths (`StorageManager`).
-11. Enqueue to `TelemetryQueue` and drain to ground (`TelemetryClient`).
-12. Detect `moving`-edge falls per channel → emit `EVT,PULL,…`; feed `SensorManager::NotePullCompleted`.
-
-### Command handling
-
-`CommandServer` runs a background thread listening on TCP port 5000. On each connection it reads one line, passes it to `SystemController::HandleCommandLine`, writes the response, and closes. Safe commands take effect immediately or set a thread-safe override flag; the override is consumed at the top of the next main-loop tick.
-
-### Telemetry reliability
-
-Every frame (DATA and `EVT,PULL`) is written to the durable disk queue before being sent. On each tick, `DrainTelemetryQueue` iterates all pending frames, sends each one, and waits for a per-frame ACK. Successfully ACK'd frames are removed. If the link is down, frames accumulate on disk (up to 72 h / 8 GiB) and are replayed when the link is restored.
-
-### Phase state machine (Rev C manual-first)
-
-During normal connected flight, phase is an operator label controlled by `SET_PHASE` (`FORCE_START` maps to `ASCENT`, `FORCE_STOP` maps to `DESCENT` and stops steppers). The pressure FSM below is used only when `manual.manual_first=false` or after an established ground link is lost for `manual.link_loss_fallback_s`.
-
-```
-         power-on
-            │
-            ▼
-       ┌─────────┐
-       │  BOOT   │  heaters off (SystemMode = STANDBY / SAFE stays here)
-       └────┬────┘
-            │ SystemMode → RUN
-            ▼
-       ┌─────────┐
-       │ ASCENT  │  floor +5 °C, per-sample PIDs with 0.5 °C hysteresis
-       └────┬────┘
-            │ P ≤ 100 mbar
-            ▼
-       ┌─────────┐
-       │  FLOAT  │  pulls happen here (MotionLock + HEATER_INHIBITED)
-       └────┬────┘
-            │ P ≥ 300 mbar
-            ▼
-       ┌─────────┐
-       │ DESCENT │  floor +5 °C
-       └────┬────┘
-            │ P ≥ 800 mbar
-            ▼
-       ┌─────────┐
-       │ LANDED  │  heaters off
-       └─────────┘
-
-  FORCE_STOP / SHUTDOWN_SAFE → STOPPED (from any state)
-  RESET_CTRL → resets per-sample PID integrators, stays in current phase
+```text
+Sensors
+  -> SensorSnapshot
+  -> StateManager only if fallback/autonomous mode is active
+  -> ThermalController
+  -> HeaterScheduler
+  -> PwmController
+  -> TelemetryRecord
+  -> StorageManager + TelemetryQueue
+  -> TelemetryClient
+  -> Ground station ACK
 ```
 
----
+Motor pulls use a separate command path:
 
-## Ground-station threading
+```text
+Ground command
+  -> CommandServer
+  -> StepperController
+  -> StepperChannel M0/M1
+  -> MotionLock acquired
+  -> HeaterScheduler forces HEATER_INHIBITED
+  -> pull completes
+  -> EVT,PULL telemetry event
+```
 
-| Thread | Responsibility |
-|---|---|
-| Main thread | Qt event loop — all widget updates, plot redraws |
-| `TelemetryReceiver` (QThread) | TCP server socket — `accept()`, `recv()`, parse, ACK, CSV write |
+## Manual-First Control
 
-Signals across the boundary (queued connection):
+| Mode | Phase control | Heater control | Motor control |
+|---|---|---|---|
+| Connected Rev C | Operator commands `SET_PHASE` | Operator commands duty; safety scheduler still applies | Operator commands `PULL_*` / `STEPPER_*` |
+| Link-loss fallback | Pressure FSM | +5 C floor controller | No automatic pulls |
+| Legacy autonomous | Pressure FSM + fatigue sequencer | +5 C floor controller | Automatic fatigue path can run |
 
-- `packet_received(TelemetryPacket)` → `_on_packet` — updates sample/heater/resistance plots and value panels.
-- `pull_event(PullEvent)` → populates the Pull events table and appends to `<log>_pulls.csv`.
-- `connection_changed(bool, str)` → status bar.
-- `log_message(str)` → log panel.
-
-Commands are sent synchronously from the main thread (`CommandSender.send()`) as one-shot TCP connections with a 3-second timeout.
-
----
-
-## Network topology
+## Network Topology
 
 | Port | Protocol | Direction | Purpose |
 |---|---|---|---|
-| 4000 | TCP | Pi → Laptop | Telemetry stream (Pi connects out) |
-| 5000 | TCP | Laptop → Pi | Command uplink (laptop connects in) |
-| 4100 | UDP broadcast | Both | Discovery beacons |
+| `4000` | TCP | Pi -> laptop | Telemetry DATA and event frames |
+| `5000` | TCP | Laptop -> Pi | One-shot command uplink |
+| `4100` | UDP | Both | Discovery |
 
-The Pi acts as a TCP **client** for telemetry and **server** for commands.
+The Pi uses static link-local Ethernet `169.254.10.10/16`. The laptop may use
+any `169.254.x.x/16` address. A successful command connection teaches the Pi
+where telemetry should be returned.
 
----
+## Final-BOM Hardware Boundaries
 
-## Data-flow summary (Rev B.1)
+| Boundary | Configured in software | Physical-driver status |
+|---|---|---|
+| TMC5160 SPI setup | Yes | SPI register writes implemented; bench validation required |
+| STEP/DIR/EN GPIO | Yes | Real pulse backend pending bench validation |
+| Heater MOSFET outputs | Yes | Real PWM backend pending bench validation |
+| DAQ132M Modbus | Yes | Device read implementation pending register-map validation |
+| DPS310 I2C | Yes | Device read implementation pending |
+| ADS1115 I2C | Yes | Device read implementation pending |
+| RTD Click | Optional config | Optional bench path only |
+| Resistance instrument | Disabled | Compatibility telemetry field only |
 
+## Telemetry Shape
+
+```text
+DATA,<session>,<seq>,<timestamp>,<rtc_valid>,<ambient_temp_c>,<ambient_pressure_mbar>,<uv>,<sample_0>..<sample_7>,HEATER_DUTY=d0|..|d5,RESISTANCE=r0|..|r7,PHASE=..,MODE=..,STATUS=..,STEPPER0=..,STEPPER1=..
 ```
-Sensors → SensorSnapshot (temps, P, T, UV, resistance) → StateManager → MissionPhase
-                     ↓
-             ThermalController → duty[6]
-                     ↓
-             HeaterScheduler → constrained_duty[6]          MotionLock → (pull active?)
-                     ↓                                              ↓
-             PwmController (6 ch) → GPIO/Simulated     heater_inhibited → STATUS bit
-                     ↓
-             StepperChannel ×2 → TMC2240 → STEP/DIR/EN
-                     ↓
-             TelemetryRecord → SerializeTelemetryDataFrame
-                     │   columns: temps(8), HEATER_DUTY=(6), RESISTANCE=(8),
-                     │            PHASE, MODE, STATUS(13), STEPPER0, STEPPER1
-                     ↓
-             StorageManager (SD + USB CSV) ← also receives EVT,PULL strings
-                     ↓
-             TelemetryQueue (disk, durable)
-                     ↓
-             TelemetryClient → TCP → TelemetryReceiver
-                                         ↓
-                                     ACK → parse → CSV
-                                         ↓
-                                 Qt signals → GUI panels
-```
+
+The ground station accepts the compatibility `RESISTANCE=` field, but the final
+BOM has no resistance instrument, so normal final-BOM frames emit `-` values.
