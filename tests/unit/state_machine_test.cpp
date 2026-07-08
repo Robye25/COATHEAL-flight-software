@@ -45,7 +45,7 @@ void TestModeCommandsParse() {
 }
 
 void TestDefaultAscentToFloatAt100Mbar() {
-  // Rev B: FLOAT begins when ambient pressure falls at/below 100 mbar.
+  // Legacy autonomous fallback: FLOAT begins when pressure falls to 100 mbar.
   coatheal::OnboardConfig config;
   assert(config.transition.ascent_to_float_mbar == 100.0);
 
@@ -69,9 +69,9 @@ void TestDefaultAscentToFloatAt100Mbar() {
   assert(p == coatheal::MissionPhase::kFloat);
 }
 
-void TestSecondaryCycleNoOpInRevB() {
-  // Rev B removed the timed FLOAT hold and the secondary-cycle re-entry to
-  // ACTIVATION_RAMP that went with it. `secondary_cycle` is kept on the
+void TestSecondaryCycleNoOpInRevC() {
+  // Rev C has no timed FLOAT hold or secondary-cycle re-entry to an activation
+  // ramp. `secondary_cycle` is kept on the
   // StateOverrides struct for wire-compat but the FSM ignores it.
   coatheal::OnboardConfig config;
   config.transition.ascent_to_float_mbar = 100.0;
@@ -118,7 +118,7 @@ int main() {
   TestSystemModeToString();
   TestModeCommandsParse();
   TestDefaultAscentToFloatAt100Mbar();
-  TestSecondaryCycleNoOpInRevB();
+  TestSecondaryCycleNoOpInRevC();
   TestStandbyRunSafeTransitionsViaCommands();
   std::cout << "State machine tests passed.\n";
   return 0;

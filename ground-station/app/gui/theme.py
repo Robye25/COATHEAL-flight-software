@@ -9,13 +9,11 @@ HEATER_COLORS = [
     "#e74c3c", "#e67e22", "#f1c40f", "#2ecc71", "#1abc9c",
     "#3498db",
 ]
-# Rev-B.1: 6 sample-bank heaters (H0..H5). Box heater removed along with
-# the box-temperature sensor.
+# Final BOM: 6 sample-bank heaters (H0..H5). No box heater.
 HEATER_LABELS = [f"H{i}" for i in range(6)]
 
-# Rev-B.1: 8 sample resistance traces, sharing the 6-entry HEATER_COLORS
-# palette. Channels 6 and 7 are unmeasured on the flight hardware (no
-# INA3221 coverage) and render as dashed placeholders when absent.
+# Compatibility resistance traces, sharing the 6-entry HEATER_COLORS palette.
+# Final-BOM hardware normally renders these as dashed placeholders.
 RESISTANCE_COLORS = [
     "#e74c3c", "#e67e22", "#f1c40f", "#2ecc71", "#1abc9c",
     "#3498db", "#9b59b6", "#e91e63",
@@ -28,8 +26,7 @@ PHASE_COLORS = {
     "ACTIVATION_RAMP": "#f39c12",
     "FLOAT_HOLD":      "#2ecc71",
     "DESCENT_FLOOR":   "#9b59b6",
-    # Rev-B placeholders (Agent A is reshaping phases — floor-only control,
-    # no setpoint suffix).
+    # Rev C phase names.
     "BOOT":            "#7f8c8d",
     "ASCENT":          "#3498db",
     "PRE_FLOAT":       "#f39c12",

@@ -113,7 +113,7 @@ class ValuesPanel(QScrollArea):
 
         self._section("STATUS")
         self._row("status", "flags")
-        # Individual Rev-B flags broken out so operators can watch them
+        # Individual status flags broken out so operators can watch them
         # without scanning the whole bitfield string.
         self._row("rs485", "RS-485")
         self._row("heater_inhibit", "heater inhibit")
@@ -149,7 +149,7 @@ class ValuesPanel(QScrollArea):
         for i in range(8):
             if i < len(pkt.sample_temps_c):
                 f[f"sample_{i}"].setText(f"{pkt.sample_temps_c[i]:.2f}")
-        # Rev-B.1: 8 resistance rows. A literal '-' on the wire surfaces
+        # Compatibility resistance rows. A literal '-' on the wire surfaces
         # as None here; show an em-dash so the operator knows it's an
         # unmeasured channel rather than a broken sensor.
         for i in range(8):
@@ -173,7 +173,7 @@ class ValuesPanel(QScrollArea):
                 for k in ("state", "cfg", "mode", "src"):
                     f[f"m{m}_{k}"].setText("—")
         f["status"].setText(pkt.status)
-        # Rev-B STATUS bits, surfaced as boolean-ish indicators.
+        # Status bits surfaced as boolean-ish indicators.
         rs_ok = "RS485_OK" in pkt.status
         hi    = "HEATER_INHIBITED" in pkt.status
         f["rs485"].setText("OK" if rs_ok else ("FAIL" if "RS485_FAIL" in pkt.status else "—"))
@@ -187,8 +187,8 @@ class ValuesPanel(QScrollArea):
             "font-family: monospace; font-size: 11px; color: "
             + ("#f39c12" if hi else "#2ecc71") + ";"
         )
-        # Rev-B.1: RESISTANCE_OK / RESISTANCE_FAIL reflects the INA3221
-        # instrument health. If neither bit is in the status string we
+        # RESISTANCE_OK / RESISTANCE_FAIL reflects the configured resistance
+        # source. If neither bit is in the status string we
         # treat it as "unknown" to stay visually quiet on legacy replays.
         res_ok = "RESISTANCE_OK" in pkt.status
         res_fail = "RESISTANCE_FAIL" in pkt.status
@@ -320,7 +320,7 @@ class LogPanel(QWidget):
 
 # ── Motor status dock (M0 + M1) ──────────────────────────────────────────────
 class MotorPanel(QWidget):
-    """Live state tiles for the two sample-bending motors (Rev-B).
+    """Live state tiles for the two sample-bending motors.
 
     Reads `packet.steppers[0]` and `[1]`. Shows each motor's position,
     target, step rate, microstep, and enable/move indicators. This is a

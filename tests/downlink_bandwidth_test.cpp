@@ -21,7 +21,7 @@ coatheal::TelemetryRecord MakeRealisticRecord(std::uint64_t seq) {
   r.sensors.ambient_temp_c = -55.23;
   r.sensors.ambient_pressure_mbar = 140.12;
   r.sensors.uv = 0.00012;
-  // Rev B.1: 8 PT100 sample temperatures, 6 heater duties (5 W each).
+  // Rev C: 8 PT100 sample temperatures, 6 heater duties (5 W each).
   r.sensors.sample_temps_c = {
       -30.12, -30.23, -30.01, -30.30, -30.11, -30.22, -30.05, -30.33};
   r.sensors.sample_resistance_ohm = {

@@ -1,334 +1,144 @@
 # Ground Station Module Reference
 
-The ground station is a Python package (`ground-station/`) providing two user interfaces and a shared protocol library.
+The ground station is the operator interface for Rev C manual-first flight
+operations. It provides a PyQt6 GUI, a CLI telemetry receiver, and a CLI command
+client.
 
-```
+```text
 ground-station/
-├── gui_app.py          PyQt6 desktop GUI (recommended for operations)
-├── main.py             CLI entry point (telemetry-server + command subcommands)
-└── app/
-    ├── protocol.py     Wire protocol parser and builders
-    ├── telemetry_server.py   CLI telemetry receiver + live matplotlib plot
-    └── command_client.py     CLI one-shot command uplink
+  gui_app.py                 PyQt6 desktop GUI
+  main.py                    CLI entry point
+  app/protocol.py            DATA, EVT,PULL, ACK, and command parsing
+  app/telemetry_server.py    CLI telemetry receiver
+  app/command_client.py      CLI command uplink
 ```
 
----
+## Launch
 
-## gui_app.py
+Plug the laptop into the Pi Ethernet link, then start:
 
-**`ground-station/gui_app.py`**
-
-Full-featured PyQt6 desktop application for flight operations. All network I/O runs in a background `QThread`; all Qt widget operations run on the main thread. Data crosses the boundary via queued `pyqtSignal` connections.
-
-### Launch
-
-```bash
-python gui_app.py [--host <ip>] [--tel-port 4000] [--cmd-port 5000]
+```powershell
+cd D:\COATHEAL-flight-software\COATHEAL-flight-software\ground-station
+.\.venv\Scripts\Activate.ps1
+python gui_app.py
 ```
 
-With no `--host`, the GUI starts in plug-and-play mode: it listens for
-telemetry, sends UDP discovery beacons, and probes the Pi at
-`169.254.10.10:5000`. A successful probe retargets command buttons and causes
-the Pi to send telemetry back to this ground-station laptop.
+With no `--host`, the GUI runs plug-and-play:
 
-### Threading Model
+1. Listen for telemetry on TCP `4000`.
+2. Send UDP discovery beacons on `4100`.
+3. Probe the Pi at `169.254.10.10:5000`.
+4. Use a successful probe/discovery result as the command target.
+5. Let the Pi retarget telemetry to this laptop's link-local IP.
 
-| Thread | Responsibility |
+Explicit host mode is still available:
+
+```powershell
+python gui_app.py --host 169.254.10.10 --tel-port 4000 --cmd-port 5000
+```
+
+## GUI Responsibilities
+
+| Component | Responsibility |
 |---|---|
-| **Main thread** | Qt event loop — all widget creation, updates, plot redraws |
-| **`TelemetryReceiver` (QThread)** | TCP server on `tel_port` — `accept()`, `recv()`, parse, ACK, CSV write |
+| `MainWindow` | Main Qt thread, widgets, plots, command buttons |
+| `TelemetryReceiver` | Background TCP server, frame parsing, ACKs, CSV writes |
+| `CommandSender` | One-shot TCP command client |
+| Discovery worker | UDP beacons and onboard-host cache |
 
-The `TelemetryReceiver` emits three signals:
+The GUI updates all plots and panels from parsed `TelemetryPacket` objects. It
+ACKs duplicate replayed frames so the Pi can clear its durable queue, but it
+does not duplicate CSV rows.
 
-| Signal | Type | Delivered to |
-|---|---|---|
-| `packet_received` | `object` (`TelemetryPacket`) | `MainWindow._on_packet` — updates all plots and panels |
-| `connection_changed` | `(bool, str)` | `MainWindow._on_connection` — updates connection label, status bar |
-| `log_message` | `str` | `MainWindow._on_log` — appends to log panel |
+## Rev C Display Model
 
-### TelemetryReceiver
+| Panel / plot | Rev C data |
+|---|---|
+| Connection | Pi command target, telemetry bind state, discovery result |
+| Heater duties | Six heater channels H0..H5 |
+| Motor dock | M0 and M1 TMC5160/ball-screw state from `STEPPER0` / `STEPPER1` |
+| Pull events | `EVT,PULL` rows with motor id, steps, hold time, sample group |
+| Temperature plot | Eight PT100 sample temperatures S0..S7 from DAQ132M |
+| Pressure plot | DPS310 pressure |
+| Environment / UV plot | GUVA-S12SD value through ADS1115 |
+| Resistance plot | Compatibility field; normally empty/`-` for final BOM |
+| Values panel | Latest parsed telemetry fields and status tokens |
+| Status bar | Phase, sequence, pressure, sample mean, link state, packet rate |
 
-TCP server that loops: `bind → listen → accept → recv → parse → ACK → emit`. Reconnect behaviour:
+## Command Workflow
 
-- Each accepted connection is handled in `_handle_connection`. On data timeout (`_DATA_TIMEOUT_S = 3.0`) or on `socket.timeout`, the method returns, triggering reconnect.
-- Windows `ConnectionResetError` (WinError 10054) from `recv()` is caught as `OSError` and treated as a clean disconnect — the thread loops back to `accept()` rather than dying.
-- `srv.listen(5)` allows the OS to queue multiple pending connections, so the Pi can reconnect before the ground station calls `accept()` again.
+Typical connected operation:
 
-### CommandSender
-
-Synchronous one-shot TCP connection to the command port. Called from the main thread directly (acceptable: commands are infrequent and the 3-second timeout is tolerable).
-
-```python
-sender = CommandSender(host, cmd_port)
-response = sender.send("PING")   # → "ACK,PING,pong"
+```powershell
+python main.py command --cmd PING
+python main.py command --cmd STATUS
+python main.py command --cmd ARM
+python main.py command --cmd "SET_PHASE ASCENT"
+python main.py command --cmd "SET_HEATER_DUTY 0 0.20"
+python main.py command --cmd "PULL_ARM 0"
+python main.py command --cmd "PULL_EXECUTE 0"
+python main.py command --cmd HEATERS_OFF --yes
+python main.py command --cmd DISARM
 ```
 
-### LivePlotWidget
+Dangerous commands require GUI confirmation or the CLI `--yes` flag:
 
-PyQtGraph-based scrolling plot. Each trace is a pre-created `PlotDataItem` (curve). Data is stored in a `collections.deque(maxlen=1200)` ring buffer. `push(seq, values_dict)` appends a point; `setData(x, y)` redraws the curve without recreating the graphics item.
+```text
+FORCE_STOP
+HEATERS_OFF
+RESET_CTRL
+SHUTDOWN_SAFE
+OFF
+RESET
+```
 
-### GUI Panels
+Bench-only commands require `runtime.bench_mode=true` and `ARM_DEBUG`.
 
-#### Connection Panel (left dock)
+## Protocol Parser
 
-- IP address field, telemetry port, command port
-- Start / Stop telemetry button
-- Connection label: grey "Waiting..." or green "● <ip>"
+`app/protocol.py` accepts:
 
-#### Heater Duties Panel (left dock)
-
-**Rev B.1:** 6 `HeaterCell` widgets, labelled `H0–H5`, coloured from the
-`HEATER_COLORS` amber-orange palette. Each cell has a 0–100 % progress bar,
-a readout of `duty | temp`, and a `Set` / `Off` action row. There is **no
-BOX bar** (the electronics-box heater was removed at Rev B.1 — see
-[docs/CHANGELOG-RevB.md](CHANGELOG-RevB.md)). Samples 6 and 7 are pulled but
-unheated and so have no heater cell.
-
-#### Motor Dock (right dock, "Motors" tab)
-
-**Rev-B:** dedicated read-only dashboard for the two sample-bending motors.
-Each motor (M0, M1) has its own `QGroupBox` with pos/tgt/Hz/µstep/hold/pulses
-readouts and three status dots (`en`, `mv`, `hold`). Populated from
-`packet.steppers[0]` and `packet.steppers[1]`. When the onboard reports
-only one motor (legacy single-`STEPPER=` frame), M1 is rendered as "—".
-
-#### Pull Events Panel (bottom dock, "Pull events" tab)
-
-**Rev-B:** scrolling `QTableWidget` of `EVT,PULL,...` frames. Columns:
-`time`, `motor`, `pull_id`, `steps`, `hold s`, `samples`, `session`.
-Motor column is colored per motor (green for M0, orange for M1). Fed by
-the `TelemetryReceiver.pull_event` signal; the dispatcher also appends to
-`<log>_pulls.csv` alongside the main DATA log.
-
-#### Commands Panel (left dock)
-
-Buttons for every command. Dangerous commands (`FORCE_STOP`, `HEATERS_OFF`, `RESET_CTRL`, `SHUTDOWN_SAFE`) require a `QMessageBox` confirmation dialog before sending. Heater duty commands are normal manual flight controls; bench-only debug commands such as `SET_PID` and `SET_BENCH_MODE` require `ARM_DEBUG` first.
-
-#### Temperature Plot (center tab)
-
-**Rev B.1:** 8 sample temperature traces (`S0..S7`) over sequence number. One
-trace per channel, auto-colored. There is no box-temperature trace (no box
-sensor at Rev B.1).
-
-#### Pressure Plot (center tab)
-
-Ambient pressure (mbar) from the MS5803-01BA over sequence number. Useful for
-observing ascent/float/descent transitions.
-
-#### Heater Duties Plot (center tab)
-
-**Rev B.1:** 6 heater duty-cycle traces (`H0..H5`, 0.0–1.0) over sequence
-number.
-
-#### Resistance Plot (center tab)
-
-**Rev B.1:** up to 8 sample-resistance traces (ohms) from the two INA3221
-chips, over sequence number. Samples 6 and 7 typically have no trace (no
-INA3221 channel assigned — the wire value is `-`). Step changes in these
-traces correspond to microcrack events and should line up with `EVT,PULL`
-rows in the Pull-events tab.
-
-#### Environment Plot (center tab)
-
-**Rev B.1:** UV only. The humidity trace was removed because the MS5803-01BA
-ambient sensor has no humidity output.
-
-#### Values Panel (right, resizable)
-
-Latest value for every telemetry field, updated on each packet. **Rev B.1**
-rows: 8 sample temperatures (S0–S7), 6 heater duties (H0–H5), 8 sample
-resistances (R0–R7, `-` for unmeasured), ambient T + P (no humidity, no box
-T), UV, a `MOTORS` section with per-motor state (M0 and M1 each surface
-pos/tgt, Hz · µstep, mode, src), and broken-out indicator rows for the
-STATUS bits `RS485_OK/FAIL`, `HEATER_INHIBITED/HEATER_ACTIVE`, and
-`RESISTANCE_OK/FAIL`. Status flags are colour-coded green / red / amber.
-
-#### Log Panel (bottom dock)
-
-Timestamped scrolling event log from both the telemetry receiver and any command responses. Controls: auto-scroll toggle, Clear, Save to file.
-
-#### Status Bar
-
-Five status widgets at the bottom edge:
-
-| Widget | Content |
+| Input | Parser |
 |---|---|
-| Phase | Current mission phase string, color-coded per phase |
-| SEQ | Latest sequence number |
-| Pressure | Ambient pressure in mbar (MS5803-01BA) |
-| Samples | Mean sample temperature across the 6 heated samples, in °C (Rev B.1 replaces the Rev B `Box Temp` widget, which is gone with the box sensor) |
-| LINK | `LINK: OK` (green) / `LINK: FAIL` (red) / `LINK: —` (disconnected) |
-| Rate | Packet rate and age ("X.X s ago") |
+| DATA frame | `parse_telemetry_csv` |
+| Pull event | `parse_pull_event` |
+| ACK | `build_ack` |
+| Command line | `build_command` |
 
-All widgets are cleared / greyed out when the onboard disconnects.
+The parser keeps compatibility with the `RESISTANCE=` field. In final-BOM Rev C
+operation, no resistance instrument is carried, so that field normally contains
+`-` placeholders.
 
-### CSV Log
+## CSV Logs
 
-The GUI writes received telemetry to `logs/ground_telemetry.csv` in the same format as the CLI server. **File → Open CSV log…** loads any existing CSV into all plot panels for post-flight analysis.
+The GUI writes received DATA frames to `logs/ground_telemetry.csv`. Pull events
+are written to a sibling pull-event CSV. The ACK cursor is stored in
+`logs/ground_ack_cursor.json` so restarted ground-station sessions can dedupe
+replayed onboard queue frames.
 
-### ACK Cursor
+## CLI Telemetry Server
 
-Acknowledgement state is persisted to `logs/ground_ack_cursor.json`. The GUI deduplicates replayed frames using `{session_id → last_seq}` — duplicate packets are ACK'd (to let the Pi clear its queue) but are not written to the CSV log again.
+Headless telemetry receiver:
 
----
+```powershell
+python main.py telemetry-server --host 0.0.0.0 --port 4000
+```
 
-## app/protocol.py
+It binds the telemetry socket, parses incoming DATA and event frames, writes CSV
+logs, and sends ACKs.
 
-**`ground-station/app/protocol.py`**
+## CLI Command Client
 
-Pure-Python wire protocol primitives. No I/O — only parsing and building.
+One-shot command uplink:
 
-### `TelemetryPacket` (dataclass)
+```powershell
+python main.py command --cmd STATUS
+python main.py command --host 169.254.10.10 --cmd PING
+```
 
-Holds all fields from a decoded DATA frame. Rev B.1 drops `ambient_humidity_pct`
-and `box_temp_c` and adds `sample_resistance_ohm`. The parser continues to
-accept Rev A / Rev B frames — legacy fields are populated with sentinel
-values (`0.0`) for back-compat on log replay.
+Host resolution order:
 
-| Field | Type | Notes |
-|---|---|---|
-| `session_id` | `str` | |
-| `seq` | `int` | |
-| `timestamp` | `str` | ISO-8601 |
-| `rtc_valid` | `int` | 0 or 1 |
-| `ambient_temp_c` | `float` | MS5803-01BA |
-| `ambient_pressure_mbar` | `float` | MS5803-01BA |
-| `uv` | `float` | GUVA-S12SD via ADS1015 |
-| `sample_temps_c` | `List[float]` | 8 channels at Rev B.1 |
-| `heater_duty` | `List[float]` | 6 channels at Rev B.1 |
-| `sample_resistance_ohm` | `List[Optional[float]]` | **Rev B.1.** 8 entries; `None` (or `-` on the wire) where unmeasured |
-| `phase` | `str` | `BOOT` / `ASCENT` / `FLOAT` / `DESCENT` / `LANDED` / `STOPPED` |
-| `mode` | `str` | `STANDBY` / `RUN` / `SAFE` |
-| `status` | `str` | 13 pipe-separated tokens at Rev B.1 (adds `RESISTANCE_OK`) |
-| `steppers` | `List[Dict]` | Two motor snapshots |
-| `stepper` | `StepperSnapshot` or `None` | Legacy; mirrors `steppers[0]` |
-
-### `parse_telemetry_csv(line) → TelemetryPacket`
-
-Parses a raw DATA frame string. Raises `TelemetryParseError` on:
-
-- Fewer than 13 comma-separated tokens
-- Missing `DATA` prefix
-- Missing `HEATER_DUTY=` field
-- Missing `PHASE=` or `STATUS=` field
-
-The number of sample temperatures is inferred from the position of `HEATER_DUTY=` — it is not hardcoded to 8, 9, or 10.
-
-**Rev-B stepper handling:** both the legacy single-segment `STEPPER=…` and
-the new indexed `STEPPER0=…`, `STEPPER1=…` forms are accepted.
-`packet.steppers` is a list of dicts with keys
-`motor_id, position, target, hz, microstep, enabled, moving, holding,
-hold_s, pulses, source`:
-
-| Input | `packet.steppers` length | `packet.stepper` |
-|---|---|---|
-| No stepper segment (legacy short frame) | 0 | `None` |
-| Legacy single `STEPPER=…` | 1 (motor_id=0) | mirrors `steppers[0]` |
-| Rev-B `STEPPER0=…`, `STEPPER1=…` | 2+, sorted by motor_id | mirrors `steppers[0]` |
-
-### `parse_pull_event(line) → PullEvent`
-
-Parses an `EVT,PULL,<session>,<pull_id>,<motor_id>,<start_ts>,<steps_moved>,<hold_s>,<samples>` line. `samples` is either pipe-separated specimen indices or `-` for empty. Raises `TelemetryParseError` on malformed input.
-
-### `build_ack(session_id, seq) → str`
-
-Returns `"ACK,<session_id>,<seq>\n"`.
-
-### `build_command(command) → str`
-
-Strips and appends `\n`. Raises `ValueError` on empty input.
-
-### `TelemetryParseError`
-
-Subclass of `ValueError`. Raised by `parse_telemetry_csv` on malformed input.
-
----
-
-## app/telemetry_server.py
-
-**`ground-station/app/telemetry_server.py`**
-
-CLI telemetry receiver (headless). Used via `python main.py telemetry-server`.
-
-### TelemetryServer
-
-Manages the TCP server, discovery beacon, optional matplotlib live plot, CSV log, ACK cursor, and discovered-host cache.
-
-#### `run()`
-
-1. Creates log, cursor, and discovered directories
-2. Optionally starts `LivePlotter`
-3. Optionally starts `_discovery_loop` daemon thread
-4. Starts `_network_loop` daemon thread
-5. If plotting: drives matplotlib on the main thread at ~20 fps via `plt.pause(0.05)`
-6. If not plotting: joins the network thread until `KeyboardInterrupt`
-
-#### `_network_loop()`
-
-Binds TCP server socket, accepts connections in a loop. Each accepted connection is passed to `_handle_connection` — the loop blocks until that connection closes, then immediately waits for the next `accept()`.
-
-#### `_handle_connection(conn)`
-
-Per-connection handler. Opens (or appends to) the CSV log, then loops:
-
-1. `conn.recv(4096)` with 1-second socket timeout
-2. On `socket.timeout`: checks elapsed time vs `timeout_s`; returns if stale
-3. On empty `recv`: clean close, returns
-4. Parse line → `TelemetryPacket`
-5. Check duplicate by `(session_id, seq)` against cursor
-6. Send ACK regardless of duplicate status
-7. If not duplicate: write CSV row, flush, push to plotter if enabled
-
-#### `_discovery_loop()`
-
-Runs as a daemon thread. Sends `GS_HELLO` broadcast on UDP `discovery_port` once per second and listens for `ONBOARD_HELLO` replies. On a valid reply (matching nonce), updates `_last_onboard_ip` and `_last_onboard_session`, writes `discovered_onboard.json`.
-
-### LivePlotter
-
-Optional matplotlib live plot (box temperature + pressure vs. sequence). Uses a `collections.deque` as a thread-safe buffer between the network thread and the main thread. The main thread calls `tick()` every ~50 ms to drain the buffer and redraw.
-
----
-
-## app/command_client.py
-
-**`ground-station/app/command_client.py`**
-
-CLI one-shot command uplink. Used via `python main.py command --cmd <CMD>`.
-
-### `send_command(host, port, command, timeout) → str`
-
-Opens a TCP connection, sends `command + "\n"`, reads the response, and closes the connection. Returns the stripped response string.
-
-### `discover_onboard_host(discovery_port, command_port, timeout) → str | None`
-
-Sends a single `GS_HELLO` UDP broadcast and waits up to `timeout` seconds for an `ONBOARD_HELLO` reply with a matching nonce. Returns the sender's IP address or `None`.
-
-### `load_discovered_host(path) → str | None`
-
-Reads `discovered_onboard.json` and returns the cached `onboard_ip` string, or `None` if the file is absent or malformed.
-
-### Host Resolution Order
-
-1. `--host` argument (explicit)
-2. `logs/discovered_onboard.json` cache
-3. UDP auto-discovery (if `--discovery-enabled`)
-4. `--static-host` fallback (`169.254.10.10`)
-
-### Safety Confirmation
-
-Commands in `DANGEROUS_COMMANDS` (`FORCE_STOP`, `HEATERS_OFF`, `RESET_CTRL`, `SHUTDOWN_SAFE`, `OFF`, `RESET`) require interactive confirmation (`Type YES to continue`) unless `--yes` is passed.
-
----
-
-## main.py
-
-**`ground-station/main.py`**
-
-CLI entry point. Registers two subcommands via `argparse`:
-
-| Subcommand | Module | Description |
-|---|---|---|
-| `telemetry-server` | `app.telemetry_server` | TCP telemetry receiver + CSV log + optional plot |
-| `command` | `app.command_client` | Send one command and print the response |
-
-Each subcommand's `add_subparser()` sets `_coatheal_handler` as the `argparse` default, which `main()` calls after parsing.
+1. Explicit `--host`.
+2. `logs/discovered_onboard.json`.
+3. UDP discovery if enabled.
+4. Static fallback `169.254.10.10`.

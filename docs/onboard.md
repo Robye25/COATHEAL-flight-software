@@ -1,338 +1,179 @@
-# Onboard Software Reference (Rev B.1)
+# Onboard Software Reference (Rev C)
 
-The onboard software is a C++17 application (`coatheal_onboard`) running on a Raspberry Pi 4. Rev C is manual-first: while the telemetry link is healthy, operators command phase, heater duties, and motor movement from the ground station. The onboard remains responsible for safety interlocks, telemetry/logging, watchdog recovery, and link-loss fallback.
+The onboard application is a C++17 program (`coatheal_onboard`) for a Raspberry
+Pi 4. Rev C is manual-first: while the ground link is healthy, operators command
+phase, heater duties, and motor movement from the ground station. The onboard
+keeps safety interlocks, telemetry/logging, watchdog recovery, and link-loss
+fallback.
 
-## Entry point
+## Entry Point
 
-**[`onboard/src/main.cpp`](../onboard/src/main.cpp)**
-
-Parses `--config <path>`, calls `LoadConfigFromIni`, constructs `SystemController`, calls `Initialize`, then `Run`. Exits with the return value of `Run`.
+`onboard/src/main.cpp` parses `--config <path>`, loads the INI file, constructs
+`SystemController`, calls `Initialize`, then `Run`.
 
 ```bash
 ./build/onboard/coatheal_onboard --config config/onboard.example.ini
 ```
 
----
+## Main Loop
 
-## SystemController
+`SystemController::Run` runs at `runtime.tick_hz` and performs this sequence:
 
-**[`onboard/src/system_controller.cpp`](../onboard/src/system_controller.cpp)** | **[`onboard/include/coatheal/system_controller.hpp`](../onboard/include/coatheal/system_controller.hpp)**
+1. Apply queued command overrides.
+2. Read `SensorManager` snapshot.
+3. Track link state and activate fallback only after configured link loss.
+4. Update `StateManager` only in fallback or legacy autonomous mode.
+5. Compute requested heater duties.
+6. Apply `HeaterScheduler` limits: max active heaters, thermal power, energy, and `MotionLock`.
+7. Apply duties to `PwmController`.
+8. Tick both `StepperChannel` instances.
+9. Serialize telemetry and write it to CSV plus durable queue.
+10. Drain queued telemetry to the ground station and process ACKs.
+11. Emit `EVT,PULL` after a motor finishes a pull.
+12. Toggle status LEDs and feed the systemd watchdog.
 
-Master orchestrator. Owns and coordinates all subsystems. Main loop runs at `tick_hz` (default 1 Hz).
+## Manual-First Behavior
 
-### Key methods
+When `manual.manual_first=true`:
 
-| Method | Description |
+| Condition | Behavior |
 |---|---|
-| `Initialize(error*)` | Initialise subsystems; start command server thread. |
-| `Run()` | Blocking main loop; returns exit code. |
-| `DrainTelemetryQueue(link_ok*, error*)` | Send pending frames to ground station; update link status. |
-| `HandleCommandLine(line)` | Dispatch an incoming command string. Called from the command server thread. |
+| Ground link healthy | Operator commands phase, heaters, and pulls |
+| Link not yet seen | System stays conservative; no fallback automation |
+| Established link lost past timeout | Pressure FSM and +5 C sample floor controller may run |
+| `manual.manual_first=false` | Legacy autonomous phase/fatigue behavior can run |
 
-### Override flags
+Automatic fatigue pulls are disabled for normal Rev C operation. Operators use
+`PULL_ARM` and `PULL_EXECUTE`.
 
-Commands from the ground station set thread-safe flags (`std::mutex overrides_mu_`) consumed at the top of each tick, so commands never interrupt a sensor read or heater update mid-tick.
+## Final Hardware Model
 
-| Flag | Set by | Effect |
-|---|---|---|
-| `force_start` | `FORCE_START` | Legacy autonomous transition request; in manual-first mode this sets phase to `ASCENT` immediately. |
-| `force_stop` | `FORCE_STOP` | Legacy autonomous stop request; in manual-first mode this sets phase to `DESCENT` and stops steppers. |
-| `reset_control` | `RESET_CTRL` | `ThermalController::Reset()` next tick. |
-| `shutdown_safe` | `SHUTDOWN_SAFE` | Set `running_ = false`, stop loop. |
-| `heaters_off` | `HEATERS_OFF` | Zero all heater duties via `ControlOverrides`. |
-| `single_heater_override` | `SET_HEATER_DUTY` | Duty for one heater index (0..5). |
-| `all_heaters_override` | `SET_ALL_DUTY` | Duty for all heaters. |
-| `pid_override` | `SET_PID` | Override per-sample PID gains. |
-
-### Per-tick loop order
-
-1. Apply queued state/control overrides.
-2. `SensorManager::ReadSnapshot` — 8-sample temperatures, ambient P + T, UV, sample resistance.
-3. Track ground-link state; run `StateManager::Update` only in link-loss fallback or legacy autonomous mode.
-4. `ThermalController::ComputeRequestedDuty` - manual duty overrides while connected; 6 per-sample floor PIDs only in fallback or legacy autonomous mode.
-5. `HeaterScheduler::Schedule` — 4-heater / 20 W / 130 Wh caps, MotionLock interlock.
-6. `PwmController::SetDuty` — apply to GPIO or simulated backend.
-7. `StepperChannel::Tick` x 2; phase-entry stepper setpoints are disabled in manual-first mode.
-8. Build `TelemetryRecord` + status flags (`SPI_OK`, `I2C_OK`, `LINK_OK`, `T_AMBIENT_OK`, `P_AMBIENT_OK`, `UNIFORMITY_OK`, `OVERTEMP_OK`, `ENERGY_OK`, `RS485_OK`, `HEATER_INHIBITED`/`HEATER_ACTIVE`, `RESISTANCE_OK`).
-9. `SerializeTelemetryDataFrame` → storage CSV + telemetry queue.
-10. `DrainTelemetryQueue` → TCP send + ACK reconciliation.
-11. `EVT,PULL` edge detection (falling edge of `moving` on any channel) → `SerializeTelemetryPullEventFrame` → storage + queue; also calls `SensorManager::NotePullCompleted(motor_id)` so the simulator steps the resistance decay.
-12. Toggle heartbeat LED; feed `sd_notify(WATCHDOG=1)`.
-
----
-
-## StateManager
-
-**[`onboard/src/state_manager.cpp`](../onboard/src/state_manager.cpp)** | **[`onboard/include/coatheal/state_manager.hpp`](../onboard/include/coatheal/state_manager.hpp)**
-
-Pressure-driven Rev C fallback FSM (`BOOT -> ASCENT -> PRE_FLOAT -> FLOAT -> DESCENT -> LANDED`, plus `STOPPED`). In normal connected flight, operators set phase explicitly with `SET_PHASE`; this FSM is used only when `manual.manual_first=false` or link-loss fallback is active.
-
-- `ASCENT -> PRE_FLOAT` at `transition.pre_float_mbar` after debounce.
-- `PRE_FLOAT -> FLOAT` only when an external/manual completion signal is set; manual-first mode does not auto-run fatigue pulls.
-- `FLOAT -> DESCENT` at `transition.float_to_descent_mbar` after debounce.
-- `DESCENT -> LANDED` at `transition.descent_to_landed_mbar` after debounce.
-- `SET_PHASE`, `FORCE_START`, `FORCE_STOP`, and `SHUTDOWN_SAFE` can override from command handling.
-
----
-
-## ThermalController
-
-**[`onboard/src/thermal_controller.cpp`](../onboard/src/thermal_controller.cpp)** | **[`onboard/include/coatheal/thermal_controller.hpp`](../onboard/include/coatheal/thermal_controller.hpp)**
-
-Rev B.1: **6-channel floor controller**. There is no box PID.
-
-### PID topology
-
-| Controller | Count | Target | Feedback | Drives |
-|---|---|---|---|---|
-| Per-sample PID | **6** | `phase.sample_floor_c` (+5 °C) | `sample_temps_c[i]` | `heater_duty[i]` for i ∈ 0..5 |
-
-Samples 6 and 7 are pulled but unheated; they have no PID and no heater. Sample resistance (INA3221) is a passive instrument — it does not feed any control loop.
-
-### Setpoint schedule (Rev B floor-only)
-
-| Phase | Sample policy |
+| Subsystem | Software model |
 |---|---|
-| `BOOT` / `LANDED` / `STOPPED` | 0.0 (heaters off) |
-| `ASCENT` / `FLOAT` / `DESCENT` | Floor = `phase.sample_floor_c` (+5 °C), 0.5 °C hysteresis |
+| Sample temperatures | 8 PT100 channels from DAQ132M over USB-RS485 Modbus |
+| Ambient pressure / temperature | DPS310 over I2C |
+| UV | GUVA-S12SD analog output through ADS1115 over I2C |
+| Heaters | 6 polyimide heaters through EKM014/UCC27524 MOSFET inputs |
+| Motors | 2 NEMA 17 ball-screw actuators through FYSETC TMC5160 drivers |
+| Resistance | Disabled in final BOM; telemetry field retained for compatibility |
 
-Each PID engages only when `T_sample < (floor − 0.5 °C)` and disengages at/above the floor. While disengaged, the integrator is frozen.
+The current code has the final-BOM configuration schema and the TMC5160 SPI
+configuration path. The generic GPIO PWM/pulse boundary and device-specific
+DPS310, ADS1115, and DAQ132M reads still require bench validation and driver
+completion before powered flight hardware tests.
 
-### `ComputeRequestedDuty(phase, snapshot, dt, overrides)`
+## Thermal Control
 
-Returns a `std::vector<double>` of size `heater_count` (= 6). Overrides (`heaters_off`, `single_heater_override`, `all_heaters_override`, `pid_override`) are applied before returning.
+`ThermalController` owns six floor controllers, one per heated sample.
 
-### `Reset()`
+| Parameter | Default |
+|---|---|
+| Heated samples | 0..5 |
+| Unheated pulled samples | 6..7 |
+| Floor target | `phase.sample_floor_c=5.0` |
+| Hysteresis | 0.5 C |
+| Duty range | `0.0..1.0` |
 
-Resets all 6 PID integrators and clears the overtemp/uniformity latches. Called by `RESET_CTRL`.
+Manual heater overrides are applied while connected. PID floor control is used
+only in fallback or legacy autonomous mode.
 
----
+## Heater Scheduler
 
-## HeaterScheduler
+`HeaterScheduler` enforces:
 
-**[`onboard/src/heater_scheduler.cpp`](../onboard/src/heater_scheduler.cpp)** | **[`onboard/include/coatheal/heater_scheduler.hpp`](../onboard/include/coatheal/heater_scheduler.hpp)**
+| Limit | Default |
+|---|---|
+| `power.max_active_heaters` | 4 |
+| `power.max_thermal_w` | 20 W |
+| `power.heater_nominal_w` | 5 W |
+| `power.energy_budget_wh` | 130 Wh |
 
-Enforces power and count constraints on the requested duties.
-
-### Constraints (Rev B.1 defaults)
-
-| Parameter | Default | Description |
-|---|---|---|
-| `power.max_active_heaters` | 4 | Maximum simultaneous active heaters. |
-| `power.max_thermal_w` | 20 W | Maximum combined thermal power. |
-| `power.heater_nominal_w` | 5 W | Nominal per-heater power at 100 % duty. |
-| `power.energy_budget_wh` | 130 Wh | Cumulative heater energy; latches off on exhaustion. |
-
-### Interlocks
-
-- `MotionLock` holder test: when any motor holds the lock, all duties are forced to zero and `heater_inhibited() == true` → wire-format `HEATER_INHIBITED` bit.
-- `prioritize_samples` flag: historically de-prioritised the electronics box heater during flying phases. At Rev B.1 there is no box heater, so the flag is effectively a no-op.
-
-### Algorithm
-
-1. Rank heaters by requested duty (highest first).
-2. Accept heaters greedily until `max_active_heaters` or `max_thermal_w` is reached.
-3. Clamp accepted duties to the remaining power headroom.
-4. Zero all rejected heaters.
-5. Integrate cumulative energy; latch off when `energy_budget_wh` is exhausted.
-
----
-
-## PidController
-
-**[`onboard/src/pid_controller.cpp`](../onboard/src/pid_controller.cpp)** | **[`onboard/include/coatheal/pid_controller.hpp`](../onboard/include/coatheal/pid_controller.hpp)**
-
-Standard discrete PID with anti-windup and output clamping.
-
-```
-output = kp × error + ki × integral + kd × derivative
-```
-
-- **Integral anti-windup:** clamped to `[-10, 10]`.
-- **Output clamping:** `[0.0, 1.0]` (duty cycle).
-- `Update(setpoint, measurement, dt)` returns the clamped duty.
-- `Reset()` zeros integral and derivative state.
-
----
+When a motor holds `MotionLock`, every heater duty is forced to zero and
+telemetry reports `HEATER_INHIBITED`.
 
 ## SensorManager
 
-**[`onboard/src/sensor_manager.cpp`](../onboard/src/sensor_manager.cpp)** | **[`onboard/include/coatheal/sensor_manager.hpp`](../onboard/include/coatheal/sensor_manager.hpp)**
+`SensorManager` returns `SensorSnapshot`:
 
-Reads all sensors and returns a `SensorSnapshot`. In bench/simulation mode, uses a physics-based model rather than real hardware.
-
-### Constructor
-
-```cpp
-SensorManager(const OnboardConfig& config,
-              SpiAdapter* spi,
-              I2cAdapter* i2c,
-              RtcAdapter* rtc,
-              Ina3221Adapter* ina = nullptr);
-```
-
-`SystemController` passes `&spi_`, `&i2c_`, `&rtc_`, `&ina_` — all HAL adapters are owned by `SystemController`.
-
-### `SensorSnapshot` fields (Rev B.1)
-
-| Field | Source | Units |
-|---|---|---|
-| `timestamp_utc` | RTC or system clock | ISO-8601 UTC string |
-| `rtc_valid` | `RtcAdapter` | bool |
-| `ambient_temp_c` | MS5803-01BA (I2C) | °C |
-| `ambient_pressure_mbar` | MS5803-01BA (I2C) | mbar |
-| `uv` | GUVA-S12SD via ADS1015 (I2C) | normalised float |
-| `sample_temps_c` | 8 × PT100 through 2 × 4-ch Modbus RTD collectors | °C (vector, size 8) |
-| `sample_resistance_ohm` | 2 × INA3221 (I2C 0x40 / 0x41, ch 1..3) | Ω (vector, size ≤ 8; unmeasured samples serialize as `-`) |
-
-**Humidity and box temperature are gone.** There is no `ambient_humidity_pct` and no `box_temp_c` at Rev B.1.
-
-### Simulation model
-
-When bench mode is active (or hardware is absent):
-
-- Samples start at simulated ambient and converge toward the PID setpoint at a rate proportional to applied heater duty. Samples 6 and 7 receive no heat (no heater) and drift with ambient.
-- Ambient pressure decreases linearly (simulated ascent), then rises (descent).
-- Sample resistance starts at a nominal base and decays ~5 % per observed pull via `NotePullCompleted(motor_id)` edge fed from the `EVT,PULL` serializer in `system_controller.cpp`.
-
-### Status accessors
-
-- `t_ambient_ok()` — ambient-T inside `[sensor.ambient_temp_min_c, sensor.ambient_temp_max_c]`.
-- `p_ambient_ok()` — ambient-P inside `[sensor.ambient_pressure_min_mbar, sensor.ambient_pressure_max_mbar]`.
-- `resistance_ok()` — drives the `RESISTANCE_OK` wire bit. True iff the INA3221 instrument is present and its `healthy_` flag is set.
-
----
-
-## TelemetryClient
-
-**[`onboard/src/telemetry_client.cpp`](../onboard/src/telemetry_client.cpp)** | **[`onboard/include/coatheal/telemetry_client.hpp`](../onboard/include/coatheal/telemetry_client.hpp)**
-
-Outbound TCP connection to the ground station.
-
-### Session ID
-
-Generated at startup: `<hostname>-<unix_seconds>-<monotonic_ns % 1000000>`. Uniquely identifies one run of the onboard process. The ground station uses this for deduplication.
-
-### `SendFrameAwaitAck(frame, ack*)`
-
-1. If not connected, `ConnectLocked()`.
-2. Send `frame + '\n'`.
-3. Wait up to `reconnect_ms` for an ACK line.
-4. Parse ACK; reject on session_id or seq mismatch.
-5. On any failure, `CloseLocked()` and return false.
-
-### `ConnectLocked()`
-
-1. If `discovery_enabled`, try `DiscoverGroundHostLocked()` (3 attempts × `reconnect_ms` each).
-2. Fall back to `static_ground_ip`.
-3. TCP `connect()` to resolved host and `telemetry_port`.
-
-### `DiscoverGroundHostLocked()`
-
-Bind UDP to `discovery_port` (4100) and listen for `GS_HELLO` broadcasts. Reply with `ONBOARD_HELLO`; return the sender's IP.
-
----
-
-## TelemetryQueue
-
-**[`onboard/src/telemetry_queue.cpp`](../onboard/src/telemetry_queue.cpp)** | **[`onboard/include/coatheal/telemetry_queue.hpp`](../onboard/include/coatheal/telemetry_queue.hpp)**
-
-Persistent, disk-backed FIFO queue for telemetry frames. Survives process restarts.
-
-| Property | Default |
+| Field | Final source |
 |---|---|
-| Max age | `queue_retention_hours` (72 h) |
-| Max size | `queue_max_bytes` (8 GiB) |
-| On startup | prune aged + over-size frames |
+| `ambient_temp_c` | DPS310 |
+| `ambient_pressure_mbar` | DPS310 |
+| `uv` | GUVA-S12SD through ADS1115 |
+| `sample_temps_c` | 8 DAQ132M PT100 channels |
+| `sample_resistance_ohm` | Disabled final-BOM compatibility vector |
 
-### Key methods
+In bench/simulation mode, the manager synthesizes pressure, temperature, UV,
+and optional resistance changes so the ground station can be tested without
+hardware.
 
-| Method | Description |
-|---|---|
-| `Enqueue(frame, error*)` | Persist frame to disk queue. |
-| `PendingFrames()` | Return all unacked frames in order. |
-| `Acknowledge(session_id, seq, error*)` | Mark frames up to `seq` acknowledged; delete their files. |
-| `size()` | Count of pending frames. |
+## Motion
 
----
+The two motor channels are configured from `[motor0]`, `[motor1]`, and `[pull]`
+INI keys.
 
-## StorageManager
+| Motor | Default samples | Default SPI | STEP / DIR / EN |
+|---|---|---|---|
+| M0 | 0,1,2,3 | `/dev/spidev0.0` | BCM 5 / 6 / 13 |
+| M1 | 4,5,6,7 | `/dev/spidev0.1` | BCM 19 / 26 / 16 |
 
-**[`onboard/src/storage_manager.cpp`](../onboard/src/storage_manager.cpp)** | **[`onboard/include/coatheal/storage_manager.hpp`](../onboard/include/coatheal/storage_manager.hpp)**
+`Tmc5160Driver` performs a boot-time SPI configuration pass. The step pulse
+backend still must be bench-verified with the final wiring, motor current, and
+enable polarity before powered motion.
 
-Writes telemetry lines to two independent CSV paths (primary: SD card, secondary: USB drive).
+## Telemetry
 
-- Writes `# COATHEAL telemetry log` header on first write.
-- Continues writing if one path fails; tracks `sd_ok` / `usb_ok` status flags.
-- `wrote_header_` is only set after at least one successful header write, preventing header-less CSVs after partial failures.
+`SerializeTelemetryDataFrame` emits:
 
----
-
-## CommandServer / CommandParser
-
-**[`onboard/src/command_server.cpp`](../onboard/src/command_server.cpp)** — TCP server on `command_port` (5000). Accepts one client at a time, loops: read one line → `handler(line)` → send response + close.
-
-**[`onboard/src/command_parser.cpp`](../onboard/src/command_parser.cpp)** — trims whitespace, replaces commas with spaces, uppercases the first token, validates argument count, and returns a `CommandParseResult`.
-
-The `ARM_DEBUG <token>` → extended command set is documented in [docs/protocol.md](protocol.md).
-
----
-
-## HAL adapters
-
-Hardware Abstraction Layer in [`onboard/src/hal/`](../onboard/src/hal/) and [`onboard/include/coatheal/hal/`](../onboard/include/coatheal/hal/).
-
-### Current status
-
-| Adapter | Status | Description |
-|---|---|---|
-| `SpiAdapter` | Stub | Tracks `healthy_`; no real SPI reads. Shared with `Tmc2240Driver`. |
-| `I2cAdapter` | Stub | Shared by MS5803-01BA, ADS1015, RTC. |
-| `RtcAdapter` | Stub (system clock) | DS3231 driver pending. |
-| `Ina3221Adapter` | Stub — returns zeros | Two chips at I2C 0x40 / 0x41, channels 1..3. `SensorSnapshot::sample_resistance_ohm` is filled from the INA3221 instrument; in stub mode SensorManager synthesises resistance decay from `NotePullCompleted` edges. |
-| `LibgpiodPwmController` | Implemented | Real PWM via `libgpiod`; GPIO pin mapping needed for the 6-ch MOSFET module. |
-| `SimulatedPwmController` | Implemented | In-memory duty array for bench testing. |
-| `GpioStatusLed` | Implemented | `hal.status_led_line` / `hal.mode_led_line`. |
-| `SimulatedStatusLed` | Implemented | Logs state transitions to stderr (bench). |
-
-### Pending implementation
-
-- **MS5803-01BA I2C driver** — ambient P + T.
-- **ADS1015 I2C driver** — UV ADC.
-- **INA3221 I2C driver** — real reads for the sample-resistance instrument.
-- **DS3231 I2C driver** — RTC sync.
-- **`Rs485ModbusAdapter`** — 2 × 4-ch PT100 collectors over USB-RS485 (`/dev/ttyUSB0`).
-- **TMC2240 SPI configuration pass** — `Tmc2240Driver` currently falls back to plain `GpioStepDirStepperDriver` outside simulation.
-- **GPIO pin mapping** — heater MOSFET gates and per-motor STEP/DIR/EN pins.
-
-See [docs/hardware.md](hardware.md) for interface specifications.
-
----
-
-## Telemetry serializer
-
-**[`onboard/src/telemetry.cpp`](../onboard/src/telemetry.cpp)** | **[`onboard/include/coatheal/telemetry.hpp`](../onboard/include/coatheal/telemetry.hpp)**
-
-`SerializeTelemetryDataFrame(record, session_id)` produces the Rev B.1 DATA frame:
-
-```
+```text
 DATA,<session>,<seq>,<ts>,<rtc_valid>,<ambient_temp_c>,<ambient_pressure_mbar>,<uv>,<sample_0>..<sample_7>,HEATER_DUTY=d0|..|d5,RESISTANCE=r0|..|r7,PHASE=..,MODE=..,STATUS=..,STEPPER0=..,STEPPER1=..
 ```
 
-Humidity and box_temp columns are **not** emitted. `RESISTANCE=` is new; unmeasured samples render as `-`. See [docs/protocol.md](protocol.md) for full schema.
+`RESISTANCE=` remains on the wire for parser compatibility. With
+`sensor.resistance_source=disabled`, every slot serializes as `-`.
 
-`SerializeTelemetryPullEventFrame(event, session_id)` produces `EVT,PULL,...` frames; `SerializeHeatingCycleEvent(...)` (`EVT,CYCLE,...`) is retained for legacy compatibility but is not emitted under Rev B.1 since the activation ramp is gone.
+`SerializeTelemetryPullEventFrame` emits:
 
----
-
-## StatusFlags
-
-**[`onboard/src/status_flags.cpp`](../onboard/src/status_flags.cpp)** | **[`onboard/include/coatheal/status_flags.hpp`](../onboard/include/coatheal/status_flags.hpp)**
-
-`ToStatusBitfield(flags)` emits 13 pipe-separated tokens:
-
-```
-SD_OK|USB_OK|I2C_OK|SPI_OK|LINK_OK|T_AMBIENT_OK|P_AMBIENT_OK|UNIFORMITY_OK|OVERTEMP_OK|ENERGY_OK|RS485_OK|HEATER_ACTIVE|RESISTANCE_OK
+```text
+EVT,PULL,<session_id>,<pull_id>,<motor_id>,<start_ts>,<steps_moved>,<hold_s>,<samples>
 ```
 
-Each token flips between `_OK` and `_FAIL` except `HEATER_ACTIVE` / `HEATER_INHIBITED` which is a state bit, not a health bit.
+## Command Surface
+
+The command server listens on TCP port `5000`. Commands are parsed on a
+background thread and applied through synchronized overrides at the next main
+loop tick.
+
+Primary flight commands:
+
+```text
+PING
+STATUS
+ARM
+DISARM
+SET_PHASE <phase>
+SET_HEATER_DUTY <index> <duty>
+SET_ALL_DUTY <duty>
+HEATERS_OFF
+PULL_ARM <id>
+PULL_EXECUTE <id>
+STEPPER_STOP <id>
+SHUTDOWN_SAFE
+```
+
+See `docs/protocol.md` for the complete command list.
+
+## HAL Status
+
+| Adapter | Status |
+|---|---|
+| `Tmc5160Driver` | SPI register writes implemented; bench validation required |
+| `GpioStepDirStepperDriver` | Interface present; real pulse timing backend pending |
+| `LibgpiodPwmController` | Configured output mapping; real PWM backend pending |
+| `I2cAdapter` | Health boundary; DPS310/ADS1115 device reads pending |
+| `SpiAdapter` | Health boundary; shared with TMC5160 and optional RTD Click |
+| `RtcAdapter` | System-clock fallback |
+| `Ina3221Adapter` | Historical compatibility stub; final BOM disables resistance |
+
+See `docs/hardware.md` and `docs/configuration.md` for the pin and bus
+configuration.

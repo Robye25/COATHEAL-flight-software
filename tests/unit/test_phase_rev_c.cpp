@@ -47,7 +47,7 @@ void TestRevCDefaults() {
   assert(cfg.transition.float_to_descent_mbar == 300.0);
   assert(cfg.transition.descent_to_landed_mbar == 800.0);
   assert(cfg.transition.debounce_samples == 5);
-  // Rev B.1 power defaults: 5 W @ 24 V, 20 W combined ceiling, 4 active.
+  // Rev C power defaults: 5 W heaters, 20 W combined ceiling, 4 active.
   assert(cfg.power.heater_nominal_w == 5.0);
   assert(cfg.power.max_thermal_w == 20.0);
   assert(cfg.power.max_active_heaters == 4);

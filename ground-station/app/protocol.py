@@ -29,14 +29,14 @@ class TelemetryPacket:
     uv: float
     sample_temps_c: List[float]
     heater_duty: List[float]
-    # Rev-B.1: one resistance value per sample (`None` when the channel is
+    # Compatibility resistance value per sample (`None` when the channel is
     # unmeasured — wire representation is a literal '-'). When the onboard
     # omits the RESISTANCE= segment entirely this stays an empty list.
     sample_resistance_ohm: List[Optional[float]]
     phase: str
     status: str
     mode: str = ""
-    # Rev-B: multi-motor snapshot list. `steppers[0]` = M0, `steppers[1]` = M1.
+    # Multi-motor snapshot list. `steppers[0]` = M0, `steppers[1]` = M1.
     # Length: 0 (no stepper segment), 1 (legacy single STEPPER=... segment),
     # or 2+ (new STEPPER0=/STEPPER1=... segments). Entries are dicts matching
     # the StepperSnapshot field set, with an extra 'motor_id' key.
@@ -102,7 +102,7 @@ def _snapshot_to_dict(snap: StepperSnapshot, motor_id: int) -> Dict:
 
 def parse_telemetry_csv(line: str) -> TelemetryPacket:
     parts = [p.strip() for p in line.strip().split(',')]
-    # Rev-B.1 fixed prefix = DATA + 7 scalar columns = 8 tokens before the
+    # Fixed prefix = DATA + 7 scalar columns = 8 tokens before the
     # first sample. Plus at least HEATER_DUTY + PHASE + STATUS = 3 trailing
     # tokens. Minimum well-formed frame is 11 tokens.
     if len(parts) < 11:
@@ -150,7 +150,7 @@ def parse_telemetry_csv(line: str) -> TelemetryPacket:
         elif token.startswith("STATUS="):
             status = token.split('=', 1)[1]
         elif token.startswith("RESISTANCE="):
-            # Rev-B.1: pipe-separated resistance values, one per sample. A
+            # Pipe-separated compatibility resistance values, one per sample. A
             # literal '-' means the channel is unmeasured on this onboard.
             raw = token.split('=', 1)[1]
             if raw == "":
@@ -169,7 +169,7 @@ def parse_telemetry_csv(line: str) -> TelemetryPacket:
         elif token.startswith("STEPPER="):
             legacy_stepper = _parse_stepper_segment(token.split('=', 1)[1])
         elif token.startswith("STEPPER"):
-            # STEPPER<digits>=...  — Rev-B dual-motor form.
+            # STEPPER<digits>=... indexed dual-motor form.
             eq = token.find('=')
             if eq <= len("STEPPER"):
                 continue
@@ -384,7 +384,7 @@ def parse_command_response(line: str) -> CommandResponse:
 def validate_heater_index(idx: int, count: int = 6) -> Tuple[bool, str]:
     """Validate a heater index.
 
-    Rev-B.1 heater channels: 0..5 (six sample-bank heaters, no BOX).
+    Final-BOM heater channels: 0..5 (six sample-bank heaters, no box heater).
     """
     if not isinstance(idx, int) or idx < 0 or idx >= count:
         return False, f"index must be in [0, {count - 1}]"

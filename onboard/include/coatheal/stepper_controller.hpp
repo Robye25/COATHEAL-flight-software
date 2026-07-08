@@ -33,12 +33,12 @@ struct StepperStatus {
 class StepperChannel;
 struct StepperChannelConfig;
 
-// REV-B stepper controller.
+// Multi-motor stepper controller.
 //
 // Two-motor capable: holds a vector of StepperChannel objects, one per motor,
 // and dispatches commands by motor_id. All single-motor methods preserve the
-// REV-A signature and route to channel 0 — the existing system_controller
-// integration keeps working unchanged. New id-taking overloads are provided
+// legacy signature and route to channel 0, so existing single-motor call sites
+// keep working. New id-taking overloads are provided
 // for the multi-motor command surface.
 //
 // Ownership: channels are created in one of three ways
@@ -50,9 +50,8 @@ struct StepperChannelConfig;
 //   3. AddChannel() — append a pre-built channel (used by tests / plugins).
 class StepperController {
  public:
-  // Legacy single-channel constructor. Behaves exactly like REV-A for the one
-  // motor it controls; Tick() still applies phase-based bend setpoints to
-  // channel 0. Kept so the existing system_controller wiring compiles.
+  // Legacy single-channel constructor. Behaves like the older single-motor
+  // path; Tick() still applies phase-based bend setpoints to channel 0.
   StepperController(const StepperConfig& cfg,
                     const BendScheduleConfig& schedule,
                     std::unique_ptr<StepperDriver> driver);
@@ -84,7 +83,7 @@ class StepperController {
   bool SetMicrostep(int divisor, std::string* error);
   bool SetEnabled(bool enable);
 
-  // ---- REV-B multi-motor command surface ----
+  // ---- Multi-motor command surface ----
   bool MoveSteps(int motor_id, std::int64_t delta_steps, std::string* error);
   bool MoveToSteps(int motor_id, std::int64_t absolute_steps, double hold_s,
                    std::string* error);

@@ -50,7 +50,7 @@ struct Command {
   std::vector<std::string> args;
   bool is_extended = false;
 
-  // REV-B: stepper commands carry an optional motor_id as their first numeric
+  // Stepper commands carry an optional motor_id as their first numeric
   // argument. When present in the wire form (e.g. "STEPPER_MOVE 1 400"), the
   // parser strips it from `args` and stores it here. When absent (legacy
   // form, e.g. "STEPPER_MOVE 400"), motor_id defaults to 0 and `args` keeps

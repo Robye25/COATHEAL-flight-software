@@ -87,7 +87,7 @@ class SystemController {
   double link_loss_s_ = 0.0;
   bool link_loss_fallback_active_ = false;
 
-  // Rev B pull-event bookkeeping: emit EVT,PULL after each motor completes a
+  // Pull-event bookkeeping: emit EVT,PULL after each motor completes a
   // pull cycle. Edge-detects channel moving true->false while the MotionLock
   // was held by that motor.
   struct PullState {

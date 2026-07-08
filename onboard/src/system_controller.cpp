@@ -16,7 +16,7 @@
 #include "coatheal/sd_notify.hpp"
 #include "coatheal/stepper_channel.hpp"
 #include "coatheal/telemetry.hpp"
-#include "coatheal/tmc2240_driver.hpp"
+#include "coatheal/tmc5160_driver.hpp"
 
 // Perf instrumentation. Off in flight builds (default). Enable with
 // -DCOATHEAL_PERF_TRACE to emit a single "[perf]" line per 60 ticks with
@@ -105,7 +105,9 @@ bool SystemController::Initialize(std::string* error) {
                                                      config_.hal.mode_led_line);
   } else {
     pwm_ = std::make_unique<LibgpiodPwmController>(
-        config_.runtime.gpio_chip, config_.hardware.heater_count);
+        config_.runtime.gpio_chip, config_.hardware.heater_count,
+        config_.heaters.output_lines, config_.heaters.pwm_frequency_hz,
+        config_.heaters.active_high);
     status_led_ = std::make_unique<GpioStatusLed>(
         config_.runtime.gpio_chip, config_.hal.status_led_line, "heartbeat");
     mode_led_ = std::make_unique<GpioStatusLed>(
@@ -113,81 +115,66 @@ bool SystemController::Initialize(std::string* error) {
   }
   mode_led_->Set(StatusLed::Pattern::kSolid);
 
-  // Rev B: two stepper channels. Motor 0 drives samples 0..3 (high-torque
-  // Pololu 2851 via TMC2240 on SPI1), motor 1 drives samples 4..7 (Adafruit
-  // 1918 via A4988/DRV8825 STEP/DIR/EN). The MotionLock is owned by this
-  // controller and shared with the heater scheduler for the interlock.
-  //
-  // We currently build both channels from the legacy StepperConfig defaults
-  // plus a compiled-in sample split (0..3 / 4..7). When the Rev B
-  // onboard.ini schema (`motor0.*` / `motor1.*` / `pull.*`) lands in
-  // config.cpp, these fields will be populated from it instead.
-  StepperChannelConfig cfg0;
-  cfg0.channel_id = 0;
-  cfg0.full_steps_per_rev = config_.stepper.steps_per_rev;
-  cfg0.max_step_hz = 100.0;
-  cfg0.default_step_hz = 100.0;
-  cfg0.accel_steps_per_s2 = 200.0;
-  cfg0.microstep = 4;
-  cfg0.max_position_steps = config_.stepper.max_position_steps;
-  cfg0.samples = {0, 1, 2, 3};
-  cfg0.pull_travel_full_steps = 200;
-  cfg0.pull_hold_s = 5.0;
-  cfg0.enable_on_boot = config_.stepper.enable_on_boot;
-
-  StepperChannelConfig cfg1 = cfg0;
-  cfg1.channel_id = 1;
-  cfg1.samples = {4, 5, 6, 7};
-
+  // Final BOM: two TMC5160-driven NEMA 17 ball-screw actuators. Motor channel,
+  // sample mapping, SPI device, current, and GPIO lines come from onboard.ini.
   std::vector<StepperChannelConfig> channel_cfgs;
-  channel_cfgs.push_back(cfg0);
-  channel_cfgs.push_back(cfg1);
+  channel_cfgs.reserve(config_.motors.size());
+  for (std::size_t i = 0; i < config_.motors.size(); ++i) {
+    StepperChannelConfig cfg;
+    cfg.channel_id = static_cast<int>(i);
+    cfg.full_steps_per_rev = config_.stepper.steps_per_rev;
+    cfg.max_step_hz = config_.pull.max_step_hz;
+    cfg.default_step_hz = config_.stepper.default_step_hz;
+    cfg.accel_steps_per_s2 = config_.pull.accel_steps_per_s2;
+    cfg.microstep = config_.pull.microstep;
+    cfg.max_position_steps = config_.stepper.max_position_steps;
+    cfg.samples = config_.motors[i].samples;
+    cfg.pull_travel_full_steps = config_.pull.travel_full_steps;
+    cfg.pull_hold_s = config_.pull.hold_s;
+    cfg.enable_on_boot = config_.stepper.enable_on_boot;
+    channel_cfgs.push_back(std::move(cfg));
+  }
 
   std::vector<std::unique_ptr<StepperDriver>> drivers;
   if (config_.runtime.use_simulated_pwm) {
-    drivers.emplace_back(std::make_unique<SimulatedStepperDriver>());
-    drivers.emplace_back(std::make_unique<SimulatedStepperDriver>());
+    for (std::size_t i = 0; i < config_.motors.size(); ++i) {
+      drivers.emplace_back(std::make_unique<SimulatedStepperDriver>());
+    }
   } else {
-    // Rev B.1: both motors are driven by TMC2240 steppers on SPI1. Motor 0
-    // uses /dev/spidev1.0 (CE0), motor 1 uses /dev/spidev1.1 (CE1). The
-    // pulse scheduler still toggles STEP/DIR/EN via libgpiod, so the TMC
-    // driver only programs current/chopper registers. On SPI bring-up
-    // failure we log a loud warning and fall back to a plain STEP/DIR/EN
-    // driver so the tick loop keeps running for GS diagnostics (motor
-    // will run at the driver's power-on current, which is safer-low on
-    // the SilentStepStick-2240 modules we are flying).
+    // If SPI bring-up fails, keep the process alive with a bare STEP/DIR/EN
+    // fallback so operators still get diagnostics.
     auto build_tmc_or_fallback =
-        [&](const char* motor_label, const std::string& spi_device,
-            std::size_t cs_line) -> std::unique_ptr<StepperDriver> {
-      Tmc2240Config tcfg;
-      tcfg.spi_device = spi_device;
-      tcfg.cs_line = cs_line;
-      tcfg.step_line = config_.stepper.step_line;
-      tcfg.dir_line = config_.stepper.dir_line;
-      tcfg.enable_line = config_.stepper.enable_line;
-      tcfg.invert_direction = config_.stepper.invert_direction;
-      tcfg.enable_active_low = config_.stepper.enable_active_low;
-      tcfg.microstep = 4;  // Rev-B default; channel schedules the 5× rate.
-      tcfg.run_current_a_rms = 2.0;
-      tcfg.hold_current_frac = 0.30;
-      tcfg.stealth_chop = true;
-      auto tmc = std::make_unique<Tmc2240Driver>(tcfg);
+        [&](const char* motor_label, const MotorConfig& motor)
+            -> std::unique_ptr<StepperDriver> {
+      Tmc5160Config tcfg;
+      tcfg.spi_device = motor.spi_device;
+      tcfg.cs_line = motor.cs_line;
+      tcfg.step_line = motor.step_line;
+      tcfg.dir_line = motor.dir_line;
+      tcfg.enable_line = motor.enable_line;
+      tcfg.invert_direction = motor.invert_direction;
+      tcfg.enable_active_low = motor.enable_active_low;
+      tcfg.microstep = config_.pull.microstep;
+      tcfg.run_current_a_rms = motor.run_current_a_rms;
+      tcfg.hold_current_frac = motor.hold_current_frac;
+      tcfg.stealth_chop = motor.stealth_chop;
+      tcfg.spi_speed_hz = motor.spi_speed_hz;
+      auto tmc = std::make_unique<Tmc5160Driver>(tcfg);
       if (tmc->healthy()) {
         return tmc;
       }
       std::cerr << "[system] " << motor_label
-                << ": TMC2240 SPI bring-up on " << spi_device
+                << ": TMC5160 SPI bring-up on " << motor.spi_device
                 << " failed; falling back to bare STEP/DIR/EN driver."
                 << " Motor will run without SPI current control." << '\n';
       return std::make_unique<GpioStepDirStepperDriver>(
-          config_.runtime.gpio_chip, config_.stepper.step_line,
-          config_.stepper.dir_line, config_.stepper.enable_line,
-          config_.stepper.invert_direction, config_.stepper.enable_active_low);
+          config_.runtime.gpio_chip, motor.step_line, motor.dir_line,
+          motor.enable_line, motor.invert_direction, motor.enable_active_low);
     };
     drivers.emplace_back(build_tmc_or_fallback(
-        "motor0", "/dev/spidev1.0", /*cs_line=*/0));
+        "motor0", config_.motors[0]));
     drivers.emplace_back(build_tmc_or_fallback(
-        "motor1", "/dev/spidev1.1", /*cs_line=*/1));
+        "motor1", config_.motors[1]));
   }
 
   stepper_ = std::make_unique<StepperController>(
@@ -399,9 +386,8 @@ int SystemController::Run() {
         phase, snapshot, tick_duration.count(), effective_control);
     COATHEAL_PERF_STAMP(perf_ts[4]);  // stage 3: thermal controller
 
-    // Rev B: the "prioritize samples" flag deprioritises the electronics
-    // heater during any flying phase (not just the removed ramp). All three
-    // flying phases share the same +5 C floor policy.
+    // Heaters are only scheduled during active flight phases. Manual duty
+    // overrides can request heat, but safety limits still gate output.
     const bool any_flying_phase =
         (phase == MissionPhase::kAscent || phase == MissionPhase::kPreFloat ||
          phase == MissionPhase::kFloat || phase == MissionPhase::kDescent);
@@ -437,11 +423,10 @@ int SystemController::Run() {
     record.status.uniformity_ok = thermal_controller_.uniformity_ok();
     record.status.energy_ok = !scheduler_.is_budget_exhausted();
     record.status.heater_inhibited = scheduler_.heater_inhibited();
-    record.status.resistance_ok = ina_.healthy();
+    record.status.resistance_ok = sensor_manager_.resistance_ok();
     if (stepper_) {
-      // Rev B: one snapshot per channel drives the STEPPER0=/STEPPER1=
-      // telemetry segments. Reserve up-front so the two push_back calls
-      // never trigger a realloc on the hot path. (Agent B perf fix.)
+      // One snapshot per channel drives the STEPPER0=/STEPPER1= telemetry
+      // segments. Reserve up-front so the two push_back calls avoid reallocs.
       const std::size_t n_channels = stepper_->channel_count();
       record.steppers.clear();
       record.steppers.reserve(n_channels);
@@ -475,8 +460,7 @@ int SystemController::Run() {
     }
     COATHEAL_PERF_STAMP(perf_ts[9]);  // stage 8: queue enqueue + drain
 
-    // Rev B: emit EVT,PULL after each motor finishes a pull cycle. The Rev A
-    // heating-cycle aggregator is retired with the +70 C activation ramp.
+    // Emit EVT,PULL after each motor finishes a pull cycle.
     //
     // A pull starts when the MotionLock transitions to this motor (rising
     // edge of the lock holder) and completes when the channel releases it
@@ -534,8 +518,7 @@ int SystemController::Run() {
           std::string evt_error;
           telemetry_queue_.Enqueue(evt_frame, &evt_error);
 
-          // Rev B.1: feed the resistance simulator so the plotter sees the
-          // crack-formation decay step on this pull.
+          // Feed the optional resistance simulator after each completed pull.
           sensor_manager_.NotePullCompleted(static_cast<int>(i));
 
           ps.lock_held = false;

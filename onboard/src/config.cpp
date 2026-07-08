@@ -3,8 +3,11 @@
 #include <algorithm>
 #include <cctype>
 #include <fstream>
+#include <iomanip>
 #include <sstream>
 #include <string>
+#include <type_traits>
+#include <vector>
 
 namespace coatheal {
 namespace {
@@ -38,11 +41,57 @@ bool ParseBool(const std::string& value, bool* out) {
 template <typename T>
 bool ParseNumber(const std::string& value, T* out) {
   std::istringstream iss(Trim(value));
-  iss >> *out;
+  if constexpr (std::is_integral_v<T>) {
+    iss >> std::setbase(0) >> *out;
+  } else {
+    iss >> *out;
+  }
   return iss && iss.eof();
 }
 
+bool ParseSizeList(const std::string& value, std::vector<std::size_t>* out) {
+  out->clear();
+  std::istringstream iss(value);
+  std::string item;
+  while (std::getline(iss, item, ',')) {
+    const std::string trimmed = Trim(item);
+    if (trimmed.empty()) {
+      return false;
+    }
+    std::size_t parsed = 0;
+    if (!ParseNumber(trimmed, &parsed)) {
+      return false;
+    }
+    out->push_back(parsed);
+  }
+  return true;
+}
+
 }  // namespace
+
+OnboardConfig::OnboardConfig() {
+  heaters.output_lines = {12, 20, 21, 23, 24, 25};
+
+  motors[0].driver = "tmc5160";
+  motors[0].spi_device = "/dev/spidev0.0";
+  motors[0].cs_line = 8;
+  motors[0].step_line = stepper.step_line;
+  motors[0].dir_line = stepper.dir_line;
+  motors[0].enable_line = stepper.enable_line;
+  motors[0].invert_direction = stepper.invert_direction;
+  motors[0].enable_active_low = stepper.enable_active_low;
+  motors[0].samples = {0, 1, 2, 3};
+
+  motors[1].driver = "tmc5160";
+  motors[1].spi_device = "/dev/spidev0.1";
+  motors[1].cs_line = 7;
+  motors[1].step_line = 19;
+  motors[1].dir_line = 26;
+  motors[1].enable_line = 16;
+  motors[1].invert_direction = stepper.invert_direction;
+  motors[1].enable_active_low = stepper.enable_active_low;
+  motors[1].samples = {4, 5, 6, 7};
+}
 
 bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::string* error) {
   if (config == nullptr) {
@@ -261,6 +310,10 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
       if (!parse_double(key, value, &config->power.heater_nominal_w, line_no)) return false;
     } else if (key == "power.energy_budget_wh") {
       if (!parse_double(key, value, &config->power.energy_budget_wh, line_no)) return false;
+    } else if (key == "power.logic_regulator_v") {
+      if (!parse_double(key, value, &config->power.logic_regulator_v, line_no)) return false;
+    } else if (key == "power.stepper_regulator_v") {
+      if (!parse_double(key, value, &config->power.stepper_regulator_v, line_no)) return false;
 
     } else if (key == "pid.kp") {
       if (!parse_double(key, value, &config->pid.kp, line_no)) return false;
@@ -269,10 +322,70 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
     } else if (key == "pid.kd") {
       if (!parse_double(key, value, &config->pid.kd, line_no)) return false;
 
+    } else if (key == "hardware.sample_count") {
+      if (!parse_size_t(key, value, &config->hardware.sample_count, line_no)) return false;
     } else if (key == "hardware.heater_count") {
       if (!parse_size_t(key, value, &config->hardware.heater_count, line_no)) return false;
     } else if (key == "hardware.electronics_heater_index") {
       if (!parse_size_t(key, value, &config->hardware.electronics_heater_index, line_no)) return false;
+
+    } else if (key == "sensor.sample_temperature_source") {
+      config->sensors.sample_temperature_source = value;
+    } else if (key == "sensor.daq132m_device") {
+      config->sensors.daq132m_device = value;
+    } else if (key == "sensor.daq132m_baud") {
+      if (!parse_int(key, value, &config->sensors.daq132m_baud, line_no)) return false;
+    } else if (key == "sensor.daq132m_parity") {
+      config->sensors.daq132m_parity = value;
+    } else if (key == "sensor.daq132m_data_bits") {
+      if (!parse_int(key, value, &config->sensors.daq132m_data_bits, line_no)) return false;
+    } else if (key == "sensor.daq132m_stop_bits") {
+      if (!parse_int(key, value, &config->sensors.daq132m_stop_bits, line_no)) return false;
+    } else if (key == "sensor.daq132m_slave_id") {
+      if (!parse_int(key, value, &config->sensors.daq132m_slave_id, line_no)) return false;
+    } else if (key == "sensor.daq132m_register_base") {
+      if (!parse_int(key, value, &config->sensors.daq132m_register_base, line_no)) return false;
+    } else if (key == "sensor.daq132m_register_count") {
+      if (!parse_int(key, value, &config->sensors.daq132m_register_count, line_no)) return false;
+    } else if (key == "sensor.daq132m_c_per_count") {
+      if (!parse_double(key, value, &config->sensors.daq132m_c_per_count, line_no)) return false;
+    } else if (key == "sensor.rtd_click_enabled") {
+      if (!parse_bool(key, value, &config->sensors.rtd_click_enabled, line_no)) return false;
+    } else if (key == "sensor.rtd_click_spi_device") {
+      config->sensors.rtd_click_spi_device = value;
+    } else if (key == "sensor.rtd_click_cs_line") {
+      if (!parse_size_t(key, value, &config->sensors.rtd_click_cs_line, line_no)) return false;
+    } else if (key == "sensor.rtd_click_drdy_line") {
+      if (!parse_size_t(key, value, &config->sensors.rtd_click_drdy_line, line_no)) return false;
+    } else if (key == "sensor.rtd_click_wires") {
+      if (!parse_int(key, value, &config->sensors.rtd_click_wires, line_no)) return false;
+    } else if (key == "sensor.pressure_source") {
+      config->sensors.pressure_source = value;
+    } else if (key == "sensor.dps310_i2c_addr") {
+      if (!parse_int(key, value, &config->sensors.dps310_i2c_addr, line_no)) return false;
+    } else if (key == "sensor.uv_source") {
+      config->sensors.uv_source = value;
+    } else if (key == "sensor.ads1115_i2c_addr") {
+      if (!parse_int(key, value, &config->sensors.ads1115_i2c_addr, line_no)) return false;
+    } else if (key == "sensor.uv_ads1115_channel") {
+      if (!parse_int(key, value, &config->sensors.uv_ads1115_channel, line_no)) return false;
+    } else if (key == "sensor.uv_full_scale_v") {
+      if (!parse_double(key, value, &config->sensors.uv_full_scale_v, line_no)) return false;
+    } else if (key == "sensor.resistance_source") {
+      config->sensors.resistance_source = value;
+
+    } else if (key == "heater.output_lines") {
+      if (!ParseSizeList(value, &config->heaters.output_lines)) {
+        if (error != nullptr) {
+          *error = "invalid GPIO list for heater.output_lines at line " +
+                   std::to_string(line_no);
+        }
+        return false;
+      }
+    } else if (key == "heater.pwm_frequency_hz") {
+      if (!parse_double(key, value, &config->heaters.pwm_frequency_hz, line_no)) return false;
+    } else if (key == "heater.active_high") {
+      if (!parse_bool(key, value, &config->heaters.active_high, line_no)) return false;
 
     } else if (key == "hal.status_led_line") {
       if (!parse_size_t(key, value, &config->hal.status_led_line, line_no)) return false;
@@ -302,6 +415,63 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
     } else if (key == "stepper.enable_on_boot") {
       if (!parse_bool(key, value, &config->stepper.enable_on_boot, line_no)) return false;
 
+    } else if (key == "pull.max_step_hz") {
+      if (!parse_double(key, value, &config->pull.max_step_hz, line_no)) return false;
+    } else if (key == "pull.accel_steps_per_s2") {
+      if (!parse_double(key, value, &config->pull.accel_steps_per_s2, line_no)) return false;
+    } else if (key == "pull.microstep") {
+      if (!parse_int(key, value, &config->pull.microstep, line_no)) return false;
+    } else if (key == "pull.travel_full_steps") {
+      if (!parse_int(key, value, &config->pull.travel_full_steps, line_no)) return false;
+    } else if (key == "pull.hold_s") {
+      if (!parse_double(key, value, &config->pull.hold_s, line_no)) return false;
+
+    } else if (key.rfind("motor0.", 0) == 0 || key.rfind("motor1.", 0) == 0) {
+      const std::size_t motor_index = key[5] == '0' ? 0U : 1U;
+      const std::string suffix = key.substr(7);
+      MotorConfig& motor = config->motors[motor_index];
+      if (suffix == "driver") {
+        motor.driver = value;
+      } else if (suffix == "spi_device") {
+        motor.spi_device = value;
+      } else if (suffix == "cs_line") {
+        if (!parse_size_t(key, value, &motor.cs_line, line_no)) return false;
+      } else if (suffix == "step_line") {
+        if (!parse_size_t(key, value, &motor.step_line, line_no)) return false;
+      } else if (suffix == "dir_line") {
+        if (!parse_size_t(key, value, &motor.dir_line, line_no)) return false;
+      } else if (suffix == "enable_line") {
+        if (!parse_size_t(key, value, &motor.enable_line, line_no)) return false;
+      } else if (suffix == "invert_direction") {
+        if (!parse_bool(key, value, &motor.invert_direction, line_no)) return false;
+      } else if (suffix == "enable_active_low") {
+        if (!parse_bool(key, value, &motor.enable_active_low, line_no)) return false;
+      } else if (suffix == "run_current_a_rms") {
+        if (!parse_double(key, value, &motor.run_current_a_rms, line_no)) return false;
+      } else if (suffix == "hold_current_frac") {
+        if (!parse_double(key, value, &motor.hold_current_frac, line_no)) return false;
+      } else if (suffix == "stealth_chop") {
+        if (!parse_bool(key, value, &motor.stealth_chop, line_no)) return false;
+      } else if (suffix == "spi_speed_hz") {
+        int speed = 0;
+        if (!parse_int(key, value, &speed, line_no)) return false;
+        motor.spi_speed_hz = static_cast<std::uint32_t>(speed);
+      } else if (suffix == "samples") {
+        if (!ParseSizeList(value, &motor.samples)) {
+          if (error != nullptr) {
+            *error = "invalid sample list for " + key + " at line " +
+                     std::to_string(line_no);
+          }
+          return false;
+        }
+      } else {
+        if (error != nullptr) {
+          *error = "unknown motor config key at line " + std::to_string(line_no) +
+                   ": " + key;
+        }
+        return false;
+      }
+
     } else if (key == "bend.ascent_steps") {
       if (!parse_i64(key, value, &config->bend.ascent_steps, line_no)) return false;
     } else if (key == "bend.ascent_hold_s") {
@@ -318,15 +488,8 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
       if (!parse_i64(key, value, &config->bend.descent_steps, line_no)) return false;
     } else if (key == "bend.descent_hold_s") {
       if (!parse_double(key, value, &config->bend.descent_hold_s, line_no)) return false;
-    } else if (key.rfind("pull.", 0) == 0 ||
-               key.rfind("motor0.", 0) == 0 ||
-               key.rfind("motor1.", 0) == 0) {
-      // Rev B dual-stepper / pull-envelope keys. Accepted but not yet wired
-      // into StepperChannelConfig — system_controller.cpp uses hard-coded
-      // Rev B defaults for now. Parsing will be added when the multi-channel
-      // config path is fully plumbed.
-      (void)value;
     } else {
+      // Reject unknown keys so final-BOM configuration drift fails at startup.
       if (error != nullptr) {
         *error = "unknown config key at line " + std::to_string(line_no) + ": " + key;
       }
@@ -355,8 +518,37 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
     return false;
   }
 
-  // Rev B.1: SIZE_MAX is the sentinel for "no electronics-box heater". Any
-  // other value must still be a valid channel index.
+  if (config->hardware.sample_count == 0U) {
+    if (error != nullptr) {
+      *error = "hardware.sample_count must be > 0";
+    }
+    return false;
+  }
+
+  if (config->hardware.heater_count > config->hardware.sample_count) {
+    if (error != nullptr) {
+      *error = "hardware.heater_count must be <= hardware.sample_count";
+    }
+    return false;
+  }
+
+  if (!config->heaters.output_lines.empty() &&
+      config->heaters.output_lines.size() != config->hardware.heater_count) {
+    if (error != nullptr) {
+      *error = "heater.output_lines count must equal hardware.heater_count";
+    }
+    return false;
+  }
+
+  if (config->heaters.pwm_frequency_hz <= 0.0) {
+    if (error != nullptr) {
+      *error = "heater.pwm_frequency_hz must be > 0";
+    }
+    return false;
+  }
+
+  // SIZE_MAX is the sentinel for "no electronics-box heater". Any other value
+  // must still be a valid channel index.
   if (config->hardware.electronics_heater_index != static_cast<std::size_t>(-1) &&
       config->hardware.electronics_heater_index >= config->hardware.heater_count) {
     if (error != nullptr) {
@@ -392,6 +584,100 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
       *error = "storage.queue_max_bytes must be > 0";
     }
     return false;
+  }
+
+  if (config->sensors.daq132m_baud <= 0 ||
+      config->sensors.daq132m_data_bits <= 0 ||
+      config->sensors.daq132m_stop_bits <= 0 ||
+      config->sensors.daq132m_slave_id <= 0 ||
+      config->sensors.daq132m_register_count <
+          static_cast<int>(config->hardware.sample_count) ||
+      config->sensors.daq132m_c_per_count == 0.0) {
+    if (error != nullptr) {
+      *error = "invalid DAQ132M Modbus configuration";
+    }
+    return false;
+  }
+
+  if (config->sensors.sample_temperature_source != "daq132m_modbus" ||
+      config->sensors.pressure_source != "dps310" ||
+      config->sensors.uv_source != "guva_s12sd_ads1115") {
+    if (error != nullptr) {
+      *error = "sensor sources must match the Rev C final BOM";
+    }
+    return false;
+  }
+
+  if (config->sensors.resistance_source != "disabled" &&
+      config->sensors.resistance_source != "simulated") {
+    if (error != nullptr) {
+      *error = "sensor.resistance_source must be disabled or simulated";
+    }
+    return false;
+  }
+
+  if (config->sensors.dps310_i2c_addr < 0 ||
+      config->sensors.dps310_i2c_addr > 0x7F ||
+      config->sensors.ads1115_i2c_addr < 0 ||
+      config->sensors.ads1115_i2c_addr > 0x7F ||
+      config->sensors.uv_ads1115_channel < 0 ||
+      config->sensors.uv_ads1115_channel > 3 ||
+      config->sensors.uv_full_scale_v <= 0.0) {
+    if (error != nullptr) {
+      *error = "invalid I2C sensor configuration";
+    }
+    return false;
+  }
+
+  if (config->sensors.rtd_click_wires < 2 || config->sensors.rtd_click_wires > 4) {
+    if (error != nullptr) {
+      *error = "sensor.rtd_click_wires must be 2, 3, or 4";
+    }
+    return false;
+  }
+
+  if (config->stepper.steps_per_rev <= 0 || config->stepper.microstep <= 0 ||
+      config->stepper.default_step_hz <= 0.0 || config->stepper.max_step_hz <= 0.0 ||
+      config->stepper.max_position_steps <= 0) {
+    if (error != nullptr) {
+      *error = "invalid stepper configuration";
+    }
+    return false;
+  }
+
+  if (config->pull.max_step_hz <= 0.0 || config->pull.accel_steps_per_s2 <= 0.0 ||
+      config->pull.microstep <= 0 || config->pull.travel_full_steps <= 0 ||
+      config->pull.hold_s < 0.0) {
+    if (error != nullptr) {
+      *error = "invalid pull configuration";
+    }
+    return false;
+  }
+
+  for (std::size_t i = 0; i < config->motors.size(); ++i) {
+    const MotorConfig& motor = config->motors[i];
+    if (motor.driver != "tmc5160") {
+      if (error != nullptr) {
+        *error = "motor" + std::to_string(i) + ".driver must be tmc5160";
+      }
+      return false;
+    }
+    if (motor.spi_device.empty() || motor.run_current_a_rms <= 0.0 ||
+        motor.hold_current_frac < 0.0 || motor.hold_current_frac > 1.0 ||
+        motor.spi_speed_hz == 0U || motor.samples.empty()) {
+      if (error != nullptr) {
+        *error = "invalid motor" + std::to_string(i) + " configuration";
+      }
+      return false;
+    }
+    for (const std::size_t sample : motor.samples) {
+      if (sample >= config->hardware.sample_count) {
+        if (error != nullptr) {
+          *error = "motor" + std::to_string(i) + ".samples contains out-of-range sample";
+        }
+        return false;
+      }
+    }
   }
 
   return true;

@@ -9,7 +9,7 @@ namespace {
 
 void AppendStepperSegment(std::ostringstream& oss, const StepperStatus& st,
                           int motor_index) {
-  // Rev-B wire format: `STEPPER<n>=pos:...|tgt:...|...`. The per-segment
+  // Rev C wire format: `STEPPER<n>=pos:...|tgt:...|...`. The per-segment
   // schema is unchanged from the legacy single-stepper frame so ground
   // parsers can reuse one key-value splitter.
   oss << ",STEPPER" << motor_index
@@ -27,15 +27,15 @@ void AppendStepperSegment(std::ostringstream& oss, const StepperStatus& st,
 
 }  // namespace
 
-// Rev B.1 DATA-frame schema:
+// Rev C DATA-frame schema:
 //   DATA,<session>,<seq>,<ts>,<rtc_valid>,<ambient_temp_c>,
 //        <ambient_pressure_mbar>,<uv>,<sample_0>...<sample_N>,
 //        HEATER_DUTY=d0|d1|...,
 //        RESISTANCE=r0|r1|...   (- for unmeasured samples),
 //        PHASE=...,MODE=...,STATUS=...,
 //        STEPPER0=...,STEPPER1=...
-// Humidity and box_temp are gone (no BME280, no box sensor). RESISTANCE is
-// new (INA3221 sample-resistance instrument).
+// Humidity and box_temp are not emitted. RESISTANCE is retained for ground-side
+// compatibility; the final BOM normally serializes "-" in every slot.
 std::string SerializeTelemetryDataFrame(const TelemetryRecord& record,
                                         const std::string& session_id) {
   std::ostringstream oss;
@@ -44,7 +44,7 @@ std::string SerializeTelemetryDataFrame(const TelemetryRecord& record,
       << record.sensors.ambient_temp_c << ',' << record.sensors.ambient_pressure_mbar << ','
       << record.sensors.uv;
 
-  // Rev-B.1: 8 sample_i columns. Heater duty has heater_count (=6) values.
+  // Final BOM: 8 sample_i columns. Heater duty has heater_count (=6) values.
   // The ground parser locates HEATER_DUTY= by token name, so the sample
   // count is inferred from position, not a hardcoded constant.
   for (double temp : record.sensors.sample_temps_c) {
@@ -59,9 +59,8 @@ std::string SerializeTelemetryDataFrame(const TelemetryRecord& record,
     oss << std::setprecision(3) << record.heater_duty[i];
   }
 
-  // Rev B.1: RESISTANCE= carries one pipe-separated value per sample. The
-  // two INA3221 chips cover 6 of 8 samples; unmeasured samples (6, 7) are
-  // emitted as "-" so the column count always equals sample_temps_c.size().
+  // RESISTANCE= carries one pipe-separated value per sample for compatibility.
+  // Disabled or unavailable readings are emitted as "-".
   oss << ",RESISTANCE=";
   const std::size_t nres = record.sensors.sample_resistance_ohm.size();
   const std::size_t nsamp = record.sensors.sample_temps_c.size();
@@ -79,9 +78,7 @@ std::string SerializeTelemetryDataFrame(const TelemetryRecord& record,
   oss << ",PHASE=" << ToString(record.phase) << ",MODE=" << ToString(record.mode)
       << ",STATUS=" << ToStatusBitfield(record.status);
 
-  // Rev B.1 dual-stepper telemetry: one STEPPER<n>= segment per motor. The
-  // legacy single-STEPPER= path has been retired — Rev B.1 is a breaking
-  // wire change anyway, and ground parsers already accept the indexed form.
+  // Dual-stepper telemetry: one STEPPER<n>= segment per motor.
   for (std::size_t i = 0; i < record.steppers.size(); ++i) {
     AppendStepperSegment(oss, record.steppers[i], static_cast<int>(i));
   }

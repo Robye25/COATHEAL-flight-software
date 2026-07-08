@@ -122,7 +122,7 @@ class LivePlotWidget(QWidget):
 class PlotTabs(QTabWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        # Rev-B.1: box temperature trace removed. 8 specimen traces only.
+        # Final BOM: 8 specimen temperature traces, no box-temperature trace.
         self._temp = LivePlotWidget("Specimen Temperature", "temperature", "°C")
         for i in range(8):
             self._temp.add_curve(f"S{i}", RESISTANCE_COLORS[i % len(RESISTANCE_COLORS)])
@@ -139,17 +139,17 @@ class PlotTabs(QTabWidget):
                                      f"pre-float {PRE_FLOAT_PRESSURE_MBAR:.0f} mbar")
 
         self._heaters = LivePlotWidget("Heater Duty", "duty", "%")
-        # Rev-B.1: 6 heater traces (H0..H5). Box heater is gone.
+        # Six final-BOM heater traces (H0..H5). Box heater is absent.
         for i, label in enumerate(HEATER_LABELS):
             self._heaters.add_curve(label, HEATER_COLORS[i % len(HEATER_COLORS)])
 
-        # Rev-B.1: resistance plot replaces the Env tab. 8 traces; samples
-        # with no INA3221 channel stay empty (None values are skipped).
+        # Compatibility resistance plot. Final-BOM frames normally contain
+        # None values, which are skipped.
         self._resistance = LivePlotWidget("Sample Resistance", "resistance", "Ω")
         for i, label in enumerate(RESISTANCE_LABELS):
             self._resistance.add_curve(label, RESISTANCE_COLORS[i % len(RESISTANCE_COLORS)])
 
-        # Rev-B: two motors, each with a position + target trace.
+        # Two motors, each with a position + target trace.
         self._stepper = LivePlotWidget("Stepper position", "steps")
         self._stepper.add_curve("M0 pos", "#2ecc71", width=2)
         self._stepper.add_curve("M0 tgt", "#27ae60", width=1)

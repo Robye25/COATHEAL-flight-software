@@ -68,7 +68,7 @@ std::vector<double> HeaterScheduler::Schedule(const std::vector<double>& request
     value = std::clamp(value, 0.0, 1.0);
   }
 
-  // Rev B.1: when `electronics_heater_index_ == SIZE_MAX` there is no
+  // When `electronics_heater_index_ == SIZE_MAX` there is no
   // electronics-box heater in the system, so the `deprioritize_electronics`
   // flag has no effect. The scheduler still accepts the argument for ABI
   // stability; it simply falls through as a no-op in that branch.
