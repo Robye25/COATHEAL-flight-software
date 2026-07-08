@@ -68,8 +68,8 @@ Ground command
 
 | Mode | Phase control | Heater control | Motor control |
 |---|---|---|---|
-| Connected Rev C | Operator commands `SET_PHASE` | Operator commands duty; safety scheduler still applies | Operator commands `PULL_*` / `STEPPER_*` |
-| Link-loss fallback | Pressure FSM | +5 C floor controller | No automatic pulls |
+| Connected Rev C | Operator commands `SET_PHASE` | Operator commands duties or PID targets; safety scheduler still applies | Operator jogs or runtime bend sequences |
+| Link-loss fallback | Pressure FSM | Existing targets continue; untargeted channels use +5 C floor | Active sequence continues; non-sequence motion stops |
 | Legacy autonomous | Pressure FSM + fatigue sequencer | +5 C floor controller | Automatic fatigue path can run |
 
 ## Network Topology
@@ -88,13 +88,13 @@ where telemetry should be returned.
 
 | Boundary | Configured in software | Physical-driver status |
 |---|---|---|
-| TMC5160 SPI setup | Yes | SPI register writes implemented; bench validation required |
-| STEP/DIR/EN GPIO | Yes | Real pulse backend pending bench validation |
-| Heater MOSFET outputs | Yes | Real PWM backend pending bench validation |
-| DAQ132M Modbus | Yes | Device read implementation pending register-map validation |
-| DPS310 I2C | Yes | Device read implementation pending |
-| ADS1115 I2C | Yes | Device read implementation pending |
-| RTD Click | Optional config | Optional bench path only |
+| TMC5160 SPI setup | Yes | GPIO-CS SPI register writes implemented; bench validation required |
+| STEP/DIR/EN GPIO | Yes | libgpiod pulse backend implemented; bench timing validation required |
+| Heater MOSFET outputs | Yes | zero-safe software PWM implemented; dummy-load validation required |
+| DAQ132M Modbus | Yes | RTU/CRC/scaling implemented; exact register map must be verified |
+| DPS310 I2C | Yes | compensated `i2c-dev` reads implemented |
+| ADS1115 I2C | Yes | single-ended `i2c-dev` reads implemented |
+| RTD Click | Optional config | Pins reserved; active MAX31865 read path not implemented |
 | Resistance instrument | Disabled | Compatibility telemetry field only |
 
 ## Telemetry Shape

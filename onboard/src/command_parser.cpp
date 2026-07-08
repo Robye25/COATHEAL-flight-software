@@ -46,6 +46,8 @@ std::string CommandTypeToString(CommandType type) {
       return "RESET_CTRL";
     case CommandType::kShutdownSafe:
       return "SHUTDOWN_SAFE";
+    case CommandType::kCheck:
+      return "CHECK";
     case CommandType::kArm:
       return "ARM";
     case CommandType::kDisarm:
@@ -66,6 +68,16 @@ std::string CommandTypeToString(CommandType type) {
       return "SET_ALL_DUTY";
     case CommandType::kSetPid:
       return "SET_PID";
+    case CommandType::kSetTempTarget:
+      return "SET_TEMP_TARGET";
+    case CommandType::kSetAllTempTargets:
+      return "SET_ALL_TEMP_TARGETS";
+    case CommandType::kClearTempTarget:
+      return "CLEAR_TEMP_TARGET";
+    case CommandType::kClearTempTargets:
+      return "CLEAR_TEMP_TARGETS";
+    case CommandType::kGetThermal:
+      return "GET_THERMAL";
     case CommandType::kClearOverrides:
       return "CLEAR_OVERRIDES";
     case CommandType::kSetBenchMode:
@@ -98,6 +110,22 @@ std::string CommandTypeToString(CommandType type) {
       return "STEPPER_DISABLE";
     case CommandType::kStepperBend:
       return "STEPPER_BEND";
+    case CommandType::kSetPositionZero:
+      return "SET_POSITION_ZERO";
+    case CommandType::kBendSeqLoad:
+      return "BENDSEQ_LOAD";
+    case CommandType::kBendSeqRun:
+      return "BENDSEQ_RUN";
+    case CommandType::kBendSeqPause:
+      return "BENDSEQ_PAUSE";
+    case CommandType::kBendSeqResume:
+      return "BENDSEQ_RESUME";
+    case CommandType::kBendSeqStop:
+      return "BENDSEQ_STOP";
+    case CommandType::kBendSeqStatus:
+      return "BENDSEQ_STATUS";
+    case CommandType::kBendSeqClear:
+      return "BENDSEQ_CLEAR";
     case CommandType::kPullArm:
       return "PULL_ARM";
     case CommandType::kPullExecute:
@@ -110,7 +138,6 @@ std::string CommandTypeToString(CommandType type) {
 
 bool IsExtendedCommand(CommandType type) {
   switch (type) {
-    case CommandType::kSetPid:
     case CommandType::kSetBenchMode:
     case CommandType::kDisarmDebug:
       return true;
@@ -156,6 +183,7 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
       {"RESET_CTRL", CommandType::kResetCtrl},
       {"RESET", CommandType::kResetCtrl},
       {"SHUTDOWN_SAFE", CommandType::kShutdownSafe},
+      {"CHECK", CommandType::kCheck},
       {"ARM", CommandType::kArm},
       {"DISARM", CommandType::kDisarm},
       {"ENTER_SAFE", CommandType::kEnterSafe},
@@ -166,6 +194,11 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
       {"SET_HEATER_DUTY", CommandType::kSetHeaterDuty},
       {"SET_ALL_DUTY", CommandType::kSetAllDuty},
       {"SET_PID", CommandType::kSetPid},
+      {"SET_TEMP_TARGET", CommandType::kSetTempTarget},
+      {"SET_ALL_TEMP_TARGETS", CommandType::kSetAllTempTargets},
+      {"CLEAR_TEMP_TARGET", CommandType::kClearTempTarget},
+      {"CLEAR_TEMP_TARGETS", CommandType::kClearTempTargets},
+      {"GET_THERMAL", CommandType::kGetThermal},
       {"CLEAR_OVERRIDES", CommandType::kClearOverrides},
       {"SET_BENCH_MODE", CommandType::kSetBenchMode},
       {"SET_TICK_HZ", CommandType::kSetTickHz},
@@ -182,6 +215,14 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
       {"STEPPER_ENABLE", CommandType::kStepperEnable},
       {"STEPPER_DISABLE", CommandType::kStepperDisable},
       {"STEPPER_BEND", CommandType::kStepperBend},
+      {"SET_POSITION_ZERO", CommandType::kSetPositionZero},
+      {"BENDSEQ_LOAD", CommandType::kBendSeqLoad},
+      {"BENDSEQ_RUN", CommandType::kBendSeqRun},
+      {"BENDSEQ_PAUSE", CommandType::kBendSeqPause},
+      {"BENDSEQ_RESUME", CommandType::kBendSeqResume},
+      {"BENDSEQ_STOP", CommandType::kBendSeqStop},
+      {"BENDSEQ_STATUS", CommandType::kBendSeqStatus},
+      {"BENDSEQ_CLEAR", CommandType::kBendSeqClear},
       {"PULL_ARM", CommandType::kPullArm},
       {"PULL_EXECUTE", CommandType::kPullExecute},
   };
@@ -246,6 +287,7 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
     case CommandType::kHeatersOff:
     case CommandType::kResetCtrl:
     case CommandType::kShutdownSafe:
+    case CommandType::kCheck:
     case CommandType::kArm:
     case CommandType::kDisarm:
     case CommandType::kEnterSafe:
@@ -253,9 +295,37 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
     case CommandType::kSecondaryCycle:
     case CommandType::kDisarmDebug:
     case CommandType::kClearOverrides:
+    case CommandType::kClearTempTargets:
+    case CommandType::kGetThermal:
     case CommandType::kRadioSilence:
     case CommandType::kRadioResume:
       if (!require_args(0)) {
+        return result;
+      }
+      break;
+    case CommandType::kSetPositionZero:
+    case CommandType::kBendSeqPause:
+    case CommandType::kBendSeqResume:
+    case CommandType::kBendSeqStop:
+    case CommandType::kBendSeqStatus:
+      if (!require_args(1)) {
+        return result;
+      }
+      break;
+    case CommandType::kBendSeqRun:
+      if (!require_args(2)) {
+        return result;
+      }
+      break;
+    case CommandType::kBendSeqLoad:
+      if (command.args.size() < 3) {
+        result.error = "invalid argument count for " + command.name;
+        return result;
+      }
+      break;
+    case CommandType::kBendSeqClear:
+      if (command.args.size() < 1 || command.args.size() > 2) {
+        result.error = "invalid argument count for " + command.name;
         return result;
       }
       break;
@@ -312,7 +382,25 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
       }
       break;
     case CommandType::kSetPid:
-      if (!require_args(3)) {
+      if (!require_args(4)) {
+        return result;
+      }
+      if (ToUpper(command.args[0]) == "ALL") {
+        command.args[0] = "ALL";
+      }
+      break;
+    case CommandType::kSetTempTarget:
+      if (!require_args(2)) {
+        return result;
+      }
+      break;
+    case CommandType::kSetAllTempTargets:
+      if (!require_args(1)) {
+        return result;
+      }
+      break;
+    case CommandType::kClearTempTarget:
+      if (!require_args(1)) {
         return result;
       }
       break;

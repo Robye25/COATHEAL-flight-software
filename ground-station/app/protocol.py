@@ -227,6 +227,7 @@ def build_command(command: str) -> str:
 KNOWN_COMMANDS = {
     "PING",
     "STATUS",
+    "CHECK",
     "FORCE_START",
     "FORCE_STOP",
     "ON",
@@ -240,6 +241,11 @@ KNOWN_COMMANDS = {
     "SET_HEATER_DUTY",
     "SET_ALL_DUTY",
     "SET_PID",
+    "SET_TEMP_TARGET",
+    "SET_ALL_TEMP_TARGETS",
+    "CLEAR_TEMP_TARGET",
+    "CLEAR_TEMP_TARGETS",
+    "GET_THERMAL",
     "CLEAR_OVERRIDES",
     "SET_BENCH_MODE",
     "SET_TICK_HZ",
@@ -261,6 +267,14 @@ KNOWN_COMMANDS = {
     "STEPPER_ENABLE",
     "STEPPER_DISABLE",
     "STEPPER_BEND",
+    "SET_POSITION_ZERO",
+    "BENDSEQ_LOAD",
+    "BENDSEQ_RUN",
+    "BENDSEQ_PAUSE",
+    "BENDSEQ_RESUME",
+    "BENDSEQ_STOP",
+    "BENDSEQ_STATUS",
+    "BENDSEQ_CLEAR",
     "PULL_ARM",
     "PULL_EXECUTE",
 }
@@ -399,6 +413,28 @@ def validate_duty(duty: float) -> Tuple[bool, str]:
     if d < 0.0 or d > 1.0:
         return False, "duty must be in [0.0, 1.0]"
     return True, f"{d:.3f}"
+
+
+def validate_temperature_target(
+    target_c: float, minimum_c: float = 0.0, maximum_c: float = 80.0
+) -> Tuple[bool, str]:
+    try:
+        value = float(target_c)
+    except (TypeError, ValueError):
+        return False, "target must be numeric"
+    if value < minimum_c or value > maximum_c:
+        return False, f"target must be in [{minimum_c}, {maximum_c}] C"
+    return True, f"{value:.3f}"
+
+
+def validate_pid_gains(kp: float, ki: float, kd: float) -> Tuple[bool, str]:
+    try:
+        values = (float(kp), float(ki), float(kd))
+    except (TypeError, ValueError):
+        return False, "PID gains must be numeric"
+    if any(value < 0.0 for value in values):
+        return False, "PID gains must be non-negative"
+    return True, " ".join(f"{value:.6g}" for value in values)
 
 
 def validate_tick_hz(hz: float) -> Tuple[bool, str]:

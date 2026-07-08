@@ -18,6 +18,12 @@ struct SensorSnapshot {
   double ambient_pressure_mbar = 1013.25;
   double uv = 0.0;
   std::vector<double> sample_temps_c;
+  bool ambient_temp_valid = true;
+  bool ambient_pressure_valid = true;
+  bool uv_valid = true;
+  bool sample_temps_valid = true;
+  std::vector<bool> sample_temp_valid;
+  bool simulated = false;
   // Compatibility field. The final Rev C BOM has no resistance instrument, so
   // disabled readings are reported as 0.0 here and serialized as "-".
   std::vector<double> sample_resistance_ohm;

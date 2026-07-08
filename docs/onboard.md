@@ -40,7 +40,7 @@ When `manual.manual_first=true`:
 |---|---|
 | Ground link healthy | Operator commands phase, heaters, and pulls |
 | Link not yet seen | System stays conservative; no fallback automation |
-| Established link lost past timeout | Pressure FSM and +5 C sample floor controller may run |
+| Established link lost past timeout | Continue active bend sequences and manual PID targets; stop non-sequence motion; apply +5 C floor only to channels without targets |
 | `manual.manual_first=false` | Legacy autonomous phase/fatigue behavior can run |
 
 Automatic fatigue pulls are disabled for normal Rev C operation. Operators use
@@ -57,25 +57,28 @@ Automatic fatigue pulls are disabled for normal Rev C operation. Operators use
 | Motors | 2 NEMA 17 ball-screw actuators through FYSETC TMC5160 drivers |
 | Resistance | Disabled in final BOM; telemetry field retained for compatibility |
 
-The current code has the final-BOM configuration schema and the TMC5160 SPI
-configuration path. The generic GPIO PWM/pulse boundary and device-specific
-DPS310, ADS1115, and DAQ132M reads still require bench validation and driver
-completion before powered flight hardware tests.
+Real backends are implemented for libgpiod heater PWM and STEP/DIR/EN,
+software-CS TMC5160 SPI setup, DPS310 and ADS1115 through Linux `i2c-dev`, and
+DAQ132M Modbus RTU. They still require bench validation against the exact
+boards, wiring, DAQ register map, current limits, and powered loads.
 
 ## Thermal Control
 
-`ThermalController` owns six floor controllers, one per heated sample.
+`ThermalController` owns six PID controllers, one per heated sample.
 
 | Parameter | Default |
 |---|---|
 | Heated samples | 0..5 |
 | Unheated pulled samples | 6..7 |
-| Floor target | `phase.sample_floor_c=5.0` |
+| Manual target range | `heater.target_min_c..heater.target_max_c` (`0..80 C`) |
+| Fallback floor | `phase.sample_floor_c=5.0` |
 | Hysteresis | 0.5 C |
 | Duty range | `0.0..1.0` |
 
-Manual heater overrides are applied while connected. PID floor control is used
-only in fallback or legacy autonomous mode.
+Manual targets and per-channel PID gains are runtime controls. A duty override
+clears the same channel's target; a target clears its duty override. Invalid
+DAQ132M data forces that heater off even in open-loop duty mode. Fallback keeps
+existing targets and applies the floor controller only to untargeted channels.
 
 ## Heater Scheduler
 
@@ -103,9 +106,9 @@ telemetry reports `HEATER_INHIBITED`.
 | `sample_temps_c` | 8 DAQ132M PT100 channels |
 | `sample_resistance_ohm` | Disabled final-BOM compatibility vector |
 
-In bench/simulation mode, the manager synthesizes pressure, temperature, UV,
-and optional resistance changes so the ground station can be tested without
-hardware.
+Simulation is used only when `runtime.use_simulated_sensors=true`. Real mode
+does not replace failed reads with synthetic data and reports `SIMULATED` or
+`REAL_SENSORS` in telemetry.
 
 ## Motion
 
@@ -114,12 +117,13 @@ INI keys.
 
 | Motor | Default samples | Default SPI | STEP / DIR / EN |
 |---|---|---|---|
-| M0 | 0,1,2,3 | `/dev/spidev0.0` | BCM 5 / 6 / 13 |
-| M1 | 4,5,6,7 | `/dev/spidev0.1` | BCM 19 / 26 / 16 |
+| M0 | 0,1,2,3 | `/dev/spidev0.0`, CS BCM 22 | BCM 19 / 26 / 12 |
+| M1 | 4,5,6,7 | `/dev/spidev0.0`, CS BCM 23 | BCM 16 / 20 / 21 |
 
-`Tmc5160Driver` performs a boot-time SPI configuration pass. The step pulse
-backend still must be bench-verified with the final wiring, motor current, and
-enable polarity before powered motion.
+`Tmc5160Driver` uses `SPI_NO_CS`, drives the configured CS GPIO, and performs
+boot-time and `CHECK` register-write passes. Every absolute motion requires a
+software zero established by `SET_POSITION_ZERO`; there are no limit switches.
+`MotionLock` serializes both manual moves and runtime bend sequences.
 
 ## Telemetry
 
@@ -149,14 +153,19 @@ Primary flight commands:
 ```text
 PING
 STATUS
+CHECK
 ARM
 DISARM
 SET_PHASE <phase>
 SET_HEATER_DUTY <index> <duty>
 SET_ALL_DUTY <duty>
+SET_TEMP_TARGET <index> <temp_c>
+SET_PID <index|ALL> <kp> <ki> <kd>
+GET_THERMAL
 HEATERS_OFF
-PULL_ARM <id>
-PULL_EXECUTE <id>
+SET_POSITION_ZERO <id>
+BENDSEQ_LOAD <id> <name> <target>:<hold>[:<speed>] ...
+BENDSEQ_RUN <id> <name>
 STEPPER_STOP <id>
 SHUTDOWN_SAFE
 ```
@@ -167,10 +176,10 @@ See `docs/protocol.md` for the complete command list.
 
 | Adapter | Status |
 |---|---|
-| `Tmc5160Driver` | SPI register writes implemented; bench validation required |
-| `GpioStepDirStepperDriver` | Interface present; real pulse timing backend pending |
-| `LibgpiodPwmController` | Configured output mapping; real PWM backend pending |
-| `I2cAdapter` | Health boundary; DPS310/ADS1115 device reads pending |
+| `Tmc5160Driver` | SPI register writes and GPIO CS/STEP/DIR/EN implemented; bench validation required |
+| `GpioStepDirStepperDriver` | Real libgpiod STEP/DIR/EN pulses implemented |
+| `LibgpiodPwmController` | Real 10 Hz software PWM thread with zero-on-start/stop |
+| `I2cAdapter` | DPS310 and ADS1115 reads implemented |
 | `SpiAdapter` | Health boundary; shared with TMC5160 and optional RTD Click |
 | `RtcAdapter` | System-clock fallback |
 | `Ina3221Adapter` | Historical compatibility stub; final BOM disables resistance |

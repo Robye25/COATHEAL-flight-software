@@ -16,6 +16,7 @@ at load time.
 | `runtime.bench_mode` | `false` | Enables bench-only commands after `ARM_DEBUG`. |
 | `runtime.debug_arm_code` | `COATHEAL_DEBUG` | Debug token; change before serious testing. |
 | `runtime.use_simulated_pwm` | `false` | Uses simulated heater/stepper/LED backends. |
+| `runtime.use_simulated_sensors` | `false` | Explicitly enables synthetic sensor data. Real mode never silently falls back to simulation. |
 | `runtime.gpio_chip` | `/dev/gpiochip0` | Pi GPIO chip path. |
 
 ## Manual Control
@@ -67,9 +68,11 @@ at load time.
 | `sensor.daq132m_parity` | `N` | Modbus parity. |
 | `sensor.daq132m_data_bits` / `stop_bits` | `8` / `1` | Serial framing. |
 | `sensor.daq132m_slave_id` | `1` | DAQ132M Modbus slave ID. |
+| `sensor.daq132m_function_code` | `3` | Modbus register-read function, `3` or `4`. |
 | `sensor.daq132m_register_base` | `0` | First temperature register. |
 | `sensor.daq132m_register_count` | `8` | Number of PT100 registers. Must cover `sample_count`. |
 | `sensor.daq132m_c_per_count` | `0.1` | Temperature scale; verify against DAQ132M manual. |
+| `sensor.daq132m_c_offset` | `0.0` | Temperature offset applied after scaling. |
 | `sensor.rtd_click_enabled` | `false` | Optional MIKROE-2815/MAX31865 bench path. |
 | `sensor.rtd_click_spi_device` | `/dev/spidev0.0` | RTD Click SPI path if enabled. |
 | `sensor.rtd_click_cs_line` / `drdy_line` | `7` / `25` | RTD Click CS and DRDY GPIO. |
@@ -87,6 +90,8 @@ at load time.
 | Key | Default | Description |
 |---|---:|---|
 | `heater.max_sample_temp_c` | `85.0` | Per-sample overtemperature latch. |
+| `heater.target_min_c` | `0.0` | Lowest accepted manual PID target. |
+| `heater.target_max_c` | `80.0` | Highest accepted manual PID target; must stay below the overtemperature latch. |
 | `heater.output_lines` | `17,18,27,5,6,13` | BCM GPIO lines for HEAT_EN1..6. |
 | `heater.pwm_frequency_hz` | `10.0` | Requested heater PWM frequency. |
 | `heater.active_high` | `true` | MOSFET input polarity. |
@@ -111,7 +116,7 @@ at load time.
 | `phase.uniformity_tolerance_c` | `2.0` | Sample spread soft flag threshold. |
 | `sensor.ambient_temp_min_c` / `_max_c` | `-90.0` / `50.0` | Ambient temperature range check. |
 | `sensor.ambient_pressure_min_mbar` / `_max_mbar` | `5.0` / `1050.0` | Pressure range check. |
-| `pid.kp`, `pid.ki`, `pid.kd` | `0.20`, `0.02`, `0.03` | Sample floor PID gains. |
+| `pid.kp`, `pid.ki`, `pid.kd` | `0.20`, `0.02`, `0.03` | Startup PID gains for manual targets and fallback floor control. |
 
 ## Fallback Transitions
 
@@ -144,7 +149,7 @@ at load time.
 | Key | Motor 0 default | Motor 1 default | Description |
 |---|---:|---:|---|
 | `motor*.driver` | `tmc5160` | `tmc5160` | Required final driver type. |
-| `motor*.spi_device` | `/dev/spidev0.0` | `/dev/spidev0.1` | SPI device. |
+| `motor*.spi_device` | `/dev/spidev0.0` | `/dev/spidev0.0` | Shared SPI0 bus device; software drives each configured CS GPIO. |
 | `motor*.cs_line` | `22` | `23` | Chip select GPIO. |
 | `motor*.step_line` | `19` | `16` | STEP GPIO. |
 | `motor*.dir_line` | `26` | `20` | DIR GPIO. |
@@ -155,9 +160,10 @@ at load time.
 | `motor*.spi_speed_hz` | `1000000` | `1000000` | SPI speed. |
 | `motor*.samples` | `0,1,2,3` | `4,5,6,7` | Sample indices pulled by the motor. |
 
-`setup_coatheal.sh` installs
-`dtoverlay=spi0-2cs,cs0_pin=22,cs1_pin=23`, making `/dev/spidev0.0` select
-motor 0 on BCM 22 and `/dev/spidev0.1` select motor 1 on BCM 23 after reboot.
+The TMC5160 backend opens SPI with kernel chip-select disabled and drives
+`motor0.cs_line` and `motor1.cs_line` through libgpiod. Do not install the old
+`spi0-2cs,cs0_pin=22,cs1_pin=23` overlay because it would reserve those GPIO
+lines in the kernel and conflict with the software-controlled chip selects.
 
 ## HAL
 
@@ -171,7 +177,8 @@ motor 0 on BCM 22 and `/dev/spidev0.1` select motor 1 on BCM 23 after reboot.
 Disabled LED line values are not claimed. Configuration validation rejects any
 duplicate active BCM assignment across heaters, motors, RTD Click, and LEDs.
 
-## Bend Schedule
+## Legacy Bend Schedule
 
-The `bend.*` keys remain available but should stay `0` until calibrated. Rev C
-manual-first operations use explicit `PULL_ARM` and `PULL_EXECUTE` commands.
+Legacy `bend.*` keys are still parsed for compatibility with
+`manual.manual_first=false`, but the active Rev C configuration omits them.
+Manual operation uses runtime `BENDSEQ_*` definitions.

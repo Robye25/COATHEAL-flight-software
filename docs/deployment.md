@@ -87,6 +87,7 @@ Key settings to review before flight:
 |---|---|
 | `runtime.bench_mode` | `false` |
 | `runtime.use_simulated_pwm` | `false` |
+| `runtime.use_simulated_sensors` | `false` |
 | `runtime.debug_arm_code` | Change from default |
 | `comms.telemetry_host` | Empty for plug-and-play, or a fixed ground-station laptop IP |
 | `storage.primary_log_path` | SD card mount path |
@@ -108,10 +109,8 @@ The binary is at `build/onboard/coatheal_onboard`.
 # Run the unit tests
 ctest --test-dir build --output-on-failure
 
-# Quick bench-mode smoke test
-./build/onboard/coatheal_onboard --config config/onboard.example.ini
-# (bench_mode=false in the example, so this will attempt real hardware)
-# To smoke-test without hardware, temporarily set bench_mode=true
+# Hardware-free smoke test
+./build/onboard/coatheal_onboard --config config/onboard.debug.ini
 ```
 
 ---

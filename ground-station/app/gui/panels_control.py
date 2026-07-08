@@ -4,7 +4,7 @@ Sections:
   * ConnectionPanel — host/port + Start button + status line.
   * ModePanel      — big state tile + ARM/DISARM/SAFE/RADIO rows.
   * HeaterPanel    — 5x2 grid of HeaterCell with global presets.
-  * StepperPanel   — state line, jog row, direct input, config, BEND presets.
+  * StepperPanel   — motor-selectable jog, zeroing, and sequence controls.
   * CommandPanel   — diagnostics (PING/STATUS/TICK_HZ) + ARM_DEBUG + arbitrary
                      command entry.
   * EmergencyBar   — always-visible red bar of panic actions.
@@ -14,6 +14,7 @@ correctly.
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Callable, Optional
 
 from PyQt6.QtCore import Qt, pyqtSignal
@@ -21,15 +22,18 @@ from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QComboBox, QDoubleSpinBox, QFormLayout, QFrame, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QProgressBar, QPushButton, QScrollArea,
-    QSizePolicy, QSlider, QSpinBox, QVBoxLayout, QWidget,
+    QSizePolicy, QSlider, QSpinBox, QTableWidget, QTableWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
 from ..protocol import (
     CommandResponse, StepperSnapshot, TelemetryPacket,
     validate_duty, validate_heater_index, validate_microstep,
+    validate_pid_gains, validate_temperature_target,
     validate_revolutions, validate_speed_hz, validate_stepper_move,
     validate_tick_hz,
 )
+from ..thermal_profiles import build_profile, load_profiles, save_profiles
 from .dispatch import CommandDispatcher
 from .theme import HEATER_COLORS, HEATER_LABELS, mode_color, phase_color
 from .widgets import StatusDot, Toast, confirm
@@ -222,6 +226,8 @@ class ModePanel(QGroupBox):
 class HeaterCell(QFrame):
     set_requested = pyqtSignal(int, float)
     off_requested = pyqtSignal(int)
+    target_requested = pyqtSignal(int, float)
+    clear_target_requested = pyqtSignal(int)
 
     def __init__(self, idx: int, parent=None):
         super().__init__(parent)
@@ -265,6 +271,27 @@ class HeaterCell(QFrame):
         btns.addWidget(set_btn); btns.addWidget(off_btn)
         lay.addLayout(btns)
 
+        target_row = QHBoxLayout()
+        self._target = QDoubleSpinBox()
+        self._target.setRange(0.0, 80.0)
+        self._target.setDecimals(1)
+        self._target.setValue(20.0)
+        self._target.setSuffix(" C")
+        target_btn = QPushButton("Target")
+        _style_button(target_btn, bg="#27ae60", min_height=22)
+        clear_target = QPushButton("Clear")
+        _style_button(clear_target, bg="#34495e", min_height=22)
+        target_btn.clicked.connect(
+            lambda: self.target_requested.emit(self.idx, self._target.value())
+        )
+        clear_target.clicked.connect(
+            lambda: self.clear_target_requested.emit(self.idx)
+        )
+        target_row.addWidget(self._target, 1)
+        target_row.addWidget(target_btn)
+        target_row.addWidget(clear_target)
+        lay.addLayout(target_row)
+
     def _style_bar(self, color: str) -> None:
         self._bar.setStyleSheet(
             "QProgressBar { border: 1px solid #333; border-radius: 2px; background: #0e0e0e; }"
@@ -276,6 +303,13 @@ class HeaterCell(QFrame):
 
     def set_enabled_controls(self, enabled: bool) -> None:
         self._slider.setEnabled(enabled)
+        self._target.setEnabled(enabled)
+
+    def target_value(self) -> float:
+        return float(self._target.value())
+
+    def set_target_value(self, value: float) -> None:
+        self._target.setValue(float(value))
 
     def update_live(self, duty: float, temp_c: Optional[float]) -> None:
         pct = max(0.0, min(1.0, float(duty))) * 100.0
@@ -291,10 +325,12 @@ class HeaterPanel(QGroupBox):
     def __init__(self, dispatcher: CommandDispatcher, parent=None):
         super().__init__("Heaters", parent)
         self._disp = dispatcher
+        self._profile_path = Path("profiles/thermal_profiles.json")
+        self._profiles = load_profiles(self._profile_path)
 
         outer = QVBoxLayout(self); outer.setContentsMargins(6, 6, 6, 6); outer.setSpacing(4)
 
-        self._banner = QLabel("Manual duty controls")
+        self._banner = QLabel("Manual thermal controls")
         self._banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._banner.setStyleSheet(
             "background: #1a2d3a; color: #8fd3ff; padding: 4px; border-radius: 3px; "
@@ -312,6 +348,8 @@ class HeaterPanel(QGroupBox):
             cell.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
             cell.set_requested.connect(self._set_one)
             cell.off_requested.connect(lambda idx: self._set_one(idx, 0.0))
+            cell.target_requested.connect(self._set_target)
+            cell.clear_target_requested.connect(self._clear_target)
             grid.addWidget(cell, i // 2, i % 2)
             self._cells.append(cell)
         grid.setColumnStretch(0, 1); grid.setColumnStretch(1, 1)
@@ -339,10 +377,65 @@ class HeaterPanel(QGroupBox):
         ul.addWidget(QLabel("Uniform:")); ul.addWidget(self._uni); ul.addWidget(self._uni_lbl); ul.addWidget(apply_btn)
         outer.addLayout(ul)
 
+        target_row = QHBoxLayout()
+        target_row.addWidget(QLabel("All target:"))
+        self._all_target = QDoubleSpinBox()
+        self._all_target.setRange(0.0, 80.0)
+        self._all_target.setDecimals(1)
+        self._all_target.setValue(20.0)
+        self._all_target.setSuffix(" C")
+        set_all_target = QPushButton("Apply")
+        _style_button(set_all_target, bg="#27ae60")
+        clear_all_target = QPushButton("Clear")
+        _style_button(clear_all_target, bg="#34495e")
+        set_all_target.clicked.connect(self._set_all_target)
+        clear_all_target.clicked.connect(
+            lambda: self._send("CLEAR_TEMP_TARGETS")
+        )
+        target_row.addWidget(self._all_target, 1)
+        target_row.addWidget(set_all_target)
+        target_row.addWidget(clear_all_target)
+        outer.addLayout(target_row)
+
+        pid_row = QHBoxLayout()
+        pid_row.addWidget(QLabel("PID:"))
+        self._pid_channel = QComboBox()
+        self._pid_channel.addItem("All", "ALL")
+        for index in range(len(self._cells)):
+            self._pid_channel.addItem(f"H{index}", str(index))
+        pid_row.addWidget(self._pid_channel)
+        self._kp = QDoubleSpinBox(); self._kp.setRange(0.0, 1000.0); self._kp.setDecimals(4); self._kp.setValue(0.20)
+        self._ki = QDoubleSpinBox(); self._ki.setRange(0.0, 1000.0); self._ki.setDecimals(4); self._ki.setValue(0.02)
+        self._kd = QDoubleSpinBox(); self._kd.setRange(0.0, 1000.0); self._kd.setDecimals(4); self._kd.setValue(0.03)
+        for label, widget in (("Kp", self._kp), ("Ki", self._ki), ("Kd", self._kd)):
+            pid_row.addWidget(QLabel(label)); pid_row.addWidget(widget)
+        pid_btn = QPushButton("Apply")
+        _style_button(pid_btn, bg="#2980b9")
+        pid_btn.clicked.connect(lambda: self._apply_pid())
+        pid_row.addWidget(pid_btn)
+        outer.addLayout(pid_row)
+
+        profile_row = QHBoxLayout()
+        self._profile_name = QLineEdit()
+        self._profile_name.setPlaceholderText("profile name")
+        self._profile_select = QComboBox()
+        self._refresh_profile_names()
+        save_profile = QPushButton("Save")
+        apply_profile = QPushButton("Apply")
+        _style_button(save_profile, bg="#7f8c8d")
+        _style_button(apply_profile, bg="#27ae60")
+        save_profile.clicked.connect(self._save_profile)
+        apply_profile.clicked.connect(self._apply_profile)
+        profile_row.addWidget(self._profile_name)
+        profile_row.addWidget(self._profile_select)
+        profile_row.addWidget(save_profile)
+        profile_row.addWidget(apply_profile)
+        outer.addLayout(profile_row)
+
         self.set_armed(True)
 
     def set_armed(self, _armed: bool) -> None:
-        self._banner.setText("Manual duty controls")
+        self._banner.setText("Manual thermal controls")
         self._banner.setStyleSheet(
             "background: #1a2d3a; color: #8fd3ff; padding: 4px; border-radius: 3px; "
             "font-weight: bold; font-size: 10pt;"
@@ -366,6 +459,79 @@ class HeaterPanel(QGroupBox):
             Toast.anchor(self, "invalid duty", ok=False); return
         self._disp.send(f"SET_ALL_DUTY {d}", tag=self)
 
+    def _set_target(self, idx: int, target_c: float) -> None:
+        ok_i, _ = validate_heater_index(idx)
+        ok_t, target = validate_temperature_target(target_c)
+        if not (ok_i and ok_t):
+            Toast.anchor(self, target, ok=False); return
+        self._disp.send(f"SET_TEMP_TARGET {idx} {target}", tag=self._cells[idx])
+
+    def _clear_target(self, idx: int) -> None:
+        ok, _ = validate_heater_index(idx)
+        if not ok:
+            Toast.anchor(self, "invalid heater index", ok=False); return
+        self._disp.send(f"CLEAR_TEMP_TARGET {idx}", tag=self._cells[idx])
+
+    def _set_all_target(self) -> None:
+        ok, target = validate_temperature_target(self._all_target.value())
+        if not ok:
+            Toast.anchor(self, target, ok=False); return
+        for cell in self._cells:
+            cell.set_target_value(self._all_target.value())
+        self._disp.send(f"SET_ALL_TEMP_TARGETS {target}", tag=self)
+
+    def _apply_pid(self, channel: Optional[str] = None) -> None:
+        ok, gains = validate_pid_gains(
+            self._kp.value(), self._ki.value(), self._kd.value()
+        )
+        if not ok:
+            Toast.anchor(self, gains, ok=False); return
+        target = channel or str(self._pid_channel.currentData())
+        self._disp.send(f"SET_PID {target} {gains}", tag=self)
+
+    def _refresh_profile_names(self) -> None:
+        current = self._profile_select.currentText() if self._profile_select.count() else ""
+        self._profile_select.clear()
+        self._profile_select.addItems(sorted(self._profiles))
+        if current in self._profiles:
+            self._profile_select.setCurrentText(current)
+
+    def _save_profile(self) -> None:
+        name = self._profile_name.text().strip()
+        if not name:
+            Toast.anchor(self, "profile name required", ok=False); return
+        self._profiles[name] = build_profile(
+            [cell.target_value() for cell in self._cells],
+            self._kp.value(), self._ki.value(), self._kd.value(),
+        )
+        try:
+            save_profiles(self._profiles, self._profile_path)
+        except OSError as exc:
+            Toast.anchor(self, f"profile save failed: {exc}", ok=False); return
+        self._refresh_profile_names()
+        self._profile_select.setCurrentText(name)
+        Toast.anchor(self, "profile saved", ok=True)
+
+    def _apply_profile(self) -> None:
+        name = self._profile_select.currentText()
+        profile = self._profiles.get(name)
+        if not profile:
+            Toast.anchor(self, "select a profile", ok=False); return
+        targets = profile.get("targets_c", [])
+        pid = profile.get("pid", {})
+        if len(targets) != len(self._cells):
+            Toast.anchor(self, "profile heater count mismatch", ok=False); return
+        try:
+            kp, ki, kd = float(pid["kp"]), float(pid["ki"]), float(pid["kd"])
+        except (KeyError, TypeError, ValueError):
+            Toast.anchor(self, "invalid profile PID", ok=False); return
+        self._kp.setValue(kp); self._ki.setValue(ki); self._kd.setValue(kd)
+        self._pid_channel.setCurrentIndex(0)
+        self._apply_pid("ALL")
+        for idx, target in enumerate(targets):
+            self._cells[idx].set_target_value(float(target))
+            self._set_target(idx, float(target))
+
     def update_from_packet(self, pkt: TelemetryPacket) -> None:
         # Six cells (H0..H5, no box). Heater-to-sample mapping is
         # 1:1 for the first 6 samples; remaining samples (6, 7) are still
@@ -380,13 +546,22 @@ class HeaterPanel(QGroupBox):
 
 # ── Stepper ──────────────────────────────────────────────────────────────────
 class StepperPanel(QGroupBox):
-    BEND_PRESETS = [("Ascent", "ASCENT"), ("Pre-Float", "PRE_FLOAT"),
-                    ("Float", "FLOAT"), ("Descent", "DESCENT")]
-
     def __init__(self, dispatcher: CommandDispatcher, parent=None):
         super().__init__("Stepper", parent)
         self._disp = dispatcher
         outer = QVBoxLayout(self); outer.setContentsMargins(6, 6, 6, 6); outer.setSpacing(4)
+
+        motor_row = QHBoxLayout()
+        motor_row.addWidget(QLabel("Motor:"))
+        self._motor = QComboBox()
+        self._motor.addItem("Motor 0", 0)
+        self._motor.addItem("Motor 1", 1)
+        motor_row.addWidget(self._motor)
+        zero = QPushButton("SET ZERO"); _style_button(zero, bg="#2980b9", bold=True)
+        zero.clicked.connect(lambda: self._send(f"SET_POSITION_ZERO {self._motor_id()}", tag=zero))
+        motor_row.addWidget(zero)
+        motor_row.addStretch()
+        outer.addLayout(motor_row)
 
         # State line
         self._state = QLabel("pos — / tgt — · — Hz · µ— · — · — · src=—")
@@ -400,11 +575,13 @@ class StepperPanel(QGroupBox):
         jog = QGridLayout(); jog.setSpacing(3)
         for col, delta in enumerate((-1000, -100, -10, -1)):
             b = QPushButton(str(delta)); _style_button(b, bg="#34495e", min_height=24)
-            b.clicked.connect(lambda _, d=delta: self._send(f"STEPPER_MOVE {d}", tag=self))
+            b.clicked.connect(lambda _, d=delta: self._send(
+                f"STEPPER_MOVE {self._motor_id()} {d}", tag=self))
             jog.addWidget(b, 0, col)
         for col, delta in enumerate((1, 10, 100, 1000)):
             b = QPushButton(f"+{delta}"); _style_button(b, bg="#34495e", min_height=24)
-            b.clicked.connect(lambda _, d=delta: self._send(f"STEPPER_MOVE {d}", tag=self))
+            b.clicked.connect(lambda _, d=delta: self._send(
+                f"STEPPER_MOVE {self._motor_id()} {d}", tag=self))
             jog.addWidget(b, 1, col)
         outer.addLayout(jog)
 
@@ -450,74 +627,153 @@ class StepperPanel(QGroupBox):
         dis_btn = QPushButton("DISABLE"); _style_button(dis_btn, bg="#7f8c8d")
         home    = QPushButton("HOME");    _style_button(home,    bg="#2980b9", bold=True)
         self._stop = QPushButton("STOP"); _style_button(self._stop, bg="#c0392b", bold=True, min_height=34)
-        en_btn.clicked.connect(lambda: self._send("STEPPER_ENABLE", tag=en_btn))
-        dis_btn.clicked.connect(lambda: self._send("STEPPER_DISABLE", tag=dis_btn))
-        home.clicked.connect(lambda: self._send("STEPPER_HOME", tag=home))
+        en_btn.clicked.connect(lambda: self._send(f"STEPPER_ENABLE {self._motor_id()}", tag=en_btn))
+        dis_btn.clicked.connect(lambda: self._send(f"STEPPER_DISABLE {self._motor_id()}", tag=dis_btn))
+        home.clicked.connect(lambda: self._send(f"STEPPER_HOME {self._motor_id()}", tag=home))
         self._stop.clicked.connect(self.emergency_stop)
         act.addWidget(en_btn); act.addWidget(dis_btn); act.addWidget(home); act.addWidget(self._stop)
         outer.addLayout(act)
 
-        # BEND presets — 2x2 grid.
-        bend = QGridLayout(); bend.setSpacing(4)
-        self._bend_hold: dict[str, QDoubleSpinBox] = {}
-        for idx, (label, phase) in enumerate(self.BEND_PRESETS):
-            w = QWidget(); vl = QVBoxLayout(w); vl.setContentsMargins(0, 0, 0, 0); vl.setSpacing(2)
-            b = QPushButton(f"BEND {label}"); _style_button(b, bg="#8e44ad", bold=True, min_height=36)
-            b.setToolTip(f"Sends: STEPPER_BEND  (target from config for {phase})")
-            hold = QDoubleSpinBox(); hold.setRange(0.0, 36000.0); hold.setSuffix(" s hold"); hold.setDecimals(0)
-            self._bend_hold[phase] = hold
-            b.clicked.connect(lambda _, p=phase: self._on_bend(p))
-            vl.addWidget(b); vl.addWidget(hold)
-            bend.addWidget(w, idx // 2, idx % 2)
-        outer.addLayout(bend)
+        # Runtime bend sequence editor.
+        seq_header = QHBoxLayout()
+        seq_header.addWidget(QLabel("Sequence:"))
+        self._sequence_name = QLineEdit()
+        self._sequence_name.setPlaceholderText("sequence name")
+        seq_header.addWidget(self._sequence_name, 1)
+        add_step = QPushButton("+"); _style_button(add_step, bg="#34495e")
+        add_step.setToolTip("Add sequence step")
+        remove_step = QPushButton("-"); _style_button(remove_step, bg="#7f8c8d")
+        remove_step.setToolTip("Remove selected sequence step")
+        add_step.clicked.connect(self._add_sequence_step)
+        remove_step.clicked.connect(self._remove_sequence_step)
+        seq_header.addWidget(add_step); seq_header.addWidget(remove_step)
+        outer.addLayout(seq_header)
+
+        self._sequence = QTableWidget(0, 3)
+        self._sequence.setHorizontalHeaderLabels(["Target usteps", "Hold s", "Speed Hz"])
+        self._sequence.verticalHeader().setVisible(False)
+        self._sequence.setMinimumHeight(120)
+        self._sequence.horizontalHeader().setStretchLastSection(True)
+        outer.addWidget(self._sequence)
+        self._add_sequence_step()
+
+        seq_actions = QGridLayout(); seq_actions.setSpacing(3)
+        for label, slot, color, row, col in (
+            ("LOAD", self._load_sequence, "#2980b9", 0, 0),
+            ("RUN", self._run_sequence, "#27ae60", 0, 1),
+            ("PAUSE", self._pause_sequence, "#e67e22", 0, 2),
+            ("RESUME", self._resume_sequence, "#27ae60", 1, 0),
+            ("STOP", self._stop_sequence, "#c0392b", 1, 1),
+            ("STATUS", self._sequence_status, "#34495e", 1, 2),
+        ):
+            button = QPushButton(label); _style_button(button, bg=color, bold=True)
+            button.clicked.connect(slot)
+            seq_actions.addWidget(button, row, col)
+        outer.addLayout(seq_actions)
 
     # ── helpers ──
     def _send(self, cmd: str, tag) -> None:
         self._disp.send(cmd, tag=tag)
 
+    def _motor_id(self) -> int:
+        return int(self._motor.currentData())
+
     def _on_move(self) -> None:
         ok, norm = validate_stepper_move(self._move_in.value())
         if not ok:
             Toast.anchor(self, norm, ok=False); return
-        self._disp.send(f"STEPPER_MOVE {norm}", tag=self)
+        self._disp.send(f"STEPPER_MOVE {self._motor_id()} {norm}", tag=self)
 
     def _on_moveto(self) -> None:
         ok, norm = validate_stepper_move(self._moveto_in.value())
         if not ok:
             Toast.anchor(self, norm, ok=False); return
-        self._disp.send(f"STEPPER_MOVETO {norm}", tag=self)
+        self._disp.send(f"STEPPER_MOVETO {self._motor_id()} {norm}", tag=self)
 
     def _on_rotate(self) -> None:
         ok, norm = validate_revolutions(self._rot_in.value())
         if not ok:
             Toast.anchor(self, norm, ok=False); return
-        self._disp.send(f"STEPPER_ROTATE {norm}", tag=self)
+        self._disp.send(f"STEPPER_ROTATE {self._motor_id()} {norm}", tag=self)
 
     def _on_set_speed(self) -> None:
         ok, norm = validate_speed_hz(self._speed.value())
         if not ok:
             Toast.anchor(self, norm, ok=False); return
-        self._disp.send(f"STEPPER_SET_SPEED {norm}", tag=self)
+        self._disp.send(f"STEPPER_SET_SPEED {self._motor_id()} {norm}", tag=self)
 
     def _on_set_microstep(self) -> None:
         ok, norm = validate_microstep(int(self._us.currentText()))
         if not ok:
             Toast.anchor(self, norm, ok=False); return
-        self._disp.send(f"STEPPER_SET_MICROSTEP {norm}", tag=self)
+        self._disp.send(f"STEPPER_SET_MICROSTEP {self._motor_id()} {norm}", tag=self)
 
-    def _on_bend(self, phase: str) -> None:
-        hold = int(self._bend_hold[phase].value())
-        # Onboard resolves the bend target from config based on current phase;
-        # we expose BEND as: STEPPER_BEND <target_steps> [hold_s]. Without a
-        # known target here, we send target=0 and the operator overrides via
-        # the hold spinbox. A future enhancement can read config from onboard.
-        if hold > 0:
-            self._disp.send(f"STEPPER_BEND 0 {hold}", tag=self)
-        else:
-            self._disp.send("STEPPER_BEND 0", tag=self)
+    def _add_sequence_step(self) -> None:
+        row = self._sequence.rowCount()
+        self._sequence.insertRow(row)
+        self._sequence.setItem(row, 0, QTableWidgetItem("0"))
+        self._sequence.setItem(row, 1, QTableWidgetItem("0"))
+        self._sequence.setItem(row, 2, QTableWidgetItem(""))
+
+    def _remove_sequence_step(self) -> None:
+        row = self._sequence.currentRow()
+        if row < 0:
+            row = self._sequence.rowCount() - 1
+        if row >= 0:
+            self._sequence.removeRow(row)
+
+    def _sequence_identity(self) -> tuple[int, str] | None:
+        name = self._sequence_name.text().strip()
+        if not name or any(ch.isspace() for ch in name):
+            Toast.anchor(self, "sequence name must be one word", ok=False)
+            return None
+        return self._motor_id(), name
+
+    def _load_sequence(self) -> None:
+        identity = self._sequence_identity()
+        if identity is None:
+            return
+        if self._sequence.rowCount() == 0:
+            Toast.anchor(self, "add at least one sequence step", ok=False); return
+        encoded = []
+        try:
+            for row in range(self._sequence.rowCount()):
+                target = int(self._sequence.item(row, 0).text().strip())
+                hold = float(self._sequence.item(row, 1).text().strip())
+                speed_text = self._sequence.item(row, 2).text().strip()
+                if hold < 0:
+                    raise ValueError("hold must be non-negative")
+                step = f"{target}:{hold:g}"
+                if speed_text:
+                    speed = float(speed_text)
+                    if speed <= 0:
+                        raise ValueError("speed must be positive")
+                    step += f":{speed:g}"
+                encoded.append(step)
+        except (AttributeError, TypeError, ValueError) as exc:
+            Toast.anchor(self, f"invalid sequence step: {exc}", ok=False); return
+        motor, name = identity
+        self._disp.send(f"BENDSEQ_LOAD {motor} {name} {' '.join(encoded)}", tag=self)
+
+    def _run_sequence(self) -> None:
+        identity = self._sequence_identity()
+        if identity:
+            self._disp.send(f"BENDSEQ_RUN {identity[0]} {identity[1]}", tag=self)
+
+    def _pause_sequence(self) -> None:
+        self._disp.send(f"BENDSEQ_PAUSE {self._motor_id()}", tag=self)
+
+    def _resume_sequence(self) -> None:
+        self._disp.send(f"BENDSEQ_RESUME {self._motor_id()}", tag=self)
+
+    def _stop_sequence(self) -> None:
+        self._disp.send(f"BENDSEQ_STOP {self._motor_id()}", tag=self)
+
+    def _sequence_status(self) -> None:
+        self._disp.send(f"BENDSEQ_STATUS {self._motor_id()}", tag=self)
 
     def emergency_stop(self) -> None:
-        self._disp.send("STEPPER_STOP", tag=self._stop)
+        self._disp.send(f"STEPPER_STOP {self._motor_id()}", tag=self._stop)
 
     def update_from_packet(self, pkt: TelemetryPacket) -> None:
         # Show a compact one-liner per motor if dual; otherwise fall
@@ -574,7 +830,8 @@ class CommandPanel(QGroupBox):
         row = QHBoxLayout()
         b_ping = QPushButton("PING");   _style_button(b_ping,   bg="#2980b9"); b_ping.clicked.connect(lambda: self._disp.send("PING",   tag=b_ping))
         b_stat = QPushButton("STATUS"); _style_button(b_stat,   bg="#2980b9"); b_stat.clicked.connect(lambda: self._disp.send("STATUS", tag=b_stat))
-        row.addWidget(b_ping); row.addWidget(b_stat)
+        b_check = QPushButton("CHECK"); _style_button(b_check, bg="#2980b9"); b_check.clicked.connect(lambda: self._disp.send("CHECK", tag=b_check))
+        row.addWidget(b_ping); row.addWidget(b_stat); row.addWidget(b_check)
         b_reset = QPushButton("RESET_CTRL"); _style_button(b_reset, bg="#e67e22")
         b_reset.clicked.connect(lambda: self._confirm_send(b_reset, "RESET_CTRL", "Reset controller?"))
         row.addWidget(b_reset)

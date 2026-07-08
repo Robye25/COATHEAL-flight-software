@@ -18,6 +18,7 @@ class StepperDriver {
   virtual bool Step(bool direction_forward) = 0;
   virtual void SetMicrostep(int divisor) = 0;
   virtual bool healthy() const = 0;
+  virtual bool ActiveCheck() { return healthy(); }
   virtual std::uint64_t pulses_issued() const = 0;
 };
 
@@ -42,8 +43,8 @@ class SimulatedStepperDriver : public StepperDriver {
   std::uint64_t pulses_ = 0;
 };
 
-// STEP/DIR/EN backend used by the TMC5160 fallback path. Real GPIO pulse
-// generation requires a bench-validated Pi timing backend.
+// STEP/DIR/EN backend used by the TMC5160 fallback path. Pulses are emitted
+// through libgpiod and still require waveform validation on the target Pi.
 class GpioStepDirStepperDriver : public StepperDriver {
  public:
   GpioStepDirStepperDriver(std::string chip,
@@ -52,6 +53,7 @@ class GpioStepDirStepperDriver : public StepperDriver {
                            std::size_t enable_line,
                            bool invert_direction,
                            bool enable_active_low);
+  ~GpioStepDirStepperDriver() override;
 
   bool Enable(bool enable) override;
   bool Step(bool direction_forward) override;
@@ -67,8 +69,14 @@ class GpioStepDirStepperDriver : public StepperDriver {
   bool invert_direction_;
   bool enable_active_low_;
   bool healthy_ = false;
+  bool enabled_ = false;
+  bool last_direction_forward_ = true;
   int microstep_ = 1;
   std::uint64_t pulses_ = 0;
+  void* chip_handle_ = nullptr;
+  void* step_handle_ = nullptr;
+  void* dir_handle_ = nullptr;
+  void* enable_handle_ = nullptr;
 };
 
 }  // namespace coatheal

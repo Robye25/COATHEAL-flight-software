@@ -15,7 +15,7 @@ DATA,<session_id>,<seq>,<timestamp>,<rtc_valid>,<ambient_temp_c>,<ambient_pressu
 
 | Field | Meaning |
 |---|---|
-| `ambient_temp_c` | DPS310 ambient temperature value, once the I2C driver is enabled |
+| `ambient_temp_c` | DPS310 ambient temperature value |
 | `ambient_pressure_mbar` | DPS310 pressure value |
 | `uv` | GUVA-S12SD analog output through ADS1115 |
 | `sample_0..sample_7` | XF-931-FAR PT100 values from DAQ132M Modbus registers |
@@ -43,8 +43,8 @@ STATUS=SD_OK|USB_OK|I2C_OK|SPI_OK|LINK_OK|T_AMBIENT_OK|P_AMBIENT_OK|UNIFORMITY_O
 |---|---|
 | `SD_OK` / `SD_FAIL` | Primary SD-card CSV log health |
 | `USB_OK` / `USB_FAIL` | Secondary USB mirror log health |
-| `I2C_OK` / `I2C_FAIL` | I2C bus health for DPS310, ADS1115, optional RTD Click, and RTC |
-| `SPI_OK` / `SPI_FAIL` | SPI health for TMC5160 configuration and optional RTD Click |
+| `I2C_OK` / `I2C_FAIL` | Latest DPS310 and ADS1115 read health |
+| `SPI_OK` / `SPI_FAIL` | TMC5160 SPI setup/check health |
 | `LINK_OK` / `LINK_FAIL` | Last telemetry drain/ACK status |
 | `T_AMBIENT_OK` / `T_AMBIENT_FAIL` | Ambient temperature in configured range |
 | `P_AMBIENT_OK` / `P_AMBIENT_FAIL` | Ambient pressure in configured range |
@@ -52,6 +52,11 @@ STATUS=SD_OK|USB_OK|I2C_OK|SPI_OK|LINK_OK|T_AMBIENT_OK|P_AMBIENT_OK|UNIFORMITY_O
 | `OVERTEMP_OK` / `OVERTEMP_FAIL` | No sample over-temperature latch |
 | `ENERGY_OK` / `ENERGY_FAIL` | Heater energy budget not exhausted |
 | `RS485_OK` / `RS485_FAIL` | USB-RS485 / DAQ132M path health |
+| `PWM_OK` / `PWM_FAIL` | Heater GPIO/PWM backend health |
+| `STEPPER_OK` / `STEPPER_FAIL` | Both motor backends healthy |
+| `SAMPLE_TEMP_OK` / `SAMPLE_TEMP_FAIL` | All configured DAQ132M temperature channels valid |
+| `SIMULATED` / `REAL_SENSORS` | Explicit sensor mode |
+| `SEQ_PAUSED` / `SEQ_READY` | At least one bend sequence is paused/faulted, or no sequence fault is active |
 | `HEATER_ACTIVE` / `HEATER_INHIBITED` | Heaters are inhibited while a motor holds `MotionLock` |
 | `RESISTANCE_OK` / `RESISTANCE_FAIL` | Compatibility bit; OK when resistance is disabled or simulated path is healthy |
 
@@ -128,7 +133,8 @@ NACK,<COMMAND>,<reason>
 | Command | Args | Description |
 |---|---|---|
 | `PING` | none | Liveness check |
-| `STATUS` | none | Phase, mode, manual/fallback state, telemetry target, queue depth, energy status |
+| `STATUS` | none | Lightweight live state: phase/mode, fallback, queue, current hardware flags, and sequence state |
+| `CHECK` | none | Active storage, DPS310, ADS1115, DAQ132M, PWM, stepper, and TMC5160 SPI probe |
 | `ARM` | none | Enable manual flight outputs |
 | `DISARM` | none | Disable outputs, clear heater overrides, stop steppers |
 | `SET_PHASE` | `<phase>` | Set `BOOT`, `ASCENT`, `PRE_FLOAT`, `FLOAT`, `DESCENT`, `LANDED`, or `STOPPED` |
@@ -142,21 +148,53 @@ NACK,<COMMAND>,<reason>
 | `RADIO_RESUME` | none | Resume telemetry transmission |
 | `SET_HEATER_DUTY` | `<index> <duty>` | Set one heater duty, index `0..5` |
 | `SET_ALL_DUTY` | `<duty>` | Set all heater duties |
-| `CLEAR_OVERRIDES` | none | Clear heater/PID overrides |
+| `SET_TEMP_TARGET` | `<index> <temp_c>` | Set one closed-loop target within configured limits |
+| `SET_ALL_TEMP_TARGETS` | `<temp_c>` | Set all six closed-loop targets |
+| `CLEAR_TEMP_TARGET` | `<index>` | Clear one target |
+| `CLEAR_TEMP_TARGETS` | none | Clear every target |
+| `SET_PID` | `<index\|ALL> <kp> <ki> <kd>` | Set non-negative PID gains |
+| `GET_THERMAL` | none | Return target, measured temperature, and duty for every heater |
+| `CLEAR_OVERRIDES` | none | Clear duty, target, and PID overrides |
+| `SET_POSITION_ZERO` | `<id>` | Set current physical position as software zero without motion |
 | `STEPPER_MOVE` | `<id> <steps>` | Relative motor move |
-| `STEPPER_MOVETO` | `<id> <abs_steps> [hold_s]` | Absolute motor move |
+| `STEPPER_MOVETO` | `<id> <abs_usteps> [hold_s]` | Absolute move; motor must be zeroed |
 | `STEPPER_ROTATE` | `<id> <revs>` | Rotate by full revolutions |
-| `STEPPER_BEND` | `<id> <abs_steps> [hold_s]` | Alias for absolute bend move |
-| `STEPPER_HOME` | `<id>` | Return motor to position zero |
+| `STEPPER_BEND` | `<id> <abs_usteps> [hold_s]` | Compatibility alias for absolute move; motor must be zeroed |
+| `STEPPER_HOME` | `<id>` | Return to software zero; motor must be zeroed |
 | `STEPPER_STOP` | `<id>` | Stop motion and release `MotionLock` |
 | `STEPPER_SET_SPEED` | `<id> <hz>` | Set motor speed |
 | `STEPPER_SET_MICROSTEP` | `<id> <n>` | Set microstep divisor |
 | `STEPPER_ENABLE` / `STEPPER_DISABLE` | `<id>` | Enable or disable driver output |
 | `PULL_ARM` | `<id>` | Queue one pull cycle |
 | `PULL_EXECUTE` | `<id>` | Queue one pull cycle and report as executed |
+| `BENDSEQ_LOAD` | `<id> <name> <target>:<hold>[:<hz>] ...` | Load a runtime absolute-microstep sequence |
+| `BENDSEQ_RUN` | `<id> <name>` | Run a loaded sequence |
+| `BENDSEQ_PAUSE` / `BENDSEQ_RESUME` | `<id>` | Pause or resume the active sequence |
+| `BENDSEQ_STOP` / `BENDSEQ_STATUS` | `<id>` | Stop or inspect sequence state |
+| `BENDSEQ_CLEAR` | `<id> [name]` | Clear one or all stored definitions for a motor |
 
 `ON`, `OFF`, and `RESET` remain aliases for `FORCE_START`, `FORCE_STOP`, and
 `RESET_CTRL`.
+
+Setting a duty clears that channel's temperature target. Setting a temperature
+target clears that channel's duty override. `HEATERS_OFF` clears all duties and
+targets. Any invalid PT100 channel forces its matching heater off, including in
+open-loop duty mode.
+
+Absolute motion, homing, pull cycles, and bend sequences require
+`SET_POSITION_ZERO <id>` after each onboard restart. Relative
+`STEPPER_MOVE`/`STEPPER_ROTATE` commands are allowed before zeroing.
+
+Example:
+
+```text
+ARM
+STEPPER_ENABLE 0
+SET_POSITION_ZERO 0
+BENDSEQ_LOAD 0 flex 800:2:50 1600:3:75 0:1:50
+BENDSEQ_RUN 0 flex
+BENDSEQ_STATUS 0
+```
 
 ### Bench-Only Commands
 
@@ -165,5 +203,4 @@ These require `runtime.bench_mode=true` and `ARM_DEBUG <token>`.
 | Command | Args | Description |
 |---|---|---|
 | `DISARM_DEBUG` | none | Disable debug mode |
-| `SET_PID` | `<kp> <ki> <kd>` | Override PID gains |
 | `SET_BENCH_MODE` | `<1|0>` | Toggle bench mode |

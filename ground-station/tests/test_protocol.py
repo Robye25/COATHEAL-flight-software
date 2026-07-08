@@ -8,7 +8,8 @@ from app.protocol import (
     PullEvent, StepperSnapshot, TelemetryParseError, build_ack,
     parse_command_response, parse_pull_event, parse_telemetry_csv,
     validate_duty, validate_heater_index, validate_microstep,
-    validate_revolutions, validate_speed_hz, validate_stepper_move,
+    validate_pid_gains, validate_revolutions, validate_speed_hz,
+    validate_stepper_move, validate_temperature_target,
     validate_tick_hz,
 )
 
@@ -282,6 +283,18 @@ class ValidatorTests(unittest.TestCase):
         self.assertTrue(validate_revolutions(0.0)[0])
         self.assertTrue(validate_revolutions(-12.5)[0])
         self.assertFalse(validate_revolutions(2e6)[0])
+
+    def test_temperature_target(self) -> None:
+        self.assertTrue(validate_temperature_target(0.0)[0])
+        self.assertTrue(validate_temperature_target(80.0)[0])
+        self.assertFalse(validate_temperature_target(-0.1)[0])
+        self.assertFalse(validate_temperature_target(80.1)[0])
+
+    def test_pid_gains(self) -> None:
+        self.assertTrue(validate_pid_gains(0.2, 0.02, 0.03)[0])
+        self.assertTrue(validate_pid_gains(0.0, 0.0, 0.0)[0])
+        self.assertFalse(validate_pid_gains(-0.1, 0.0, 0.0)[0])
+        self.assertFalse(validate_pid_gains("x", 0.0, 0.0)[0])
 
 
 if __name__ == "__main__":

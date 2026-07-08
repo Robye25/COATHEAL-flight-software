@@ -2,6 +2,7 @@
 // uniformity monitor during FLOAT, ambient-range flagging, and
 // StorageManager SAFE-mode fsync durability.
 #include <cassert>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -29,6 +30,7 @@ coatheal::OnboardConfig MakeConfig() {
   cfg.phase.uniformity_tolerance_c = 2.0;
   // Rev C stores the fallback floor target in `sample_floor_c`.
   cfg.phase.sample_floor_c = 5.0;
+  cfg.runtime.use_simulated_sensors = true;
   return cfg;
 }
 
@@ -99,6 +101,64 @@ void TestUniformityBit() {
   // Outside any flying phase (BOOT), uniformity bit should be OK regardless.
   ctrl.ComputeRequestedDuty(coatheal::MissionPhase::kBoot, spread, 1.0, ov);
   assert(ctrl.uniformity_ok());
+}
+
+void TestInvalidSampleForcesHeaterOff() {
+  const auto cfg = MakeConfig();
+  coatheal::ThermalController ctrl(cfg);
+  coatheal::ControlOverrides ov;
+  ov.floor_control_enabled = false;
+  ov.heater_duty_overrides.resize(cfg.hardware.heater_count);
+  ov.heater_duty_overrides[2] = 1.0;
+
+  coatheal::SensorSnapshot snapshot = MakeSnapshot(8, 10.0);
+  snapshot.sample_temp_valid.assign(8, true);
+  snapshot.sample_temp_valid[2] = false;
+  const auto duty = ctrl.ComputeRequestedDuty(
+      coatheal::MissionPhase::kFloat, snapshot, 1.0, ov);
+  assert(duty[2] == 0.0);
+}
+
+void TestManualTemperatureTargetAndPid() {
+  const auto cfg = MakeConfig();
+  coatheal::ThermalController ctrl(cfg);
+  coatheal::ControlOverrides ov;
+  ov.floor_control_enabled = false;
+  ov.temp_targets_c.resize(cfg.hardware.heater_count);
+  ov.pid_overrides.resize(cfg.hardware.heater_count);
+  ov.temp_targets_c[0] = 40.0;
+  ov.pid_overrides[0] = coatheal::PidGains{0.1, 0.0, 0.0};
+
+  const auto cold = MakeSnapshot(8, 20.0);
+  auto duty = ctrl.ComputeRequestedDuty(
+      coatheal::MissionPhase::kBoot, cold, 1.0, ov);
+  assert(duty[0] > 0.0);
+  for (std::size_t i = 1; i < duty.size(); ++i) assert(duty[i] == 0.0);
+
+  auto hot = cold;
+  hot.sample_temps_c[0] = 40.0;
+  duty = ctrl.ComputeRequestedDuty(
+      coatheal::MissionPhase::kBoot, hot, 1.0, ov);
+  assert(duty[0] == 0.0);
+}
+
+void TestPerChannelPidOverridesGlobalPid() {
+  const auto cfg = MakeConfig();
+  coatheal::ThermalController ctrl(cfg);
+  coatheal::ControlOverrides ov;
+  ov.floor_control_enabled = false;
+  ov.temp_targets_c.resize(cfg.hardware.heater_count);
+  ov.pid_overrides.resize(cfg.hardware.heater_count);
+  ov.temp_targets_c[0] = 21.0;
+  ov.temp_targets_c[1] = 21.0;
+  ov.pid_override = coatheal::PidGains{0.1, 0.0, 0.0};
+  ov.pid_overrides[0] = coatheal::PidGains{0.2, 0.0, 0.0};
+
+  const auto snapshot = MakeSnapshot(8, 20.0);
+  const auto duty = ctrl.ComputeRequestedDuty(
+      coatheal::MissionPhase::kFloat, snapshot, 1.0, ov);
+  assert(std::fabs(duty[0] - 0.2) < 1e-9);
+  assert(std::fabs(duty[1] - 0.1) < 1e-9);
 }
 
 void TestAmbientRangeFlags() {
@@ -174,6 +234,9 @@ void TestStorageSafeModeWrites() {
 int main() {
   TestOvertempCutoffLatches();
   TestUniformityBit();
+  TestInvalidSampleForcesHeaterOff();
+  TestManualTemperatureTargetAndPid();
+  TestPerChannelPidOverridesGlobalPid();
   TestAmbientRangeFlags();
   TestStatusFlagsSerialize();
   TestStorageSafeModeWrites();

@@ -20,15 +20,17 @@ struct ControlOverrides {
   bool floor_control_enabled = true;
   std::optional<std::pair<std::size_t, double>> single_heater_override;
   std::optional<double> all_heaters_override;
+  std::vector<std::optional<double>> heater_duty_overrides;
+  std::vector<std::optional<double>> temp_targets_c;
+  std::vector<std::optional<PidGains>> pid_overrides;
   std::optional<PidGains> pid_override;
 };
 
-// Rev C fallback floor controller:
-//   * Per-sample PID setpoint = phase.sample_floor_c (shared across
-//     ASCENT/FLOAT/DESCENT).
-//   * PID is only active when sample < (floor - hysteresis); once sample
-//     reaches floor it switches off, duty goes to 0, and the integrator is
-//     frozen. kFloorHysteresisC defines the dead-band.
+// Rev C per-sample thermal controller:
+//   * Explicit operator targets run in any RUN phase.
+//   * Untargeted channels use phase.sample_floor_c only when fallback/legacy
+//     floor control is enabled.
+//   * The fallback PID uses a hysteresis dead-band around the floor target.
 //   * 6 heaters drive samples 0..5 1:1 (heater[i] <-> sample[i]). Samples 6
 //     and 7 are pulled but unheated — PT100 measured only.
 //   * No electronics-box heater. `electronics_heater_index == SIZE_MAX` is
@@ -50,6 +52,7 @@ class ThermalController {
                                            const ControlOverrides& overrides);
 
   void UpdatePid(PidGains gains);
+  void UpdatePid(std::size_t channel, PidGains gains);
 
   // Per-channel over-temperature latch (kept from Rev A for defense-in-depth
   // even though the fallback thermal goal is a floor, not a ceiling).
@@ -61,9 +64,11 @@ class ThermalController {
 
   const std::vector<bool>& channel_latched() const { return channel_latched_; }
 
-  // True while each per-sample PID is currently driving output (below
-  // floor - hysteresis). Exposed for tests and telemetry.
+  // True while each per-sample PID is currently driving output.
   const std::vector<bool>& sample_heating() const { return sample_heating_; }
+  const std::vector<std::optional<double>>& active_targets() const {
+    return active_targets_c_;
+  }
 
  private:
   bool ShouldHeatPhase(MissionPhase phase) const;
@@ -72,6 +77,7 @@ class ThermalController {
   std::vector<PidController> sample_pids_;
   std::vector<bool> channel_latched_;
   std::vector<bool> sample_heating_;
+  std::vector<std::optional<double>> active_targets_c_;
   bool overtemp_latched_ = false;
   bool uniformity_ok_ = true;
 };

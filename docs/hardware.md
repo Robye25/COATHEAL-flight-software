@@ -81,9 +81,10 @@ Do not energize heaters or motors until these points are verified:
 7. The final diagram provides no limit switches. Software position is unknown
    after reboot, so travel must remain mechanically constrained and low-speed
    commissioning must establish safe step limits before any full pull.
-8. SPI0 has three targets: two TMC5160 drivers and RTD Click. The standard
-   `spi0-2cs` overlay maps BCM 22/23 to the motors only. RTD Click on BCM 7
-   requires software-controlled CS or a custom three-CS overlay.
+8. SPI0 has three possible targets. The TMC5160 backend uses `/dev/spidev0.0`
+   with kernel CS disabled and software-controlled CS on BCM 22/23. Do not
+   install the old `spi0-2cs` overlay. RTD Click on BCM 7 remains an optional
+   bench path and must stay disabled until its MAX31865 read path is validated.
 
 The ADS1115 and DPS310 may share I2C-1 at default addresses `0x48` and `0x77`.
 Power both STEMMA QT boards from 3.3 V so their I2C pull-ups cannot raise SDA or
@@ -109,20 +110,23 @@ sensor.daq132m_parity=N
 sensor.daq132m_data_bits=8
 sensor.daq132m_stop_bits=1
 sensor.daq132m_slave_id=1
+sensor.daq132m_function_code=3
 sensor.daq132m_register_base=0
 sensor.daq132m_register_count=8
 sensor.daq132m_c_per_count=0.1
+sensor.daq132m_c_offset=0.0
 ```
 
-The Modbus register base and scaling must be verified against the exact DAQ132M
-manual before flight. The software now stores and validates these settings, but
-the real Modbus read backend still needs bench validation against the card.
+The Modbus RTU read, CRC validation, range checks, function code, register base,
+scale, and offset are implemented. The exact register map and engineering-unit
+conversion must still be verified against the supplied DAQ132M manual.
 
 ### RTD Click MIKROE-2815
 
 The RTD Click is a MAX31865 single-channel SPI RTD board. It is not the primary
-eight-sample path because it handles one RTD channel. It is supported as a
-configurable bench or backup path.
+eight-sample path because it handles one RTD channel. Its pins and configuration
+are reserved, but the active Rev C sensor manager does not read it; keep
+`sensor.rtd_click_enabled=false`.
 
 ```ini
 sensor.rtd_click_enabled=false
@@ -132,8 +136,8 @@ sensor.rtd_click_drdy_line=25
 sensor.rtd_click_wires=3
 ```
 
-Enable it only when the SPI chip-select wiring does not conflict with the two
-TMC5160 drivers.
+Do not enable it for flight until a dedicated MAX31865 backend and bench test
+are added.
 
 ### DPS310
 
@@ -159,10 +163,10 @@ sensor.uv_full_scale_v=4.096
 
 ## Motion System
 
-Both motors use FYSETC TMC5160 drivers. The software programs the TMC5160 over
-SPI, then uses STEP/DIR/EN GPIO for motion. Only one motor can run a pull cycle
-at a time because `MotionLock` serializes pull commands; heaters are forced to
-zero while the lock is held.
+Both motors use FYSETC TMC5160 drivers. The software programs them over SPI
+using GPIO22/GPIO23 chip-selects, then uses STEP/DIR/EN GPIO for motion.
+`MotionLock` serializes all motion, including jogs and sequences. Heater GPIOs
+are forced low before motion begins and remain inhibited while the lock is held.
 
 ```ini
 stepper.steps_per_rev=200
@@ -204,26 +208,25 @@ connecting flight heaters.
 | Area | Status |
 |---|---|
 | Command protocol, manual-first state, telemetry queue | Implemented |
-| TMC5160 SPI setup | Implemented as a conservative register-write pass; current scaling must be bench-verified |
-| STEP/DIR/EN GPIO pulse backend | Still integration-stubbed; final GPIO waveform timing needs Pi bench validation |
-| Heater channel mapping | Parsed and passed into `LibgpiodPwmController`; real PWM waveform backend still needs Pi validation |
-| DAQ132M Modbus | Configured and validated; real Modbus reads still pending |
-| DPS310 / ADS1115 I2C | Configured and validated; real I2C reads still pending |
-| RTD Click MAX31865 | Configured as optional; real SPI reads still pending |
+| TMC5160 SPI setup | GPIO chip-select and register writes implemented; current scaling must be bench-verified |
+| STEP/DIR/EN GPIO pulse backend | Implemented with libgpiod; waveform timing needs Pi bench validation |
+| Heater PWM | Implemented as a zero-safe libgpiod software PWM thread; validate with dummy loads |
+| DAQ132M Modbus | RTU read/CRC/range handling implemented; register map and scaling need card validation |
+| DPS310 / ADS1115 I2C | Linux `i2c-dev` reads implemented; validate addresses and calibration on the assembled bus |
+| RTD Click MAX31865 | Pins/config reserved; active read backend not implemented |
 
 ## Bring-Up Commands
 
 ```bash
 sudo raspi-config nonint do_i2c 0
 sudo raspi-config nonint do_spi 0
-# In /boot/firmware/config.txt (or /boot/config.txt on older systems):
-# dtoverlay=spi0-2cs,cs0_pin=22,cs1_pin=23
 sudo reboot
 
 i2cdetect -y 1
 ls -l /dev/spidev*
 ls -l /dev/ttyUSB*
 gpioinfo gpiochip0
+./build/onboard/coatheal_onboard --config config/onboard.example.ini
 ```
 
 Expected I2C devices:
@@ -233,16 +236,18 @@ Expected I2C devices:
 0x77  DPS310, unless address jumper changes it
 ```
 
-Expected SPI devices:
+Expected SPI device:
 
 ```text
-/dev/spidev0.0  motor0 TMC5160
-/dev/spidev0.1  motor1 TMC5160
+/dev/spidev0.0  shared bus for both TMC5160 drivers
 ```
 
-The standard two-CS overlay covers the two TMC5160 drivers. The RTD Click is a
-third SPI target on BCM 7; its real driver must use software-controlled CS (or
-a custom three-CS overlay) before `sensor.rtd_click_enabled=true`.
+After the onboard command server starts, run `CHECK`. It actively probes
+DPS310, ADS1115, DAQ132M, storage, PWM/stepper backends, and TMC5160 SPI:
+
+```powershell
+python main.py command --cmd CHECK
+```
 
 Expected RS485:
 

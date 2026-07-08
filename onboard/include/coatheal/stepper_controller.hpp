@@ -89,6 +89,7 @@ class StepperController {
                    std::string* error);
   bool Rotate(int motor_id, double revolutions, std::string* error);
   bool Home(int motor_id, std::string* error);
+  bool SetPositionZero(int motor_id, std::string* error);
   bool Stop(int motor_id, std::string* error);
   bool SetSpeed(int motor_id, double step_hz, std::string* error);
   bool SetMicrostep(int motor_id, int divisor, std::string* error);
@@ -104,6 +105,9 @@ class StepperController {
   StepperStatus Snapshot() const;
   // Per-channel snapshot.
   StepperStatus Snapshot(int motor_id) const;
+  bool Healthy(int motor_id) const;
+  bool AllHealthy() const;
+  bool ActiveCheck();
 
   std::size_t channel_count() const;
   // Lookup samples() for a channel (empty if invalid id).
