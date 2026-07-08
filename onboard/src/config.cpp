@@ -4,6 +4,7 @@
 #include <cctype>
 #include <fstream>
 #include <iomanip>
+#include <map>
 #include <sstream>
 #include <string>
 #include <type_traits>
@@ -70,24 +71,27 @@ bool ParseSizeList(const std::string& value, std::vector<std::size_t>* out) {
 }  // namespace
 
 OnboardConfig::OnboardConfig() {
-  heaters.output_lines = {12, 20, 21, 23, 24, 25};
+  heaters.output_lines = {17, 18, 27, 5, 6, 13};
+  stepper.step_line = 19;
+  stepper.dir_line = 26;
+  stepper.enable_line = 12;
 
   motors[0].driver = "tmc5160";
   motors[0].spi_device = "/dev/spidev0.0";
-  motors[0].cs_line = 8;
-  motors[0].step_line = stepper.step_line;
-  motors[0].dir_line = stepper.dir_line;
-  motors[0].enable_line = stepper.enable_line;
+  motors[0].cs_line = 22;
+  motors[0].step_line = 19;
+  motors[0].dir_line = 26;
+  motors[0].enable_line = 12;
   motors[0].invert_direction = stepper.invert_direction;
   motors[0].enable_active_low = stepper.enable_active_low;
   motors[0].samples = {0, 1, 2, 3};
 
   motors[1].driver = "tmc5160";
   motors[1].spi_device = "/dev/spidev0.1";
-  motors[1].cs_line = 7;
-  motors[1].step_line = 19;
-  motors[1].dir_line = 26;
-  motors[1].enable_line = 16;
+  motors[1].cs_line = 23;
+  motors[1].step_line = 16;
+  motors[1].dir_line = 20;
+  motors[1].enable_line = 21;
   motors[1].invert_direction = stepper.invert_direction;
   motors[1].enable_active_low = stepper.enable_active_low;
   motors[1].samples = {4, 5, 6, 7};
@@ -387,6 +391,10 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
     } else if (key == "heater.active_high") {
       if (!parse_bool(key, value, &config->heaters.active_high, line_no)) return false;
 
+    } else if (key == "hal.status_led_enabled") {
+      if (!parse_bool(key, value, &config->hal.status_led_enabled, line_no)) return false;
+    } else if (key == "hal.mode_led_enabled") {
+      if (!parse_bool(key, value, &config->hal.mode_led_enabled, line_no)) return false;
     } else if (key == "hal.status_led_line") {
       if (!parse_size_t(key, value, &config->hal.status_led_line, line_no)) return false;
     } else if (key == "hal.mode_led_line") {
@@ -678,6 +686,50 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
         return false;
       }
     }
+  }
+
+  std::map<std::size_t, std::string> gpio_owners;
+  auto claim_gpio = [&](std::size_t line, const std::string& owner) -> bool {
+    const auto [it, inserted] = gpio_owners.emplace(line, owner);
+    if (!inserted) {
+      if (error != nullptr) {
+        *error = "BCM GPIO " + std::to_string(line) + " assigned to both " +
+                 it->second + " and " + owner;
+      }
+      return false;
+    }
+    return true;
+  };
+
+  for (std::size_t i = 0; i < config->heaters.output_lines.size(); ++i) {
+    if (!claim_gpio(config->heaters.output_lines[i],
+                    "heater.output_lines[" + std::to_string(i) + "]")) {
+      return false;
+    }
+  }
+  for (std::size_t i = 0; i < config->motors.size(); ++i) {
+    const std::string prefix = "motor" + std::to_string(i);
+    if (!claim_gpio(config->motors[i].cs_line, prefix + ".cs_line") ||
+        !claim_gpio(config->motors[i].step_line, prefix + ".step_line") ||
+        !claim_gpio(config->motors[i].dir_line, prefix + ".dir_line") ||
+        !claim_gpio(config->motors[i].enable_line, prefix + ".enable_line")) {
+      return false;
+    }
+  }
+  if (config->sensors.rtd_click_enabled &&
+      (!claim_gpio(config->sensors.rtd_click_cs_line,
+                   "sensor.rtd_click_cs_line") ||
+       !claim_gpio(config->sensors.rtd_click_drdy_line,
+                   "sensor.rtd_click_drdy_line"))) {
+    return false;
+  }
+  if (config->hal.status_led_enabled &&
+      !claim_gpio(config->hal.status_led_line, "hal.status_led_line")) {
+    return false;
+  }
+  if (config->hal.mode_led_enabled &&
+      !claim_gpio(config->hal.mode_led_line, "hal.mode_led_line")) {
+    return false;
   }
 
   return true;

@@ -72,7 +72,7 @@ at load time.
 | `sensor.daq132m_c_per_count` | `0.1` | Temperature scale; verify against DAQ132M manual. |
 | `sensor.rtd_click_enabled` | `false` | Optional MIKROE-2815/MAX31865 bench path. |
 | `sensor.rtd_click_spi_device` | `/dev/spidev0.0` | RTD Click SPI path if enabled. |
-| `sensor.rtd_click_cs_line` / `drdy_line` | `18` / `22` | RTD Click CS and DRDY GPIO. |
+| `sensor.rtd_click_cs_line` / `drdy_line` | `7` / `25` | RTD Click CS and DRDY GPIO. |
 | `sensor.rtd_click_wires` | `3` | PT100 wire mode; must be 2, 3, or 4. |
 | `sensor.pressure_source` | `dps310` | Final pressure/ambient-T source. |
 | `sensor.dps310_i2c_addr` | `0x77` | DPS310 I2C address. |
@@ -87,7 +87,7 @@ at load time.
 | Key | Default | Description |
 |---|---:|---|
 | `heater.max_sample_temp_c` | `85.0` | Per-sample overtemperature latch. |
-| `heater.output_lines` | `12,20,21,23,24,25` | BCM GPIO lines for EKM014 MOSFET inputs. |
+| `heater.output_lines` | `17,18,27,5,6,13` | BCM GPIO lines for HEAT_EN1..6. |
 | `heater.pwm_frequency_hz` | `10.0` | Requested heater PWM frequency. |
 | `heater.active_high` | `true` | MOSFET input polarity. |
 
@@ -145,22 +145,31 @@ at load time.
 |---|---:|---:|---|
 | `motor*.driver` | `tmc5160` | `tmc5160` | Required final driver type. |
 | `motor*.spi_device` | `/dev/spidev0.0` | `/dev/spidev0.1` | SPI device. |
-| `motor*.cs_line` | `8` | `7` | Chip select GPIO. |
-| `motor*.step_line` | `5` | `19` | STEP GPIO. |
-| `motor*.dir_line` | `6` | `26` | DIR GPIO. |
-| `motor*.enable_line` | `13` | `16` | EN GPIO. |
+| `motor*.cs_line` | `22` | `23` | Chip select GPIO. |
+| `motor*.step_line` | `19` | `16` | STEP GPIO. |
+| `motor*.dir_line` | `26` | `20` | DIR GPIO. |
+| `motor*.enable_line` | `12` | `21` | EN GPIO. |
 | `motor*.run_current_a_rms` | `2.0` | `2.0` | Run current request; bench-verify. |
 | `motor*.hold_current_frac` | `0.30` | `0.30` | Hold current fraction. |
 | `motor*.stealth_chop` | `true` | `true` | StealthChop request. |
 | `motor*.spi_speed_hz` | `1000000` | `1000000` | SPI speed. |
 | `motor*.samples` | `0,1,2,3` | `4,5,6,7` | Sample indices pulled by the motor. |
 
+`setup_coatheal.sh` installs
+`dtoverlay=spi0-2cs,cs0_pin=22,cs1_pin=23`, making `/dev/spidev0.0` select
+motor 0 on BCM 22 and `/dev/spidev0.1` select motor 1 on BCM 23 after reboot.
+
 ## HAL
 
 | Key | Default | Description |
 |---|---:|---|
+| `hal.status_led_enabled` | `false` | No status LED is present in the final pinout. |
+| `hal.mode_led_enabled` | `false` | No mode LED is present in the final pinout. |
 | `hal.status_led_line` | `17` | Heartbeat LED GPIO. |
 | `hal.mode_led_line` | `27` | Mode LED GPIO. |
+
+Disabled LED line values are not claimed. Configuration validation rejects any
+duplicate active BCM assignment across heaters, motors, RTD Click, and LEDs.
 
 ## Bend Schedule
 

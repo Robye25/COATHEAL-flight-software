@@ -12,10 +12,10 @@ namespace coatheal {
 // current, microstep, and chopper/stealthChop registers at startup.
 struct Tmc5160Config {
   std::string spi_device = "/dev/spidev0.0";
-  std::size_t cs_line = 0;
-  std::size_t step_line = 5;
-  std::size_t dir_line = 6;
-  std::size_t enable_line = 13;
+  std::size_t cs_line = 22;
+  std::size_t step_line = 19;
+  std::size_t dir_line = 26;
+  std::size_t enable_line = 12;
   bool invert_direction = false;
   bool enable_active_low = true;
 

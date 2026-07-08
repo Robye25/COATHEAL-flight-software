@@ -28,11 +28,48 @@ sudo apt install -y git cmake g++ libgpiod-dev
 
 ### 1. Clone the repository
 
+This repository is private. GitHub rejects account passwords for Git over
+HTTPS, so use either an SSH deploy key or a GitHub Personal Access Token. The
+recommended Pi setup is a read-only deploy key:
+
+```bash
+mkdir -p ~/.ssh
+chmod 700 ~/.ssh
+ssh-keygen -t ed25519 -C "coatheal-pi-$(hostname)" -f ~/.ssh/coatheal_github -N ""
+cat ~/.ssh/coatheal_github.pub
+```
+
+Add the printed public key in GitHub under:
+
+```text
+Robye25/COATHEAL-flight-software -> Settings -> Deploy keys -> Add deploy key
+```
+
+Then configure and clone:
+
 ```bash
 sudo mkdir -p /bexus/code
 sudo chown $USER:$USER /bexus/code
-git clone <repo-url> /bexus/code/coatheal
+cat > ~/.ssh/config <<'EOF'
+Host github.com-coatheal
+  HostName github.com
+  User git
+  IdentityFile ~/.ssh/coatheal_github
+  IdentitiesOnly yes
+  StrictHostKeyChecking accept-new
+EOF
+chmod 600 ~/.ssh/config
+git clone git@github.com-coatheal:Robye25/COATHEAL-flight-software.git /bexus/code/coatheal
 cd /bexus/code/coatheal
+```
+
+If the repo already exists and was cloned over HTTPS, switch it to SSH:
+
+```bash
+cd /bexus/code/coatheal
+git remote set-url origin git@github.com-coatheal:Robye25/COATHEAL-flight-software.git
+git fetch origin
+git pull --ff-only origin main
 ```
 
 ### 2. Configure the INI file

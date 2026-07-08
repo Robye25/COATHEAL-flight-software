@@ -306,8 +306,8 @@ void TestConfigParsesReliabilityFields() {
   out << "sensor.daq132m_c_per_count=0.1\n";
   out << "sensor.rtd_click_enabled=false\n";
   out << "sensor.rtd_click_spi_device=/dev/spidev0.0\n";
-  out << "sensor.rtd_click_cs_line=18\n";
-  out << "sensor.rtd_click_drdy_line=22\n";
+  out << "sensor.rtd_click_cs_line=7\n";
+  out << "sensor.rtd_click_drdy_line=25\n";
   out << "sensor.rtd_click_wires=3\n";
   out << "sensor.pressure_source=dps310\n";
   out << "sensor.dps310_i2c_addr=0x77\n";
@@ -316,9 +316,11 @@ void TestConfigParsesReliabilityFields() {
   out << "sensor.uv_ads1115_channel=0\n";
   out << "sensor.uv_full_scale_v=4.096\n";
   out << "sensor.resistance_source=disabled\n";
-  out << "heater.output_lines=12,20,21,23,24,25\n";
+  out << "heater.output_lines=17,18,27,5,6,13\n";
   out << "heater.pwm_frequency_hz=10.0\n";
   out << "heater.active_high=true\n";
+  out << "hal.status_led_enabled=false\n";
+  out << "hal.mode_led_enabled=false\n";
   out << "pull.max_step_hz=100.0\n";
   out << "pull.accel_steps_per_s2=200.0\n";
   out << "pull.microstep=4\n";
@@ -326,10 +328,10 @@ void TestConfigParsesReliabilityFields() {
   out << "pull.hold_s=5.0\n";
   out << "motor0.driver=tmc5160\n";
   out << "motor0.spi_device=/dev/spidev0.0\n";
-  out << "motor0.cs_line=8\n";
-  out << "motor0.step_line=5\n";
-  out << "motor0.dir_line=6\n";
-  out << "motor0.enable_line=13\n";
+  out << "motor0.cs_line=22\n";
+  out << "motor0.step_line=19\n";
+  out << "motor0.dir_line=26\n";
+  out << "motor0.enable_line=12\n";
   out << "motor0.run_current_a_rms=2.0\n";
   out << "motor0.hold_current_frac=0.30\n";
   out << "motor0.stealth_chop=true\n";
@@ -337,10 +339,10 @@ void TestConfigParsesReliabilityFields() {
   out << "motor0.samples=0,1,2,3\n";
   out << "motor1.driver=tmc5160\n";
   out << "motor1.spi_device=/dev/spidev0.1\n";
-  out << "motor1.cs_line=7\n";
-  out << "motor1.step_line=19\n";
-  out << "motor1.dir_line=26\n";
-  out << "motor1.enable_line=16\n";
+  out << "motor1.cs_line=23\n";
+  out << "motor1.step_line=16\n";
+  out << "motor1.dir_line=20\n";
+  out << "motor1.enable_line=21\n";
   out << "motor1.run_current_a_rms=2.0\n";
   out << "motor1.hold_current_frac=0.30\n";
   out << "motor1.stealth_chop=true\n";
@@ -376,18 +378,42 @@ void TestConfigParsesReliabilityFields() {
   assert(cfg.sensors.uv_ads1115_channel == 0);
   assert(cfg.sensors.resistance_source == "disabled");
   assert(cfg.heaters.output_lines.size() == 6U);
-  assert(cfg.heaters.output_lines[0] == 12U);
-  assert(cfg.heaters.output_lines[5] == 25U);
+  assert(cfg.heaters.output_lines[0] == 17U);
+  assert(cfg.heaters.output_lines[5] == 13U);
   assert(std::fabs(cfg.heaters.pwm_frequency_hz - 10.0) < 1e-9);
   assert(cfg.heaters.active_high);
   assert(cfg.pull.microstep == 4);
   assert(cfg.pull.travel_full_steps == 200);
   assert(cfg.motors[0].driver == "tmc5160");
   assert(cfg.motors[0].spi_device == "/dev/spidev0.0");
+  assert(cfg.motors[0].cs_line == 22U);
+  assert(cfg.motors[0].step_line == 19U);
+  assert(cfg.motors[0].dir_line == 26U);
+  assert(cfg.motors[0].enable_line == 12U);
   assert(cfg.motors[0].samples == std::vector<std::size_t>({0, 1, 2, 3}));
   assert(cfg.motors[1].driver == "tmc5160");
   assert(cfg.motors[1].spi_device == "/dev/spidev0.1");
+  assert(cfg.motors[1].cs_line == 23U);
+  assert(cfg.motors[1].step_line == 16U);
+  assert(cfg.motors[1].dir_line == 20U);
+  assert(cfg.motors[1].enable_line == 21U);
   assert(cfg.motors[1].samples == std::vector<std::size_t>({4, 5, 6, 7}));
+
+  std::error_code ec;
+  std::filesystem::remove(cfg_path, ec);
+}
+
+void TestConfigRejectsGpioCollisions() {
+  const std::filesystem::path cfg_path =
+      std::filesystem::temp_directory_path() / "coatheal_gpio_collision.ini";
+  std::ofstream out(cfg_path);
+  out << "heater.output_lines=17,18,27,5,6,12\n";
+  out.close();
+
+  coatheal::OnboardConfig cfg;
+  std::string error;
+  assert(!coatheal::LoadConfigFromIni(cfg_path.string(), &cfg, &error));
+  assert(error.find("BCM GPIO 12 assigned to both") != std::string::npos);
 
   std::error_code ec;
   std::filesystem::remove(cfg_path, ec);
@@ -494,6 +520,7 @@ int main() {
   TestTelemetrySerializer();
   TestTelemetryQueuePersistenceAndAck();
   TestConfigParsesReliabilityFields();
+  TestConfigRejectsGpioCollisions();
   TestStateTransitions();
   TestManualHeaterOverrideWithoutFloorControl();
   TestVacuumRegime();

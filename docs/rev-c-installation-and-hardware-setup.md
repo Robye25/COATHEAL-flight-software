@@ -148,10 +148,53 @@ sudo reboot
 
 Clone or update the repository:
 
+GitHub does not accept account passwords for Git over HTTPS. For the Pi, use a
+repo deploy key. The Pi SSH password (`coatheal` / local password) is only for
+logging into the Raspberry Pi; it is not a GitHub credential.
+
+Create a read-only GitHub key on the Pi:
+
+```bash
+sudo -u coatheal mkdir -p /home/coatheal/.ssh
+sudo -u coatheal chmod 700 /home/coatheal/.ssh
+sudo -u coatheal ssh-keygen -t ed25519 \
+  -C "coatheal-pi-$(hostname)" \
+  -f /home/coatheal/.ssh/coatheal_github \
+  -N ""
+sudo -u coatheal cat /home/coatheal/.ssh/coatheal_github.pub
+```
+
+Copy the printed public key into GitHub:
+
+```text
+Robye25/COATHEAL-flight-software
+  Settings -> Deploy keys -> Add deploy key
+  Title: coatheal-pi
+  Key: <paste printed .pub key>
+  Allow write access: off
+```
+
+Configure SSH on the Pi:
+
+```bash
+sudo -u coatheal tee /home/coatheal/.ssh/config >/dev/null <<'EOF'
+Host github.com-coatheal
+  HostName github.com
+  User git
+  IdentityFile ~/.ssh/coatheal_github
+  IdentitiesOnly yes
+  StrictHostKeyChecking accept-new
+EOF
+sudo -u coatheal chmod 600 /home/coatheal/.ssh/config
+sudo -u coatheal ssh -T git@github.com-coatheal || true
+```
+
+Now clone with SSH:
+
 ```bash
 sudo mkdir -p /bexus/code
 sudo chown coatheal:coatheal /bexus/code
-sudo -u coatheal git clone --branch main https://github.com/Robye25/COATHEAL-flight-software.git /bexus/code/coatheal
+sudo -u coatheal git clone --branch main git@github.com-coatheal:Robye25/COATHEAL-flight-software.git /bexus/code/coatheal
 cd /bexus/code/coatheal
 git switch main
 git pull --ff-only origin main
@@ -161,10 +204,15 @@ If the repository already exists:
 
 ```bash
 cd /bexus/code/coatheal
+git remote set-url origin git@github.com-coatheal:Robye25/COATHEAL-flight-software.git
 git fetch origin
 git switch main
 git pull --ff-only origin main
 ```
+
+HTTPS fallback: create a fine-grained GitHub Personal Access Token with read
+access to this repository's contents, then use that token as the password when
+Git prompts. Do not type your GitHub account password; GitHub will reject it.
 
 Create a local config:
 
@@ -260,21 +308,19 @@ telemetry_target=<laptop-link-local-ip>
 
 ## Final Pin and Bus Map
 
-This map is the current software default. Change it in
-`config/onboard.local.ini` after the wiring is finalized and bench-verified.
+This map matches the final pinout diagram. GPIO values are BCM numbers.
 
 | Function | Default | Config key |
 |---|---|---|
-| Heartbeat LED | BCM 17 | `hal.status_led_line` |
-| Mode LED | BCM 27 | `hal.mode_led_line` |
-| Heater H0..H5 inputs | BCM 12,20,21,23,24,25 | `heater.output_lines` |
+| Status LEDs | Disabled; none in final diagram | `hal.*_led_enabled` |
+| Heater H0..H5 inputs | BCM 17,18,27,5,6,13 | `heater.output_lines` |
 | Heater PWM frequency | 10 Hz | `heater.pwm_frequency_hz` |
 | Heater input polarity | active-high | `heater.active_high` |
-| Motor 0 STEP/DIR/EN | BCM 5 / 6 / 13 | `motor0.step_line`, `motor0.dir_line`, `motor0.enable_line` |
-| Motor 0 SPI | `/dev/spidev0.0`, CE0 BCM 8 | `motor0.spi_device`, `motor0.cs_line` |
-| Motor 1 STEP/DIR/EN | BCM 19 / 26 / 16 | `motor1.step_line`, `motor1.dir_line`, `motor1.enable_line` |
-| Motor 1 SPI | `/dev/spidev0.1`, CE1 BCM 7 | `motor1.spi_device`, `motor1.cs_line` |
-| RTD Click optional CS/DRDY | BCM 18 / 22 | `sensor.rtd_click_cs_line`, `sensor.rtd_click_drdy_line` |
+| Motor 0 STEP/DIR/EN | BCM 19 / 26 / 12 | `motor0.step_line`, `motor0.dir_line`, `motor0.enable_line` |
+| Motor 0 SPI | `/dev/spidev0.0`, CS BCM 22 | `motor0.spi_device`, `motor0.cs_line` |
+| Motor 1 STEP/DIR/EN | BCM 16 / 20 / 21 | `motor1.step_line`, `motor1.dir_line`, `motor1.enable_line` |
+| Motor 1 SPI | `/dev/spidev0.1`, CS BCM 23 | `motor1.spi_device`, `motor1.cs_line` |
+| RTD Click optional CS/DRDY | BCM 7 / 25 | `sensor.rtd_click_cs_line`, `sensor.rtd_click_drdy_line` |
 | I2C bus | Pi I2C-1, SDA BCM 2, SCL BCM 3 | fixed by Pi |
 | DPS310 address | `0x77` | `sensor.dps310_i2c_addr` |
 | ADS1115 address | `0x48` | `sensor.ads1115_i2c_addr` |
@@ -285,11 +331,17 @@ This map is the current software default. Change it in
 Check interfaces on the Pi:
 
 ```bash
+# The setup script installs this SPI0 CS mapping in the active boot config:
+grep -E '^dtoverlay=spi0-2cs,cs0_pin=22,cs1_pin=23$' \
+  /boot/firmware/config.txt /boot/config.txt 2>/dev/null
 i2cdetect -y 1
 ls -l /dev/spidev*
 ls -l /dev/ttyUSB*
 gpioinfo gpiochip0
 ```
+
+After adding or changing the SPI overlay, reboot before checking
+`/dev/spidev0.0` and `/dev/spidev0.1`.
 
 Expected I2C devices:
 
@@ -334,24 +386,26 @@ sensor.ads1115_i2c_addr=0x48
 sensor.uv_ads1115_channel=0
 sensor.resistance_source=disabled
 
-heater.output_lines=12,20,21,23,24,25
+hal.status_led_enabled=false
+hal.mode_led_enabled=false
+heater.output_lines=17,18,27,5,6,13
 heater.pwm_frequency_hz=10.0
 heater.active_high=true
 
 motor0.driver=tmc5160
 motor0.spi_device=/dev/spidev0.0
-motor0.cs_line=8
-motor0.step_line=5
-motor0.dir_line=6
-motor0.enable_line=13
+motor0.cs_line=22
+motor0.step_line=19
+motor0.dir_line=26
+motor0.enable_line=12
 motor0.samples=0,1,2,3
 
 motor1.driver=tmc5160
 motor1.spi_device=/dev/spidev0.1
-motor1.cs_line=7
-motor1.step_line=19
-motor1.dir_line=26
-motor1.enable_line=16
+motor1.cs_line=23
+motor1.step_line=16
+motor1.dir_line=20
+motor1.enable_line=21
 motor1.samples=4,5,6,7
 ```
 

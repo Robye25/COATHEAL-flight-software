@@ -99,17 +99,24 @@ SystemController::SystemController(OnboardConfig config)
 bool SystemController::Initialize(std::string* error) {
   if (config_.runtime.use_simulated_pwm) {
     pwm_ = std::make_unique<SimulatedPwmController>(config_.hardware.heater_count);
-    status_led_ = std::make_unique<SimulatedStatusLed>("heartbeat",
-                                                       config_.hal.status_led_line);
-    mode_led_ = std::make_unique<SimulatedStatusLed>("mode",
-                                                     config_.hal.mode_led_line);
   } else {
     pwm_ = std::make_unique<LibgpiodPwmController>(
         config_.runtime.gpio_chip, config_.hardware.heater_count,
         config_.heaters.output_lines, config_.heaters.pwm_frequency_hz,
         config_.heaters.active_high);
+  }
+
+  if (config_.runtime.use_simulated_pwm || !config_.hal.status_led_enabled) {
+    status_led_ = std::make_unique<SimulatedStatusLed>("heartbeat",
+                                                       config_.hal.status_led_line);
+  } else {
     status_led_ = std::make_unique<GpioStatusLed>(
         config_.runtime.gpio_chip, config_.hal.status_led_line, "heartbeat");
+  }
+  if (config_.runtime.use_simulated_pwm || !config_.hal.mode_led_enabled) {
+    mode_led_ = std::make_unique<SimulatedStatusLed>("mode",
+                                                     config_.hal.mode_led_line);
+  } else {
     mode_led_ = std::make_unique<GpioStatusLed>(
         config_.runtime.gpio_chip, config_.hal.mode_led_line, "mode");
   }
