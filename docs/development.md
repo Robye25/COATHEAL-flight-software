@@ -33,7 +33,7 @@
 |---|---|
 | CMake | 3.16 |
 | C++ compiler | C++17 support (GCC 10+, Clang 12+) |
-| libgpiod | Any (for `LibgpiodPwmController`) |
+| libgpiod | 1.x or 2.x (for real GPIO output backends) |
 
 On Raspberry Pi OS:
 ```bash

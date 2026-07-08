@@ -2,22 +2,36 @@
 
 #include <utility>
 
+#include "coatheal/hal/gpio_output.hpp"
+
 namespace coatheal {
 
 GpioStatusLed::GpioStatusLed(std::string chip, std::size_t line, std::string label)
     : chip_(std::move(chip)), line_(line), label_(std::move(label)) {
 #ifdef COATHEAL_HAS_LIBGPIOD
-  healthy_ = true;
+  line_handle_ = RequestGpioOutput(chip_, line_, label_.c_str(), false);
+  healthy_ = line_handle_ != nullptr;
 #else
   healthy_ = false;
 #endif
 }
 
-GpioStatusLed::~GpioStatusLed() = default;
+GpioStatusLed::~GpioStatusLed() {
+  if (line_handle_ != nullptr) {
+    SetGpioOutput(static_cast<GpioOutput*>(line_handle_), false);
+    ReleaseGpioOutput(static_cast<GpioOutput*>(line_handle_));
+    line_handle_ = nullptr;
+  }
+}
 
 bool GpioStatusLed::Write(bool value) {
+  if (!healthy_ ||
+      !SetGpioOutput(static_cast<GpioOutput*>(line_handle_), value)) {
+    healthy_ = false;
+    return false;
+  }
   on_ = value;
-  return healthy_;
+  return true;
 }
 
 bool GpioStatusLed::On() { return Write(true); }

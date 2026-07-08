@@ -67,7 +67,6 @@ class Tmc5160Driver : public StepperDriver {
   bool last_direction_forward_ = true;
   int microstep_ = 1;
   std::uint64_t pulses_ = 0;
-  void* gpio_chip_handle_ = nullptr;
   void* cs_handle_ = nullptr;
   void* step_handle_ = nullptr;
   void* dir_handle_ = nullptr;

@@ -4,9 +4,7 @@
 #include <thread>
 #include <utility>
 
-#ifdef COATHEAL_HAS_LIBGPIOD
-#include <gpiod.h>
-#endif
+#include "coatheal/hal/gpio_output.hpp"
 
 namespace coatheal {
 
@@ -23,21 +21,23 @@ GpioStepDirStepperDriver::GpioStepDirStepperDriver(std::string chip,
       invert_direction_(invert_direction),
       enable_active_low_(enable_active_low) {
 #ifdef COATHEAL_HAS_LIBGPIOD
-  auto* chip_ptr = gpiod_chip_open(chip_.c_str());
-  if (chip_ptr == nullptr) return;
-  chip_handle_ = chip_ptr;
-  auto* step_ptr = gpiod_chip_get_line(chip_ptr, static_cast<unsigned int>(step_line_));
-  auto* dir_ptr = gpiod_chip_get_line(chip_ptr, static_cast<unsigned int>(dir_line_));
-  auto* enable_ptr =
-      gpiod_chip_get_line(chip_ptr, static_cast<unsigned int>(enable_line_));
-  if (step_ptr == nullptr || dir_ptr == nullptr || enable_ptr == nullptr) return;
   const int disabled = enable_active_low_ ? 1 : 0;
-  if (gpiod_line_request_output(step_ptr, "coatheal-step", 0) < 0) return;
-  step_handle_ = step_ptr;
-  if (gpiod_line_request_output(dir_ptr, "coatheal-dir", 0) < 0) return;
-  dir_handle_ = dir_ptr;
-  if (gpiod_line_request_output(enable_ptr, "coatheal-enable", disabled) < 0) return;
-  enable_handle_ = enable_ptr;
+  step_handle_ =
+      RequestGpioOutput(chip_, step_line_, "coatheal-step", false);
+  dir_handle_ =
+      RequestGpioOutput(chip_, dir_line_, "coatheal-dir", false);
+  enable_handle_ = RequestGpioOutput(
+      chip_, enable_line_, "coatheal-enable", disabled != 0);
+  if (step_handle_ == nullptr || dir_handle_ == nullptr ||
+      enable_handle_ == nullptr) {
+    ReleaseGpioOutput(static_cast<GpioOutput*>(step_handle_));
+    ReleaseGpioOutput(static_cast<GpioOutput*>(dir_handle_));
+    ReleaseGpioOutput(static_cast<GpioOutput*>(enable_handle_));
+    step_handle_ = nullptr;
+    dir_handle_ = nullptr;
+    enable_handle_ = nullptr;
+    return;
+  }
   healthy_ = true;
 #else
   healthy_ = false;
@@ -48,18 +48,11 @@ GpioStepDirStepperDriver::~GpioStepDirStepperDriver() {
   Enable(false);
 #ifdef COATHEAL_HAS_LIBGPIOD
   if (step_handle_ != nullptr) {
-    gpiod_line_set_value(static_cast<gpiod_line*>(step_handle_), 0);
-    gpiod_line_release(static_cast<gpiod_line*>(step_handle_));
+    SetGpioOutput(static_cast<GpioOutput*>(step_handle_), false);
   }
-  if (dir_handle_ != nullptr) {
-    gpiod_line_release(static_cast<gpiod_line*>(dir_handle_));
-  }
-  if (enable_handle_ != nullptr) {
-    gpiod_line_release(static_cast<gpiod_line*>(enable_handle_));
-  }
-  if (chip_handle_ != nullptr) {
-    gpiod_chip_close(static_cast<gpiod_chip*>(chip_handle_));
-  }
+  ReleaseGpioOutput(static_cast<GpioOutput*>(step_handle_));
+  ReleaseGpioOutput(static_cast<GpioOutput*>(dir_handle_));
+  ReleaseGpioOutput(static_cast<GpioOutput*>(enable_handle_));
 #endif
 }
 
@@ -68,7 +61,7 @@ bool GpioStepDirStepperDriver::Enable(bool enable) {
 #ifdef COATHEAL_HAS_LIBGPIOD
   const int value = enable ? (enable_active_low_ ? 0 : 1)
                            : (enable_active_low_ ? 1 : 0);
-  if (gpiod_line_set_value(static_cast<gpiod_line*>(enable_handle_), value) < 0) {
+  if (!SetGpioOutput(static_cast<GpioOutput*>(enable_handle_), value != 0)) {
     healthy_ = false;
     return false;
   }
@@ -84,20 +77,20 @@ bool GpioStepDirStepperDriver::Step(bool direction_forward) {
 #ifdef COATHEAL_HAS_LIBGPIOD
   const bool physical_direction = direction_forward != invert_direction_;
   if (physical_direction != last_direction_forward_) {
-    if (gpiod_line_set_value(static_cast<gpiod_line*>(dir_handle_),
-                             physical_direction ? 1 : 0) < 0) {
+    if (!SetGpioOutput(static_cast<GpioOutput*>(dir_handle_),
+                       physical_direction)) {
       healthy_ = false;
       return false;
     }
     last_direction_forward_ = physical_direction;
     std::this_thread::sleep_for(std::chrono::microseconds(2));
   }
-  if (gpiod_line_set_value(static_cast<gpiod_line*>(step_handle_), 1) < 0) {
+  if (!SetGpioOutput(static_cast<GpioOutput*>(step_handle_), true)) {
     healthy_ = false;
     return false;
   }
   std::this_thread::sleep_for(std::chrono::microseconds(2));
-  if (gpiod_line_set_value(static_cast<gpiod_line*>(step_handle_), 0) < 0) {
+  if (!SetGpioOutput(static_cast<GpioOutput*>(step_handle_), false)) {
     healthy_ = false;
     return false;
   }

@@ -73,7 +73,6 @@ class GpioStepDirStepperDriver : public StepperDriver {
   bool last_direction_forward_ = true;
   int microstep_ = 1;
   std::uint64_t pulses_ = 0;
-  void* chip_handle_ = nullptr;
   void* step_handle_ = nullptr;
   void* dir_handle_ = nullptr;
   void* enable_handle_ = nullptr;

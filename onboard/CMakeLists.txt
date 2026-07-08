@@ -31,6 +31,7 @@ add_library(coatheal_onboard_core
   src/hal/pwm_controller.cpp
   src/hal/rtc_adapter.cpp
   src/hal/spi_adapter.cpp
+  src/hal/gpio_output.cpp
   src/hal/gpio_status_led.cpp
   src/hal/simulated_status_led.cpp
   src/hal/simulated_stepper_driver.cpp
@@ -50,6 +51,9 @@ target_link_libraries(coatheal_onboard_core PUBLIC Threads::Threads)
 
 if(LIBGPIOD_FOUND)
   target_compile_definitions(coatheal_onboard_core PUBLIC COATHEAL_HAS_LIBGPIOD=1)
+  if(LIBGPIOD_VERSION VERSION_GREATER_EQUAL "2.0")
+    target_compile_definitions(coatheal_onboard_core PUBLIC COATHEAL_LIBGPIOD_V2=1)
+  endif()
   target_include_directories(coatheal_onboard_core PUBLIC ${LIBGPIOD_INCLUDE_DIRS})
   target_link_libraries(coatheal_onboard_core PUBLIC ${LIBGPIOD_LIBRARIES})
 endif()
