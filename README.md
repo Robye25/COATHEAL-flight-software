@@ -38,6 +38,7 @@ COATHEAL is a BEXUS high-altitude balloon experiment investigating thermal self-
 | [docs/protocol.md](docs/protocol.md) | Wire protocol specification (DATA, `EVT,PULL`, commands) |
 | [docs/configuration.md](docs/configuration.md) | Full INI configuration reference |
 | [docs/deployment.md](docs/deployment.md) | Pi setup and service installation guide |
+| [docs/rev-c-installation-and-hardware-setup.md](docs/rev-c-installation-and-hardware-setup.md) | Rev C installation, plug-and-play Ethernet, component, and pin setup guide |
 | [docs/development.md](docs/development.md) | Build, test, and bench-mode workflow |
 | [docs/hardware.md](docs/hardware.md) | Hardware reference and HAL status (Rev B.1 BOM) |
 | [docs/CHANGELOG-RevB.md](docs/CHANGELOG-RevB.md) | Rev B + Rev B.1 change log |
@@ -82,18 +83,19 @@ ctest --test-dir build --output-on-failure
 python -m unittest discover -s ground-station/tests -p "test_*.py"
 ```
 
-## Mission Phases (Rev B)
+## Mission Phases (Rev C Manual-First)
 
 | Phase | Trigger | Thermal policy |
 |---|---|---|
 | `BOOT` | Power-on | Heaters off |
-| `ASCENT` | `SystemMode = RUN` | Floor ≥ +5 °C (per-sample PID, 0.5 °C hysteresis) |
-| `FLOAT` | Pressure ≤ 100 mbar | Floor ≥ +5 °C; pulls happen here |
-| `DESCENT` | Pressure ≥ 300 mbar | Floor ≥ +5 °C |
-| `LANDED` | Pressure ≥ 800 mbar | Heaters off |
+| `ASCENT` | `SET_PHASE ASCENT` / `FORCE_START`; fallback pressure tracking | Manual duties while connected; +5 C floor only during fallback |
+| `PRE_FLOAT` | `SET_PHASE PRE_FLOAT`; fallback pressure tracking | Manual duties while connected; no automatic fatigue pulls |
+| `FLOAT` | `SET_PHASE FLOAT` | Manual duties while connected; pulls are explicit `PULL_*` commands |
+| `DESCENT` | `SET_PHASE DESCENT` / `FORCE_STOP`; fallback pressure tracking | Manual duties while connected; +5 C floor only during fallback |
+| `LANDED` | `SET_PHASE LANDED`; fallback pressure tracking | Heaters off unless manually overridden |
 | `STOPPED` | `FORCE_STOP` / `SHUTDOWN_SAFE` | Heaters off |
 
-Transitions are pressure-based and can be overridden by ground command (`FORCE_START`, `FORCE_STOP`, `RESET_CTRL`, `SHUTDOWN_SAFE`). Microcrack formation at Rev B.1 is driven by **mechanical pulls** from two ball-screw stepper motors, not by a thermal activation ramp.
+Rev C is manual-first. While the ground link is healthy, `ARM` enables operator-directed heater and motor commands; the onboard does not run phase, fatigue, or phase-entry motor automation. If an established telemetry link is lost, the onboard can fall back to pressure phase tracking and the +5 C floor controller. Microcrack formation is driven by explicit mechanical pull commands from the ground station.
 
 ## Heaters, Sensors, and Motors (Rev B.1)
 
@@ -113,25 +115,27 @@ Transitions are pressure-based and can be overridden by ground command (`FORCE_S
 | Command | Safe? | Description |
 |---|---|---|
 | `PING` | OK | Liveness check |
-| `STATUS` | OK | Phase, bench mode, queue depth, tick rate, energy-budget state |
-| `FORCE_START` | OK | Force transition into `ASCENT` (Rev B) |
-| `FORCE_STOP` | confirm | Force mission into `DESCENT` / `STOPPED` |
+| `STATUS` | OK | Phase, mode, manual/fallback state, queue depth, tick rate, energy-budget state |
+| `ARM` / `DISARM` | confirm | Enable / disable manual flight outputs |
+| `SET_PHASE <phase>` | OK | Manually set `BOOT`, `ASCENT`, `PRE_FLOAT`, `FLOAT`, `DESCENT`, `LANDED`, or `STOPPED` |
+| `FORCE_START` | OK | Manual-first alias for `SET_PHASE ASCENT` |
+| `FORCE_STOP` | confirm | Manual-first alias for `SET_PHASE DESCENT` and stepper stop |
 | `HEATERS_OFF` | confirm | Emergency heater shutoff |
 | `RESET_CTRL` | confirm | Reset all per-sample PID integrators |
 | `SHUTDOWN_SAFE` | confirm | Graceful process shutdown |
 | `SET_TICK_HZ <hz>` | OK | Live downlink/loop rate, range `[0.1, 5.0]` |
 | `RADIO_SILENCE` / `RADIO_RESUME` | OK | Halt / resume TX socket (queue keeps filling) |
-| `ARM_DEBUG <token>` | — | Arm extended debug commands (bench mode only) |
-| `SET_HEATER_DUTY <i> <0–1>` | debug | Override single heater (i in 0..5) |
-| `SET_ALL_DUTY <0–1>` | debug | Override all heaters |
+| `SET_HEATER_DUTY <i> <0-1>` | OK | Set one heater duty (i in 0..5) |
+| `SET_ALL_DUTY <0-1>` | OK | Set all heater duties |
+| `CLEAR_OVERRIDES` | OK | Clear heater and PID overrides |
+| `ARM_DEBUG <token>` | debug | Arm bench-only debug commands |
 | `SET_PID <kp> <ki> <kd>` | debug | Override PID gains |
-| `CLEAR_OVERRIDES` | debug | Clear all overrides |
 | `SET_BENCH_MODE <1\|0>` | debug | Toggle bench mode |
 | `STEPPER_MOVE <id> <steps>` | motion | Relative step move (id 0 or 1) |
 | `STEPPER_BEND <id> <abs> [hold_s]` | motion | Absolute move tagged as a bend |
 | `PULL_ARM <id>` / `PULL_EXECUTE <id>` | motion | Acquire `MotionLock`, run a pull cycle |
 
-`confirm` = requires confirmation in GUI / `--yes` flag in CLI. `debug` = requires `ARM_DEBUG` first. `motion` commands acquire the `MotionLock` interlock; while held, all heater duties are forced to zero.
+`confirm` = requires confirmation in GUI / `--yes` flag in CLI. `debug` = requires bench mode plus `ARM_DEBUG`. `motion` commands acquire the `MotionLock` interlock; while held, all heater duties are forced to zero.
 
 ## Pi Boot Autostart
 

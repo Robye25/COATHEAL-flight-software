@@ -2,6 +2,10 @@
 
 This guide covers first-time Raspberry Pi 4 setup, building the onboard software, installing the systemd service, and network configuration.
 
+For the current Rev C operator procedure, including plug-and-play Ethernet,
+manual-first operation, and the current component/pin map, use
+[rev-c-installation-and-hardware-setup.md](rev-c-installation-and-hardware-setup.md).
+
 ---
 
 ## Prerequisites
@@ -47,7 +51,7 @@ Key settings to review before flight:
 | `runtime.bench_mode` | `false` |
 | `runtime.use_simulated_pwm` | `false` |
 | `runtime.debug_arm_code` | Change from default |
-| `comms.telemetry_host` | Ground station laptop IP |
+| `comms.telemetry_host` | Empty for plug-and-play, or a fixed ground-station laptop IP |
 | `storage.primary_log_path` | SD card mount path |
 | `storage.secondary_log_path` | USB drive mount path |
 

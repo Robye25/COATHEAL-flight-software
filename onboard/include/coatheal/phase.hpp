@@ -37,4 +37,28 @@ inline std::string ToString(MissionPhase phase) {
   return "UNKNOWN";
 }
 
+inline bool ParseMissionPhase(const std::string& text, MissionPhase* phase) {
+  if (phase == nullptr) {
+    return false;
+  }
+  if (text == "BOOT") {
+    *phase = MissionPhase::kBoot;
+  } else if (text == "ASCENT") {
+    *phase = MissionPhase::kAscent;
+  } else if (text == "PRE_FLOAT") {
+    *phase = MissionPhase::kPreFloat;
+  } else if (text == "FLOAT") {
+    *phase = MissionPhase::kFloat;
+  } else if (text == "DESCENT") {
+    *phase = MissionPhase::kDescent;
+  } else if (text == "LANDED") {
+    *phase = MissionPhase::kLanded;
+  } else if (text == "STOPPED") {
+    *phase = MissionPhase::kStopped;
+  } else {
+    return false;
+  }
+  return true;
+}
+
 }  // namespace coatheal

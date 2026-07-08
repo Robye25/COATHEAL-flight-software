@@ -3,22 +3,38 @@
 Safe-guarded: stops any prior debug run, refuses to start a second instance,
 and verifies liveness by hitting the command port.
 """
+import getpass
 import os
-import sys
+import subprocess
 
 import paramiko
 
-HOST = "169.254.10.10"
-USER = "coatheal"
-PW = "COTHIL"
-BUNDLE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                     "coatheal.bundle")
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+HOST = os.environ.get("COATHEAL_PI_HOST", "169.254.10.10")
+USER = os.environ.get("COATHEAL_PI_USER", "coatheal")
+PASSWORD = os.environ.get("COATHEAL_PI_PASSWORD") or getpass.getpass("Pi password: ")
+BUNDLE = os.environ.get("COATHEAL_BUNDLE", os.path.join(ROOT, "coatheal.bundle"))
 REMOTE_BUNDLE = "/tmp/coatheal.bundle"
 REMOTE_DIR = "/home/coatheal/COATHEAL-flight-software"
+try:
+    CURRENT_REF = subprocess.check_output(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=ROOT, text=True).strip()
+except subprocess.CalledProcessError:
+    CURRENT_REF = "HEAD"
+BUNDLE_REF = os.environ.get(
+    "COATHEAL_BUNDLE_REF", CURRENT_REF if CURRENT_REF != "HEAD" else "HEAD")
+
+if not os.path.exists(BUNDLE):
+    refs = ["HEAD", "main"]
+    if BUNDLE_REF and BUNDLE_REF not in refs:
+        refs.append(BUNDLE_REF)
+    subprocess.run(["git", "bundle", "create", BUNDLE, *refs],
+                   cwd=ROOT, check=True)
 
 c = paramiko.SSHClient()
 c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-c.connect(HOST, username=USER, password=PW, timeout=15, banner_timeout=15)
+c.connect(HOST, username=USER, password=PASSWORD, timeout=15, banner_timeout=15)
 
 print(f"uploading {BUNDLE} -> {REMOTE_BUNDLE}")
 sftp = c.open_sftp(); sftp.put(BUNDLE, REMOTE_BUNDLE); sftp.close()
@@ -28,7 +44,7 @@ COMMANDS = [
     f"cd {REMOTE_DIR} && bash scripts/run_debug.sh --stop 2>&1 || true",
 
     # Sync to the freshly-pushed main.
-    f"cd {REMOTE_DIR} && git fetch {REMOTE_BUNDLE} main:main-remote && "
+    f"cd {REMOTE_DIR} && git fetch {REMOTE_BUNDLE} {BUNDLE_REF}:main-remote && "
     f"git reset --hard main-remote && git log --oneline -3",
 
     # Rebuild with the debug-friendly sources.

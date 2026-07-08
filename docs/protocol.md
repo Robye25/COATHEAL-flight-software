@@ -192,9 +192,10 @@ ONBOARD_HELLO,<nonce>,<session_id>,<hostname>,<command_port>,<telemetry_port>\n
 
 Flow: ground sends `GS_HELLO` every ~1 s on UDP 4100 → onboard validates nonce → onboard replies `ONBOARD_HELLO` → ground caches source IP in `logs/discovered_onboard.json`.
 
-If discovery fails, both sides fall back to the static IPs in `onboard.ini` (`static_ground_ip`, `static_pi_ip`).
-
-> **Note:** `gui_app.py` does not currently implement the UDP discovery beacon. Use `--host` or rely on the static IP.
+If UDP discovery fails, the ground-station GUI and CLI also probe the Pi's
+link-local command address (`169.254.10.10:5000`) with `PING`. Any successful
+command connection is treated by the onboard software as an authoritative
+ground-station return path, so telemetry is retargeted to the command peer IP.
 
 ---
 
@@ -216,15 +217,21 @@ Commands are sent from the ground station to the onboard over TCP (port 5000). E
 | Command | Args | Response | Description |
 |---|---|---|---|
 | `PING` | — | `ACK,PING,pong` | Liveness check |
-| `STATUS` | — | `ACK,STATUS,phase=...;bench_mode=...;debug_armed=...;telemetry_target=...;queue_depth=...;tick_hz=...;energy_wh=...;energy_budget_wh=...;budget_exhausted=...` | System status |
-| `FORCE_START` | — | `ACK,FORCE_START,override accepted` | Force transition into `ASCENT` (Rev B) |
-| `FORCE_STOP` | — | `ACK,FORCE_STOP,override accepted` | Force into `DESCENT` / `STOPPED` |
+| `STATUS` | — | `ACK,STATUS,phase=...;mode=...;manual_first=...;link_seen=...;link_loss_s=...;fallback_active=...;...` | System status |
+| `ARM` | — | `ACK,ARM,mode=RUN;manual_control=1` | Enable manual flight outputs |
+| `DISARM` | — | `ACK,DISARM,mode=STANDBY` | Disable outputs, clear heater overrides, stop steppers |
+| `SET_PHASE` | `<phase>` | `ACK,SET_PHASE,phase=<phase>` | Manually set `BOOT`, `ASCENT`, `PRE_FLOAT`, `FLOAT`, `DESCENT`, `LANDED`, or `STOPPED` |
+| `FORCE_START` | — | `ACK,FORCE_START,phase=ASCENT` | Manual-first alias for `SET_PHASE ASCENT` |
+| `FORCE_STOP` | — | `ACK,FORCE_STOP,phase=DESCENT;steppers=stopped` | Manual-first alias for descent + stepper stop |
 | `HEATERS_OFF` | — | `ACK,HEATERS_OFF,all heaters disabled` | Emergency: zero all 6 heater duties |
 | `RESET_CTRL` | — | `ACK,RESET_CTRL,control loop reset queued` | Reset per-sample PID integrators |
 | `SHUTDOWN_SAFE` | — | `ACK,SHUTDOWN_SAFE,safe shutdown queued` | Graceful process shutdown |
 | `SET_TICK_HZ` | `<hz>` | `ACK,SET_TICK_HZ,tick_hz=<hz>` | Live loop-rate change, `[0.1, 5.0]` Hz |
 | `RADIO_SILENCE` | — | `ACK,RADIO_SILENCE,radio silent` | Stop pushing frames over the TX socket (< 1 s). Queue keeps filling. |
 | `RADIO_RESUME` | — | `ACK,RADIO_RESUME,radio resumed` | Re-enable transmission; drain in order on next tick. |
+| `SET_HEATER_DUTY` | `<index> <duty>` | `ACK,SET_HEATER_DUTY,override applied` | Set one manual heater duty. `index` in `0..5`; `duty` in `0.0..1.0`. |
+| `SET_ALL_DUTY` | `<duty>` | `ACK,SET_ALL_DUTY,global override applied` | Set all 6 manual heater duties. |
+| `CLEAR_OVERRIDES` | — | `ACK,CLEAR_OVERRIDES,overrides cleared` | Clear heater and PID overrides. |
 | `ARM_DEBUG` | `<token>` | `ACK,ARM_DEBUG,debug armed` | Arm extended debug commands (bench mode only) |
 
 Aliases: `ON` = `FORCE_START`, `OFF` = `FORCE_STOP`, `RESET` = `RESET_CTRL`.
@@ -234,10 +241,7 @@ Aliases: `ON` = `FORCE_START`, `OFF` = `FORCE_STOP`, `RESET` = `RESET_CTRL`.
 | Command | Args | Description |
 |---|---|---|
 | `DISARM_DEBUG` | — | Disarm debug mode |
-| `SET_HEATER_DUTY` | `<index> <duty>` | Override single heater. `index` in `0..5`; `duty` in `0.0..1.0`. |
-| `SET_ALL_DUTY` | `<duty>` | Override all 6 heaters. |
 | `SET_PID` | `<kp> <ki> <kd>` | Override per-sample PID gains. |
-| `CLEAR_OVERRIDES` | — | Clear all heater and PID overrides. |
 | `SET_BENCH_MODE` | `<1\|0>` | Toggle bench mode. |
 
 ### Error responses
@@ -260,10 +264,10 @@ Aliases: `ON` = `FORCE_START`, `OFF` = `FORCE_STOP`, `RESET` = `RESET_CTRL`.
 ← ACK,PING,pong\n
 
 → STATUS\n
-← ACK,STATUS,phase=FLOAT;bench_mode=1;debug_armed=0;telemetry_target=169.254.251.200;queue_depth=0;tick_hz=1.00;energy_wh=3.21;energy_budget_wh=130.00;budget_exhausted=0\n
+← ACK,STATUS,phase=FLOAT;mode=RUN;manual_first=1;link_seen=1;link_loss_s=0;fallback_active=0;bench_mode=0;debug_armed=0;telemetry_target=169.254.251.200;queue_depth=0;tick_hz=1.00;energy_wh=3.21;energy_budget_wh=130.00;budget_exhausted=0\n
 
-→ ARM_DEBUG COATHEAL_DEBUG\n
-← ACK,ARM_DEBUG,debug armed\n
+→ SET_PHASE FLOAT\n
+← ACK,SET_PHASE,phase=FLOAT\n
 
 → SET_HEATER_DUTY 0 0.5\n
 ← ACK,SET_HEATER_DUTY,override applied\n

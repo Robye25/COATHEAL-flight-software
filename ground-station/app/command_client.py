@@ -8,6 +8,8 @@ from pathlib import Path
 
 from .protocol import build_command
 
+DEFAULT_STATIC_HOST = "169.254.10.10"
+
 
 DANGEROUS_COMMANDS = {
     "FORCE_STOP",
@@ -43,9 +45,14 @@ def discover_onboard_host(discovery_port: int, command_port: int, timeout: float
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         sock.settimeout(timeout)
 
-        try:
-            sock.sendto(hello.encode("utf-8"), ("255.255.255.255", discovery_port))
-        except OSError:
+        sent = False
+        for target in ("255.255.255.255", DEFAULT_STATIC_HOST):
+            try:
+                sock.sendto(hello.encode("utf-8"), (target, discovery_port))
+                sent = True
+            except OSError:
+                continue
+        if not sent:
             return None
 
         end_time = time.time() + timeout
@@ -90,7 +97,7 @@ def add_subparser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
     parser.add_argument("--discovery-port", type=int, default=4100)
     parser.add_argument("--discover-timeout", type=float, default=2.0)
     parser.add_argument("--discovered-file", type=Path, default=Path("logs/discovered_onboard.json"))
-    parser.add_argument("--static-host", default="192.168.50.2")
+    parser.add_argument("--static-host", default=DEFAULT_STATIC_HOST)
     parser.set_defaults(_coatheal_handler=_handle)
 
 

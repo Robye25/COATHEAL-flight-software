@@ -1,6 +1,11 @@
 build/
 out/
 dist/
+*.bundle
+SED.txt
+bexus_manual.txt
+guidelines.jpeg
+Preparation_and_Test_Activities_at_Esrange.docx
 
 # logs and generated data
 *.log
@@ -15,6 +20,7 @@ __pycache__/
 .pytest_cache/
 .venv/
 venv/
+.tmp-python/
 
 # editor
 .vscode/
@@ -23,6 +29,7 @@ venv/
 # secrets
 .env
 .env.*
+config/onboard.local.ini
 
 # OS
 Thumbs.db

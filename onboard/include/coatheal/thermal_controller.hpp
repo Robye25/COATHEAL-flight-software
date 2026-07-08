@@ -17,6 +17,7 @@ struct SensorSnapshot;  // defined in telemetry.hpp; forward-declared here
 
 struct ControlOverrides {
   bool heaters_off = false;
+  bool floor_control_enabled = true;
   std::optional<std::pair<std::size_t, double>> single_heater_override;
   std::optional<double> all_heaters_override;
   std::optional<PidGains> pid_override;

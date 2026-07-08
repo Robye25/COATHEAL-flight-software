@@ -2,7 +2,7 @@
 
 ## Overview
 
-COATHEAL uses a client–server architecture over TCP/IP. The onboard C++ application runs autonomously on the Raspberry Pi 4 and streams telemetry to the ground station. The ground station receives, acknowledges, logs, and displays data, and sends operator commands back to the Pi.
+COATHEAL uses a client-server architecture over TCP/IP. The onboard C++ application is manual-first on the Raspberry Pi 4: while the telemetry link is healthy, operators command phase, heaters, and motors from the ground station. The onboard keeps safety interlocks, logging, telemetry replay, watchdog recovery, and link-loss fallback. If an established link is lost, it can resume pressure phase tracking and the +5 C floor controller until operators reconnect.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -90,11 +90,11 @@ Runs at `tick_hz` (default 1 Hz). Each tick:
 
 1. Apply queued state/control overrides (from commands received between ticks).
 2. Read sensor snapshot (`SensorManager`) — temperatures, pressure, UV, **sample resistance**.
-3. Update mission phase (`StateManager`) — pressure-driven FSM.
-4. Compute requested heater duties (`ThermalController`) — 6 per-sample PIDs.
+3. Track link state; if manual-first link-loss fallback is active, update mission phase (`StateManager`) from pressure.
+4. Compute requested heater duties (`ThermalController`) — manual duty overrides while connected; +5 C floor PID only in fallback or legacy autonomous mode.
 5. Schedule constrained duties (`HeaterScheduler`) — 4-active / 20 W / 130 Wh / MotionLock gate.
 6. Apply duties to PWM hardware (6 channels).
-7. Tick both stepper channels (`StepperChannel::Tick`).
+7. Tick both stepper channels (`StepperChannel::Tick`) without phase-entry setpoints in manual-first mode.
 8. Build `TelemetryRecord` + status flags including `RESISTANCE_OK`.
 9. Serialize DATA frame (`SerializeTelemetryDataFrame`) with `RESISTANCE=` segment.
 10. Write to both storage paths (`StorageManager`).
@@ -109,7 +109,9 @@ Runs at `tick_hz` (default 1 Hz). Each tick:
 
 Every frame (DATA and `EVT,PULL`) is written to the durable disk queue before being sent. On each tick, `DrainTelemetryQueue` iterates all pending frames, sends each one, and waits for a per-frame ACK. Successfully ACK'd frames are removed. If the link is down, frames accumulate on disk (up to 72 h / 8 GiB) and are replayed when the link is restored.
 
-### Phase state machine (Rev B)
+### Phase state machine (Rev C manual-first)
+
+During normal connected flight, phase is an operator label controlled by `SET_PHASE` (`FORCE_START` maps to `ASCENT`, `FORCE_STOP` maps to `DESCENT` and stops steppers). The pressure FSM below is used only when `manual.manual_first=false` or after an established ground link is lost for `manual.link_loss_fallback_s`.
 
 ```
          power-on

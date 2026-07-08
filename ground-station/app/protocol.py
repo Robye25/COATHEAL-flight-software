@@ -245,6 +245,7 @@ KNOWN_COMMANDS = {
     "SET_TICK_HZ",
     "RADIO_SILENCE",
     "RADIO_RESUME",
+    "SET_PHASE",
     "ARM",
     "DISARM",
     "ENTER_SAFE",
@@ -260,6 +261,8 @@ KNOWN_COMMANDS = {
     "STEPPER_ENABLE",
     "STEPPER_DISABLE",
     "STEPPER_BEND",
+    "PULL_ARM",
+    "PULL_EXECUTE",
 }
 
 

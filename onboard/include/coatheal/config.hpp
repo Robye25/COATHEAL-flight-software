@@ -14,10 +14,21 @@ struct RuntimeConfig {
   std::string gpio_chip = "/dev/gpiochip0";
 };
 
+struct ManualControlConfig {
+  // Rev C manual-first policy:
+  //   * while the ground link is healthy, ARM enables operator-directed
+  //     heater/stepper commands but does not run the phase/fatigue automation;
+  //   * after an established link is lost, the onboard may fall back to the
+  //     cold-protection floor controller.
+  bool manual_first = true;
+  bool link_loss_fallback_enabled = true;
+  double link_loss_fallback_s = 10.0;
+};
+
 struct CommsConfig {
-  std::string telemetry_host = "127.0.0.1";
+  std::string telemetry_host;
   std::string static_ground_ip;
-  std::string static_pi_ip = "192.168.50.2";
+  std::string static_pi_ip = "169.254.10.10";
   int telemetry_port = 4000;
   int command_port = 5000;
   int reconnect_ms = 2000;
@@ -153,6 +164,7 @@ struct HalConfig {
 
 struct OnboardConfig {
   RuntimeConfig runtime;
+  ManualControlConfig manual;
   CommsConfig comms;
   StorageConfig storage;
   PhaseConfig phase;

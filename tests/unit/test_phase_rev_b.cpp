@@ -305,6 +305,22 @@ void TestShutdownSafeGoesToStopped() {
   assert(p == coatheal::MissionPhase::kStopped);
 }
 
+void TestManualSetPhaseResetsDebounce() {
+  auto cfg = MakeConfig();
+  cfg.transition.debounce_samples = 3;
+  coatheal::StateManager sm(cfg);
+  const std::vector<double> samples(8, 5.0);
+  const auto t0 = std::chrono::steady_clock::now();
+
+  sm.Update(900.0, samples, {}, t0);
+  sm.Update(100.0, samples, {}, t0);
+  sm.Update(100.0, samples, {}, t0);
+
+  sm.SetPhase(coatheal::MissionPhase::kAscent);
+  auto p = sm.Update(100.0, samples, {}, t0);
+  assert(p == coatheal::MissionPhase::kAscent);
+}
+
 }  // namespace
 
 int main() {
@@ -318,6 +334,7 @@ int main() {
   TestPreFloatAbortOnDescentPressure();
   TestFullPhaseTransitionSequence();
   TestShutdownSafeGoesToStopped();
+  TestManualSetPhaseResetsDebounce();
   std::cout << "Rev C phase/thermal tests passed.\n";
   return 0;
 }

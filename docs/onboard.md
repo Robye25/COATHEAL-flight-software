@@ -1,6 +1,6 @@
 # Onboard Software Reference (Rev B.1)
 
-The onboard software is a C++17 application (`coatheal_onboard`) running on a Raspberry Pi 4. It autonomously controls the COATHEAL experiment from power-on through mission completion.
+The onboard software is a C++17 application (`coatheal_onboard`) running on a Raspberry Pi 4. Rev C is manual-first: while the telemetry link is healthy, operators command phase, heater duties, and motor movement from the ground station. The onboard remains responsible for safety interlocks, telemetry/logging, watchdog recovery, and link-loss fallback.
 
 ## Entry point
 
@@ -35,8 +35,8 @@ Commands from the ground station set thread-safe flags (`std::mutex overrides_mu
 
 | Flag | Set by | Effect |
 |---|---|---|
-| `force_start` | `FORCE_START` | Transition from `BOOT` into `ASCENT` next tick. |
-| `force_stop` | `FORCE_STOP` | Transition toward `DESCENT` / `STOPPED`. |
+| `force_start` | `FORCE_START` | Legacy autonomous transition request; in manual-first mode this sets phase to `ASCENT` immediately. |
+| `force_stop` | `FORCE_STOP` | Legacy autonomous stop request; in manual-first mode this sets phase to `DESCENT` and stops steppers. |
 | `reset_control` | `RESET_CTRL` | `ThermalController::Reset()` next tick. |
 | `shutdown_safe` | `SHUTDOWN_SAFE` | Set `running_ = false`, stop loop. |
 | `heaters_off` | `HEATERS_OFF` | Zero all heater duties via `ControlOverrides`. |
@@ -48,11 +48,11 @@ Commands from the ground station set thread-safe flags (`std::mutex overrides_mu
 
 1. Apply queued state/control overrides.
 2. `SensorManager::ReadSnapshot` — 8-sample temperatures, ambient P + T, UV, sample resistance.
-3. `StateManager::Update` — pressure-driven FSM.
-4. `ThermalController::ComputeRequestedDuty` — 6 per-sample PIDs.
+3. Track ground-link state; run `StateManager::Update` only in link-loss fallback or legacy autonomous mode.
+4. `ThermalController::ComputeRequestedDuty` - manual duty overrides while connected; 6 per-sample floor PIDs only in fallback or legacy autonomous mode.
 5. `HeaterScheduler::Schedule` — 4-heater / 20 W / 130 Wh caps, MotionLock interlock.
 6. `PwmController::SetDuty` — apply to GPIO or simulated backend.
-7. `StepperChannel::Tick` × 2.
+7. `StepperChannel::Tick` x 2; phase-entry stepper setpoints are disabled in manual-first mode.
 8. Build `TelemetryRecord` + status flags (`SPI_OK`, `I2C_OK`, `LINK_OK`, `T_AMBIENT_OK`, `P_AMBIENT_OK`, `UNIFORMITY_OK`, `OVERTEMP_OK`, `ENERGY_OK`, `RS485_OK`, `HEATER_INHIBITED`/`HEATER_ACTIVE`, `RESISTANCE_OK`).
 9. `SerializeTelemetryDataFrame` → storage CSV + telemetry queue.
 10. `DrainTelemetryQueue` → TCP send + ACK reconciliation.
@@ -65,12 +65,13 @@ Commands from the ground station set thread-safe flags (`std::mutex overrides_mu
 
 **[`onboard/src/state_manager.cpp`](../onboard/src/state_manager.cpp)** | **[`onboard/include/coatheal/state_manager.hpp`](../onboard/include/coatheal/state_manager.hpp)**
 
-Pressure-driven Rev B FSM (`BOOT → ASCENT → FLOAT → DESCENT → LANDED`, plus `STOPPED`). No timed expiry; every transition is a pure function of the latest pressure reading and override flags.
+Pressure-driven Rev C fallback FSM (`BOOT -> ASCENT -> PRE_FLOAT -> FLOAT -> DESCENT -> LANDED`, plus `STOPPED`). In normal connected flight, operators set phase explicitly with `SET_PHASE`; this FSM is used only when `manual.manual_first=false` or link-loss fallback is active.
 
-- `ASCENT → FLOAT` at `transition.ascent_to_float_mbar` (100 mbar default)
-- `FLOAT → DESCENT` at `transition.float_to_descent_mbar` (300 mbar)
-- `DESCENT → LANDED` at `transition.descent_to_landed_mbar` (800 mbar)
-- `FORCE_START` / `FORCE_STOP` / `SHUTDOWN_SAFE` can override from any state.
+- `ASCENT -> PRE_FLOAT` at `transition.pre_float_mbar` after debounce.
+- `PRE_FLOAT -> FLOAT` only when an external/manual completion signal is set; manual-first mode does not auto-run fatigue pulls.
+- `FLOAT -> DESCENT` at `transition.float_to_descent_mbar` after debounce.
+- `DESCENT -> LANDED` at `transition.descent_to_landed_mbar` after debounce.
+- `SET_PHASE`, `FORCE_START`, `FORCE_STOP`, and `SHUTDOWN_SAFE` can override from command handling.
 
 ---
 

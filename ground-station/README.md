@@ -22,7 +22,7 @@ pip install -r requirements.txt
 python gui_app.py [--host <onboard-ip>] [--tel-port 4000] [--cmd-port 5000]
 ```
 
-**Default:** `python gui_app.py` connects to `169.254.10.10` on the standard ports.
+**Default:** `python gui_app.py` starts telemetry immediately, broadcasts discovery, and probes `169.254.10.10:5000`. A successful probe also teaches the Pi where to send telemetry, so the normal flow is plug in Ethernet, launch the GUI, wait for `connected`.
 
 ### GUI Panels
 
@@ -100,7 +100,7 @@ python main.py command --cmd "<COMMAND>" [OPTIONS]
 | `--timeout` | `3.0` | Socket timeout (seconds) |
 | `--yes` | off | Skip safety confirmation for dangerous commands |
 | `--no-discovery-enabled` | — | Disable UDP discovery |
-| `--static-host` | `192.168.50.2` | Static fallback IP |
+| `--static-host` | `169.254.10.10` | Static fallback IP |
 
 **Examples:**
 
@@ -108,14 +108,14 @@ python main.py command --cmd "<COMMAND>" [OPTIONS]
 # Liveness check
 python main.py command --cmd PING
 
-# Force activation ramp
-python main.py command --cmd FORCE_START
+# Arm manual outputs and set phase
+python main.py command --cmd ARM
+python main.py command --cmd "SET_PHASE ASCENT"
 
 # Emergency heater off (requires confirmation unless --yes)
 python main.py command --cmd HEATERS_OFF --yes
 
-# Override a single heater (requires ARM_DEBUG first)
-python main.py command --cmd "ARM_DEBUG mytoken"
+# Set a single heater duty
 python main.py command --cmd "SET_HEATER_DUTY 3 0.75"
 ```
 

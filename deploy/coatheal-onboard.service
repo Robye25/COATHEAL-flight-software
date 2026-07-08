@@ -2,6 +2,9 @@
 Description=COATHEAL Onboard Flight Software
 After=network-online.target systemd-time-wait-sync.service
 Wants=network-online.target
+# Integration can flap a lot; don't let systemd give up.
+StartLimitIntervalSec=300
+StartLimitBurst=20
 
 [Service]
 # Type=notify so systemd uses our sd_notify READY=1 and WATCHDOG=1 messages.
@@ -15,11 +18,6 @@ ExecStartPre=/bexus/code/coatheal/scripts/preflight_healthcheck.sh ${COATHEAL_CO
 ExecStart=/bexus/code/coatheal/build/onboard/coatheal_onboard --config ${COATHEAL_CONFIG}
 Restart=always
 RestartSec=2
-# Integration can flap a lot; don't let systemd give up.
-StartLimitIntervalSec=300
-StartLimitBurst=20
-# No runtime limit for the flight process.
-RuntimeMaxSec=0
 # BEXUS User Manual §5.9: hung-loop recovery. The main loop pings the watchdog
 # every tick (default 1 Hz). 10 s gives 10 ticks of headroom before SIGKILL.
 WatchdogSec=10

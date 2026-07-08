@@ -64,6 +64,14 @@ class TelemetryClient {
   void SetTransmitEnabled(bool enabled);
   bool transmit_enabled() const;
 
+  // Treat a successful command connection as authoritative evidence of the
+  // ground-station return path. This is the plug-and-play fallback when UDP
+  // broadcast discovery is blocked or unreliable on link-local Ethernet.
+  void ObserveGroundStation(const std::string& host,
+                            int telemetry_port,
+                            int command_port,
+                            int priority);
+
   std::string session_id() const;
   std::string current_host() const;
 

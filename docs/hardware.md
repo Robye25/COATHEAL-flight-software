@@ -6,6 +6,12 @@
 
 Rev B.1 (April 2026) is the BOM committed in [`lista_cumparaturri.xlsx`](../lista_cumparaturri.xlsx) and implemented in the current source tree. It narrows Rev B in three directions: 6 heaters instead of 9, no electronics-box heater / sensor / PID, no humidity output. The INA3221 chips — originally scoped as power-monitor housekeeping — are repurposed as a **sample-resistance science instrument** that detects microcrack formation during pulls. Two stratospheric-grade MS5803-01BA sensors replace the BME280 for ambient P + T with no humidity output. Both steppers become OMC integrated ball-screw motors with a 1 mm lead driven by a TMC2240 each.
 
+For the current Rev C installation, manual-first operation, plug-and-play
+Ethernet, and wiring constraints, see
+[rev-c-installation-and-hardware-setup.md](rev-c-installation-and-hardware-setup.md).
+That document is the current setup source of truth until the final component
+list and pin map are frozen.
+
 Driver-level bring-up (real I2C / SPI / Modbus-RTU transactions) is still pending; HAL classes are stubs that track a `healthy_` flag and feed the `*_OK` status bits. Firmware logic, wire format, and tests already run against the Rev B.1 data model.
 
 ---

@@ -8,7 +8,7 @@ Keys use the form `<section>.<key>=<value>`. Boolean values are `true`/`false`/`
 
 ```ini
 runtime.tick_hz=1.0
-comms.telemetry_host=192.168.50.1
+comms.telemetry_host=
 ```
 
 ---
@@ -55,13 +55,25 @@ General process behaviour.
 
 ---
 
+## `[manual]`
+
+Rev C manual-first behavior.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `manual.manual_first` | bool | `true` | Healthy-link operation is operator-directed; the onboard does not auto-run phase, fatigue, or phase-entry motor automation. |
+| `manual.link_loss_fallback_enabled` | bool | `true` | Enable autonomous fallback after an established telemetry link is lost. |
+| `manual.link_loss_fallback_s` | float | `10.0` | Seconds of link loss before fallback pressure tracking and +5 C floor control engage. |
+
+---
+
 ## `[comms]`
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `comms.telemetry_host` | string | `127.0.0.1` | Ground station telemetry server IP the Pi **connects** to on `telemetry_port`. |
-| `comms.static_ground_ip` | string | `192.168.50.1` | Static fallback ground station IP when UDP discovery fails. |
-| `comms.static_pi_ip` | string | `192.168.50.2` | Static onboard IP (reference only; not bound directly). |
+| `comms.telemetry_host` | string | empty | Optional fixed ground-station telemetry server IP. Leave empty for plug-and-play discovery/command-peer targeting. |
+| `comms.static_ground_ip` | string | empty | Optional static fallback ground-station IP when discovery and command-peer targeting are unavailable. |
+| `comms.static_pi_ip` | string | `169.254.10.10` | Static onboard link-local IP used by the ground station's command probe. |
 | `comms.telemetry_port` | int | `4000` | TCP port the Pi connects to for telemetry. |
 | `comms.command_port` | int | `5000` | TCP port the Pi **listens on** for incoming commands. |
 | `comms.reconnect_ms` | int | `2000` | ACK timeout in ms. Must exceed the ground station `accept()` cycle time. |
@@ -96,13 +108,15 @@ A single cold-protection floor is shared across `ASCENT`, `FLOAT`, and `DESCENT`
 
 ## `[transition]`
 
-Pressure thresholds that drive the Rev B FSM (`BOOT → ASCENT → FLOAT → DESCENT → LANDED`). `SystemMode = RUN` is required for any transition; in `STANDBY` / `SAFE` the onboard stays in `BOOT`.
+Pressure thresholds used by legacy autonomous mode or Rev C link-loss fallback (`BOOT -> ASCENT -> PRE_FLOAT -> FLOAT -> DESCENT -> LANDED`). Normal connected flight uses operator `SET_PHASE` commands.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `transition.ascent_to_float_mbar` | float | `100.0` | Pressure at/below which `ASCENT → FLOAT` triggers (mbar). |
-| `transition.float_to_descent_mbar` | float | `300.0` | Pressure at/above which `FLOAT → DESCENT` triggers. |
-| `transition.descent_to_landed_mbar` | float | `800.0` | Pressure at/above which `DESCENT → LANDED` triggers. |
+| `transition.pre_float_mbar` | float | `150.0` | Pressure at/below which `ASCENT -> PRE_FLOAT` triggers after debounce. |
+| `transition.ascent_to_float_mbar` | float | `100.0` | Legacy compatibility key; Rev C uses `pre_float_mbar`. |
+| `transition.float_to_descent_mbar` | float | `300.0` | Pressure at/above which `FLOAT -> DESCENT` triggers after debounce. |
+| `transition.descent_to_landed_mbar` | float | `800.0` | Pressure at/above which `DESCENT -> LANDED` triggers after debounce. |
+| `transition.debounce_samples` | int | `5` | Consecutive threshold-matching samples required before fallback phase transition. |
 
 ---
 
@@ -233,7 +247,7 @@ Optional per-mission-phase bend move applied on phase entry to motor 0. Set to 0
 ## Notes
 
 - All paths are resolved relative to the **working directory** at launch, unless they are absolute. The systemd service sets `WorkingDirectory=/bexus/code/coatheal`.
-- `bench_mode=true` disables hardware I/O (sensors return simulated data) and enables extended debug commands after `ARM_DEBUG`.
+- `bench_mode=true` disables hardware I/O (sensors return simulated data) and enables bench-only debug commands after `ARM_DEBUG`.
 - The `debug_arm_code` token is transmitted in plaintext over the command TCP connection — change it from the default before flight.
 - `runtime.tick_hz` is the **boot-time** rate. During flight the operator can change it live with `SET_TICK_HZ <hz>` (range `[0.1, 5.0]`, no debug arm required).
 - The systemd unit (`deploy/coatheal-onboard.service`) uses `Type=notify` and `WatchdogSec=10`. The main loop pings the systemd watchdog every tick via `sd_notify(WATCHDOG=1)`; if the loop hangs for >10 s systemd restarts the process.
