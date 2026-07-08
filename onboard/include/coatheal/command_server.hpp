@@ -9,7 +9,8 @@ namespace coatheal {
 
 class CommandServer {
  public:
-  using Handler = std::function<std::string(const std::string&)>;
+  using Handler = std::function<std::string(const std::string&,
+                                            const std::string&)>;
 
   explicit CommandServer(int port);
   ~CommandServer();
@@ -22,7 +23,7 @@ class CommandServer {
 
  private:
   void RunLoop();
-  void HandleClient(int client_fd);
+  void HandleClient(int client_fd, const std::string& peer_ip);
   void CloseListenSocket();
 
   int port_ = 0;

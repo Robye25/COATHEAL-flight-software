@@ -26,7 +26,10 @@ Full-featured PyQt6 desktop application for flight operations. All network I/O r
 python gui_app.py [--host <ip>] [--tel-port 4000] [--cmd-port 5000]
 ```
 
-Default host is `169.254.10.10` (link-local Ethernet to Pi).
+With no `--host`, the GUI starts in plug-and-play mode: it listens for
+telemetry, sends UDP discovery beacons, and probes the Pi at
+`169.254.10.10:5000`. A successful probe retargets command buttons and causes
+the Pi to send telemetry back to this ground-station laptop.
 
 ### Threading Model
 
@@ -99,7 +102,7 @@ the `TelemetryReceiver.pull_event` signal; the dispatcher also appends to
 
 #### Commands Panel (left dock)
 
-Buttons for every command. Dangerous commands (`FORCE_STOP`, `HEATERS_OFF`, `RESET_CTRL`, `SHUTDOWN_SAFE`) require a `QMessageBox` confirmation dialog before sending. Debug commands (`SET_HEATER_DUTY`, `SET_ALL_DUTY`, `SET_PID`, etc.) require `ARM_DEBUG` first.
+Buttons for every command. Dangerous commands (`FORCE_STOP`, `HEATERS_OFF`, `RESET_CTRL`, `SHUTDOWN_SAFE`) require a `QMessageBox` confirmation dialog before sending. Heater duty commands are normal manual flight controls; bench-only debug commands such as `SET_PID` and `SET_BENCH_MODE` require `ARM_DEBUG` first.
 
 #### Temperature Plot (center tab)
 
@@ -309,7 +312,7 @@ Reads `discovered_onboard.json` and returns the cached `onboard_ip` string, or `
 1. `--host` argument (explicit)
 2. `logs/discovered_onboard.json` cache
 3. UDP auto-discovery (if `--discovery-enabled`)
-4. `--static-host` fallback (`192.168.50.2`)
+4. `--static-host` fallback (`169.254.10.10`)
 
 ### Safety Confirmation
 

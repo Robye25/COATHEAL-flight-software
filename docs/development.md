@@ -138,7 +138,7 @@ Or use the example config (already has `bench_mode=false` — change before runn
 - Simulated pressure decreases over time to drive automatic phase transitions
 - Simulated temperatures respond to heater duty cycles
 - `SimulatedPwmController` stores duty cycles in memory (no GPIO required)
-- Extended debug commands (`SET_HEATER_DUTY`, `SET_ALL_DUTY`, `SET_PID`, etc.) are unlocked after `ARM_DEBUG <token>`
+- Heater duty commands are normal manual controls; bench-only debug commands such as `SET_PID` and `SET_BENCH_MODE` are unlocked after `ARM_DEBUG <token>`.
 
 ### End-to-end bench test
 

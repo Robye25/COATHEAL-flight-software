@@ -61,7 +61,7 @@ class ConnectionPanel(QGroupBox):
         self._bind = QLineEdit(default_bind)
         self._tel_port = QSpinBox(); self._tel_port.setRange(1, 65535); self._tel_port.setValue(default_tel)
         self._cmd_host = QLineEdit(default_cmd_host if default_cmd_host else "")
-        self._cmd_host.setPlaceholderText("auto-detected")
+        self._cmd_host.setPlaceholderText("auto / 169.254.10.10")
         self._cmd_port = QSpinBox(); self._cmd_port.setRange(1, 65535); self._cmd_port.setValue(default_cmd_port)
         self._priority = QSpinBox(); self._priority.setRange(0, 999); self._priority.setValue(default_priority)
         self._priority.setToolTip("GS beacon priority — higher wins. Backup GS should be lower (e.g. 50).")
@@ -153,6 +153,14 @@ class ModePanel(QGroupBox):
         self._phase_label.setStyleSheet("font-size: 11pt; color: #bbb;")
         outer.addWidget(self._phase_label)
 
+        phase_row = QHBoxLayout(); outer.addLayout(phase_row)
+        self._phase_select = QComboBox()
+        self._phase_select.addItems(self.PHASES)
+        phase_row.addWidget(self._phase_select, 1)
+        self._btn_set_phase = self._mk_cmd(
+            phase_row, "SET PHASE", "SET_PHASE BOOT", "#2980b9",
+            confirm_title="Set mission phase?")
+
         # Rows
         row1 = QHBoxLayout(); outer.addLayout(row1)
         self._btn_arm   = self._mk_cmd(row1, "ARM",         "ARM",        "#27ae60", confirm_title="Arm experiment?")
@@ -188,6 +196,8 @@ class ModePanel(QGroupBox):
         elif wire_cmd == "RADIO_RESUME":
             self._radio_silent = False
             self._btn_radio_on.setEnabled(False)
+        elif wire_cmd.startswith("SET_PHASE "):
+            wire_cmd = f"SET_PHASE {self._phase_select.currentText()}"
         self._disp.send(wire_cmd, tag=btn)
 
     def on_response(self, cmd: str, resp: CommandResponse, tag) -> None:
@@ -204,6 +214,8 @@ class ModePanel(QGroupBox):
         )
         self._phase_label.setText(f"Phase: {pkt.phase}")
         self._phase_label.setStyleSheet(f"font-size: 11pt; color: {phase_color(pkt.phase)};")
+        if pkt.phase in self.PHASES:
+            self._phase_select.setCurrentText(pkt.phase)
 
 
 # ── Heater grid ───────────────────────────────────────────────────────────────
@@ -264,7 +276,6 @@ class HeaterCell(QFrame):
 
     def set_enabled_controls(self, enabled: bool) -> None:
         self._slider.setEnabled(enabled)
-        # Buttons stay clickable only when armed — easier to do this at the panel level.
 
     def update_live(self, duty: float, temp_c: Optional[float]) -> None:
         pct = max(0.0, min(1.0, float(duty))) * 100.0
@@ -278,16 +289,15 @@ class HeaterCell(QFrame):
 
 class HeaterPanel(QGroupBox):
     def __init__(self, dispatcher: CommandDispatcher, parent=None):
-        super().__init__("Heaters (ARM_DEBUG to enable)", parent)
+        super().__init__("Heaters", parent)
         self._disp = dispatcher
-        self._armed = False
 
         outer = QVBoxLayout(self); outer.setContentsMargins(6, 6, 6, 6); outer.setSpacing(4)
 
-        self._banner = QLabel("DEBUG DISARMED — arm to override")
+        self._banner = QLabel("Manual duty controls")
         self._banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._banner.setStyleSheet(
-            "background: #3a1a1a; color: #e74c3c; padding: 4px; border-radius: 3px; "
+            "background: #1a2d3a; color: #8fd3ff; padding: 4px; border-radius: 3px; "
             "font-weight: bold; font-size: 10pt;"
         )
         outer.addWidget(self._banner)
@@ -329,31 +339,21 @@ class HeaterPanel(QGroupBox):
         ul.addWidget(QLabel("Uniform:")); ul.addWidget(self._uni); ul.addWidget(self._uni_lbl); ul.addWidget(apply_btn)
         outer.addLayout(ul)
 
-        self.set_armed(False)
+        self.set_armed(True)
 
-    def set_armed(self, armed: bool) -> None:
-        self._armed = armed
-        if armed:
-            self._banner.setText("DEBUG ARMED — overrides active")
-            self._banner.setStyleSheet(
-                "background: #1a3a1a; color: #2ecc71; padding: 4px; border-radius: 3px; "
-                "font-weight: bold; font-size: 10pt;"
-            )
-        else:
-            self._banner.setText("DEBUG DISARMED — arm to override")
-            self._banner.setStyleSheet(
-                "background: #3a1a1a; color: #e74c3c; padding: 4px; border-radius: 3px; "
-                "font-weight: bold; font-size: 10pt;"
-            )
+    def set_armed(self, _armed: bool) -> None:
+        self._banner.setText("Manual duty controls")
+        self._banner.setStyleSheet(
+            "background: #1a2d3a; color: #8fd3ff; padding: 4px; border-radius: 3px; "
+            "font-weight: bold; font-size: 10pt;"
+        )
         for c in self._cells:
-            c.set_enabled_controls(armed)
+            c.set_enabled_controls(True)
 
     def _send(self, cmd: str) -> None:
         self._disp.send(cmd, tag=self)
 
     def _set_one(self, idx: int, duty: float) -> None:
-        if not self._armed:
-            Toast.anchor(self, "ARM_DEBUG first", ok=False); return
         ok_i, _ = validate_heater_index(idx)
         ok_d, d_norm = validate_duty(duty)
         if not (ok_i and ok_d):
@@ -361,8 +361,6 @@ class HeaterPanel(QGroupBox):
         self._disp.send(f"SET_HEATER_DUTY {idx} {d_norm}", tag=self._cells[idx])
 
     def _set_all(self, duty: float) -> None:
-        if not self._armed:
-            Toast.anchor(self, "ARM_DEBUG first", ok=False); return
         ok, d = validate_duty(duty)
         if not ok:
             Toast.anchor(self, "invalid duty", ok=False); return

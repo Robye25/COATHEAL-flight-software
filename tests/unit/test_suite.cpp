@@ -16,6 +16,7 @@
 #include "coatheal/telemetry.hpp"
 #include "coatheal/telemetry_client.hpp"
 #include "coatheal/telemetry_queue.hpp"
+#include "coatheal/thermal_controller.hpp"
 
 namespace {
 
@@ -80,6 +81,16 @@ void TestCommandParser() {
 
   auto tick_bad = parser.ParseLine("SET_TICK_HZ");
   assert(!tick_bad.ok);
+
+  auto phase = parser.ParseLine("SET_PHASE pre_float");
+  assert(phase.ok);
+  assert(phase.command.type == coatheal::CommandType::kSetPhase);
+  assert(phase.command.args.size() == 1);
+  assert(phase.command.args[0] == "PRE_FLOAT");
+
+  auto manual_heat = parser.ParseLine("SET_ALL_DUTY 0.25");
+  assert(manual_heat.ok);
+  assert(!manual_heat.command.is_extended);
 }
 
 void TestHeaterSchedulerEnergyBudget() {
@@ -134,7 +145,8 @@ void TestVacuumRegime() {
   // The simulated sensor must reach the float-pressure regime so we can
   // verify the FSM stays stable in FLOAT at flight pressure.
   coatheal::OnboardConfig config;
-  config.transition.ascent_to_float_mbar = 140.0;
+  config.transition.pre_float_mbar = 140.0;
+  config.transition.debounce_samples = 1;
   config.transition.float_to_descent_mbar = 300.0;
   config.transition.descent_to_landed_mbar = 800.0;
   config.hardware.heater_count = 6;
@@ -164,6 +176,10 @@ void TestVacuumRegime() {
   auto p = sm.Update(900.0, samples, {}, std::chrono::steady_clock::now());
   assert(p == coatheal::MissionPhase::kAscent);
   p = sm.Update(120.0, samples, {}, std::chrono::steady_clock::now());
+  assert(p == coatheal::MissionPhase::kPreFloat);
+  coatheal::StateOverrides ov;
+  ov.fatigue_complete = true;
+  p = sm.Update(120.0, samples, ov, std::chrono::steady_clock::now());
   assert(p == coatheal::MissionPhase::kFloat);
   // Vacuum-regime pressure (5 mbar) must NOT trip the descent transition.
   p = sm.Update(5.0, samples, {}, std::chrono::steady_clock::now());
@@ -243,9 +259,12 @@ void TestConfigParsesReliabilityFields() {
   out << "runtime.debug_arm_code=COATHEAL_DEBUG\n";
   out << "runtime.use_simulated_pwm=false\n";
   out << "runtime.gpio_chip=/dev/gpiochip0\n";
-  out << "comms.telemetry_host=192.168.50.1\n";
-  out << "comms.static_ground_ip=192.168.50.1\n";
-  out << "comms.static_pi_ip=192.168.50.2\n";
+  out << "manual.manual_first=true\n";
+  out << "manual.link_loss_fallback_enabled=true\n";
+  out << "manual.link_loss_fallback_s=12.5\n";
+  out << "comms.telemetry_host=\n";
+  out << "comms.static_ground_ip=\n";
+  out << "comms.static_pi_ip=169.254.10.10\n";
   out << "comms.telemetry_port=4000\n";
   out << "comms.command_port=5000\n";
   out << "comms.reconnect_ms=2000\n";
@@ -278,8 +297,14 @@ void TestConfigParsesReliabilityFields() {
   std::string error;
   assert(coatheal::LoadConfigFromIni(cfg_path.string(), &cfg, &error));
   assert(cfg.comms.discovery_enabled);
+  assert(cfg.comms.telemetry_host.empty());
+  assert(cfg.comms.static_ground_ip.empty());
+  assert(cfg.comms.static_pi_ip == "169.254.10.10");
   assert(cfg.storage.queue_max_bytes == 1024U);
   assert(!cfg.runtime.use_simulated_pwm);
+  assert(cfg.manual.manual_first);
+  assert(cfg.manual.link_loss_fallback_enabled);
+  assert(std::fabs(cfg.manual.link_loss_fallback_s - 12.5) < 1e-9);
   assert(std::fabs(cfg.power.energy_budget_wh - 130.0) < 1e-9);
   assert(cfg.hardware.heater_count == 6U);
   assert(cfg.hardware.electronics_heater_index == static_cast<std::size_t>(-1));
@@ -291,12 +316,12 @@ void TestConfigParsesReliabilityFields() {
 }
 
 void TestStateTransitions() {
-  // Rev B FSM: pure-pressure transitions through ASCENT -> FLOAT -> DESCENT
-  // -> LANDED. No timed FLOAT expiry; re-pressurisation drives DESCENT.
+  // Rev C FSM: pressure enters PRE_FLOAT; FLOAT requires pull completion.
   coatheal::OnboardConfig config;
-  config.transition.ascent_to_float_mbar = 200.0;
+  config.transition.pre_float_mbar = 200.0;
   config.transition.float_to_descent_mbar = 350.0;
   config.transition.descent_to_landed_mbar = 800.0;
+  config.transition.debounce_samples = 1;
 
   coatheal::StateManager sm(config);
   std::vector<double> samples(8, 5.0);
@@ -307,11 +332,35 @@ void TestStateTransitions() {
 
   // 150 mbar: <= ascent_to_float_mbar (200). Transitions to FLOAT.
   phase = sm.Update(150.0, samples, {}, std::chrono::steady_clock::now());
+  assert(phase == coatheal::MissionPhase::kPreFloat);
+  coatheal::StateOverrides ov;
+  ov.fatigue_complete = true;
+  phase = sm.Update(150.0, samples, ov, std::chrono::steady_clock::now());
   assert(phase == coatheal::MissionPhase::kFloat);
 
   // 400 mbar: >= float_to_descent_mbar (350). Transitions to DESCENT.
   phase = sm.Update(400.0, samples, {}, std::chrono::steady_clock::now());
   assert(phase == coatheal::MissionPhase::kDescent);
+}
+
+void TestManualHeaterOverrideWithoutFloorControl() {
+  coatheal::OnboardConfig config;
+  config.hardware.heater_count = 6;
+  config.hardware.electronics_heater_index = static_cast<std::size_t>(-1);
+  coatheal::ThermalController tc(config);
+
+  coatheal::SensorSnapshot snap;
+  snap.sample_temps_c.assign(8, 20.0);
+  coatheal::ControlOverrides overrides;
+  overrides.floor_control_enabled = false;
+  overrides.all_heaters_override = 0.25;
+
+  const auto duty = tc.ComputeRequestedDuty(coatheal::MissionPhase::kBoot,
+                                            snap, 1.0, overrides);
+  assert(duty.size() == 6);
+  for (double d : duty) {
+    assert(std::fabs(d - 0.25) < 1e-9);
+  }
 }
 
 void TestDiscoveryBeaconParser() {
@@ -342,6 +391,21 @@ void TestDiscoveryBeaconParser() {
   assert(!other);
 }
 
+void TestCommandPeerCanSeedTelemetryTarget() {
+  coatheal::TelemetryClient client("", 4000, 5000, 2000, false, 4100, "", "",
+                                   2000, 30, 5, 100);
+
+  client.ObserveGroundStation("169.254.10.11", 4000, 5000, 1000);
+
+  const coatheal::GroundStationAdvert latest = client.latest_gs();
+  assert(latest.valid);
+  assert(latest.host == "169.254.10.11");
+  assert(latest.telemetry_port == 4000);
+  assert(latest.command_port == 5000);
+  assert(latest.priority == 1000);
+  assert(client.current_host() == "169.254.10.11");
+}
+
 }  // namespace
 
 int main() {
@@ -353,8 +417,10 @@ int main() {
   TestTelemetryQueuePersistenceAndAck();
   TestConfigParsesReliabilityFields();
   TestStateTransitions();
+  TestManualHeaterOverrideWithoutFloorControl();
   TestVacuumRegime();
   TestDiscoveryBeaconParser();
+  TestCommandPeerCanSeedTelemetryTarget();
 
   std::cout << "All unit tests passed.\n";
   return 0;

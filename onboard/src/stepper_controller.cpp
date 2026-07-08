@@ -125,11 +125,12 @@ void StepperController::ApplyPhaseSetpoint(MissionPhase phase) {
   ch->MoveToSteps(steps, hold_s, &err);
 }
 
-void StepperController::Tick(MissionPhase phase, double dt_s) {
+void StepperController::Tick(MissionPhase phase, double dt_s,
+                             bool apply_phase_setpoints) {
   bool need_phase_apply = false;
   {
     std::lock_guard<std::mutex> lock(mu_);
-    if (!last_phase_valid_ || phase != last_phase_) {
+    if (apply_phase_setpoints && (!last_phase_valid_ || phase != last_phase_)) {
       last_phase_ = phase;
       last_phase_valid_ = true;
       need_phase_apply = true;

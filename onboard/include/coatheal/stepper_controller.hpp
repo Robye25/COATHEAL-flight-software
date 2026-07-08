@@ -71,7 +71,8 @@ class StepperController {
   // Called once per control-loop tick with the wall-clock dt since the last
   // call. Applies phase-based bend setpoints (to channel 0 only) and ticks
   // every owned channel so their ramp schedulers advance.
-  void Tick(MissionPhase phase, double dt_s);
+  void Tick(MissionPhase phase, double dt_s,
+            bool apply_phase_setpoints = true);
 
   // ---- Legacy single-motor command surface (routes to channel 0) ----
   bool MoveSteps(std::int64_t delta_steps, std::string* error);

@@ -22,6 +22,8 @@ from .protocol import (
     parse_telemetry_csv,
 )
 
+DEFAULT_STATIC_ONBOARD_HOST = "169.254.10.10"
+
 
 class LivePlotter:
     def __init__(self) -> None:
@@ -218,10 +220,13 @@ class TelemetryServer:
             while not self._stop.is_set():
                 nonce = str(int(time.time() * 1000))
                 hello = f"GS_HELLO,{nonce},{self.port},{self.command_port}\n"
-                try:
-                    sock.sendto(hello.encode("utf-8"), ("255.255.255.255", self.discovery_port))
-                except OSError:
-                    pass
+                beacon = f"GS_BEACON,{nonce},{self.port},{self.command_port},100\n"
+                for line in (hello, beacon):
+                    for target in ("255.255.255.255", DEFAULT_STATIC_ONBOARD_HOST):
+                        try:
+                            sock.sendto(line.encode("utf-8"), (target, self.discovery_port))
+                        except OSError:
+                            pass
 
                 end_time = time.time() + 1.0
                 while time.time() < end_time and not self._stop.is_set():
@@ -234,16 +239,18 @@ class TelemetryServer:
 
                     line = data.decode("utf-8", errors="replace").strip()
                     parts = [p.strip() for p in line.split(",")]
-                    if len(parts) < 6 or parts[0] != "ONBOARD_HELLO":
-                        continue
-                    if parts[1] != nonce:
+                    if parts[0] == "ONBOARD_HELLO" and len(parts) >= 6 and parts[1] == nonce:
+                        session = parts[2]
+                    elif parts[0] == "ONBOARD_BEACON" and len(parts) >= 5:
+                        session = parts[1]
+                    else:
                         continue
 
                     with self._lock:
                         self._last_onboard_ip = addr[0]
-                        self._last_onboard_session = parts[2]
+                        self._last_onboard_session = session
                         self._persist_discovered()
-                    print(f"[discovery] onboard={addr[0]} session={parts[2]}")
+                    print(f"[discovery] onboard={addr[0]} session={session}")
 
     def _network_loop(self) -> None:
         try:

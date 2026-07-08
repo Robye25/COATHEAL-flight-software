@@ -72,9 +72,9 @@ Legend: **OK** = implemented, **GAP** = missing / non-compliant, **PART** = part
 
 | ID | Requirement | Status | Notes |
 |----|-------------|--------|-------|
-| O.1 | Activation by ground command or autonomous sequence | OK | `FORCE_START` + pressure-trigger (`transition.ascent_to_float_mbar=100.0`). |
+| O.1 | Activation by ground command or fallback sequence | OK / Rev C update | Rev C is manual-first: operators use `ARM`, `SET_PHASE`, and explicit heater/pull commands. Link-loss fallback preserves pressure tracking and cold-protection floor control. |
 | O.2 | Autonomous heating sequence | OK | `StateManager::Update` — pressure-driven floor-only controller. |
-| O.3 | **Initiate heating when P < 100 mbar** | OK | `transition.ascent_to_float_mbar=100.0`. Rev B.1 semantics: at P ≤ 100 mbar the FSM enters `FLOAT`, where the +5 °C floor and pull cycles apply. |
+| O.3 | **Initiate heating when P < 100 mbar** | Rev C update | Connected flight is manual-first; operators set heater duties directly. During link-loss fallback, pressure tracking can enter flying phases and apply the +5 C floor controller. |
 | O.4 | Continue DAQ on loss of comms | OK | Queue + local log are independent of link ([telemetry_queue.cpp](../onboard/src/telemetry_queue.cpp)). |
 | O.5 | **Modes STANDBY / RUN / SAFE** | OK | `SystemMode` enum with `kStandby`, `kRun`, `kSafe` is orthogonal to `MissionPhase` and is emitted in the `MODE=` wire token. |
 | O.6 | Retain stored data ≥48 h after landing w/o external power | PART | SW writes to non-volatile media; depends on HW battery. SW must: (a) flush + fsync on SAFE entry, (b) survive unclean shutdown (append-only CSV already ok). |

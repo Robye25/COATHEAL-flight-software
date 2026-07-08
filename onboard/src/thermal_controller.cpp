@@ -88,41 +88,52 @@ std::vector<double> ThermalController::ComputeRequestedDuty(
     }
   }
 
-  if (overrides.heaters_off || !ShouldHeatPhase(phase)) {
+  const bool has_direct_override =
+      overrides.all_heaters_override.has_value() ||
+      overrides.single_heater_override.has_value();
+
+  if (overrides.heaters_off) {
     std::fill(sample_heating_.begin(), sample_heating_.end(), false);
     return duty;
   }
 
-  const double floor_c = config_.phase.sample_floor_c;
-  const double on_threshold = floor_c - kFloorHysteresisC;  // below -> heat
-  const double off_threshold = floor_c;                      // at/above -> off
+  if (overrides.floor_control_enabled && ShouldHeatPhase(phase)) {
+    const double floor_c = config_.phase.sample_floor_c;
+    const double on_threshold = floor_c - kFloorHysteresisC;  // below -> heat
+    const double off_threshold = floor_c;                      // at/above -> off
 
-  // Per-sample floor PID with hysteresis. The PID output is only applied
-  // (and the integrator only accumulates) while the sample is below the
-  // on_threshold; once it reaches off_threshold we freeze the controller.
-  // Rev B.1: heater[i] drives sample[i]; there is no box heater slot.
-  for (std::size_t i = 0; i < sample_pids_.size() && i < heater_count; ++i) {
-    const double measured = (i < sensors.sample_temps_c.size())
-                                ? sensors.sample_temps_c[i]
-                                : floor_c;  // no data -> assume at floor
+    // Per-sample floor PID with hysteresis. The PID output is only applied
+    // (and the integrator only accumulates) while the sample is below the
+    // on_threshold; once it reaches off_threshold we freeze the controller.
+    // Rev B.1: heater[i] drives sample[i]; there is no box heater slot.
+    for (std::size_t i = 0; i < sample_pids_.size() && i < heater_count; ++i) {
+      const double measured = (i < sensors.sample_temps_c.size())
+                                  ? sensors.sample_temps_c[i]
+                                  : floor_c;  // no data -> assume at floor
 
-    if (sample_heating_[i]) {
-      if (measured >= off_threshold) {
-        sample_heating_[i] = false;
-        sample_pids_[i].Reset();
-        duty[i] = 0.0;
-        continue;
+      if (sample_heating_[i]) {
+        if (measured >= off_threshold) {
+          sample_heating_[i] = false;
+          sample_pids_[i].Reset();
+          duty[i] = 0.0;
+          continue;
+        }
+      } else {
+        if (measured < on_threshold) {
+          sample_heating_[i] = true;
+        }
       }
-    } else {
-      if (measured < on_threshold) {
-        sample_heating_[i] = true;
+
+      if (sample_heating_[i]) {
+        duty[i] = sample_pids_[i].Update(floor_c, measured, dt_seconds);
+      } else {
+        duty[i] = 0.0;
       }
     }
-
-    if (sample_heating_[i]) {
-      duty[i] = sample_pids_[i].Update(floor_c, measured, dt_seconds);
-    } else {
-      duty[i] = 0.0;
+  } else {
+    std::fill(sample_heating_.begin(), sample_heating_.end(), false);
+    if (!has_direct_override) {
+      return duty;
     }
   }
 

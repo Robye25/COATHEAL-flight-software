@@ -76,6 +76,8 @@ std::string CommandTypeToString(CommandType type) {
       return "RADIO_SILENCE";
     case CommandType::kRadioResume:
       return "RADIO_RESUME";
+    case CommandType::kSetPhase:
+      return "SET_PHASE";
     case CommandType::kStepperMove:
       return "STEPPER_MOVE";
     case CommandType::kStepperMoveTo:
@@ -108,10 +110,7 @@ std::string CommandTypeToString(CommandType type) {
 
 bool IsExtendedCommand(CommandType type) {
   switch (type) {
-    case CommandType::kSetHeaterDuty:
-    case CommandType::kSetAllDuty:
     case CommandType::kSetPid:
-    case CommandType::kClearOverrides:
     case CommandType::kSetBenchMode:
     case CommandType::kDisarmDebug:
       return true;
@@ -172,6 +171,7 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
       {"SET_TICK_HZ", CommandType::kSetTickHz},
       {"RADIO_SILENCE", CommandType::kRadioSilence},
       {"RADIO_RESUME", CommandType::kRadioResume},
+      {"SET_PHASE", CommandType::kSetPhase},
       {"STEPPER_MOVE", CommandType::kStepperMove},
       {"STEPPER_MOVETO", CommandType::kStepperMoveTo},
       {"STEPPER_ROTATE", CommandType::kStepperRotate},
@@ -258,6 +258,12 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
       if (!require_args(0)) {
         return result;
       }
+      break;
+    case CommandType::kSetPhase:
+      if (!require_args(1)) {
+        return result;
+      }
+      command.args[0] = ToUpper(command.args[0]);
       break;
     case CommandType::kStepperHome:
     case CommandType::kStepperStop:

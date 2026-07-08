@@ -4,6 +4,8 @@ After=network-online.target systemd-time-wait-sync.service
 Wants=network-online.target
 # Flight and debug both bind port 5000 - only one can run at a time.
 Conflicts=coatheal-onboard.service
+StartLimitIntervalSec=300
+StartLimitBurst=20
 
 [Service]
 Type=notify
@@ -15,9 +17,6 @@ ExecStartPre=/bexus/code/coatheal/scripts/preflight_healthcheck.sh /bexus/code/c
 ExecStart=/bexus/code/coatheal/build/onboard/coatheal_onboard --config /bexus/code/coatheal/config/onboard.debug.ini
 Restart=always
 RestartSec=2
-StartLimitIntervalSec=300
-StartLimitBurst=20
-RuntimeMaxSec=0
 WatchdogSec=10
 KillSignal=SIGINT
 TimeoutStopSec=20

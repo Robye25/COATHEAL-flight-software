@@ -4,11 +4,20 @@ namespace coatheal {
 
 StateManager::StateManager(const OnboardConfig& config) : config_(config) {}
 
-void StateManager::Reset() {
-  phase_ = MissionPhase::kBoot;
+void StateManager::ResetDebounce() {
   debounce_pre_float_ = 0;
   debounce_descent_ = 0;
   debounce_landed_ = 0;
+}
+
+void StateManager::Reset() {
+  phase_ = MissionPhase::kBoot;
+  ResetDebounce();
+}
+
+void StateManager::SetPhase(MissionPhase phase) {
+  phase_ = phase;
+  ResetDebounce();
 }
 
 MissionPhase StateManager::Update(double pressure_mbar,

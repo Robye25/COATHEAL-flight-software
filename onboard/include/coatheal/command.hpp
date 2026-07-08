@@ -28,6 +28,7 @@ enum class CommandType {
   kSetTickHz,
   kRadioSilence,
   kRadioResume,
+  kSetPhase,
   kStepperMove,
   kStepperMoveTo,
   kStepperRotate,

@@ -32,6 +32,22 @@ except Exception:  # pylint: disable=broad-except
 
 
 DISCOVERY_PORT_DEFAULT = 4100
+STATIC_ONBOARD_HOST_DEFAULT = "169.254.10.10"
+
+
+def probe_host_candidates(*hosts: str, include_static: bool = True) -> list[str]:
+    """Return ordered, de-duplicated non-empty command-probe hosts."""
+    ordered: list[str] = []
+    values = list(hosts)
+    if include_static:
+        values.append(STATIC_ONBOARD_HOST_DEFAULT)
+    for host in values:
+        if not isinstance(host, str):
+            continue
+        value = host.strip()
+        if value and value not in ordered:
+            ordered.append(value)
+    return ordered
 
 
 # ── pure parse helpers (importable without Qt) ───────────────────────────────
@@ -125,6 +141,14 @@ def _enumerate_broadcasts() -> list[str]:
     return addrs
 
 
+def _discovery_targets() -> list[str]:
+    targets = list(_enumerate_broadcasts())
+    for host in ("255.255.255.255", STATIC_ONBOARD_HOST_DEFAULT):
+        if host not in targets:
+            targets.append(host)
+    return targets
+
+
 # ── GS -> broadcast beacon ───────────────────────────────────────────────────
 class GsBeacon(QThread):
     """Periodically broadcasts GS_BEACON on every up interface."""
@@ -160,18 +184,18 @@ class GsBeacon(QThread):
             return
         try:
             last_refresh = 0.0
-            bcasts: list[str] = []
+            targets: list[str] = []
             while not self._stop.is_set():
                 now = time.monotonic()
                 if now - last_refresh > 30.0:
-                    bcasts = _enumerate_broadcasts()
+                    targets = _discovery_targets()
                     last_refresh = now
                 nonce = str(int(time.time() * 1000))
                 line = (
                     f"GS_BEACON,{nonce},{self._tel_port},"
                     f"{self._cmd_port},{self._priority}\n"
                 ).encode("utf-8")
-                for addr in bcasts:
+                for addr in targets:
                     try:
                         sock.sendto(line, (addr, self._disc_port))
                     except OSError:
@@ -180,7 +204,7 @@ class GsBeacon(QThread):
                 legacy = (
                     f"GS_HELLO,{nonce},{self._tel_port},{self._cmd_port}\n"
                 ).encode("utf-8")
-                for addr in bcasts:
+                for addr in targets:
                     try:
                         sock.sendto(legacy, (addr, self._disc_port))
                     except OSError:
@@ -268,3 +292,59 @@ class OnboardListener(QThread):
             self._last_peer = key
             self._last_peer_t = now
             self.peer_gs_seen.emit(src_host, peer["priority"])
+
+
+class CommandProbe(QThread):
+    """Low-rate TCP command probe for deterministic link-local bring-up."""
+
+    onboard_reachable = pyqtSignal(str, int)
+    log_message = pyqtSignal(str)
+
+    def __init__(self, hosts: list[str], cmd_port: int,
+                 interval_s: float = 2.0,
+                 timeout_s: float = 0.7,
+                 include_static: bool = True,
+                 parent=None):
+        super().__init__(parent)
+        self._include_static = include_static
+        self._hosts = probe_host_candidates(*hosts, include_static=include_static)
+        self._cmd_port = int(cmd_port)
+        self._interval = float(interval_s)
+        self._timeout = float(timeout_s)
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._last_success: tuple[str, int] | None = None
+
+    def set_candidates(self, hosts: list[str]) -> None:
+        with self._lock:
+            self._hosts = probe_host_candidates(*hosts,
+                                                include_static=self._include_static)
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def run(self) -> None:
+        while not self._stop.is_set():
+            with self._lock:
+                hosts = list(self._hosts)
+            for host in hosts:
+                if self._stop.is_set():
+                    break
+                if self._try_ping(host):
+                    key = (host, self._cmd_port)
+                    if key != self._last_success:
+                        self.log_message.emit(f"[discovery] command probe {host}:{self._cmd_port}")
+                        self._last_success = key
+                    self.onboard_reachable.emit(host, self._cmd_port)
+                    break
+            self._stop.wait(self._interval)
+
+    def _try_ping(self, host: str) -> bool:
+        try:
+            with socket.create_connection((host, self._cmd_port), timeout=self._timeout) as sock:
+                sock.settimeout(self._timeout)
+                sock.sendall(b"PING\n")
+                data = sock.recv(256)
+        except OSError:
+            return False
+        return data.decode("utf-8", errors="replace").strip().startswith("ACK,PING")

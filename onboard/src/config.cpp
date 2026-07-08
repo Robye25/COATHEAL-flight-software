@@ -169,6 +169,13 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
     } else if (key == "runtime.gpio_chip") {
       config->runtime.gpio_chip = value;
 
+    } else if (key == "manual.manual_first") {
+      if (!parse_bool(key, value, &config->manual.manual_first, line_no)) return false;
+    } else if (key == "manual.link_loss_fallback_enabled") {
+      if (!parse_bool(key, value, &config->manual.link_loss_fallback_enabled, line_no)) return false;
+    } else if (key == "manual.link_loss_fallback_s") {
+      if (!parse_double(key, value, &config->manual.link_loss_fallback_s, line_no)) return false;
+
     } else if (key == "comms.telemetry_host") {
       config->comms.telemetry_host = value;
     } else if (key == "comms.static_ground_ip") {
@@ -330,6 +337,13 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
   if (config->runtime.tick_hz <= 0.0) {
     if (error != nullptr) {
       *error = "runtime.tick_hz must be > 0";
+    }
+    return false;
+  }
+
+  if (config->manual.link_loss_fallback_s < 0.0) {
+    if (error != nullptr) {
+      *error = "manual.link_loss_fallback_s must be >= 0";
     }
     return false;
   }

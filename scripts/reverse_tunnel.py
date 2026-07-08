@@ -7,15 +7,17 @@ the ground-station listens.
 """
 from __future__ import annotations
 
+import getpass
+import os
 import select
 import socket
 import threading
 
 import paramiko
 
-HOST = "169.254.10.10"
-USER = "coatheal"
-PW = "COTHIL"
+HOST = os.environ.get("COATHEAL_PI_HOST", "169.254.10.10")
+USER = os.environ.get("COATHEAL_PI_USER", "coatheal")
+PASSWORD = os.environ.get("COATHEAL_PI_PASSWORD")
 REMOTE_PORT = 4000
 LOCAL_HOST = "127.0.0.1"
 LOCAL_PORT = 4000
@@ -43,7 +45,8 @@ def _handle(chan, sock):
 def main() -> None:
     c = paramiko.SSHClient()
     c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    c.connect(HOST, username=USER, password=PW, timeout=15)
+    password = PASSWORD or getpass.getpass("Pi password: ")
+    c.connect(HOST, username=USER, password=password, timeout=15)
     t = c.get_transport()
     assert t is not None
     t.request_port_forward("127.0.0.1", REMOTE_PORT)

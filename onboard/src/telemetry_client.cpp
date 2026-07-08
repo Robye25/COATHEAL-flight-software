@@ -1,6 +1,7 @@
 #include "coatheal/telemetry_client.hpp"
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cstring>
 #include <iostream>
@@ -17,6 +18,7 @@
 using socklen_t = int;
 #else
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -53,6 +55,62 @@ bool SetSocketRecvTimeoutMs(int fd, int timeout_ms) {
   tv.tv_usec = (timeout_ms % 1000) * 1000;
   return setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0;
 #endif
+}
+
+bool SetSocketNonBlocking(int fd, bool enabled) {
+#ifdef _WIN32
+  u_long mode = enabled ? 1UL : 0UL;
+  return ioctlsocket(static_cast<SOCKET>(fd), FIONBIO, &mode) == 0;
+#else
+  const int flags = fcntl(fd, F_GETFL, 0);
+  if (flags < 0) {
+    return false;
+  }
+  const int next = enabled ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK);
+  return fcntl(fd, F_SETFL, next) == 0;
+#endif
+}
+
+bool ConnectWithTimeout(int fd,
+                        const sockaddr* addr,
+                        socklen_t addr_len,
+                        int timeout_ms) {
+  if (!SetSocketNonBlocking(fd, true)) {
+    return connect(fd, addr, static_cast<int>(addr_len)) == 0;
+  }
+
+  bool connected = false;
+  const int rc = connect(fd, addr, static_cast<int>(addr_len));
+  if (rc == 0) {
+    connected = true;
+  } else {
+#ifdef _WIN32
+    const int err = WSAGetLastError();
+    const bool in_progress = (err == WSAEWOULDBLOCK || err == WSAEINPROGRESS);
+#else
+    const bool in_progress = (errno == EINPROGRESS);
+#endif
+    if (in_progress) {
+      fd_set wfds;
+      FD_ZERO(&wfds);
+      FD_SET(fd, &wfds);
+      timeval tv{};
+      tv.tv_sec = timeout_ms / 1000;
+      tv.tv_usec = (timeout_ms % 1000) * 1000;
+      const int ready = select(fd + 1, nullptr, &wfds, nullptr, &tv);
+      if (ready > 0 && FD_ISSET(fd, &wfds)) {
+        int so_error = 0;
+        socklen_t len = sizeof(so_error);
+        if (getsockopt(fd, SOL_SOCKET, SO_ERROR,
+                       reinterpret_cast<char*>(&so_error), &len) == 0) {
+          connected = (so_error == 0);
+        }
+      }
+    }
+  }
+
+  SetSocketNonBlocking(fd, false);
+  return connected;
 }
 
 std::vector<std::string> SplitCsv(const std::string& input) {
@@ -434,7 +492,10 @@ bool TelemetryClient::ConnectLocked() {
     if (fd < 0) {
       continue;
     }
-    if (connect(fd, rp->ai_addr, static_cast<int>(rp->ai_addrlen)) == 0) {
+    const int timeout_ms = std::max(100, std::min(reconnect_ms_, 1000));
+    if (ConnectWithTimeout(fd, rp->ai_addr,
+                           static_cast<socklen_t>(rp->ai_addrlen),
+                           timeout_ms)) {
       break;
     }
     CloseSocket(&fd);
@@ -613,6 +674,31 @@ void TelemetryClient::SetTransmitEnabled(bool enabled) {
   transmit_enabled_ = enabled;
   if (!enabled) {
     CloseLocked();
+  }
+}
+
+void TelemetryClient::ObserveGroundStation(const std::string& host,
+                                           int telemetry_port,
+                                           int command_port,
+                                           int priority) {
+  if (host.empty() || host == "0.0.0.0") {
+    return;
+  }
+
+  std::lock_guard<std::mutex> lock(mu_);
+  latest_gs_.host = host;
+  latest_gs_.telemetry_port = telemetry_port > 0 ? telemetry_port : telemetry_port_;
+  latest_gs_.command_port = command_port > 0 ? command_port : command_port_;
+  latest_gs_.priority = priority;
+  latest_gs_.last_seen = std::chrono::steady_clock::now();
+  latest_gs_.valid = true;
+
+  if (connected_ && host != active_host_ && priority >= current_priority_) {
+    CloseLocked();
+  }
+  if (!connected_) {
+    active_host_ = host;
+    current_priority_ = priority;
   }
 }
 

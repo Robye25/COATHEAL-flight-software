@@ -114,14 +114,21 @@ void CommandServer::RunLoop() {
       }
       continue;
     }
-    HandleClient(client_fd);
+
+    char ip_buf[INET_ADDRSTRLEN] = {0};
+    std::string peer_ip;
+    if (inet_ntop(AF_INET, &client_addr.sin_addr, ip_buf, sizeof(ip_buf)) != nullptr) {
+      peer_ip = ip_buf;
+    }
+
+    HandleClient(client_fd, peer_ip);
     CloseFd(&client_fd);
   }
 
   CloseListenSocket();
 }
 
-void CommandServer::HandleClient(int client_fd) {
+void CommandServer::HandleClient(int client_fd, const std::string& peer_ip) {
   std::string buffer;
   buffer.reserve(1024);
 
@@ -148,7 +155,7 @@ void CommandServer::HandleClient(int client_fd) {
 
       std::string response = "NACK,UNKNOWN,internal error";
       if (handler_) {
-        response = handler_(line);
+        response = handler_(line, peer_ip);
       }
       response.push_back('\n');
 

@@ -62,6 +62,10 @@ bool ParseIndex(const std::string& text, std::size_t* out) {
   }
 }
 
+bool IsLoopbackPeer(const std::string& ip) {
+  return ip == "127.0.0.1" || ip == "::1";
+}
+
 }  // namespace
 
 SystemController::SystemController(OnboardConfig config)
@@ -215,7 +219,9 @@ bool SystemController::Initialize(std::string* error) {
   }
 
   if (!command_server_.Start(
-          [this](const std::string& line) { return HandleCommandLine(line); }, error)) {
+          [this](const std::string& line, const std::string& peer_ip) {
+            return HandleCommandLine(line, peer_ip);
+          }, error)) {
     return false;
   }
 
@@ -332,6 +338,29 @@ int SystemController::Run() {
     }
 
     const SystemMode current_mode = mode_.load();
+    if (last_link_ok) {
+      link_seen_ = true;
+      link_loss_s_ = 0.0;
+    } else if (link_seen_) {
+      link_loss_s_ += tick_duration.count();
+    }
+    const bool transmit_enabled = telemetry_client_.transmit_enabled();
+    link_loss_fallback_active_ =
+        config_.manual.manual_first &&
+        config_.manual.link_loss_fallback_enabled &&
+        current_mode == SystemMode::kRun &&
+        transmit_enabled &&
+        link_seen_ &&
+        !last_link_ok &&
+        link_loss_s_ >= config_.manual.link_loss_fallback_s;
+    const bool legacy_autonomous_run =
+        !config_.manual.manual_first && current_mode == SystemMode::kRun;
+    const bool fallback_floor_control =
+        link_loss_fallback_active_;
+    const bool automatic_phase_tracking =
+        legacy_autonomous_run || link_loss_fallback_active_;
+    const bool automatic_experiment_actions =
+        legacy_autonomous_run;
     COATHEAL_PERF_STAMP(perf_ts[1]);  // stage 0: snapshot overrides + mode load
 
     SensorSnapshot snapshot = sensor_manager_.ReadSnapshot(
@@ -339,16 +368,18 @@ int SystemController::Run() {
     COATHEAL_PERF_STAMP(perf_ts[2]);  // stage 1: sensor snapshot
 
     MissionPhase phase = state_manager_.phase();
-    if (current_mode == SystemMode::kRun) {
+    if (automatic_phase_tracking) {
       phase = state_manager_.Update(
           snapshot.ambient_pressure_mbar, snapshot.sample_temps_c, state_overrides,
           std::chrono::steady_clock::now());
     }
 
-    // Rev C: tick the fatigue sequencer during PRE_FLOAT. When the sequence
-    // completes, set the override so the next state_manager Update() will
-    // transition to FLOAT.
-    if (phase == MissionPhase::kPreFloat && fatigue_sequencer_) {
+    // Manual-first Rev C: connected operation must not start the irreversible
+    // fatigue sequence automatically. It remains available only for legacy
+    // autonomous builds (`manual.manual_first=false`); flight operators use
+    // PULL_* commands explicitly.
+    if (automatic_experiment_actions &&
+        phase == MissionPhase::kPreFloat && fatigue_sequencer_) {
       if (fatigue_sequencer_->Tick(tick_duration.count())) {
         std::lock_guard<std::mutex> lock(overrides_mu_);
         state_overrides_.fatigue_complete = true;
@@ -357,6 +388,8 @@ int SystemController::Run() {
 
     const bool heaters_allowed = (current_mode == SystemMode::kRun);
     ControlOverrides effective_control = control_overrides;
+    effective_control.floor_control_enabled =
+        legacy_autonomous_run || fallback_floor_control;
     if (!heaters_allowed) {
       effective_control.heaters_off = true;
     }
@@ -383,7 +416,8 @@ int SystemController::Run() {
     last_heater_duty_ = scheduled_duty;
 
     if (stepper_) {
-      stepper_->Tick(phase, tick_duration.count());
+      stepper_->Tick(phase, tick_duration.count(),
+                     automatic_experiment_actions);
     }
     COATHEAL_PERF_STAMP(perf_ts[6]);  // stage 5: pwm set + stepper tick
 
@@ -619,7 +653,15 @@ bool SystemController::DrainTelemetryQueue(bool* link_ok, std::string* error) {
   return true;
 }
 
-std::string SystemController::HandleCommandLine(const std::string& line) {
+std::string SystemController::HandleCommandLine(const std::string& line,
+                                                const std::string& peer_ip) {
+  if (!peer_ip.empty() && (config_.runtime.bench_mode || !IsLoopbackPeer(peer_ip))) {
+    telemetry_client_.ObserveGroundStation(peer_ip,
+                                           config_.comms.telemetry_port,
+                                           config_.comms.command_port,
+                                           1000);
+  }
+
   const CommandParseResult parsed = parser_.ParseLine(line);
   if (!parsed.ok) {
     return Nack("UNKNOWN", parsed.error);
@@ -645,6 +687,10 @@ std::string SystemController::HandleCommandLine(const std::string& line) {
       std::ostringstream status;
       status << "phase=" << ToString(state_manager_.phase())
              << ";mode=" << ToString(mode_.load())
+             << ";manual_first=" << (config_.manual.manual_first ? "1" : "0")
+             << ";link_seen=" << (link_seen_ ? "1" : "0")
+             << ";link_loss_s=" << link_loss_s_
+             << ";fallback_active=" << (link_loss_fallback_active_ ? "1" : "0")
              << ";bench_mode=" << (config_.runtime.bench_mode ? "1" : "0")
              << ";debug_armed=" << (debug_armed_.load() ? "1" : "0")
              << ";telemetry_target=" << telemetry_client_.current_host()
@@ -657,15 +703,34 @@ std::string SystemController::HandleCommandLine(const std::string& line) {
     }
 
     case CommandType::kForceStart:
+      if (config_.manual.manual_first) {
+        state_manager_.SetPhase(MissionPhase::kAscent);
+        if (fatigue_sequencer_) fatigue_sequencer_->Reset();
+        return Ack(cmd_name, "phase=ASCENT");
+      }
       set_state_override([&]() { state_overrides_.force_start = true; });
       return Ack(cmd_name, "override accepted");
 
     case CommandType::kForceStop:
+      if (config_.manual.manual_first) {
+        state_manager_.SetPhase(MissionPhase::kDescent);
+        if (stepper_) {
+          std::string err;
+          for (std::size_t i = 0; i < stepper_->channel_count(); ++i) {
+            stepper_->Stop(static_cast<int>(i), &err);
+          }
+        }
+        return Ack(cmd_name, "phase=DESCENT;steppers=stopped");
+      }
       set_state_override([&]() { state_overrides_.force_stop = true; });
       return Ack(cmd_name, "override accepted");
 
     case CommandType::kHeatersOff:
-      set_state_override([&]() { control_overrides_.heaters_off = true; });
+      set_state_override([&]() {
+        control_overrides_.heaters_off = true;
+        control_overrides_.single_heater_override.reset();
+        control_overrides_.all_heaters_override.reset();
+      });
       return Ack(cmd_name, "all heaters disabled");
 
     case CommandType::kResetCtrl:
@@ -685,7 +750,17 @@ std::string SystemController::HandleCommandLine(const std::string& line) {
 
     case CommandType::kEnterSafe:
       mode_.store(SystemMode::kSafe);
-      set_state_override([&]() { control_overrides_.heaters_off = true; });
+      set_state_override([&]() {
+        control_overrides_.heaters_off = true;
+        control_overrides_.single_heater_override.reset();
+        control_overrides_.all_heaters_override.reset();
+      });
+      if (stepper_) {
+        std::string err;
+        for (std::size_t i = 0; i < stepper_->channel_count(); ++i) {
+          stepper_->Stop(static_cast<int>(i), &err);
+        }
+      }
       storage_manager_.SetSafeMode(true);
       storage_manager_.FlushAndSync();
       return Ack(cmd_name, "entered SAFE mode");
@@ -705,13 +780,26 @@ std::string SystemController::HandleCommandLine(const std::string& line) {
       if (!mode_.compare_exchange_strong(expected, SystemMode::kRun)) {
         return Nack(cmd_name, "ARM requires STANDBY mode");
       }
-      return Ack(cmd_name, "mode=RUN");
+      return Ack(cmd_name,
+                 config_.manual.manual_first ? "mode=RUN;manual_control=1"
+                                             : "mode=RUN;autonomous=1");
     }
 
     case CommandType::kDisarm: {
       SystemMode expected = SystemMode::kRun;
       if (!mode_.compare_exchange_strong(expected, SystemMode::kStandby)) {
         return Nack(cmd_name, "DISARM requires RUN mode");
+      }
+      set_state_override([&]() {
+        control_overrides_.heaters_off = true;
+        control_overrides_.single_heater_override.reset();
+        control_overrides_.all_heaters_override.reset();
+      });
+      if (stepper_) {
+        std::string err;
+        for (std::size_t i = 0; i < stepper_->channel_count(); ++i) {
+          stepper_->Stop(static_cast<int>(i), &err);
+        }
       }
       return Ack(cmd_name, "mode=STANDBY");
     }
@@ -738,9 +826,6 @@ std::string SystemController::HandleCommandLine(const std::string& line) {
       return Ack(cmd_name, "debug disarmed");
 
     case CommandType::kSetHeaterDuty: {
-      if (!require_debug_arm()) {
-        return Nack(cmd_name, "debug arm required");
-      }
       std::size_t index = 0;
       double duty = 0.0;
       if (!ParseIndex(command.args[0], &index) || !ParseDouble(command.args[1], &duty)) {
@@ -750,20 +835,19 @@ std::string SystemController::HandleCommandLine(const std::string& line) {
         return Nack(cmd_name, "heater index out of range");
       }
       set_state_override([&]() {
+        control_overrides_.heaters_off = false;
         control_overrides_.single_heater_override = {index, std::clamp(duty, 0.0, 1.0)};
       });
       return Ack(cmd_name, "override applied");
     }
 
     case CommandType::kSetAllDuty: {
-      if (!require_debug_arm()) {
-        return Nack(cmd_name, "debug arm required");
-      }
       double duty = 0.0;
       if (!ParseDouble(command.args[0], &duty)) {
         return Nack(cmd_name, "invalid duty");
       }
       set_state_override([&]() {
+        control_overrides_.heaters_off = false;
         control_overrides_.all_heaters_override = std::clamp(duty, 0.0, 1.0);
       });
       return Ack(cmd_name, "global override applied");
@@ -785,9 +869,6 @@ std::string SystemController::HandleCommandLine(const std::string& line) {
     }
 
     case CommandType::kClearOverrides:
-      if (!require_debug_arm()) {
-        return Nack(cmd_name, "debug arm required");
-      }
       set_state_override([&]() {
         control_overrides_.heaters_off = false;
         control_overrides_.single_heater_override.reset();
@@ -839,6 +920,18 @@ std::string SystemController::HandleCommandLine(const std::string& line) {
     case CommandType::kRadioResume:
       telemetry_client_.SetTransmitEnabled(true);
       return Ack(cmd_name, "radio resumed");
+
+    case CommandType::kSetPhase: {
+      MissionPhase requested = MissionPhase::kBoot;
+      if (!ParseMissionPhase(command.args[0], &requested)) {
+        return Nack(cmd_name, "invalid phase");
+      }
+      state_manager_.SetPhase(requested);
+      if (fatigue_sequencer_) fatigue_sequencer_->Reset();
+      std::ostringstream msg;
+      msg << "phase=" << ToString(requested);
+      return Ack(cmd_name, msg.str());
+    }
 
     case CommandType::kStepperMove: {
       if (!stepper_) return Nack(cmd_name, "stepper unavailable");

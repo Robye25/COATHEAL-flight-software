@@ -22,6 +22,7 @@ class StateManager {
   explicit StateManager(const OnboardConfig& config);
 
   void Reset();
+  void SetPhase(MissionPhase phase);
 
   MissionPhase Update(double pressure_mbar,
                       const std::vector<double>& sample_temps_c,
@@ -33,6 +34,8 @@ class StateManager {
  private:
   OnboardConfig config_;
   MissionPhase phase_ = MissionPhase::kBoot;
+
+  void ResetDebounce();
 
   // Debounce counters: how many consecutive ticks the threshold has been met.
   // Reset to 0 when the condition is not met.

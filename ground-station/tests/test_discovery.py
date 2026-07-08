@@ -11,7 +11,12 @@ import unittest
 
 
 try:
-    from app.gui.discovery import parse_gs_beacon, parse_onboard_announcement
+    from app.gui.discovery import (
+        STATIC_ONBOARD_HOST_DEFAULT,
+        parse_gs_beacon,
+        parse_onboard_announcement,
+        probe_host_candidates,
+    )
     _IMPORT_OK = True
     _IMPORT_ERR = ""
 except Exception as exc:  # pylint: disable=broad-except
@@ -85,6 +90,21 @@ class OnboardAnnouncementParseTests(unittest.TestCase):
     def test_empty(self) -> None:
         self.assertIsNone(parse_onboard_announcement(""))
         self.assertIsNone(parse_onboard_announcement(None))  # type: ignore[arg-type]
+
+
+@unittest.skipUnless(_IMPORT_OK, f"discovery module unavailable: {_IMPORT_ERR}")
+class CommandProbeHelperTests(unittest.TestCase):
+    def test_candidates_append_static_default_and_dedupe(self) -> None:
+        self.assertEqual(
+            probe_host_candidates("", "169.254.10.11", "169.254.10.11"),
+            ["169.254.10.11", STATIC_ONBOARD_HOST_DEFAULT],
+        )
+
+    def test_candidates_can_respect_explicit_host_only(self) -> None:
+        self.assertEqual(
+            probe_host_candidates("127.0.0.1", include_static=False),
+            ["127.0.0.1"],
+        )
 
 
 if __name__ == "__main__":

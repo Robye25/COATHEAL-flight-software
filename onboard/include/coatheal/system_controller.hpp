@@ -39,7 +39,8 @@ class SystemController {
 
  private:
   bool DrainTelemetryQueue(bool* link_ok, std::string* error);
-  std::string HandleCommandLine(const std::string& line);
+  std::string HandleCommandLine(const std::string& line,
+                                const std::string& peer_ip);
 
   OnboardConfig config_;
   CommandParser parser_;
@@ -82,6 +83,9 @@ class SystemController {
 
   std::vector<double> last_heater_duty_;
   std::uint64_t seq_ = 0;
+  bool link_seen_ = false;
+  double link_loss_s_ = 0.0;
+  bool link_loss_fallback_active_ = false;
 
   // Rev B pull-event bookkeeping: emit EVT,PULL after each motor completes a
   // pull cycle. Edge-detects channel moving true->false while the MotionLock

@@ -16,7 +16,10 @@ from PyQt6.QtWidgets import (
 from ..protocol import CommandResponse, TelemetryPacket
 from . import firewall
 from .dispatch import CommandDispatcher, TelemetryReceiver
-from .discovery import GsBeacon, OnboardListener, DISCOVERY_PORT_DEFAULT
+from .discovery import (
+    CommandProbe, GsBeacon, OnboardListener, DISCOVERY_PORT_DEFAULT,
+    STATIC_ONBOARD_HOST_DEFAULT,
+)
 from .panels_control import (
     CommandPanel, ConnectionPanel, EmergencyBar, HeaterPanel, ModePanel,
     StepperPanel,
@@ -152,8 +155,16 @@ class MainWindow(QMainWindow):
         self._listener.log_message.connect(self._log.append)
         self._listener.onboard_discovered.connect(self._on_onboard_discovered)
         self._listener.peer_gs_seen.connect(self._on_peer_gs_seen)
+        self._probe = CommandProbe(
+            [cmd_host],
+            cmd_port=cmd_port,
+            include_static=not bool(cmd_host),
+        )
+        self._probe.log_message.connect(self._log.append)
+        self._probe.onboard_reachable.connect(self._on_onboard_reachable)
         self._beacon.start()
         self._listener.start()
+        self._probe.start()
 
         # Auto-start the TCP telemetry acceptor on :tel_port so the operator
         # doesn't have to click "Start Telemetry" for plug-and-play. The
@@ -224,6 +235,8 @@ class MainWindow(QMainWindow):
     def _on_onboard_discovered(self, host: str, cmd_port: int, tel_port: int,
                                session: str, hostname: str) -> None:
         self._connection.set_discovered(host, cmd_port, tel_port, session, hostname)
+        if getattr(self, "_probe", None) is not None:
+            self._probe.set_candidates([host, self._connection.onboard_host_value()])
         # Only retarget dispatcher if operator left host blank OR a new host/port appeared.
         user_host = self._connection.onboard_host_value()
         retarget = (not user_host) and (
@@ -249,6 +262,20 @@ class MainWindow(QMainWindow):
 
     def _on_peer_gs_seen(self, host: str, priority: int) -> None:
         self._log.append(f"[discovery] peer GS seen at {host} priority={priority}")
+
+    def _on_onboard_reachable(self, host: str, cmd_port: int) -> None:
+        user_host = self._connection.onboard_host_value()
+        if user_host and user_host != host:
+            return
+        if host == self._discovered_host and cmd_port == self._discovered_cmd_port:
+            return
+        self._dispatcher.set_endpoint(host, cmd_port)
+        self._discovered_host = host
+        self._discovered_cmd_port = cmd_port
+        self._connection.set_discovered(host, cmd_port, self._tel_port,
+                                        "probe", "coatheal")
+        self._log.append(f"[discovery] command probe target => {host}:{cmd_port}")
+        self._top.set_discovery(f"cmd: {host}:{cmd_port}", "#2ecc71")
 
     def _on_connection_changed(self, connected: bool, addr: str) -> None:
         self._link_ok = connected
@@ -346,6 +373,8 @@ class MainWindow(QMainWindow):
             self._beacon.stop(); self._beacon.wait(2000)
         if getattr(self, "_listener", None) is not None:
             self._listener.stop(); self._listener.wait(2000)
+        if getattr(self, "_probe", None) is not None:
+            self._probe.stop(); self._probe.wait(2000)
         super().closeEvent(event)
 
 
