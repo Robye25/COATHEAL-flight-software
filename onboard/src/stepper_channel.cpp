@@ -27,8 +27,7 @@ StepperChannel::StepperChannel(StepperChannelConfig cfg,
 
   if (driver_) {
     driver_->SetMicrostep(microstep_);
-    driver_->Enable(cfg_.enable_on_boot);
-    enabled_ = cfg_.enable_on_boot;
+    enabled_ = cfg_.enable_on_boot && driver_->Enable(true);
   }
 
   if (cfg_.use_pulse_thread) {
@@ -58,6 +57,18 @@ void StepperChannel::ReleaseLockIfHeld() {
     lock_->Release(cfg_.channel_id);
     lock_held_ = false;
   }
+}
+
+bool StepperChannel::AcquireLockForMotion(std::string* error) {
+  if (lock_held_ || lock_ == nullptr) {
+    return true;
+  }
+  if (!lock_->TryAcquire(cfg_.channel_id)) {
+    if (error) *error = "motion lock held by another motor";
+    return false;
+  }
+  lock_held_ = true;
+  return true;
 }
 
 void StepperChannel::UpdateRampSpeed(double dt_s,
@@ -117,13 +128,21 @@ void StepperChannel::Tick(double dt_s) {
   if (mode_ == Mode::kHolding) {
     hold_remaining_s_ = std::max(0.0, hold_remaining_s_ - dt_s);
     if (hold_remaining_s_ <= 0.0) {
-      // Pull-cycle retract leg: aim back at retract_target_.
-      target_ = retract_target_;
-      mode_ = (position_ != target_) ? Mode::kRetracting : Mode::kIdle;
-      moving_ = (mode_ != Mode::kIdle);
-      fractional_steps_ = 0.0;
-      current_step_hz_ = 0.0;
-      if (mode_ == Mode::kIdle) {
+      if (retract_after_hold_) {
+        target_ = retract_target_;
+        mode_ = (position_ != target_) ? Mode::kRetracting : Mode::kIdle;
+        moving_ = (mode_ != Mode::kIdle);
+        fractional_steps_ = 0.0;
+        current_step_hz_ = 0.0;
+        if (mode_ == Mode::kIdle) {
+          retract_after_hold_ = false;
+          ReleaseLockIfHeld();
+        }
+      } else {
+        mode_ = Mode::kIdle;
+        moving_ = false;
+        fractional_steps_ = 0.0;
+        current_step_hz_ = 0.0;
         ReleaseLockIfHeld();
       }
     }
@@ -148,12 +167,20 @@ void StepperChannel::Tick(double dt_s) {
       mode_ = Mode::kIdle;
       moving_ = false;
       current_step_hz_ = 0.0;
+      retract_after_hold_ = false;
       ReleaseLockIfHeld();
       return;
     }
     mode_ = Mode::kIdle;
     moving_ = false;
     current_step_hz_ = 0.0;
+    ReleaseLockIfHeld();
+    return;
+  }
+
+  if (cfg_.use_pulse_thread) {
+    moving_ = true;
+    cv_.notify_all();
     return;
   }
 
@@ -177,9 +204,11 @@ void StepperChannel::Tick(double dt_s) {
       mode_ = Mode::kHolding;
     } else if (mode_ == Mode::kRetracting) {
       mode_ = Mode::kIdle;
+      retract_after_hold_ = false;
       ReleaseLockIfHeld();
     } else {
       mode_ = Mode::kIdle;
+      ReleaseLockIfHeld();
     }
   }
 }
@@ -224,14 +253,22 @@ void StepperChannel::PulseThreadBody() {
 
 bool StepperChannel::MoveSteps(std::int64_t delta_usteps, std::string* error) {
   std::lock_guard<std::mutex> lock(mu_);
+  if (!enabled_) {
+    if (error) *error = "channel disabled";
+    return false;
+  }
   const std::int64_t new_target = target_ + delta_usteps;
   if (std::abs(new_target) > cfg_.max_position_steps) {
     if (error) *error = "target exceeds max_position_steps";
     return false;
   }
+  if (new_target != position_ && !AcquireLockForMotion(error)) {
+    return false;
+  }
   target_ = new_target;
   hold_remaining_s_ = 0.0;
   retract_target_ = position_;  // fallback retract = current position
+  retract_after_hold_ = false;
   mode_ = (position_ != target_) ? Mode::kMoving : Mode::kIdle;
   moving_ = (mode_ == Mode::kMoving);
   last_source_ = "cmd:MOVE";
@@ -241,6 +278,10 @@ bool StepperChannel::MoveSteps(std::int64_t delta_usteps, std::string* error) {
 bool StepperChannel::MoveToSteps(std::int64_t absolute_usteps, double hold_s,
                                  std::string* error) {
   std::lock_guard<std::mutex> lock(mu_);
+  if (!enabled_) {
+    if (error) *error = "channel disabled";
+    return false;
+  }
   if (std::abs(absolute_usteps) > cfg_.max_position_steps) {
     if (error) *error = "target exceeds max_position_steps";
     return false;
@@ -249,9 +290,13 @@ bool StepperChannel::MoveToSteps(std::int64_t absolute_usteps, double hold_s,
     if (error) *error = "hold must be >= 0";
     return false;
   }
+  if ((position_ != absolute_usteps || hold_s > 0.0) && !AcquireLockForMotion(error)) {
+    return false;
+  }
   target_ = absolute_usteps;
   hold_remaining_s_ = hold_s;
   retract_target_ = position_;
+  retract_after_hold_ = false;
   if (position_ != target_) {
     mode_ = Mode::kMoving;
   } else if (hold_s > 0.0) {
@@ -275,15 +320,38 @@ bool StepperChannel::Rotate(double revolutions, std::string* error) {
   return MoveSteps(static_cast<std::int64_t>(std::llround(total)), error);
 }
 
-bool StepperChannel::Home(std::string* /*error*/) {
+bool StepperChannel::Home(std::string* error) {
   std::lock_guard<std::mutex> lock(mu_);
+  if (!enabled_) {
+    if (error) *error = "channel disabled";
+    return false;
+  }
+  if (position_ != 0 && !AcquireLockForMotion(error)) {
+    return false;
+  }
   target_ = 0;
   hold_remaining_s_ = 0.0;
   retract_target_ = 0;
+  retract_after_hold_ = false;
   mode_ = (position_ != 0) ? Mode::kMoving : Mode::kIdle;
   moving_ = (mode_ == Mode::kMoving);
   last_source_ = "cmd:HOME";
   return true;
+}
+
+void StepperChannel::SetPositionZero() {
+  std::lock_guard<std::mutex> lock(mu_);
+  position_ = 0;
+  target_ = 0;
+  retract_target_ = 0;
+  hold_remaining_s_ = 0.0;
+  fractional_steps_ = 0.0;
+  current_step_hz_ = 0.0;
+  moving_ = false;
+  mode_ = Mode::kIdle;
+  retract_after_hold_ = false;
+  last_source_ = "cmd:ZERO";
+  ReleaseLockIfHeld();
 }
 
 void StepperChannel::Stop() {
@@ -295,6 +363,7 @@ void StepperChannel::Stop() {
   fractional_steps_ = 0.0;
   current_step_hz_ = 0.0;
   mode_ = Mode::kIdle;
+  retract_after_hold_ = false;
   last_source_ = "cmd:STOP";
   ReleaseLockIfHeld();
 }
@@ -324,6 +393,13 @@ bool StepperChannel::SetMicrostep(int divisor, std::string* error) {
     return false;
   }
   std::lock_guard<std::mutex> lock(mu_);
+  if (driver_) {
+    driver_->SetMicrostep(divisor);
+    if (!driver_->healthy()) {
+      if (error) *error = "driver microstep configuration failed";
+      return false;
+    }
+  }
   // Re-scale position_ / target_ proportionally so absolute travel in
   // real-world distance is preserved across a microstep change.
   if (microstep_ != divisor && microstep_ > 0) {
@@ -334,14 +410,15 @@ bool StepperChannel::SetMicrostep(int divisor, std::string* error) {
     retract_target_ = static_cast<std::int64_t>(std::llround(retract_target_ * scale));
   }
   microstep_ = divisor;
-  if (driver_) driver_->SetMicrostep(divisor);
   return true;
 }
 
 bool StepperChannel::SetEnabled(bool enable) {
   std::lock_guard<std::mutex> lock(mu_);
+  if (driver_ == nullptr || !driver_->Enable(enable)) {
+    return false;
+  }
   enabled_ = enable;
-  if (driver_) driver_->Enable(enable);
   if (!enable) {
     moving_ = false;
     mode_ = Mode::kIdle;
@@ -371,6 +448,7 @@ bool StepperChannel::ArmPullCycle(std::string* error) {
   std::lock_guard<std::mutex> lock(mu_);
   lock_held_ = (lock_ != nullptr);
   retract_target_ = 0;  // pull cycle always retracts to home
+  retract_after_hold_ = true;
   const std::int64_t pull_usteps =
       static_cast<std::int64_t>(cfg_.pull_travel_full_steps) * microstep_;
   if (std::abs(pull_usteps) > cfg_.max_position_steps) {

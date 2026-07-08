@@ -55,8 +55,8 @@ does not duplicate CSV rows.
 | Panel / plot | Rev C data |
 |---|---|
 | Connection | Pi command target, telemetry bind state, discovery result |
-| Heater duties | Six heater channels H0..H5 |
-| Motor dock | M0 and M1 TMC5160/ball-screw state from `STEPPER0` / `STEPPER1` |
+| Heater control | Six duties, six PID targets, global/per-channel target controls, PID tuning, and local JSON profiles |
+| Motor dock | Explicit M0/M1 selector, jog/absolute controls, software zero, and runtime sequence editor |
 | Pull events | `EVT,PULL` rows with motor id, steps, hold time, sample group |
 | Temperature plot | Eight PT100 sample temperatures S0..S7 from DAQ132M |
 | Pressure plot | DPS310 pressure |
@@ -72,11 +72,17 @@ Typical connected operation:
 ```powershell
 python main.py command --cmd PING
 python main.py command --cmd STATUS
+python main.py command --cmd CHECK
 python main.py command --cmd ARM
 python main.py command --cmd "SET_PHASE ASCENT"
-python main.py command --cmd "SET_HEATER_DUTY 0 0.20"
-python main.py command --cmd "PULL_ARM 0"
-python main.py command --cmd "PULL_EXECUTE 0"
+python main.py command --cmd "SET_PID ALL 0.20 0.02 0.03"
+python main.py command --cmd "SET_TEMP_TARGET 0 25.0"
+python main.py command --cmd GET_THERMAL
+python main.py command --cmd "STEPPER_ENABLE 0"
+python main.py command --cmd "SET_POSITION_ZERO 0"
+python main.py command --cmd "BENDSEQ_LOAD 0 flex 800:2:50 1600:3:75 0:1:50"
+python main.py command --cmd "BENDSEQ_RUN 0 flex"
+python main.py command --cmd "BENDSEQ_STATUS 0"
 python main.py command --cmd HEATERS_OFF --yes
 python main.py command --cmd DISARM
 ```
@@ -92,6 +98,8 @@ OFF
 RESET
 ```
 
+Thermal profiles are stored locally in `profiles/thermal_profiles.json`. The Pi
+does not persist targets or tuned gains; applying a profile re-sends them.
 Bench-only commands require `runtime.bench_mode=true` and `ARM_DEBUG`.
 
 ## Protocol Parser

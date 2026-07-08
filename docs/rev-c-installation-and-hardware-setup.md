@@ -6,8 +6,9 @@ Rev C is manual-first. While the ground-station link is healthy, the onboard
 software does not start autonomous phase-entry motion, fatigue pulls, or
 automatic thermal sequencing. Operators command phase, heaters, and pull cycles
 from the ground station. If an established link is lost for the configured
-timeout, the onboard can fall back to pressure-based phase tracking and the
-sample +5 C floor controller.
+timeout, the onboard continues an already-running bend sequence and existing
+PID targets, stops non-sequence motion, and applies the +5 C floor only to
+channels without an explicit target.
 
 ## Source of Truth
 
@@ -59,17 +60,16 @@ All GPIO values are BCM GPIO line numbers on `/dev/gpiochip0`, not physical
 | Telemetry logging and durable queue | Implemented | Verify SD/USB paths on the Pi |
 | Final-BOM config schema | Implemented | Use `config/onboard.example.ini` as the template |
 | TMC5160 config path | Implemented | Bench-verify SPI current/chopper setup and motor polarity |
-| STEP/DIR/EN pulses | HAL boundary present | Bench-verify real GPIO pulse backend before powered motor tests |
-| Heater PWM mapping | Configured | Bench-verify real GPIO/PWM backend before powered heater tests |
-| DAQ132M Modbus settings | Configured | Implement/verify register reads against the DAQ132M manual |
-| DPS310 / ADS1115 reads | Configured | Implement/verify I2C reads with final addresses |
-| RTD Click bench path | Configured as optional | Enable only if used for bench validation |
+| STEP/DIR/EN pulses | Implemented with libgpiod | Bench-verify waveform timing, direction, and travel |
+| Heater PWM mapping | Implemented with zero-safe software PWM | Validate with current-limited dummy loads |
+| DAQ132M Modbus | RTU read, CRC, scaling, and range checks implemented | Verify register map/function/scale against the exact card |
+| DPS310 / ADS1115 reads | Linux `i2c-dev` reads implemented | Verify addresses and values on the assembled bus |
+| RTD Click bench path | Pins/config reserved; active read backend absent | Keep disabled |
 | Sample resistance | Disabled in final BOM | Telemetry keeps the field for parser compatibility and emits `-` |
 
-The software is now configurable for the final parts. The remaining work before
-powered hardware operation is physical I/O validation: real GPIO pulse/PWM
-timing and device-specific I2C/Modbus read implementations must be tested on
-the assembled Pi.
+The remaining work before powered hardware operation is physical validation on
+the assembled Pi: bus addressing, DAQ register mapping, GPIO waveforms, motor
+current/polarity, and heater dummy-load behavior.
 
 ## Ground Station Installation
 
@@ -110,11 +110,15 @@ cd D:\COATHEAL-flight-software\COATHEAL-flight-software\ground-station
 .\.venv\Scripts\Activate.ps1
 python main.py command --cmd PING
 python main.py command --cmd STATUS
+python main.py command --cmd CHECK
 python main.py command --cmd ARM
 python main.py command --cmd "SET_PHASE ASCENT"
-python main.py command --cmd "SET_HEATER_DUTY 0 0.25"
-python main.py command --cmd "PULL_ARM 0"
-python main.py command --cmd "PULL_EXECUTE 0"
+python main.py command --cmd "SET_PID ALL 0.20 0.02 0.03"
+python main.py command --cmd "SET_TEMP_TARGET 0 25.0"
+python main.py command --cmd "STEPPER_ENABLE 0"
+python main.py command --cmd "SET_POSITION_ZERO 0"
+python main.py command --cmd "BENDSEQ_LOAD 0 flex 800:2:50 1600:3:75 0:1:50"
+python main.py command --cmd "BENDSEQ_RUN 0 flex"
 python main.py command --cmd HEATERS_OFF --yes
 ```
 
@@ -319,7 +323,7 @@ This map matches the final pinout diagram. GPIO values are BCM numbers.
 | Motor 0 STEP/DIR/EN | BCM 19 / 26 / 12 | `motor0.step_line`, `motor0.dir_line`, `motor0.enable_line` |
 | Motor 0 SPI | `/dev/spidev0.0`, CS BCM 22 | `motor0.spi_device`, `motor0.cs_line` |
 | Motor 1 STEP/DIR/EN | BCM 16 / 20 / 21 | `motor1.step_line`, `motor1.dir_line`, `motor1.enable_line` |
-| Motor 1 SPI | `/dev/spidev0.1`, CS BCM 23 | `motor1.spi_device`, `motor1.cs_line` |
+| Motor 1 SPI | `/dev/spidev0.0`, CS BCM 23 | `motor1.spi_device`, `motor1.cs_line` |
 | RTD Click optional CS/DRDY | BCM 7 / 25 | `sensor.rtd_click_cs_line`, `sensor.rtd_click_drdy_line` |
 | I2C bus | Pi I2C-1, SDA BCM 2, SCL BCM 3 | fixed by Pi |
 | DPS310 address | `0x77` | `sensor.dps310_i2c_addr` |
@@ -331,17 +335,15 @@ This map matches the final pinout diagram. GPIO values are BCM numbers.
 Check interfaces on the Pi:
 
 ```bash
-# The setup script installs this SPI0 CS mapping in the active boot config:
-grep -E '^dtoverlay=spi0-2cs,cs0_pin=22,cs1_pin=23$' \
-  /boot/firmware/config.txt /boot/config.txt 2>/dev/null
 i2cdetect -y 1
 ls -l /dev/spidev*
 ls -l /dev/ttyUSB*
 gpioinfo gpiochip0
 ```
 
-After adding or changing the SPI overlay, reboot before checking
-`/dev/spidev0.0` and `/dev/spidev0.1`.
+The software uses `SPI_NO_CS` and drives BCM 22/23 through libgpiod. Remove the
+old `dtoverlay=spi0-2cs,cs0_pin=22,cs1_pin=23` line if it is present, then
+reboot. `/dev/spidev0.0` is shared by both TMC5160 drivers.
 
 Expected I2C devices:
 
@@ -376,9 +378,11 @@ sensor.daq132m_device=/dev/ttyUSB0
 sensor.daq132m_baud=9600
 sensor.daq132m_parity=N
 sensor.daq132m_slave_id=1
+sensor.daq132m_function_code=3
 sensor.daq132m_register_base=0
 sensor.daq132m_register_count=8
 sensor.daq132m_c_per_count=0.1
+sensor.daq132m_c_offset=0.0
 sensor.pressure_source=dps310
 sensor.dps310_i2c_addr=0x77
 sensor.uv_source=guva_s12sd_ads1115
@@ -391,6 +395,8 @@ hal.mode_led_enabled=false
 heater.output_lines=17,18,27,5,6,13
 heater.pwm_frequency_hz=10.0
 heater.active_high=true
+heater.target_min_c=0.0
+heater.target_max_c=80.0
 
 motor0.driver=tmc5160
 motor0.spi_device=/dev/spidev0.0
@@ -401,7 +407,7 @@ motor0.enable_line=12
 motor0.samples=0,1,2,3
 
 motor1.driver=tmc5160
-motor1.spi_device=/dev/spidev0.1
+motor1.spi_device=/dev/spidev0.0
 motor1.cs_line=23
 motor1.step_line=16
 motor1.dir_line=20
@@ -457,9 +463,17 @@ Ground command link:
 ```powershell
 python main.py command --cmd PING
 python main.py command --cmd STATUS
+python main.py command --cmd CHECK
 python main.py command --cmd ARM
 python main.py command --cmd "SET_PHASE ASCENT"
-python main.py command --cmd "SET_ALL_DUTY 0.00"
+python main.py command --cmd "SET_PID ALL 0.20 0.02 0.03"
+python main.py command --cmd "SET_ALL_TEMP_TARGETS 25.0"
+python main.py command --cmd GET_THERMAL
+python main.py command --cmd "STEPPER_ENABLE 0"
+python main.py command --cmd "SET_POSITION_ZERO 0"
+python main.py command --cmd "BENDSEQ_LOAD 0 flex 800:2:50 1600:3:75 0:1:50"
+python main.py command --cmd "BENDSEQ_RUN 0 flex"
+python main.py command --cmd "BENDSEQ_STATUS 0"
 python main.py command --cmd HEATERS_OFF --yes
 python main.py command --cmd DISARM
 ```
@@ -471,12 +485,13 @@ Before connecting heater or motor power:
 1. Build and run tests on the Pi.
 2. Verify Ethernet command and telemetry with no loads connected.
 3. Verify I2C, SPI, and `/dev/ttyUSB0` enumeration.
-4. Confirm `HEATERS_OFF` is ACKed and all configured heater outputs are off.
-5. Test each MOSFET output with a current-limited dummy load.
-6. Test each TMC5160 with motor supply current-limited and one motor only.
-7. Confirm motor direction and travel limits with the ball screw unloaded.
-8. Confirm `PULL_ARM` / `PULL_EXECUTE` holds `HEATER_INHIBITED`.
-9. Only then connect heaters and the mechanical sample fixtures.
+4. Run `CHECK`; do not continue until required real devices report `OK`.
+5. Confirm `HEATERS_OFF` is ACKed and all configured heater outputs are off.
+6. Test each MOSFET output with a current-limited dummy load.
+7. Test each TMC5160 with motor supply current-limited and one motor only.
+8. Confirm motor direction and travel limits with the ball screw unloaded.
+9. Confirm bend-sequence motion reports `HEATER_INHIBITED`.
+10. Only then connect heaters and the mechanical sample fixtures.
 
 ## Troubleshooting
 

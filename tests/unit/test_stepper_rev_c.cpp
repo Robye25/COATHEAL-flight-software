@@ -309,9 +309,20 @@ void TestControllerMultiChannelDispatch() {
   assert(ctl.Snapshot(1).target_steps == 400);
   assert(ctl.Snapshot(0).target_steps == 0);  // untouched
 
+  // MotionLock serializes all motion, including ordinary manual jogs.
+  assert(!ctl.MoveSteps(0, 200, &err));
+  for (int i = 0; i < 10000 && ctl.Snapshot(1).moving; ++i) {
+    ctl.Tick(MissionPhase::kAscent, 0.001, false);
+  }
+  assert(!ctl.Snapshot(1).moving);
   assert(ctl.MoveSteps(0, 200, &err));
   assert(ctl.Snapshot(0).target_steps == 200);
   assert(ctl.Snapshot(1).target_steps == 400);
+
+  ctl.Stop(0, &err);
+  assert(ctl.SetPositionZero(1, &err));
+  assert(ctl.Snapshot(1).position_steps == 0);
+  assert(ctl.Snapshot(1).target_steps == 0);
 
   // Unknown motor id rejected.
   assert(!ctl.MoveSteps(9, 100, &err));

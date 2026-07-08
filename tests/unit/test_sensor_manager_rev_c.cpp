@@ -23,6 +23,7 @@ SensorManager MakeSensorManager(Ina3221Adapter* ina,
   OnboardConfig config;
   config.hardware.sample_count = 8;
   config.hardware.heater_count = 6;
+  config.runtime.use_simulated_sensors = true;
   config.sensors.resistance_source = "disabled";
   return SensorManager(config, spi, i2c, rtc, ina);
 }

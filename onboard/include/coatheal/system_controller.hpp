@@ -1,9 +1,11 @@
 #pragma once
 
 #include <atomic>
+#include <map>
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -41,6 +43,11 @@ class SystemController {
   bool DrainTelemetryQueue(bool* link_ok, std::string* error);
   std::string HandleCommandLine(const std::string& line,
                                 const std::string& peer_ip);
+  void TickBendSequences();
+  bool AnySequencePaused() const;
+  std::string SequenceStatus(int motor_id) const;
+  void StopNonSequenceMotionOnFallback();
+  void InhibitHeatersForMotion();
 
   OnboardConfig config_;
   CommandParser parser_;
@@ -86,6 +93,31 @@ class SystemController {
   bool link_seen_ = false;
   double link_loss_s_ = 0.0;
   bool link_loss_fallback_active_ = false;
+  bool link_loss_fallback_was_active_ = false;
+  bool tmc_spi_ok_ = true;
+  SensorSnapshot last_sensor_snapshot_;
+
+  struct BendSequenceStep {
+    std::int64_t target_usteps = 0;
+    double hold_s = 0.0;
+    std::optional<double> speed_hz;
+  };
+  struct BendSequenceDefinition {
+    std::string name;
+    std::vector<BendSequenceStep> steps;
+  };
+  struct BendSequenceRuntime {
+    std::map<std::string, BendSequenceDefinition> definitions;
+    std::string active_name;
+    std::size_t step_index = 0;
+    bool running = false;
+    bool paused = false;
+    bool step_queued = false;
+    std::string fault;
+  };
+  mutable std::mutex sequence_mu_;
+  std::vector<BendSequenceRuntime> bend_sequences_;
+  std::vector<bool> motor_zeroed_;
 
   // Pull-event bookkeeping: emit EVT,PULL after each motor completes a
   // pull cycle. Edge-detects channel moving true->false while the MotionLock

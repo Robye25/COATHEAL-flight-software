@@ -96,6 +96,7 @@ class StepperChannel {
                    std::string* error);
   bool Rotate(double revolutions, std::string* error);
   bool Home(std::string* error);
+  void SetPositionZero();
   void Stop();
   bool SetSpeed(double full_step_hz, std::string* error);
   bool SetMicrostep(int divisor, std::string* error);
@@ -113,6 +114,8 @@ class StepperChannel {
   void Tick(double dt_s);
 
   StepperStatus Snapshot() const;
+  bool healthy() const { return driver_ != nullptr && driver_->healthy(); }
+  bool ActiveCheck() { return driver_ != nullptr && driver_->ActiveCheck(); }
 
   // "[pull] cycle complete id=<id> samples=0,1,2,3"
   std::string FormatPullCompleteLog() const;
@@ -129,6 +132,7 @@ class StepperChannel {
   double ClampHz(double hz) const;
   std::int64_t FullStepsPerRev() const { return cfg_.full_steps_per_rev; }
   void ReleaseLockIfHeld();  // caller holds mu_
+  bool AcquireLockForMotion(std::string* error);  // caller holds mu_
   // Core pulse-issuing worker used by both Tick() and the RT thread. Called
   // with mu_ held. Issues up to `allowed_usteps` microsteps toward target_
   // and updates position_/mode_. Returns # of microsteps issued.
@@ -156,6 +160,7 @@ class StepperChannel {
   Mode mode_ = Mode::kIdle;
   bool lock_held_ = false;
   std::int64_t retract_target_ = 0;
+  bool retract_after_hold_ = false;
   double fractional_steps_ = 0.0;  // sub-integer accumulator
 
   std::thread pulse_thread_;

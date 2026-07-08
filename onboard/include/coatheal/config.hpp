@@ -13,6 +13,7 @@ struct RuntimeConfig {
   bool bench_mode = false;
   std::string debug_arm_code = "COATHEAL_DEBUG";
   bool use_simulated_pwm = false;
+  bool use_simulated_sensors = false;
   std::string gpio_chip = "/dev/gpiochip0";
 };
 
@@ -92,6 +93,8 @@ struct FatigueConfig {
 
 struct HeaterSafetyConfig {
   double max_sample_temp_c = 85.0;
+  double target_min_c = 0.0;
+  double target_max_c = 80.0;
 };
 
 struct SensorRangeConfig {
@@ -138,9 +141,11 @@ struct SensorHardwareConfig {
   int daq132m_data_bits = 8;
   int daq132m_stop_bits = 1;
   int daq132m_slave_id = 1;
+  int daq132m_function_code = 3;
   int daq132m_register_base = 0;
   int daq132m_register_count = 8;
   double daq132m_c_per_count = 0.1;
+  double daq132m_c_offset = 0.0;
 
   bool rtd_click_enabled = false;
   std::string rtd_click_spi_device = "/dev/spidev0.0";

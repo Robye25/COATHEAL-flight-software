@@ -25,6 +25,7 @@ class StorageManager {
   bool safe_mode() const { return safe_mode_.load(); }
 
   StatusFlags status() const;
+  bool ActiveCheck(std::string* details);
 
  private:
   static bool EnsureParentDirectory(const std::string& path);

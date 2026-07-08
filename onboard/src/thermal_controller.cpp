@@ -9,7 +9,8 @@ namespace coatheal {
 ThermalController::ThermalController(const OnboardConfig& config)
     : config_(config),
       channel_latched_(config.hardware.heater_count, false),
-      sample_heating_(config.hardware.heater_count, false) {
+      sample_heating_(config.hardware.heater_count, false),
+      active_targets_c_(config.hardware.heater_count) {
   sample_pids_.reserve(config_.hardware.heater_count);
   for (std::size_t i = 0; i < config_.hardware.heater_count; ++i) {
     sample_pids_.emplace_back(PidGains{config.pid.kp, config.pid.ki, config.pid.kd},
@@ -23,6 +24,7 @@ void ThermalController::Reset() {
   }
   std::fill(channel_latched_.begin(), channel_latched_.end(), false);
   std::fill(sample_heating_.begin(), sample_heating_.end(), false);
+  std::fill(active_targets_c_.begin(), active_targets_c_.end(), std::nullopt);
   overtemp_latched_ = false;
   uniformity_ok_ = true;
 }
@@ -30,6 +32,12 @@ void ThermalController::Reset() {
 void ThermalController::UpdatePid(PidGains gains) {
   for (auto& pid : sample_pids_) {
     pid.SetGains(gains);
+  }
+}
+
+void ThermalController::UpdatePid(std::size_t channel, PidGains gains) {
+  if (channel < sample_pids_.size()) {
+    sample_pids_[channel].SetGains(gains);
   }
 }
 
@@ -59,6 +67,9 @@ std::vector<double> ThermalController::ComputeRequestedDuty(
   }
   if (sample_heating_.size() != heater_count) {
     sample_heating_.assign(heater_count, false);
+  }
+  if (active_targets_c_.size() != heater_count) {
+    active_targets_c_.assign(heater_count, std::nullopt);
   }
   std::vector<double> duty(heater_count, 0.0);
 
@@ -90,44 +101,89 @@ std::vector<double> ThermalController::ComputeRequestedDuty(
 
   const bool has_direct_override =
       overrides.all_heaters_override.has_value() ||
-      overrides.single_heater_override.has_value();
+      overrides.single_heater_override.has_value() ||
+      std::any_of(overrides.heater_duty_overrides.begin(),
+                  overrides.heater_duty_overrides.end(),
+                  [](const std::optional<double>& v) { return v.has_value(); });
+  const bool has_temp_targets =
+      std::any_of(overrides.temp_targets_c.begin(), overrides.temp_targets_c.end(),
+                  [](const std::optional<double>& v) { return v.has_value(); });
 
   if (overrides.heaters_off) {
     std::fill(sample_heating_.begin(), sample_heating_.end(), false);
+    std::fill(active_targets_c_.begin(), active_targets_c_.end(), std::nullopt);
     return duty;
   }
 
-  if (overrides.floor_control_enabled && ShouldHeatPhase(phase)) {
-    const double floor_c = config_.phase.sample_floor_c;
-    const double on_threshold = floor_c - kFloorHysteresisC;  // below -> heat
-    const double off_threshold = floor_c;                      // at/above -> off
+  if (overrides.pid_override.has_value()) {
+    for (auto& pid : sample_pids_) {
+      pid.SetGains(overrides.pid_override.value());
+    }
+  }
+  for (std::size_t i = 0;
+       i < sample_pids_.size() && i < overrides.pid_overrides.size(); ++i) {
+    if (overrides.pid_overrides[i].has_value()) {
+      sample_pids_[i].SetGains(overrides.pid_overrides[i].value());
+    }
+  }
 
-    // Per-sample floor PID with hysteresis. The PID output is only applied
-    // (and the integrator only accumulates) while the sample is below the
-    // on_threshold; once it reaches off_threshold we freeze the controller.
-    // heater[i] drives sample[i]; there is no box heater slot.
+  active_targets_c_.assign(heater_count, std::nullopt);
+
+  if (has_temp_targets ||
+      (overrides.floor_control_enabled && ShouldHeatPhase(phase))) {
     for (std::size_t i = 0; i < sample_pids_.size() && i < heater_count; ++i) {
-      const double measured = (i < sensors.sample_temps_c.size())
-                                  ? sensors.sample_temps_c[i]
-                                  : floor_c;  // no data -> assume at floor
+      const bool temp_valid =
+          i < sensors.sample_temps_c.size() &&
+          (sensors.sample_temp_valid.empty() ||
+           (i < sensors.sample_temp_valid.size() && sensors.sample_temp_valid[i]));
+      if (!temp_valid) {
+        sample_heating_[i] = false;
+        sample_pids_[i].Reset();
+        duty[i] = 0.0;
+        continue;
+      }
 
-      if (sample_heating_[i]) {
-        if (measured >= off_threshold) {
+      const bool explicit_target =
+          i < overrides.temp_targets_c.size() &&
+          overrides.temp_targets_c[i].has_value();
+      if (!explicit_target &&
+          (!overrides.floor_control_enabled || !ShouldHeatPhase(phase))) {
+        sample_heating_[i] = false;
+        continue;
+      }
+
+      const double target = explicit_target ? overrides.temp_targets_c[i].value()
+                                            : config_.phase.sample_floor_c;
+      const double measured = sensors.sample_temps_c[i];
+      active_targets_c_[i] = target;
+
+      if (explicit_target) {
+        if (measured >= target) {
           sample_heating_[i] = false;
           sample_pids_[i].Reset();
           duty[i] = 0.0;
-          continue;
-        }
-      } else {
-        if (measured < on_threshold) {
+        } else {
           sample_heating_[i] = true;
+          duty[i] = sample_pids_[i].Update(target, measured, dt_seconds);
         }
-      }
-
-      if (sample_heating_[i]) {
-        duty[i] = sample_pids_[i].Update(floor_c, measured, dt_seconds);
       } else {
-        duty[i] = 0.0;
+        const double on_threshold = target - kFloorHysteresisC;
+        const double off_threshold = target;
+        if (sample_heating_[i]) {
+          if (measured >= off_threshold) {
+            sample_heating_[i] = false;
+            sample_pids_[i].Reset();
+            duty[i] = 0.0;
+            continue;
+          }
+        } else {
+          if (measured < on_threshold) {
+            sample_heating_[i] = true;
+          }
+        }
+        duty[i] = sample_heating_[i]
+                      ? sample_pids_[i].Update(target, measured, dt_seconds)
+                      : 0.0;
       }
     }
   } else {
@@ -149,16 +205,22 @@ std::vector<double> ThermalController::ComputeRequestedDuty(
     }
   }
 
-  if (overrides.pid_override.has_value()) {
-    for (auto& pid : sample_pids_) {
-      pid.SetGains(overrides.pid_override.value());
+  for (std::size_t i = 0; i < duty.size() && i < overrides.heater_duty_overrides.size(); ++i) {
+    if (overrides.heater_duty_overrides[i].has_value()) {
+      duty[i] = std::clamp(overrides.heater_duty_overrides[i].value(), 0.0, 1.0);
     }
   }
 
-  // Enforce per-channel latch last so no override re-arms a tripped channel
-  // without RESET_CONTROL.
+  // Enforce sensor validity and the per-channel latch last so no open-loop
+  // override can energize a heater whose RTD is unavailable, or re-arm a
+  // tripped channel without RESET_CONTROL.
   for (std::size_t i = 0; i < heater_count; ++i) {
-    if (channel_latched_[i]) {
+    const bool temp_valid =
+        i < sensors.sample_temps_c.size() &&
+        (sensors.sample_temp_valid.empty() ||
+         (i < sensors.sample_temp_valid.size() &&
+          sensors.sample_temp_valid[i]));
+    if (!temp_valid || channel_latched_[i]) {
       duty[i] = 0.0;
     }
   }

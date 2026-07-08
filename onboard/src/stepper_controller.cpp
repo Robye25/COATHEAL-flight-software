@@ -204,6 +204,18 @@ bool StepperController::Home(int motor_id, std::string* error) {
   return ch->Home(error);
 }
 
+bool StepperController::SetPositionZero(int motor_id, std::string* error) {
+  StepperChannel* ch = ChannelById(motor_id);
+  if (!ch) { if (error) *error = "unknown motor id"; return false; }
+  const StepperStatus status = ch->Snapshot();
+  if (status.moving || status.holding) {
+    if (error) *error = "motor must be idle before zeroing";
+    return false;
+  }
+  ch->SetPositionZero();
+  return true;
+}
+
 bool StepperController::Stop(int motor_id, std::string* error) {
   StepperChannel* ch = ChannelById(motor_id);
   if (!ch) { if (error) *error = "unknown motor id"; return false; }
@@ -252,6 +264,31 @@ StepperStatus StepperController::Snapshot(int motor_id) const {
   const StepperChannel* ch = ChannelById(motor_id);
   if (!ch) return StepperStatus{};
   return ch->Snapshot();
+}
+
+bool StepperController::Healthy(int motor_id) const {
+  const StepperChannel* ch = ChannelById(motor_id);
+  return ch != nullptr && ch->healthy();
+}
+
+bool StepperController::AllHealthy() const {
+  if (channels_.empty()) return false;
+  for (const auto& ch : channels_) {
+    if (!ch || !ch->healthy()) return false;
+  }
+  return true;
+}
+
+bool StepperController::ActiveCheck() {
+  if (channels_.empty()) return false;
+  bool healthy = true;
+  for (const auto& ch : channels_) {
+    if (ch == nullptr) return false;
+    const StepperStatus status = ch->Snapshot();
+    if (status.moving || status.holding) return false;
+    healthy = ch->ActiveCheck() && healthy;
+  }
+  return healthy;
 }
 
 }  // namespace coatheal

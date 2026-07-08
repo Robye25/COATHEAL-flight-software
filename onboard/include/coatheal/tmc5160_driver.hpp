@@ -11,6 +11,7 @@ namespace coatheal {
 // FYSETC TMC5160 setup. Motion remains STEP/DIR/EN; SPI is used to program
 // current, microstep, and chopper/stealthChop registers at startup.
 struct Tmc5160Config {
+  std::string gpio_chip = "/dev/gpiochip0";
   std::string spi_device = "/dev/spidev0.0";
   std::size_t cs_line = 22;
   std::size_t step_line = 19;
@@ -40,6 +41,7 @@ class Tmc5160Driver : public StepperDriver {
   bool Step(bool direction_forward) override;
   void SetMicrostep(int divisor) override;
   bool healthy() const override { return healthy_; }
+  bool ActiveCheck() override { return Reinitialize(); }
   std::uint64_t pulses_issued() const override { return pulses_; }
 
   bool Reinitialize();
@@ -52,14 +54,24 @@ class Tmc5160Driver : public StepperDriver {
 
  private:
   bool OpenSpi();
+  bool OpenGpio();
   void CloseSpi();
+  void CloseGpio();
   bool WriteRegister(std::uint8_t address, std::uint32_t value);
 
   Tmc5160Config cfg_;
   int spi_fd_ = -1;
   bool healthy_ = false;
+  bool gpio_healthy_ = false;
+  bool enabled_ = false;
+  bool last_direction_forward_ = true;
   int microstep_ = 1;
   std::uint64_t pulses_ = 0;
+  void* gpio_chip_handle_ = nullptr;
+  void* cs_handle_ = nullptr;
+  void* step_handle_ = nullptr;
+  void* dir_handle_ = nullptr;
+  void* enable_handle_ = nullptr;
 };
 
 }  // namespace coatheal

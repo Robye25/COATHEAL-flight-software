@@ -72,6 +72,29 @@ void TestCommandParser() {
   auto invalid = parser.ParseLine("SET_PID 1 2");
   assert(!invalid.ok);
 
+  auto pid = parser.ParseLine("SET_PID All 0.2 0.02 0.03");
+  assert(pid.ok);
+  assert(pid.command.type == coatheal::CommandType::kSetPid);
+  assert(pid.command.args[0] == "ALL");
+
+  auto target = parser.ParseLine("SET_TEMP_TARGET 3 42.5");
+  assert(target.ok);
+  assert(target.command.type == coatheal::CommandType::kSetTempTarget);
+
+  auto sequence =
+      parser.ParseLine("BENDSEQ_LOAD 1 flex 800:2.5:50 0:1");
+  assert(sequence.ok);
+  assert(sequence.command.type == coatheal::CommandType::kBendSeqLoad);
+  assert(sequence.command.args.size() == 4);
+
+  auto zero = parser.ParseLine("SET_POSITION_ZERO 1");
+  assert(zero.ok);
+  assert(zero.command.type == coatheal::CommandType::kSetPositionZero);
+
+  auto check = parser.ParseLine("CHECK");
+  assert(check.ok);
+  assert(check.command.type == coatheal::CommandType::kCheck);
+
   // SET_TICK_HZ — flight-safe (no debug arm needed at parser layer).
   auto tick = parser.ParseLine("SET_TICK_HZ 0.5");
   assert(tick.ok);
@@ -151,6 +174,7 @@ void TestVacuumRegime() {
   config.transition.descent_to_landed_mbar = 800.0;
   config.hardware.heater_count = 6;
   config.hardware.electronics_heater_index = static_cast<std::size_t>(-1);
+  config.runtime.use_simulated_sensors = true;
 
   coatheal::SensorManager sensors(config, nullptr, nullptr, nullptr);
   std::vector<double> heater_duty(6, 0.0);
@@ -258,6 +282,7 @@ void TestConfigParsesReliabilityFields() {
   out << "runtime.bench_mode=false\n";
   out << "runtime.debug_arm_code=COATHEAL_DEBUG\n";
   out << "runtime.use_simulated_pwm=false\n";
+  out << "runtime.use_simulated_sensors=false\n";
   out << "runtime.gpio_chip=/dev/gpiochip0\n";
   out << "manual.manual_first=true\n";
   out << "manual.link_loss_fallback_enabled=true\n";
@@ -301,9 +326,13 @@ void TestConfigParsesReliabilityFields() {
   out << "sensor.daq132m_data_bits=8\n";
   out << "sensor.daq132m_stop_bits=1\n";
   out << "sensor.daq132m_slave_id=1\n";
+  out << "sensor.daq132m_function_code=4\n";
   out << "sensor.daq132m_register_base=0\n";
   out << "sensor.daq132m_register_count=8\n";
   out << "sensor.daq132m_c_per_count=0.1\n";
+  out << "sensor.daq132m_c_offset=-5.0\n";
+  out << "heater.target_min_c=0.0\n";
+  out << "heater.target_max_c=80.0\n";
   out << "sensor.rtd_click_enabled=false\n";
   out << "sensor.rtd_click_spi_device=/dev/spidev0.0\n";
   out << "sensor.rtd_click_cs_line=7\n";
@@ -338,7 +367,7 @@ void TestConfigParsesReliabilityFields() {
   out << "motor0.spi_speed_hz=1000000\n";
   out << "motor0.samples=0,1,2,3\n";
   out << "motor1.driver=tmc5160\n";
-  out << "motor1.spi_device=/dev/spidev0.1\n";
+  out << "motor1.spi_device=/dev/spidev0.0\n";
   out << "motor1.cs_line=23\n";
   out << "motor1.step_line=16\n";
   out << "motor1.dir_line=20\n";
@@ -359,6 +388,7 @@ void TestConfigParsesReliabilityFields() {
   assert(cfg.comms.static_pi_ip == "169.254.10.10");
   assert(cfg.storage.queue_max_bytes == 1024U);
   assert(!cfg.runtime.use_simulated_pwm);
+  assert(!cfg.runtime.use_simulated_sensors);
   assert(cfg.manual.manual_first);
   assert(cfg.manual.link_loss_fallback_enabled);
   assert(std::fabs(cfg.manual.link_loss_fallback_s - 12.5) < 1e-9);
@@ -373,6 +403,10 @@ void TestConfigParsesReliabilityFields() {
   assert(cfg.sensors.sample_temperature_source == "daq132m_modbus");
   assert(cfg.sensors.daq132m_device == "/dev/ttyUSB0");
   assert(cfg.sensors.daq132m_register_count == 8);
+  assert(cfg.sensors.daq132m_function_code == 4);
+  assert(std::fabs(cfg.sensors.daq132m_c_offset - (-5.0)) < 1e-9);
+  assert(std::fabs(cfg.heater_safety.target_min_c - 0.0) < 1e-9);
+  assert(std::fabs(cfg.heater_safety.target_max_c - 80.0) < 1e-9);
   assert(cfg.sensors.dps310_i2c_addr == 0x77);
   assert(cfg.sensors.ads1115_i2c_addr == 0x48);
   assert(cfg.sensors.uv_ads1115_channel == 0);
@@ -392,7 +426,7 @@ void TestConfigParsesReliabilityFields() {
   assert(cfg.motors[0].enable_line == 12U);
   assert(cfg.motors[0].samples == std::vector<std::size_t>({0, 1, 2, 3}));
   assert(cfg.motors[1].driver == "tmc5160");
-  assert(cfg.motors[1].spi_device == "/dev/spidev0.1");
+  assert(cfg.motors[1].spi_device == "/dev/spidev0.0");
   assert(cfg.motors[1].cs_line == 23U);
   assert(cfg.motors[1].step_line == 16U);
   assert(cfg.motors[1].dir_line == 20U);

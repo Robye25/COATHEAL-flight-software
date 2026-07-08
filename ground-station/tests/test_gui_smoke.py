@@ -29,6 +29,7 @@ class GuiSmoke(unittest.TestCase):
     def test_mainwindow_builds_and_handles_packet(self) -> None:
         from app.gui.main_window import MainWindow
         from app.protocol import parse_telemetry_csv
+        from PyQt6.QtWidgets import QPushButton
 
         win = MainWindow(bind="127.0.0.1", tel_port=44000, cmd_port=45000,
                          cmd_host="127.0.0.1", log_path=Path("logs/smoke.csv"),
@@ -48,6 +49,14 @@ class GuiSmoke(unittest.TestCase):
             win._on_packet(pkt)
             # Pause toggle should flip.
             self.assertIsInstance(win._plots.toggle_paused(), bool)
+            labels = {button.text() for button in win.findChildren(QPushButton)}
+            self.assertIn("SET ZERO", labels)
+            self.assertIn("LOAD", labels)
+            self.assertIn("CHECK", labels)
+            self.assertIn("Target", labels)
+            self.assertNotIn("BEND ASCENT", labels)
+            self.assertNotIn("BEND FLOAT", labels)
+            self.assertNotIn("BEND DESCENT", labels)
         finally:
             win.close()
 

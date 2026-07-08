@@ -113,4 +113,26 @@ StatusFlags StorageManager::status() const {
   return flags;
 }
 
+bool StorageManager::ActiveCheck(std::string* details) {
+  std::lock_guard<std::mutex> lock(mu_);
+  auto probe = [](const std::string& path) {
+    std::FILE* fp = std::fopen(path.c_str(), "ab");
+    if (fp == nullptr) return false;
+    bool ok = std::fflush(fp) == 0;
+#if defined(__unix__) || defined(__APPLE__)
+    const int fd = ::fileno(fp);
+    if (fd < 0 || ::fsync(fd) != 0) ok = false;
+#endif
+    std::fclose(fp);
+    return ok;
+  };
+  primary_ok_ = probe(primary_path_);
+  secondary_ok_ = probe(secondary_path_);
+  if (details != nullptr) {
+    *details = "sd=" + std::string(primary_ok_ ? "OK" : "FAIL") +
+               ";usb=" + std::string(secondary_ok_ ? "OK" : "FAIL");
+  }
+  return primary_ok_ && secondary_ok_;
+}
+
 }  // namespace coatheal

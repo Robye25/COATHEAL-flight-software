@@ -29,8 +29,9 @@ python gui_app.py [--host <onboard-ip>] [--tel-port 4000] [--cmd-port 5000]
 | Panel | Location | Description |
 |---|---|---|
 | **Connection** | Left dock | Onboard IP, telemetry port, command port; Start/Stop button; connection status |
-| **Heater Duties** | Left dock | 6 animated progress bars (H0–H5 = sample-bank heaters) |
-| **Commands** | Left dock | Buttons for every command; dangerous commands require confirmation dialog |
+| **Heater Control** | Left dock | 6 duties, manual targets, PID tuning, and local JSON profiles |
+| **Motor Control** | Left dock | M0/M1 selection, jog/absolute commands, software zero, and bend sequence editor |
+| **Commands** | Left dock | Diagnostics including `CHECK`, plus arbitrary command entry |
 | **Temperature** | Center tab | Live PyQtGraph plot — up to 8 sample temps |
 | **Pressure** | Center tab | Live pressure trace |
 | **Heater Duties** | Center tab | All 6 heater duty traces over time |
@@ -41,18 +42,21 @@ python gui_app.py [--host <onboard-ip>] [--tel-port 4000] [--cmd-port 5000]
 
 ### Command Buttons
 
-**Safe commands** (no confirmation required):
-- `PING`, `STATUS`, `FORCE START`
+**Normal controls**:
+- `PING`, `STATUS`, `CHECK`, `ARM`, `DISARM`
+- Per-heater duty and temperature target controls
+- Per-channel/all-channel PID tuning
+- Explicit motor selection, software zero, and runtime bend sequences
 
 **Safety-critical** (confirmation dialog):
 - `FORCE STOP`, `HEATERS OFF`, `RESET CTRL`, `SHUTDOWN SAFE`
 
-**Debug** (ARM DEBUG token required first):
+**Debug** (`ARM_DEBUG` token required first):
 - `ARM DEBUG <token>`, `DISARM DEBUG`
 - `BENCH ON` / `BENCH OFF`
-- `SET HEATER DUTY <index> <duty>` — index 0–5, duty 0.0–1.0
-- `SET ALL DUTY <duty>`
-- `CLEAR OVERRIDES`
+
+Thermal profiles are saved to `profiles/thermal_profiles.json` and are applied
+by re-sending PID gains and targets to the Pi.
 
 ### Reconnect Behaviour
 
@@ -117,6 +121,17 @@ python main.py command --cmd HEATERS_OFF --yes
 
 # Set a single heater duty
 python main.py command --cmd "SET_HEATER_DUTY 3 0.75"
+
+# Closed-loop temperature control
+python main.py command --cmd "SET_PID ALL 0.20 0.02 0.03"
+python main.py command --cmd "SET_TEMP_TARGET 3 25.0"
+python main.py command --cmd GET_THERMAL
+
+# Define and run a bend sequence on motor 1
+python main.py command --cmd "STEPPER_ENABLE 1"
+python main.py command --cmd "SET_POSITION_ZERO 1"
+python main.py command --cmd "BENDSEQ_LOAD 1 flex 800:2:50 1600:3:75 0:1:50"
+python main.py command --cmd "BENDSEQ_RUN 1 flex"
 ```
 
 ---

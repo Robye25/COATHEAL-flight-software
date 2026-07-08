@@ -128,24 +128,25 @@ Set in the config:
 ```ini
 runtime.bench_mode=true
 runtime.use_simulated_pwm=true
+runtime.use_simulated_sensors=true
 ```
 
-Or use the example config (already has `bench_mode=false` — change before running).
+Or use `config/onboard.debug.ini`.
 
 ### What bench mode does
 
-- `SensorManager` uses a physics-based simulation model instead of real I2C/SPI sensors
+- `SensorManager` uses simulation only when `runtime.use_simulated_sensors=true`
 - Simulated pressure decreases over time to drive automatic phase transitions
 - Simulated temperatures respond to heater duty cycles
 - `SimulatedPwmController` stores duty cycles in memory (no GPIO required)
-- Heater duty commands are normal manual controls; bench-only debug commands such as `SET_PID` and `SET_BENCH_MODE` are unlocked after `ARM_DEBUG <token>`.
+- Heater duty, targets, and `SET_PID` are normal manual controls.
+- `SET_BENCH_MODE` remains bench/debug gated by `ARM_DEBUG <token>`.
 
 ### End-to-end bench test
 
 Terminal 1 — run onboard:
 ```bash
-# Edit config: bench_mode=true, use_simulated_pwm=true, telemetry_host=127.0.0.1
-./build/onboard/coatheal_onboard --config config/onboard.example.ini
+./build/onboard/coatheal_onboard --config config/onboard.debug.ini
 ```
 
 Terminal 2 — run ground station:

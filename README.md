@@ -38,6 +38,7 @@ docs/            Architecture, protocol, configuration, and hardware docs
 | [docs/hardware.md](docs/hardware.md) | Final Rev C hardware reference and HAL status |
 | [docs/configuration.md](docs/configuration.md) | Full INI configuration reference |
 | [docs/protocol.md](docs/protocol.md) | DATA, `EVT,PULL`, ACK, discovery, and command protocol |
+| [docs/manual-operations.md](docs/manual-operations.md) | Complete CLI workflow for thermal control, zeroing, bend sequences, fallback, and safe stop |
 | [docs/onboard.md](docs/onboard.md) | Onboard C++ module reference |
 | [docs/ground-station.md](docs/ground-station.md) | Ground station GUI/CLI reference |
 | [docs/architecture.md](docs/architecture.md) | System architecture and data flow |
@@ -83,12 +84,12 @@ python -m unittest discover -s ground-station/tests -p "test_*.py"
 
 | Phase | Normal Rev C trigger | Thermal behavior |
 |---|---|---|
-| `BOOT` | Power-on | Heaters off |
-| `ASCENT` | `SET_PHASE ASCENT` / `FORCE_START` | Manual duties while connected; +5 C floor only during fallback |
-| `PRE_FLOAT` | `SET_PHASE PRE_FLOAT` | Manual duties; no automatic fatigue pulls |
-| `FLOAT` | `SET_PHASE FLOAT` | Explicit `PULL_*` commands |
-| `DESCENT` | `SET_PHASE DESCENT` / `FORCE_STOP` | Manual duties while connected; +5 C floor only during fallback |
-| `LANDED` | `SET_PHASE LANDED` | Heaters off unless manually overridden |
+| `BOOT` | Power-on | Explicit manual targets/duties only after `ARM` |
+| `ASCENT` | `SET_PHASE ASCENT` / `FORCE_START` | Manual targets/duties; +5 C floor during fallback |
+| `PRE_FLOAT` | `SET_PHASE PRE_FLOAT` | Manual control; no automatic fatigue pulls |
+| `FLOAT` | `SET_PHASE FLOAT` | Manual control and operator-defined bend sequences |
+| `DESCENT` | `SET_PHASE DESCENT` / `FORCE_STOP` | Manual targets/duties; +5 C floor during fallback |
+| `LANDED` | `SET_PHASE LANDED` | Explicit manual targets/duties only |
 | `STOPPED` | `SHUTDOWN_SAFE` | Heaters off |
 
 ## Final Rev C Component List
@@ -112,13 +113,16 @@ python -m unittest discover -s ground-station/tests -p "test_*.py"
 
 | Command | Description |
 |---|---|
-| `PING` / `STATUS` | Link and system status |
+| `PING` / `STATUS` / `CHECK` | Link, live state, and active hardware checks |
 | `ARM` / `DISARM` | Enable or disable manual flight outputs |
 | `SET_PHASE <phase>` | Manually set mission phase |
+| `SET_TEMP_TARGET <i> <C>` | Set one closed-loop heater target |
+| `SET_PID <i\|ALL> <kp> <ki> <kd>` | Tune one or all heater PID loops |
 | `SET_HEATER_DUTY <i> <0-1>` | Set one heater duty |
 | `SET_ALL_DUTY <0-1>` | Set all heater duties |
 | `HEATERS_OFF` | Emergency heater shutoff |
-| `PULL_ARM <id>` / `PULL_EXECUTE <id>` | Run one motor pull cycle |
+| `SET_POSITION_ZERO <id>` | Declare the current physical motor position as zero |
+| `BENDSEQ_LOAD` / `BENDSEQ_RUN` | Define and execute absolute bend sequences |
 | `STEPPER_*` | Direct motor movement commands |
 | `SHUTDOWN_SAFE` | Flush logs and stop onboard process |
 
@@ -126,10 +130,12 @@ See [docs/protocol.md](docs/protocol.md) for the complete command list.
 
 ## Hardware Status
 
-The software is configured for the final component list. The TMC5160 SPI setup
-path is implemented. The remaining physical I/O work before powered hardware
-operation is bench validation and completion of real GPIO PWM/pulse timing,
-DPS310/ADS1115 I2C reads, and DAQ132M Modbus reads.
+The real hardware paths are implemented for libgpiod heater PWM, TMC5160
+configuration with GPIO chip-select, STEP/DIR/EN pulses, DPS310, ADS1115, and
+configurable DAQ132M Modbus RTU. `runtime.use_simulated_sensors=true` and
+`runtime.use_simulated_pwm=true` are explicit debug-only switches. Bench
+validation, DAQ132M register-map confirmation, motor current calibration, and
+dummy-load heater tests are still required before flight hardware operation.
 
 ## Security
 

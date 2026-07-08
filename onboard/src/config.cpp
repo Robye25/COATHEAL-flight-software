@@ -87,7 +87,7 @@ OnboardConfig::OnboardConfig() {
   motors[0].samples = {0, 1, 2, 3};
 
   motors[1].driver = "tmc5160";
-  motors[1].spi_device = "/dev/spidev0.1";
+  motors[1].spi_device = "/dev/spidev0.0";
   motors[1].cs_line = 23;
   motors[1].step_line = 16;
   motors[1].dir_line = 20;
@@ -219,6 +219,8 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
       config->runtime.debug_arm_code = value;
     } else if (key == "runtime.use_simulated_pwm") {
       if (!parse_bool(key, value, &config->runtime.use_simulated_pwm, line_no)) return false;
+    } else if (key == "runtime.use_simulated_sensors") {
+      if (!parse_bool(key, value, &config->runtime.use_simulated_sensors, line_no)) return false;
     } else if (key == "runtime.gpio_chip") {
       config->runtime.gpio_chip = value;
 
@@ -272,6 +274,10 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
 
     } else if (key == "heater.max_sample_temp_c") {
       if (!parse_double(key, value, &config->heater_safety.max_sample_temp_c, line_no)) return false;
+    } else if (key == "heater.target_min_c") {
+      if (!parse_double(key, value, &config->heater_safety.target_min_c, line_no)) return false;
+    } else if (key == "heater.target_max_c") {
+      if (!parse_double(key, value, &config->heater_safety.target_max_c, line_no)) return false;
 
     } else if (key == "sensor.ambient_temp_min_c") {
       if (!parse_double(key, value, &config->sensor_range.ambient_temp_min_c, line_no)) return false;
@@ -347,12 +353,16 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
       if (!parse_int(key, value, &config->sensors.daq132m_stop_bits, line_no)) return false;
     } else if (key == "sensor.daq132m_slave_id") {
       if (!parse_int(key, value, &config->sensors.daq132m_slave_id, line_no)) return false;
+    } else if (key == "sensor.daq132m_function_code") {
+      if (!parse_int(key, value, &config->sensors.daq132m_function_code, line_no)) return false;
     } else if (key == "sensor.daq132m_register_base") {
       if (!parse_int(key, value, &config->sensors.daq132m_register_base, line_no)) return false;
     } else if (key == "sensor.daq132m_register_count") {
       if (!parse_int(key, value, &config->sensors.daq132m_register_count, line_no)) return false;
     } else if (key == "sensor.daq132m_c_per_count") {
       if (!parse_double(key, value, &config->sensors.daq132m_c_per_count, line_no)) return false;
+    } else if (key == "sensor.daq132m_c_offset") {
+      if (!parse_double(key, value, &config->sensors.daq132m_c_offset, line_no)) return false;
     } else if (key == "sensor.rtd_click_enabled") {
       if (!parse_bool(key, value, &config->sensors.rtd_click_enabled, line_no)) return false;
     } else if (key == "sensor.rtd_click_spi_device") {
@@ -555,6 +565,14 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
     return false;
   }
 
+  if (config->heater_safety.target_min_c >= config->heater_safety.target_max_c ||
+      config->heater_safety.target_max_c >= config->heater_safety.max_sample_temp_c) {
+    if (error != nullptr) {
+      *error = "heater target limits must satisfy min < max < max_sample_temp_c";
+    }
+    return false;
+  }
+
   // SIZE_MAX is the sentinel for "no electronics-box heater". Any other value
   // must still be a valid channel index.
   if (config->hardware.electronics_heater_index != static_cast<std::size_t>(-1) &&
@@ -598,6 +616,8 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
       config->sensors.daq132m_data_bits <= 0 ||
       config->sensors.daq132m_stop_bits <= 0 ||
       config->sensors.daq132m_slave_id <= 0 ||
+      (config->sensors.daq132m_function_code != 3 &&
+       config->sensors.daq132m_function_code != 4) ||
       config->sensors.daq132m_register_count <
           static_cast<int>(config->hardware.sample_count) ||
       config->sensors.daq132m_c_per_count == 0.0) {
