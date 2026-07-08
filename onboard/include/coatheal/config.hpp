@@ -144,8 +144,8 @@ struct SensorHardwareConfig {
 
   bool rtd_click_enabled = false;
   std::string rtd_click_spi_device = "/dev/spidev0.0";
-  std::size_t rtd_click_cs_line = 18;
-  std::size_t rtd_click_drdy_line = 22;
+  std::size_t rtd_click_cs_line = 7;
+  std::size_t rtd_click_drdy_line = 25;
   int rtd_click_wires = 3;
 
   std::string pressure_source = "dps310";
@@ -173,9 +173,9 @@ struct StepperConfig {
   double default_step_hz = 100.0;
   double max_step_hz = 100.0;
   std::int64_t max_position_steps = 200000;  // absolute travel limit
-  std::size_t step_line = 5;         // GPIO lines (BCM) — see docs/hardware.md
-  std::size_t dir_line = 6;
-  std::size_t enable_line = 13;
+  std::size_t step_line = 19;        // Motor 0 BCM lines; see docs/hardware.md
+  std::size_t dir_line = 26;
+  std::size_t enable_line = 12;
   bool invert_direction = false;
   bool enable_active_low = true;     // most step/dir drivers have active-low /EN
   bool enable_on_boot = false;       // stay de-energised until commanded
@@ -191,11 +191,11 @@ struct PullConfig {
 
 struct MotorConfig {
   std::string driver = "tmc5160";
-  std::string spi_device = "/dev/spidev1.0";
-  std::size_t cs_line = 0;
-  std::size_t step_line = 5;
-  std::size_t dir_line = 6;
-  std::size_t enable_line = 13;
+  std::string spi_device = "/dev/spidev0.0";
+  std::size_t cs_line = 22;
+  std::size_t step_line = 19;
+  std::size_t dir_line = 26;
+  std::size_t enable_line = 12;
   bool invert_direction = false;
   bool enable_active_low = true;
   double run_current_a_rms = 2.0;
@@ -219,8 +219,10 @@ struct BendScheduleConfig {
 };
 
 struct HalConfig {
-  // GPIO line numbers for the two visual status LEDs on the Pi 40-pin header.
-  // Defaults (BCM 17 / BCM 27) match the wiring documented in docs/hardware.md.
+  // The final pinout has no status LEDs. Keep both disabled so their old
+  // defaults, BCM 17 and BCM 27, remain available for heater channels.
+  bool status_led_enabled = false;
+  bool mode_led_enabled = false;
   std::size_t status_led_line = 17;  // heartbeat
   std::size_t mode_led_line = 27;    // system-mode indicator
 };

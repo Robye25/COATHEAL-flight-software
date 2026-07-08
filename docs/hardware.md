@@ -31,35 +31,64 @@ There is no separate resistance instrument in the final BOM. The telemetry
 `RESISTANCE=` field remains for protocol compatibility and emits `-` values
 when `sensor.resistance_source=disabled`.
 
-## Default Pin Map
+## Final Pin Map
 
-All GPIO numbers are BCM line numbers on `/dev/gpiochip0`.
+All GPIO numbers are BCM line numbers on `/dev/gpiochip0`. Physical header
+numbers are included to prevent BCM/physical-number confusion.
 
-| Function | BCM line | Config key | Notes |
-|---|---:|---|---|
-| Heartbeat LED | 17 | `hal.status_led_line` | Optional operator heartbeat |
-| Mode LED | 27 | `hal.mode_led_line` | Optional mode indication |
-| Motor 0 STEP | 5 | `motor0.step_line` | TMC5160 STEP |
-| Motor 0 DIR | 6 | `motor0.dir_line` | TMC5160 DIR |
-| Motor 0 EN | 13 | `motor0.enable_line` | Active-low by default |
-| Motor 0 CS | 8 | `motor0.cs_line` | SPI0 CE0, `/dev/spidev0.0` |
-| Motor 1 STEP | 19 | `motor1.step_line` | TMC5160 STEP |
-| Motor 1 DIR | 26 | `motor1.dir_line` | TMC5160 DIR |
-| Motor 1 EN | 16 | `motor1.enable_line` | Active-low by default |
-| Motor 1 CS | 7 | `motor1.cs_line` | SPI0 CE1, `/dev/spidev0.1` |
-| Heater 0 | 12 | `heater.output_lines[0]` | EKM014 input |
-| Heater 1 | 20 | `heater.output_lines[1]` | EKM014 input |
-| Heater 2 | 21 | `heater.output_lines[2]` | EKM014 input |
-| Heater 3 | 23 | `heater.output_lines[3]` | EKM014 input |
-| Heater 4 | 24 | `heater.output_lines[4]` | EKM014 input |
-| Heater 5 | 25 | `heater.output_lines[5]` | EKM014 input |
-| I2C SDA/SCL | 2 / 3 | Pi I2C bus | DPS310 + ADS1115 |
-| SPI0 MOSI/MISO/SCLK | 10 / 9 / 11 | Pi SPI0 bus | TMC5160 drivers; RTD Click only if enabled |
-| RTD Click DRDY | 22 | `sensor.rtd_click_drdy_line` | Optional bench/backup path |
-| DAQ132M RS485 | USB | `sensor.daq132m_device` | Default `/dev/ttyUSB0` |
+| Function | Physical pin | BCM line | Config key |
+|---|---:|---:|---|
+| Heater 0 / HEAT_EN1 | 11 | 17 | `heater.output_lines[0]` |
+| Heater 1 / HEAT_EN2 | 12 | 18 | `heater.output_lines[1]` |
+| Heater 2 / HEAT_EN3 | 13 | 27 | `heater.output_lines[2]` |
+| Heater 3 / HEAT_EN4 | 29 | 5 | `heater.output_lines[3]` |
+| Heater 4 / HEAT_EN5 | 31 | 6 | `heater.output_lines[4]` |
+| Heater 5 / HEAT_EN6 | 33 | 13 | `heater.output_lines[5]` |
+| Motor 0 / STEP1 CS | 15 | 22 | `motor0.cs_line` |
+| Motor 0 / STEP1 EN | 32 | 12 | `motor0.enable_line` |
+| Motor 0 / STEP1 STEP | 35 | 19 | `motor0.step_line` |
+| Motor 0 / STEP1 DIR | 37 | 26 | `motor0.dir_line` |
+| Motor 1 / STEP2 CS | 16 | 23 | `motor1.cs_line` |
+| Motor 1 / STEP2 STEP | 36 | 16 | `motor1.step_line` |
+| Motor 1 / STEP2 DIR | 38 | 20 | `motor1.dir_line` |
+| Motor 1 / STEP2 EN | 40 | 21 | `motor1.enable_line` |
+| RTD Click CS | 26 | 7 | `sensor.rtd_click_cs_line` |
+| RTD Click DRDY | 22 | 25 | `sensor.rtd_click_drdy_line` |
+| I2C SDA / SCL | 3 / 5 | 2 / 3 | Fixed Pi I2C-1 |
+| SPI0 MOSI / MISO / SCLK | 19 / 21 / 23 | 10 / 9 / 11 | Shared SPI0 bus |
+| DAQ132M RS485 | USB | n/a | `sensor.daq132m_device` |
 
-The pin map is configurable. If wiring changes, update `config/onboard.local.ini`
-and keep this table in sync.
+The diagram has no status LEDs, so `hal.status_led_enabled` and
+`hal.mode_led_enabled` are both `false`.
+
+## Wiring Sanity Requirements
+
+Do not energize heaters or motors until these points are verified:
+
+1. Use two EKM014 boards for six heaters. Each EKM014 has four channels.
+2. Power each EKM014 driver supply within its specified 4.5-12 V range. Its
+   control inputs accept Pi 3.3 V logic; do not power heater loads from the Pi.
+3. Add an external pull-down to every `HEAT_EN` input so all heaters remain off
+   while the Pi boots, reboots, or has its GPIO lines unclaimed.
+4. Add an external pull-up to each active-low TMC5160 `EN` input so both motors
+   remain disabled during boot. Power TMC5160 `VIO` from 3.3 V and the motor
+   stage from the separate 12 V rail.
+5. Tie Pi, EKM014, TMC5160, sensor, and regulator signal grounds together.
+   Route heater and motor return current separately from sensor ground wiring.
+6. Power the Pi from one controlled 5 V source. If the 5 V header is used,
+   verify polarity and regulation before connecting it and do not also inject
+   power from another source.
+7. The final diagram provides no limit switches. Software position is unknown
+   after reboot, so travel must remain mechanically constrained and low-speed
+   commissioning must establish safe step limits before any full pull.
+8. SPI0 has three targets: two TMC5160 drivers and RTD Click. The standard
+   `spi0-2cs` overlay maps BCM 22/23 to the motors only. RTD Click on BCM 7
+   requires software-controlled CS or a custom three-CS overlay.
+
+The ADS1115 and DPS310 may share I2C-1 at default addresses `0x48` and `0x77`.
+Power both STEMMA QT boards from 3.3 V so their I2C pull-ups cannot raise SDA or
+SCL above the Pi's 3.3 V GPIO domain. RTD Click MIKROE-2815 is also a 3.3 V
+board.
 
 ## Sensors
 
@@ -98,8 +127,8 @@ configurable bench or backup path.
 ```ini
 sensor.rtd_click_enabled=false
 sensor.rtd_click_spi_device=/dev/spidev0.0
-sensor.rtd_click_cs_line=18
-sensor.rtd_click_drdy_line=22
+sensor.rtd_click_cs_line=7
+sensor.rtd_click_drdy_line=25
 sensor.rtd_click_wires=3
 ```
 
@@ -159,7 +188,7 @@ channels.
 
 ```ini
 hardware.heater_count=6
-heater.output_lines=12,20,21,23,24,25
+heater.output_lines=17,18,27,5,6,13
 heater.pwm_frequency_hz=10.0
 heater.active_high=true
 power.max_active_heaters=4
@@ -187,6 +216,8 @@ connecting flight heaters.
 ```bash
 sudo raspi-config nonint do_i2c 0
 sudo raspi-config nonint do_spi 0
+# In /boot/firmware/config.txt (or /boot/config.txt on older systems):
+# dtoverlay=spi0-2cs,cs0_pin=22,cs1_pin=23
 sudo reboot
 
 i2cdetect -y 1
@@ -208,6 +239,10 @@ Expected SPI devices:
 /dev/spidev0.0  motor0 TMC5160
 /dev/spidev0.1  motor1 TMC5160
 ```
+
+The standard two-CS overlay covers the two TMC5160 drivers. The RTD Click is a
+third SPI target on BCM 7; its real driver must use software-controlled CS (or
+a custom three-CS overlay) before `sensor.rtd_click_enabled=true`.
 
 Expected RS485:
 
