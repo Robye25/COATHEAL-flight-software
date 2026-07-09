@@ -15,8 +15,8 @@ link loss.
 
 | Subsystem | Final component | Interface | Config keys |
 |---|---|---|---|
-| Stepper drivers | FYSETC TMC5160 | SPI + STEP/DIR/EN GPIO | `motor0.*`, `motor1.*`, `pull.*` |
-| Linear actuators | NEMA 17 external ball-screw linear stepper, 2.5 A, 48 mm | STEP/DIR/EN through TMC5160 | `stepper.*`, `motor*.samples` |
+| Stepper drivers | TMC2240 carriers | SPI mode 3 + STEP/DIR/EN GPIO | `motor0.*`, `motor1.*`, `pull.*` |
+| Linear actuators | NEMA 17 external ball-screw linear stepper, 2.5 A, 48 mm | STEP/DIR/EN through TMC2240 | `stepper.*`, `motor*.samples` |
 | Sample temperature | XF-931-FAR PT100 probes | PT100 into DAQ132M | `hardware.sample_count=8` |
 | PT100 acquisition | DAQ132M 8-channel thermocouple/PT100 RS485 Modbus card | USB-RS485, Modbus RTU | `sensor.daq132m_*` |
 | Optional PT100 bench path | RTD Click MIKROE-2815 / MAX31865 | SPI + DRDY GPIO | `sensor.rtd_click_*` |
@@ -73,10 +73,10 @@ Do not energize heaters or motors until these points are verified:
    control inputs accept Pi 3.3 V logic; do not power heater loads from the Pi.
 3. Add an external pull-down to every `HEAT_EN` input so all heaters remain off
    while the Pi boots, reboots, or has its GPIO lines unclaimed.
-4. Add an external pull-up to each active-low TMC5160 `EN` input so both motors
-   remain disabled during boot. Power TMC5160 `VIO` from 3.3 V and the motor
+4. Add an external pull-up to each active-low TMC2240 `EN` input so both motors
+   remain disabled during boot. Power TMC2240 `VIO` from 3.3 V and the motor
    stage from the separate 12 V rail.
-5. Tie Pi, EKM014, TMC5160, sensor, and regulator signal grounds together.
+5. Tie Pi, EKM014, TMC2240, sensor, and regulator signal grounds together.
    Route heater and motor return current separately from sensor ground wiring.
 6. Power the Pi from one controlled 5 V source. If the 5 V header is used,
    verify polarity and regulation before connecting it and do not also inject
@@ -84,7 +84,7 @@ Do not energize heaters or motors until these points are verified:
 7. The final diagram provides no limit switches. Software position is unknown
    after reboot, so travel must remain mechanically constrained and low-speed
    commissioning must establish safe step limits before any full pull.
-8. SPI0 has three possible targets. The TMC5160 backend uses `/dev/spidev0.0`
+8. SPI0 has three possible targets. The TMC2240 backend uses `/dev/spidev0.0`
    with kernel CS disabled and software-controlled CS on BCM 22/23. Do not
    install the old `spi0-2cs` overlay. RTD Click on BCM 7 remains an optional
    bench path and must stay disabled until its MAX31865 read path is validated.
@@ -171,16 +171,14 @@ sensor.uv_full_scale_v=4.096
 
 ## Motion System
 
-Both motors use FYSETC TMC5160 drivers. The software programs them over SPI
-using GPIO22/GPIO23 chip-selects, then uses STEP/DIR/EN GPIO for motion.
+Both motors use TMC2240 carriers. The software programs them over SPI mode 3
+using configurable chip-selects, then uses configurable STEP/DIR/EN GPIO for motion.
 `MotionLock` serializes all motion, including jogs and sequences. Heater GPIOs
 are forced low before motion begins and remain inhibited while the lock is held.
 
 ```ini
 stepper.steps_per_rev=200
-stepper.microstep=4
 stepper.default_step_hz=100.0
-stepper.max_step_hz=100.0
 stepper.max_position_steps=200000
 
 pull.max_step_hz=100.0
@@ -216,7 +214,7 @@ connecting flight heaters.
 | Area | Status |
 |---|---|
 | Command protocol, manual-first state, telemetry queue | Implemented |
-| TMC5160 SPI setup | GPIO chip-select and register writes implemented; current scaling must be bench-verified |
+| TMC2240 SPI setup | GPIO chip-select and register writes implemented; integrated current scaling must be bench-verified |
 | STEP/DIR/EN GPIO pulse backend | Implemented with libgpiod; waveform timing needs Pi bench validation |
 | Heater PWM | Implemented as a zero-safe libgpiod software PWM thread; validate with dummy loads |
 | DAQ132M Modbus | RTU read/CRC/range handling implemented; register map and scaling need card validation |
@@ -247,11 +245,11 @@ Expected I2C devices:
 Expected SPI device:
 
 ```text
-/dev/spidev0.0  shared bus for both TMC5160 drivers
+/dev/spidev0.0  shared bus for both TMC2240 drivers
 ```
 
 After the onboard command server starts, run `CHECK`. It actively probes
-DPS310, ADS1115, DAQ132M, storage, PWM/stepper backends, and TMC5160 SPI:
+DPS310, ADS1115, DAQ132M, storage, PWM/stepper backends, and TMC2240 SPI:
 
 ```powershell
 python main.py command --cmd CHECK

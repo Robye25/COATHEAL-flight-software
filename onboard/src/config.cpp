@@ -2,12 +2,14 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <fstream>
 #include <iomanip>
 #include <map>
 #include <sstream>
 #include <string>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace coatheal {
@@ -74,28 +76,23 @@ OnboardConfig::OnboardConfig() {
   heaters.output_lines = {17, 18, 27, 5, 6, 13};
   heaters.temperature_channels = {0, 1, 2, 3, 4, 5};
   sensors.daq132m_enabled_channels = {0, 1, 2, 3, 4, 5, 6, 7};
-  stepper.step_line = 19;
-  stepper.dir_line = 26;
-  stepper.enable_line = 12;
 
-  motors[0].driver = "tmc5160";
+  motors[0].driver = "tmc2240";
+  motors[0].gpio_chip = runtime.gpio_chip;
   motors[0].spi_device = "/dev/spidev0.0";
   motors[0].cs_line = 22;
   motors[0].step_line = 19;
   motors[0].dir_line = 26;
   motors[0].enable_line = 12;
-  motors[0].invert_direction = stepper.invert_direction;
-  motors[0].enable_active_low = stepper.enable_active_low;
   motors[0].samples = {0, 1, 2, 3};
 
-  motors[1].driver = "tmc5160";
+  motors[1].driver = "tmc2240";
+  motors[1].gpio_chip = runtime.gpio_chip;
   motors[1].spi_device = "/dev/spidev0.0";
   motors[1].cs_line = 23;
   motors[1].step_line = 16;
   motors[1].dir_line = 20;
   motors[1].enable_line = 21;
-  motors[1].invert_direction = stepper.invert_direction;
-  motors[1].enable_active_low = stepper.enable_active_low;
   motors[1].samples = {4, 5, 6, 7};
 }
 
@@ -433,24 +430,10 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
 
     } else if (key == "stepper.steps_per_rev") {
       if (!parse_int(key, value, &config->stepper.steps_per_rev, line_no)) return false;
-    } else if (key == "stepper.microstep") {
-      if (!parse_int(key, value, &config->stepper.microstep, line_no)) return false;
     } else if (key == "stepper.default_step_hz") {
       if (!parse_double(key, value, &config->stepper.default_step_hz, line_no)) return false;
-    } else if (key == "stepper.max_step_hz") {
-      if (!parse_double(key, value, &config->stepper.max_step_hz, line_no)) return false;
     } else if (key == "stepper.max_position_steps") {
       if (!parse_i64(key, value, &config->stepper.max_position_steps, line_no)) return false;
-    } else if (key == "stepper.step_line") {
-      if (!parse_size_t(key, value, &config->stepper.step_line, line_no)) return false;
-    } else if (key == "stepper.dir_line") {
-      if (!parse_size_t(key, value, &config->stepper.dir_line, line_no)) return false;
-    } else if (key == "stepper.enable_line") {
-      if (!parse_size_t(key, value, &config->stepper.enable_line, line_no)) return false;
-    } else if (key == "stepper.invert_direction") {
-      if (!parse_bool(key, value, &config->stepper.invert_direction, line_no)) return false;
-    } else if (key == "stepper.enable_active_low") {
-      if (!parse_bool(key, value, &config->stepper.enable_active_low, line_no)) return false;
     } else if (key == "stepper.enable_on_boot") {
       if (!parse_bool(key, value, &config->stepper.enable_on_boot, line_no)) return false;
 
@@ -471,6 +454,8 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
       MotorConfig& motor = config->motors[motor_index];
       if (suffix == "driver") {
         motor.driver = value;
+      } else if (suffix == "gpio_chip") {
+        motor.gpio_chip = value;
       } else if (suffix == "spi_device") {
         motor.spi_device = value;
       } else if (suffix == "cs_line") {
@@ -487,8 +472,8 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
         if (!parse_bool(key, value, &motor.enable_active_low, line_no)) return false;
       } else if (suffix == "run_current_a_rms") {
         if (!parse_double(key, value, &motor.run_current_a_rms, line_no)) return false;
-      } else if (suffix == "sense_resistor_ohm") {
-        if (!parse_double(key, value, &motor.sense_resistor_ohm, line_no)) return false;
+      } else if (suffix == "current_range_a_peak") {
+        if (!parse_double(key, value, &motor.current_range_a_peak, line_no)) return false;
       } else if (suffix == "hold_current_frac") {
         if (!parse_double(key, value, &motor.hold_current_frac, line_no)) return false;
       } else if (suffix == "stealth_chop") {
@@ -694,8 +679,8 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
     return false;
   }
 
-  if (config->stepper.steps_per_rev <= 0 || config->stepper.microstep <= 0 ||
-      config->stepper.default_step_hz <= 0.0 || config->stepper.max_step_hz <= 0.0 ||
+  if (config->stepper.steps_per_rev <= 0 ||
+      config->stepper.default_step_hz <= 0.0 ||
       config->stepper.max_position_steps <= 0) {
     if (error != nullptr) {
       *error = "invalid stepper configuration";
@@ -704,7 +689,12 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
   }
 
   if (config->pull.max_step_hz <= 0.0 || config->pull.accel_steps_per_s2 <= 0.0 ||
-      config->pull.microstep <= 0 || config->pull.travel_full_steps <= 0 ||
+      (config->pull.microstep != 1 && config->pull.microstep != 2 &&
+       config->pull.microstep != 4 && config->pull.microstep != 8 &&
+       config->pull.microstep != 16 && config->pull.microstep != 32 &&
+       config->pull.microstep != 64 && config->pull.microstep != 128 &&
+       config->pull.microstep != 256) ||
+      config->pull.travel_full_steps <= 0 ||
       config->pull.hold_s < 0.0) {
     if (error != nullptr) {
       *error = "invalid pull configuration";
@@ -714,16 +704,40 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
 
   for (std::size_t i = 0; i < config->motors.size(); ++i) {
     const MotorConfig& motor = config->motors[i];
-    if (motor.driver != "tmc5160") {
+    if (motor.driver != "tmc2240") {
       if (error != nullptr) {
-        *error = "motor" + std::to_string(i) + ".driver must be tmc5160";
+        *error = "motor" + std::to_string(i) + ".driver must be tmc2240";
       }
       return false;
     }
-    if (motor.spi_device.empty() || motor.run_current_a_rms <= 0.0 ||
-        motor.sense_resistor_ohm <= 0.0 ||
+    const double requested_peak = motor.run_current_a_rms * std::sqrt(2.0);
+    const bool valid_current_range =
+        motor.current_range_a_peak == 0.0 ||
+        motor.current_range_a_peak == 1.0 ||
+        motor.current_range_a_peak == 2.0 ||
+        motor.current_range_a_peak == 3.0;
+    const double selected_range =
+        motor.current_range_a_peak > 0.0
+            ? motor.current_range_a_peak
+            : (requested_peak <= 1.0 ? 1.0
+                                     : (requested_peak <= 2.0 ? 2.0 : 3.0));
+    const long global_scaler =
+        std::isfinite(requested_peak) && std::isfinite(selected_range) &&
+                selected_range > 0.0
+            ? std::lround(requested_peak * 256.0 / selected_range)
+            : 0L;
+    if (motor.gpio_chip.empty() || motor.spi_device.empty() ||
+        !std::isfinite(motor.run_current_a_rms) ||
+        !std::isfinite(motor.current_range_a_peak) ||
+        !std::isfinite(motor.hold_current_frac) ||
+        motor.run_current_a_rms <= 0.0 || motor.run_current_a_rms > 2.1 ||
+        !valid_current_range ||
+        (motor.current_range_a_peak > 0.0 &&
+         requested_peak > motor.current_range_a_peak) ||
+        global_scaler < 32 || global_scaler > 256 ||
         motor.hold_current_frac < 0.0 || motor.hold_current_frac > 1.0 ||
-        motor.spi_speed_hz == 0U || motor.pulse_high_us < 1 ||
+        motor.spi_speed_hz == 0U || motor.spi_speed_hz > 10000000U ||
+        motor.pulse_high_us < 1 ||
         motor.retry_ms < 100 || motor.samples.empty()) {
       if (error != nullptr) {
         *error = "invalid motor" + std::to_string(i) + " configuration";
@@ -740,13 +754,15 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
     }
   }
 
-  std::map<std::size_t, std::string> gpio_owners;
-  auto claim_gpio = [&](std::size_t line, const std::string& owner) -> bool {
-    const auto [it, inserted] = gpio_owners.emplace(line, owner);
+  std::map<std::pair<std::string, std::size_t>, std::string> gpio_owners;
+  auto claim_gpio = [&](const std::string& chip, std::size_t line,
+                        const std::string& owner) -> bool {
+    const auto [it, inserted] =
+        gpio_owners.emplace(std::make_pair(chip, line), owner);
     if (!inserted) {
       if (error != nullptr) {
-        *error = "BCM GPIO " + std::to_string(line) + " assigned to both " +
-                 it->second + " and " + owner;
+        *error = chip + " line " + std::to_string(line) +
+                 " assigned to both " + it->second + " and " + owner;
       }
       return false;
     }
@@ -754,24 +770,28 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
   };
 
   for (std::size_t i = 0; i < config->heaters.output_lines.size(); ++i) {
-    if (!claim_gpio(config->heaters.output_lines[i],
+    if (!claim_gpio(config->runtime.gpio_chip, config->heaters.output_lines[i],
                     "heater.output_lines[" + std::to_string(i) + "]")) {
       return false;
     }
   }
   for (std::size_t i = 0; i < config->motors.size(); ++i) {
     const std::string prefix = "motor" + std::to_string(i);
-    if (!claim_gpio(config->motors[i].cs_line, prefix + ".cs_line") ||
-        !claim_gpio(config->motors[i].step_line, prefix + ".step_line") ||
-        !claim_gpio(config->motors[i].dir_line, prefix + ".dir_line") ||
-        !claim_gpio(config->motors[i].enable_line, prefix + ".enable_line")) {
+    const std::string& chip = config->motors[i].gpio_chip;
+    if (!claim_gpio(chip, config->motors[i].cs_line, prefix + ".cs_line") ||
+        !claim_gpio(chip, config->motors[i].step_line, prefix + ".step_line") ||
+        !claim_gpio(chip, config->motors[i].dir_line, prefix + ".dir_line") ||
+        !claim_gpio(chip, config->motors[i].enable_line,
+                    prefix + ".enable_line")) {
       return false;
     }
   }
   if (config->sensors.rtd_click_enabled &&
-      (!claim_gpio(config->sensors.rtd_click_cs_line,
+      (!claim_gpio(config->runtime.gpio_chip,
+                   config->sensors.rtd_click_cs_line,
                    "sensor.rtd_click_cs_line") ||
-       !claim_gpio(config->sensors.rtd_click_drdy_line,
+       !claim_gpio(config->runtime.gpio_chip,
+                   config->sensors.rtd_click_drdy_line,
                    "sensor.rtd_click_drdy_line"))) {
     return false;
   }
@@ -790,11 +810,13 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
     }
   }
   if (config->hal.status_led_enabled &&
-      !claim_gpio(config->hal.status_led_line, "hal.status_led_line")) {
+      !claim_gpio(config->runtime.gpio_chip, config->hal.status_led_line,
+                  "hal.status_led_line")) {
     return false;
   }
   if (config->hal.mode_led_enabled &&
-      !claim_gpio(config->hal.mode_led_line, "hal.mode_led_line")) {
+      !claim_gpio(config->runtime.gpio_chip, config->hal.mode_led_line,
+                  "hal.mode_led_line")) {
     return false;
   }
 

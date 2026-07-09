@@ -52,11 +52,11 @@ start motor motion. Operators use explicit jog, pull, or `BENDSEQ_*` commands.
 | Ambient pressure / temperature | DPS310 over I2C |
 | UV | GUVA-S12SD analog output through ADS1115 over I2C |
 | Heaters | 6 polyimide heaters through EKM014/UCC27524 MOSFET inputs |
-| Motors | 2 NEMA 17 ball-screw actuators through FYSETC TMC5160 drivers |
+| Motors | 2 NEMA 17 ball-screw actuators through TMC2240 carriers |
 | Resistance | Disabled in final BOM; telemetry field retained for compatibility |
 
 Real backends are implemented for libgpiod heater PWM and STEP/DIR/EN,
-software-CS TMC5160 SPI setup, DPS310 and ADS1115 through Linux `i2c-dev`, and
+software-CS TMC2240 SPI setup, DPS310 and ADS1115 through Linux `i2c-dev`, and
 DAQ132M Modbus RTU. They still require bench validation against the exact
 boards, wiring, DAQ register map, current limits, and powered loads.
 
@@ -125,7 +125,7 @@ INI keys.
 | M0 | 0,1,2,3 | `/dev/spidev0.0`, CS BCM 22 | BCM 19 / 26 / 12 |
 | M1 | 4,5,6,7 | `/dev/spidev0.0`, CS BCM 23 | BCM 16 / 20 / 21 |
 
-`Tmc5160Driver` uses `SPI_NO_CS`, drives the configured CS GPIO, performs
+`Tmc2240Driver` uses SPI mode 3 with `SPI_NO_CS`, drives the configured CS GPIO, performs
 pipelined register reads, and verifies IOIN/version and written registers.
 Every absolute motion requires a
 software zero established by `SET_POSITION_ZERO`; there are no limit switches.
@@ -183,11 +183,11 @@ See `docs/protocol.md` for the complete command list.
 
 | Adapter | Status |
 |---|---|
-| `Tmc5160Driver` | SPI register writes and GPIO CS/STEP/DIR/EN implemented; bench validation required |
+| `Tmc2240Driver` | SPI register writes and GPIO CS/STEP/DIR/EN implemented; bench validation required |
 | `GpioStepDirStepperDriver` | Real libgpiod STEP/DIR/EN pulses implemented |
 | `LibgpiodPwmController` | Real 10 Hz software PWM thread with zero-on-start/stop |
 | `I2cAdapter` | DPS310 and ADS1115 reads implemented |
-| `SpiAdapter` | Health boundary; shared with TMC5160 and optional RTD Click |
+| `SpiAdapter` | Health boundary; shared with TMC2240 and optional RTD Click |
 | `RtcAdapter` | System-clock fallback |
 | `Ina3221Adapter` | Historical compatibility stub; final BOM disables resistance |
 

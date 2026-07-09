@@ -38,11 +38,8 @@ struct StepperChannelConfig {
   // ramp from 0 to 100 Hz, matching the Rev C mechanical envelope.
   double accel_steps_per_s2 = 200.0;
 
-  // Microstep divisor. 4 (Rev C default) or 5 are the only values accepted by
-  // StepperChannel::SetMicrostep unless `allow_extended_microstep` is true
-  // (which enables any divisor in [1, 32]).
+  // TMC2240 MRES divisor. Must be a power of two from 1 through 256.
   int microstep = 4;
-  bool allow_extended_microstep = false;
 
   // Absolute travel limit in *microsteps* (=full_steps × microstep). Any
   // absolute target with |pos| > this is rejected.

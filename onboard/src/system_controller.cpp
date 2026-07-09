@@ -16,7 +16,7 @@
 #include "coatheal/sd_notify.hpp"
 #include "coatheal/stepper_channel.hpp"
 #include "coatheal/telemetry.hpp"
-#include "coatheal/tmc5160_driver.hpp"
+#include "coatheal/tmc2240_driver.hpp"
 
 // Perf instrumentation. Off in flight builds (default). Enable with
 // -DCOATHEAL_PERF_TRACE to emit a single "[perf]" line per 60 ticks with
@@ -147,7 +147,7 @@ bool SystemController::Initialize(std::string* error) {
   }
   mode_led_->Set(StatusLed::Pattern::kSolid);
 
-  // Final BOM: two TMC5160-driven NEMA 17 ball-screw actuators. Motor channel,
+  // Final BOM: two TMC2240-driven NEMA 17 ball-screw actuators. Motor channel,
   // sample mapping, SPI device, current, and GPIO lines come from onboard.ini.
   std::vector<StepperChannelConfig> channel_cfgs;
   channel_cfgs.reserve(config_.motors.size());
@@ -180,8 +180,8 @@ bool SystemController::Initialize(std::string* error) {
     auto build_tmc =
         [&](const char* motor_label, const MotorConfig& motor)
             -> std::unique_ptr<StepperDriver> {
-      Tmc5160Config tcfg;
-      tcfg.gpio_chip = config_.runtime.gpio_chip;
+      Tmc2240Config tcfg;
+      tcfg.gpio_chip = motor.gpio_chip;
       tcfg.spi_device = motor.spi_device;
       tcfg.cs_line = motor.cs_line;
       tcfg.step_line = motor.step_line;
@@ -191,16 +191,16 @@ bool SystemController::Initialize(std::string* error) {
       tcfg.enable_active_low = motor.enable_active_low;
       tcfg.microstep = config_.pull.microstep;
       tcfg.run_current_a_rms = motor.run_current_a_rms;
-      tcfg.sense_resistor_ohm = motor.sense_resistor_ohm;
+      tcfg.current_range_a_peak = motor.current_range_a_peak;
       tcfg.hold_current_frac = motor.hold_current_frac;
       tcfg.stealth_chop = motor.stealth_chop;
       tcfg.spi_speed_hz = motor.spi_speed_hz;
       tcfg.pulse_high_us = motor.pulse_high_us;
-      auto tmc = std::make_unique<Tmc5160Driver>(tcfg);
+      auto tmc = std::make_unique<Tmc2240Driver>(tcfg);
       if (!tmc->healthy()) {
         tmc_spi_ok_ = false;
         std::cerr << "[system] " << motor_label
-                  << ": TMC5160 bring-up on " << motor.spi_device
+                  << ": TMC2240 bring-up on " << motor.spi_device
                   << " failed; motor remains unavailable until CHECK or restart"
                   << " completes SPI setup." << '\n';
       }

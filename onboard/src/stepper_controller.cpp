@@ -24,7 +24,6 @@ StepperChannelConfig BuildLegacyChannelConfig(const StepperConfig& cfg) {
   c.max_step_hz = cfg.max_step_hz / div;
   c.accel_steps_per_s2 = 1e12;  // "instant" — REV-A had no ramp; keep behavior
                                 // step-for-step identical under legacy ctor.
-  c.allow_extended_microstep = true;  // REV-A accepted any divisor [1,32]
   c.max_position_steps = cfg.max_position_steps;
   c.samples = {0, 1, 2, 3};
   c.enable_on_boot = cfg.enable_on_boot;

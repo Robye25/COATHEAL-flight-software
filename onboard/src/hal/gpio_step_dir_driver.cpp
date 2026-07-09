@@ -80,6 +80,9 @@ bool GpioStepDirStepperDriver::Step(bool direction_forward) {
     if (!SetGpioOutput(static_cast<GpioOutput*>(dir_handle_),
                        physical_direction)) {
       healthy_ = false;
+      SetGpioOutput(static_cast<GpioOutput*>(enable_handle_),
+                    enable_active_low_);
+      enabled_ = false;
       return false;
     }
     last_direction_forward_ = physical_direction;

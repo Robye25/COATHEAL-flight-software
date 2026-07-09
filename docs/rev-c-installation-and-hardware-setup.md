@@ -32,15 +32,16 @@ Use these as the active Rev C references:
 | Discovery port | `4100/udp` |
 | Static onboard Ethernet IP | `169.254.10.10/16` |
 
-All GPIO values are BCM GPIO line numbers on `/dev/gpiochip0`, not physical
-40-pin header numbers.
+Default GPIO values are BCM GPIO line numbers on `/dev/gpiochip0`, not physical
+40-pin header numbers. Each motor can select another chip with
+`motor*.gpio_chip`.
 
 ## Final Component List
 
 | Subsystem | Final component | Software interface |
 |---|---|---|
-| Stepper driver | FYSETC TMC5160 | SPI + STEP/DIR/EN GPIO |
-| Linear actuator | NEMA 17 external ball-screw linear stepper, 2.5 A, 48 mm | Controlled through TMC5160 |
+| Stepper driver | TMC2240 carrier | SPI mode 3 + STEP/DIR/EN GPIO |
+| Linear actuator | NEMA 17 external ball-screw linear stepper, 2.5 A, 48 mm | Controlled through TMC2240 |
 | Sample temperature probes | XF-931-FAR PT100 Class B probes | Into DAQ132M |
 | Primary temperature card | DAQ132M 8-channel thermocouple/PT100 card | USB-RS485 Modbus RTU |
 | Optional PT100 bench board | RTD Click MIKROE-2815 / MAX31865 | SPI + DRDY GPIO |
@@ -63,7 +64,7 @@ All GPIO values are BCM GPIO line numbers on `/dev/gpiochip0`, not physical
 | Plug-and-play Ethernet | Implemented | Pi must keep `169.254.10.10/16`; Windows firewall must allow telemetry |
 | Telemetry logging and durable queue | Implemented | Verify SD/USB paths on the Pi |
 | Final-BOM config schema | Implemented | Use `config/onboard.example.ini` as the template |
-| TMC5160 config path | Implemented | Bench-verify SPI current/chopper setup and motor polarity |
+| TMC2240 config path | Implemented | Bench-verify integrated current/chopper setup and motor polarity |
 | STEP/DIR/EN pulses | Implemented with libgpiod | Bench-verify waveform timing, direction, and travel |
 | Heater PWM mapping | Implemented with zero-safe software PWM | Validate with current-limited dummy loads |
 | DAQ132M Modbus | RTU read, CRC, scaling, and range checks implemented | Verify register map/function/scale against the exact card |
@@ -347,7 +348,7 @@ gpioinfo gpiochip0
 
 The software uses `SPI_NO_CS` and drives BCM 22/23 through libgpiod. Remove the
 old `dtoverlay=spi0-2cs,cs0_pin=22,cs1_pin=23` line if it is present, then
-reboot. `/dev/spidev0.0` is shared by both TMC5160 drivers.
+reboot. `/dev/spidev0.0` is shared by both TMC2240 drivers.
 
 Expected I2C devices:
 
@@ -402,20 +403,26 @@ heater.active_high=true
 heater.target_min_c=0.0
 heater.target_max_c=80.0
 
-motor0.driver=tmc5160
+motor0.driver=tmc2240
+motor0.gpio_chip=/dev/gpiochip0
 motor0.spi_device=/dev/spidev0.0
 motor0.cs_line=22
 motor0.step_line=19
 motor0.dir_line=26
 motor0.enable_line=12
+motor0.run_current_a_rms=0.8
+motor0.current_range_a_peak=0
 motor0.samples=0,1,2,3
 
-motor1.driver=tmc5160
+motor1.driver=tmc2240
+motor1.gpio_chip=/dev/gpiochip0
 motor1.spi_device=/dev/spidev0.0
 motor1.cs_line=23
 motor1.step_line=16
 motor1.dir_line=20
 motor1.enable_line=21
+motor1.run_current_a_rms=0.8
+motor1.current_range_a_peak=0
 motor1.samples=4,5,6,7
 ```
 
@@ -492,7 +499,7 @@ Before connecting heater or motor power:
 4. Run `CHECK`; do not continue until required real devices report `OK`.
 5. Confirm `HEATERS_OFF` is ACKed and all configured heater outputs are off.
 6. Test each MOSFET output with a current-limited dummy load.
-7. Test each TMC5160 with motor supply current-limited and one motor only.
+7. Test each TMC2240 with motor supply current-limited and one motor only.
 8. Confirm motor direction and travel limits with the ball screw unloaded.
 9. Confirm bend-sequence motion reports `HEATER_INHIBITED`.
 10. Only then connect heaters and the mechanical sample fixtures.

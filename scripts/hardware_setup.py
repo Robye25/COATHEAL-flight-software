@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import math
 import os
 import select
 import shutil
@@ -131,22 +132,63 @@ def validate_candidate(text: str) -> list[str]:
     if len(set(enabled_channels)) != len(enabled_channels):
         errors.append("DAQ enabled channels contain duplicates")
 
-    gpio_claims: dict[int, str] = {}
+    runtime_chip = values.get("runtime.gpio_chip", "/dev/gpiochip0")
+    gpio_claims: dict[tuple[str, int], str] = {}
     gpio_keys = [
-        (f"heater.output_lines[{index}]", line)
+        (runtime_chip, f"heater.output_lines[{index}]", line)
         for index, line in enumerate(output_lines)
     ]
     for motor in (0, 1):
+        chip_key = f"motor{motor}.gpio_chip"
+        chip = values.get(chip_key, "")
+        if not chip:
+            errors.append(f"invalid or missing {chip_key}")
         for suffix in ("cs_line", "step_line", "dir_line", "enable_line"):
             key = f"motor{motor}.{suffix}"
             try:
-                gpio_keys.append((key, int(values[key], 0)))
+                gpio_keys.append((chip, key, int(values[key], 0)))
             except (KeyError, ValueError):
                 errors.append(f"invalid or missing {key}")
-    for owner, line in gpio_keys:
-        previous = gpio_claims.setdefault(line, owner)
+        if values.get(f"motor{motor}.driver") != "tmc2240":
+            errors.append(f"motor{motor}.driver must be tmc2240")
+        try:
+            run_current = float(values[f"motor{motor}.run_current_a_rms"])
+            current_range = float(
+                values[f"motor{motor}.current_range_a_peak"])
+            spi_speed = int(values[f"motor{motor}.spi_speed_hz"], 0)
+            pulse_high = int(values[f"motor{motor}.pulse_high_us"], 0)
+            if not math.isfinite(run_current) or not 0.0 < run_current <= 2.1:
+                errors.append(
+                    f"motor{motor}.run_current_a_rms must be in (0, 2.1]")
+            if current_range not in (0.0, 1.0, 2.0, 3.0):
+                errors.append(
+                    f"motor{motor}.current_range_a_peak must be 0, 1, 2, or 3")
+            if current_range > 0.0 and run_current * math.sqrt(2.0) > current_range:
+                errors.append(
+                    f"motor{motor} current does not fit selected peak range")
+            requested_peak = run_current * math.sqrt(2.0)
+            selected_range = current_range or (
+                1.0 if requested_peak <= 1.0 else
+                2.0 if requested_peak <= 2.0 else 3.0)
+            global_scaler = math.floor(
+                requested_peak * 256.0 / selected_range + 0.5)
+            if not 32 <= global_scaler <= 256:
+                errors.append(
+                    f"motor{motor} current produces invalid GLOBALSCALER")
+            if not 0 < spi_speed <= 10_000_000:
+                errors.append(
+                    f"motor{motor}.spi_speed_hz must be in [1, 10000000]")
+            if pulse_high < 1:
+                errors.append(
+                    f"motor{motor}.pulse_high_us must be at least 1")
+        except (KeyError, ValueError):
+            errors.append(f"invalid or missing motor{motor} electrical setting")
+    for chip, owner, line in gpio_keys:
+        gpio_id = (chip, line)
+        previous = gpio_claims.setdefault(gpio_id, owner)
         if previous != owner:
-            errors.append(f"BCM GPIO {line} used by {previous} and {owner}")
+            errors.append(
+                f"{chip} line {line} used by {previous} and {owner}")
     return errors
 
 
@@ -174,10 +216,12 @@ def wizard(args: argparse.Namespace) -> int:
     updates = {
         "sensor.daq132m_device": device,
         "sensor.daq132m_enabled_channels": channels,
+        "motor0.driver": "tmc2240",
+        "motor1.driver": "tmc2240",
         "motor0.run_current_a_rms": "0.8",
         "motor1.run_current_a_rms": "0.8",
-        "motor0.sense_resistor_ohm": "0.075",
-        "motor1.sense_resistor_ohm": "0.075",
+        "motor0.current_range_a_peak": "0",
+        "motor1.current_range_a_peak": "0",
     }
     text = replace_ini(EXAMPLE_CONFIG.read_text(encoding="utf-8"), updates)
     errors = validate_candidate(text)

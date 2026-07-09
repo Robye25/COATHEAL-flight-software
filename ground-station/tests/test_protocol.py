@@ -297,9 +297,9 @@ class ValidatorTests(unittest.TestCase):
         self.assertFalse(validate_speed_hz(5001)[0])
 
     def test_microstep(self) -> None:
-        for n in (1, 2, 4, 8, 16, 32):
+        for n in (1, 2, 4, 8, 16, 32, 64, 128, 256):
             self.assertTrue(validate_microstep(n)[0], msg=f"{n}")
-        for n in (0, 3, 64):
+        for n in (0, 3, 512):
             self.assertFalse(validate_microstep(n)[0], msg=f"{n}")
 
     def test_stepper_move(self) -> None:

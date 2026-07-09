@@ -6,7 +6,7 @@
 
 namespace coatheal {
 
-// Driver-agnostic stepper interface. The final TMC5160 path exposes
+// Driver-agnostic stepper interface. The final TMC2240 path exposes
 // STEP/DIR/EN plus SPI configuration, but the controller only needs this small
 // motion surface. Real pulse timing is backend-specific; the simulated driver
 // just counts pulses.
@@ -43,7 +43,7 @@ class SimulatedStepperDriver : public StepperDriver {
   std::uint64_t pulses_ = 0;
 };
 
-// STEP/DIR/EN backend used by the TMC5160 fallback path. Pulses are emitted
+// Generic STEP/DIR/EN backend retained for isolated GPIO tests. Pulses are emitted
 // through libgpiod and still require waveform validation on the target Pi.
 class GpioStepDirStepperDriver : public StepperDriver {
  public:
@@ -70,7 +70,7 @@ class GpioStepDirStepperDriver : public StepperDriver {
   bool enable_active_low_;
   bool healthy_ = false;
   bool enabled_ = false;
-  bool last_direction_forward_ = true;
+  bool last_direction_forward_ = false;
   int microstep_ = 1;
   std::uint64_t pulses_ = 0;
   void* step_handle_ = nullptr;

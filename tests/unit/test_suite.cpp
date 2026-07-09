@@ -17,6 +17,7 @@
 #include "coatheal/telemetry_client.hpp"
 #include "coatheal/telemetry_queue.hpp"
 #include "coatheal/thermal_controller.hpp"
+#include "coatheal/tmc2240_driver.hpp"
 
 namespace {
 
@@ -32,6 +33,25 @@ void TestPidBoundsAndAntiWindup() {
   pid.Reset();
   const double settle = pid.Update(0.0, 0.0, 0.1);
   assert(std::fabs(settle) < 1e-6);
+}
+
+void TestTmc2240CurrentConfiguration() {
+  coatheal::Tmc2240CurrentSettings settings;
+  assert(coatheal::Tmc2240Driver::CalculateCurrentSettings(
+      0.8, 0.30, 0.0, &settings));
+  assert(settings.range_code == 1U);
+  assert(std::fabs(settings.range_a_peak - 2.0) < 1e-9);
+  assert(settings.global_scaler == 145U);
+  assert(((settings.ihold_irun >> 8U) & 0x1FU) == 31U);
+  assert((settings.ihold_irun & 0x1FU) == 9U);
+
+  assert(!coatheal::Tmc2240Driver::CalculateCurrentSettings(
+      0.8, 0.30, 1.0, &settings));
+  assert(!coatheal::Tmc2240Driver::CalculateCurrentSettings(
+      2.2, 0.30, 0.0, &settings));
+  assert(coatheal::Tmc2240Driver::CalculateCurrentSettings(
+      1.0 / std::sqrt(2.0), 0.30, 1.0, &settings));
+  assert(settings.global_scaler == 0U);
 }
 
 void TestHeaterSchedulerCap() {
@@ -360,24 +380,28 @@ void TestConfigParsesReliabilityFields() {
   out << "pull.microstep=4\n";
   out << "pull.travel_full_steps=200\n";
   out << "pull.hold_s=5.0\n";
-  out << "motor0.driver=tmc5160\n";
+  out << "motor0.driver=tmc2240\n";
+  out << "motor0.gpio_chip=/dev/gpiochip0\n";
   out << "motor0.spi_device=/dev/spidev0.0\n";
   out << "motor0.cs_line=22\n";
   out << "motor0.step_line=19\n";
   out << "motor0.dir_line=26\n";
   out << "motor0.enable_line=12\n";
   out << "motor0.run_current_a_rms=2.0\n";
+  out << "motor0.current_range_a_peak=0\n";
   out << "motor0.hold_current_frac=0.30\n";
   out << "motor0.stealth_chop=true\n";
   out << "motor0.spi_speed_hz=1000000\n";
   out << "motor0.samples=0,1,2,3\n";
-  out << "motor1.driver=tmc5160\n";
+  out << "motor1.driver=tmc2240\n";
+  out << "motor1.gpio_chip=/dev/gpiochip0\n";
   out << "motor1.spi_device=/dev/spidev0.0\n";
   out << "motor1.cs_line=23\n";
   out << "motor1.step_line=16\n";
   out << "motor1.dir_line=20\n";
   out << "motor1.enable_line=21\n";
   out << "motor1.run_current_a_rms=2.0\n";
+  out << "motor1.current_range_a_peak=0\n";
   out << "motor1.hold_current_frac=0.30\n";
   out << "motor1.stealth_chop=true\n";
   out << "motor1.spi_speed_hz=1000000\n";
@@ -423,14 +447,16 @@ void TestConfigParsesReliabilityFields() {
   assert(cfg.heaters.active_high);
   assert(cfg.pull.microstep == 4);
   assert(cfg.pull.travel_full_steps == 200);
-  assert(cfg.motors[0].driver == "tmc5160");
+  assert(cfg.motors[0].driver == "tmc2240");
+  assert(cfg.motors[0].gpio_chip == "/dev/gpiochip0");
   assert(cfg.motors[0].spi_device == "/dev/spidev0.0");
   assert(cfg.motors[0].cs_line == 22U);
   assert(cfg.motors[0].step_line == 19U);
   assert(cfg.motors[0].dir_line == 26U);
   assert(cfg.motors[0].enable_line == 12U);
   assert(cfg.motors[0].samples == std::vector<std::size_t>({0, 1, 2, 3}));
-  assert(cfg.motors[1].driver == "tmc5160");
+  assert(cfg.motors[1].driver == "tmc2240");
+  assert(cfg.motors[1].gpio_chip == "/dev/gpiochip0");
   assert(cfg.motors[1].spi_device == "/dev/spidev0.0");
   assert(cfg.motors[1].cs_line == 23U);
   assert(cfg.motors[1].step_line == 16U);
@@ -552,6 +578,7 @@ void TestCommandPeerCanSeedTelemetryTarget() {
 
 int main() {
   TestPidBoundsAndAntiWindup();
+  TestTmc2240CurrentConfiguration();
   TestHeaterSchedulerCap();
   TestHeaterSchedulerEnergyBudget();
   TestCommandParser();

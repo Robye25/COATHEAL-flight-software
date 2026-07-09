@@ -27,7 +27,7 @@ Raspberry Pi 4
       PwmController
         H0..H5 MOSFET input mapping
       StepperController
-        M0 + M1 TMC5160 motor channels
+        M0 + M1 TMC2240 motor channels
 
 Ground station laptop
   gui_app.py
@@ -88,7 +88,7 @@ where telemetry should be returned.
 
 | Boundary | Configured in software | Physical-driver status |
 |---|---|---|
-| TMC5160 SPI setup | Yes | GPIO-CS SPI register writes implemented; bench validation required |
+| TMC2240 SPI setup | Yes | GPIO-CS SPI mode 3 register writes implemented; bench validation required |
 | STEP/DIR/EN GPIO | Yes | libgpiod pulse backend implemented; bench timing validation required |
 | Heater MOSFET outputs | Yes | zero-safe software PWM implemented; dummy-load validation required |
 | DAQ132M Modbus | Yes | RTU/CRC/scaling implemented; exact register map must be verified |

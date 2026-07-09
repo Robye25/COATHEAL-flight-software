@@ -3,7 +3,7 @@
 All messages are UTF-8 encoded, newline-terminated, and sent over TCP or UDP.
 Rev C keeps the existing wire shape for ground-station compatibility, but the
 hardware meaning is now the final BOM: PT100 temperatures from DAQ132M, pressure
-from DPS310, UV from GUVA-S12SD through ADS1115, and two TMC5160 motor channels.
+from DPS310, UV from GUVA-S12SD through ADS1115, and two TMC2240 motor channels.
 
 ## Telemetry DATA Frame
 
@@ -24,7 +24,7 @@ DATA,<session_id>,<seq>,<timestamp>,<rtc_valid>,<ambient_temp_c>,<ambient_pressu
 | `SENSOR_VALID` | Current validity for ambient temperature (`AT`), pressure (`AP`), UV, and `S0..S7` |
 | `SENSOR_AGE_MS` | Monotonic age of each last successful reading; `-1` means never valid |
 | `COMPONENT_STATE` | Independent state for DPS310, ADS1115, DAQ132M, both motors, and PWM |
-| `STEPPER0`, `STEPPER1` | TMC5160-driven NEMA 17 ball-screw motor snapshots |
+| `STEPPER0`, `STEPPER1` | TMC2240-driven NEMA 17 ball-screw motor snapshots |
 
 The parser locates `HEATER_DUTY=` by token name, so sample count is inferred
 from the position of that token. Frames with any number of sample columns parse
@@ -51,7 +51,7 @@ STATUS=SD_OK|USB_OK|I2C_OK|SPI_OK|LINK_OK|T_AMBIENT_OK|P_AMBIENT_OK|UNIFORMITY_O
 | `SD_OK` / `SD_FAIL` | Primary SD-card CSV log health |
 | `USB_OK` / `USB_FAIL` | Secondary USB mirror log health |
 | `I2C_OK` / `I2C_FAIL` | Latest DPS310 and ADS1115 read health |
-| `SPI_OK` / `SPI_FAIL` | TMC5160 SPI setup/check health |
+| `SPI_OK` / `SPI_FAIL` | TMC2240 SPI setup/check health |
 | `LINK_OK` / `LINK_FAIL` | Last telemetry drain/ACK status |
 | `T_AMBIENT_OK` / `T_AMBIENT_FAIL` | Ambient temperature in configured range |
 | `P_AMBIENT_OK` / `P_AMBIENT_FAIL` | Ambient pressure in configured range |
