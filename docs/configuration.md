@@ -80,7 +80,7 @@ at load time.
 | `sensor.daq132m_enabled_channels` | `0..7` | Zero-based channels expected to be connected. Physical channel 2 is software `S1`. |
 | `sensor.rtd_click_enabled` | `true` | Current MIKROE-2815/MAX31865 bench path. |
 | `sensor.rtd_click_spi_device` | `/dev/spidev0.0` | RTD Click SPI path if enabled. |
-| `sensor.rtd_click_cs_line` / `drdy_line` | `7` / `25` | RTD Click CS and DRDY GPIO. |
+| `sensor.rtd_click_cs_line` / `drdy_line` | `16` / `25` | RTD Click CS and DRDY GPIO. |
 | `sensor.rtd_click_wires` | `3` | PT100 wire mode; must be 2, 3, or 4. |
 | `sensor.rtd_click_sample_channel` | `0` | Software sample channel populated by RTD Click. |
 | `sensor.rtd_click_reference_ohm` | `400.0` | MAX31865 reference resistor value used for PT100 conversion. |

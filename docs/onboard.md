@@ -127,7 +127,7 @@ INI keys.
 | Motor | Default samples | Default SPI | STEP / DIR / EN |
 |---|---|---|---|
 | M0 | 0,1,2,3 | `/dev/spidev0.0`, CS BCM 22 | BCM 19 / 26 / 12 |
-| M1 | 4,5,6,7 | `/dev/spidev0.0`, CS BCM 23 | BCM 16 / 20 / 21 |
+| M1 | 4,5,6,7 | `/dev/spidev0.0`, CS BCM 23 | BCM 24 / 20 / 21 |
 
 `Tmc2240Driver` uses SPI mode 3 with `SPI_NO_CS`, drives the configured CS GPIO, performs
 pipelined register reads, and verifies IOIN/version and written registers.

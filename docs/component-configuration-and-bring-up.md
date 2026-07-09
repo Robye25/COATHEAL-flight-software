@@ -66,11 +66,11 @@ Configuration uses BCM GPIO numbers, not physical header numbers.
 | Motor 0 STEP | 35 | 19 | `motor0.step_line` |
 | Motor 0 DIR | 37 | 26 | `motor0.dir_line` |
 | Motor 1 CS | 16 | 23 | `motor1.cs_line` |
-| Motor 1 STEP | 36 | 16 | `motor1.step_line` |
+| Motor 1 STEP | 18 | 24 | `motor1.step_line` |
 | Motor 1 DIR | 38 | 20 | `motor1.dir_line` |
 | Motor 1 EN | 40 | 21 | `motor1.enable_line` |
 | RTD Click DRDY | 22 | 25 | `sensor.rtd_click_drdy_line` |
-| RTD Click CS | 26 | 7 | `sensor.rtd_click_cs_line` |
+| RTD Click CS | 36 | 16 | `sensor.rtd_click_cs_line` |
 
 The DAQ132M uses USB and consumes no Pi header GPIO when it is re-enabled.
 Status LEDs are disabled because BCM 17 and 27 are heater outputs.
@@ -136,7 +136,7 @@ sudo ./scripts/install_onboard_service.sh \
 ## 6. Current PT100 Through RTD Click
 
 For the current bench, connect one XF-931-FAR PT100 to RTD Click
-MIKROE-2815/MAX31865. Wire RTD Click to Pi SPI0, CS BCM 7, and DRDY BCM 25.
+MIKROE-2815/MAX31865. Wire RTD Click to Pi SPI0, CS BCM 16, and DRDY BCM 25.
 Power the board from 3.3 V.
 
 Relevant configuration:
@@ -146,7 +146,7 @@ sensor.sample_temperature_source=rtd_click_max31865
 sensor.daq132m_enabled=false
 sensor.rtd_click_enabled=true
 sensor.rtd_click_spi_device=/dev/spidev0.0
-sensor.rtd_click_cs_line=7
+sensor.rtd_click_cs_line=16
 sensor.rtd_click_drdy_line=25
 sensor.rtd_click_wires=3
 sensor.rtd_click_sample_channel=0

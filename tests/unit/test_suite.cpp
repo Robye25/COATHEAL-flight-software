@@ -379,7 +379,7 @@ void TestConfigParsesReliabilityFields() {
   out << "heater.target_max_c=80.0\n";
   out << "sensor.rtd_click_enabled=true\n";
   out << "sensor.rtd_click_spi_device=/dev/spidev0.0\n";
-  out << "sensor.rtd_click_cs_line=7\n";
+  out << "sensor.rtd_click_cs_line=16\n";
   out << "sensor.rtd_click_drdy_line=25\n";
   out << "sensor.rtd_click_wires=3\n";
   out << "sensor.rtd_click_sample_channel=0\n";
@@ -422,7 +422,7 @@ void TestConfigParsesReliabilityFields() {
   out << "motor1.gpio_chip=/dev/gpiochip0\n";
   out << "motor1.spi_device=/dev/spidev0.0\n";
   out << "motor1.cs_line=23\n";
-  out << "motor1.step_line=16\n";
+  out << "motor1.step_line=24\n";
   out << "motor1.dir_line=20\n";
   out << "motor1.enable_line=21\n";
   out << "motor1.run_current_a_rms=2.0\n";
@@ -492,7 +492,7 @@ void TestConfigParsesReliabilityFields() {
   assert(cfg.motors[1].gpio_chip == "/dev/gpiochip0");
   assert(cfg.motors[1].spi_device == "/dev/spidev0.0");
   assert(cfg.motors[1].cs_line == 23U);
-  assert(cfg.motors[1].step_line == 16U);
+  assert(cfg.motors[1].step_line == 24U);
   assert(cfg.motors[1].dir_line == 20U);
   assert(cfg.motors[1].enable_line == 21U);
   assert(cfg.motors[1].samples == std::vector<std::size_t>({4, 5, 6, 7}));

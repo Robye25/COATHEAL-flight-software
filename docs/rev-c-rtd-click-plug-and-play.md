@@ -6,7 +6,7 @@ temperature path until the damaged Modbus hardware is replaced.
 Current temperature source:
 
 - One PT100 probe through RTD Click MIKROE-2815 / MAX31865.
-- RTD Click on SPI0 with manual chip select on BCM 7 and DRDY on BCM 25.
+- RTD Click on SPI0 with manual chip select on BCM 16 and DRDY on BCM 25.
 - Software sample channel `S0` by default.
 - DAQ132M disabled by default, but the DAQ code and config remain available for
   later replacement hardware.
@@ -41,10 +41,10 @@ included only to avoid wiring confusion.
 | Motor 0 STEP | 35 | 19 | `motor0.step_line` |
 | Motor 0 DIR | 37 | 26 | `motor0.dir_line` |
 | Motor 1 CS | 16 | 23 | `motor1.cs_line` |
-| Motor 1 STEP | 36 | 16 | `motor1.step_line` |
+| Motor 1 STEP | 18 | 24 | `motor1.step_line` |
 | Motor 1 DIR | 38 | 20 | `motor1.dir_line` |
 | Motor 1 EN | 40 | 21 | `motor1.enable_line` |
-| RTD Click CS | 26 | 7 | `sensor.rtd_click_cs_line` |
+| RTD Click CS | 36 | 16 | `sensor.rtd_click_cs_line` |
 | RTD Click DRDY | 22 | 25 | `sensor.rtd_click_drdy_line` |
 | SPI0 MOSI / MISO / SCLK | 19 / 21 / 23 | 10 / 9 / 11 | fixed SPI0 |
 | I2C SDA / SCL | 3 / 5 | 2 / 3 | fixed I2C-1 |
@@ -67,7 +67,7 @@ sensor.sample_temperature_source=rtd_click_max31865
 sensor.daq132m_enabled=false
 sensor.rtd_click_enabled=true
 sensor.rtd_click_spi_device=/dev/spidev0.0
-sensor.rtd_click_cs_line=7
+sensor.rtd_click_cs_line=16
 sensor.rtd_click_drdy_line=25
 sensor.rtd_click_wires=3
 sensor.rtd_click_sample_channel=0
@@ -92,7 +92,7 @@ motor1.gpio_chip=/dev/gpiochip0
 motor1.spi_device=/dev/spidev0.0
 motor1.cs_line=23
 motor1.enable_line=21
-motor1.step_line=16
+motor1.step_line=24
 motor1.dir_line=20
 ```
 
@@ -228,7 +228,7 @@ RTD Click default bench assumptions:
 - RTD Click VCC to Pi 3.3 V, not 5 V.
 - RTD Click GND to Pi ground.
 - SPI MOSI/MISO/SCLK to Pi SPI0.
-- RTD Click CS to BCM 7.
+- RTD Click CS to BCM 16.
 - RTD Click DRDY to BCM 25.
 - PT100 wiring mode matches `sensor.rtd_click_wires`.
 - Default RTD Click jumper setup is normally 3-wire; change config if your
@@ -260,7 +260,7 @@ Common RTD failures:
 |---|---|---|
 | `SPI_OPEN_FAILED` | `/dev/spidev0.0` missing | Enable SPI and reboot |
 | `SPI_CONFIG_FAILED` | Kernel rejected SPI mode/speed | Lower `sensor.rtd_click_spi_speed_hz` |
-| `CS_GPIO_FAILED` | BCM 7 busy or unavailable | Stop conflicting service, inspect `gpioinfo`, confirm final pin map |
+| `CS_GPIO_FAILED` | BCM 16 busy or unavailable | Stop conflicting service, inspect `gpioinfo`, confirm final pin map |
 | `DATA_READ_FAILED` | No MAX31865 response | Check MOSI/MISO/SCLK/CS wiring and RTD Click power |
 | `FAULT_0x..` | MAX31865 fault bit set | Check PT100 wiring, jumper mode, open/short sensor |
 | `TEMPERATURE_RANGE` | Converted resistance outside PT100 range | Check `sensor.rtd_click_reference_ohm` and wiring |
@@ -445,4 +445,3 @@ sudo systemctl restart coatheal-onboard.service
 - [ ] `CHECK MOTOR0` and `CHECK MOTOR1` report TMC2240 SPI readback OK.
 - [ ] `motor-test` moves each motor visibly at low speed, out and back.
 - [ ] Telemetry continues after motor motion.
-
