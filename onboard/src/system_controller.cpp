@@ -896,6 +896,55 @@ std::string SystemController::HandleCommandLine(const std::string& line,
     fn();
   };
 
+  auto heater_temperature_channel = [&](std::size_t heater_index) {
+    return heater_index < config_.heaters.temperature_channels.size()
+               ? config_.heaters.temperature_channels[heater_index]
+               : heater_index;
+  };
+
+  auto heater_temperature_valid_locked = [&](std::size_t heater_index,
+                                             std::string* reason) {
+    const std::size_t sample = heater_temperature_channel(heater_index);
+    if (sample >= last_sensor_snapshot_.sample_temps_c.size()) {
+      if (reason != nullptr) {
+        std::ostringstream msg;
+        msg << "heater " << heater_index << " temperature unavailable"
+            << " (sample " << sample << " has no reading)";
+        *reason = msg.str();
+      }
+      return false;
+    }
+    if (!last_sensor_snapshot_.sample_temp_valid.empty()) {
+      if (sample >= last_sensor_snapshot_.sample_temp_valid.size() ||
+          !last_sensor_snapshot_.sample_temp_valid[sample]) {
+        if (reason != nullptr) {
+          std::ostringstream msg;
+          msg << "heater " << heater_index << " temperature unavailable"
+              << " (sample " << sample << " invalid)";
+          *reason = msg.str();
+        }
+        return false;
+      }
+    }
+    return true;
+  };
+
+  auto heater_temperature_valid = [&](std::size_t heater_index,
+                                      std::string* reason) {
+    std::lock_guard<std::mutex> lock(overrides_mu_);
+    return heater_temperature_valid_locked(heater_index, reason);
+  };
+
+  auto all_heater_temperatures_valid = [&](std::string* reason) {
+    std::lock_guard<std::mutex> lock(overrides_mu_);
+    for (std::size_t i = 0; i < config_.hardware.heater_count; ++i) {
+      if (!heater_temperature_valid_locked(i, reason)) {
+        return false;
+      }
+    }
+    return true;
+  };
+
   auto valid_motor = [&](int motor_id) {
     return motor_id >= 0 && stepper_ != nullptr &&
            static_cast<std::size_t>(motor_id) < stepper_->channel_count();
@@ -1181,6 +1230,12 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       if (duty < 0.0 || duty > 1.0) {
         return Nack(cmd_name, "duty out of range [0,1]");
       }
+      if (duty > 0.0) {
+        std::string reason;
+        if (!heater_temperature_valid(index, &reason)) {
+          return Nack(cmd_name, reason + "; use HEATER_TEST for bench-only open-loop output test");
+        }
+      }
       set_state_override([&]() {
         control_overrides_.heaters_off = false;
         control_overrides_.single_heater_override.reset();
@@ -1201,6 +1256,12 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       }
       if (duty < 0.0 || duty > 1.0) {
         return Nack(cmd_name, "duty out of range [0,1]");
+      }
+      if (duty > 0.0) {
+        std::string reason;
+        if (!all_heater_temperatures_valid(&reason)) {
+          return Nack(cmd_name, reason + "; SET_ALL_DUTY requires all heater temperatures");
+        }
       }
       set_state_override([&]() {
         control_overrides_.heaters_off = false;
@@ -1298,6 +1359,12 @@ std::string SystemController::HandleCommandLine(const std::string& line,
           target > config_.heater_safety.target_max_c) {
         return Nack(cmd_name, "target outside configured limits");
       }
+      {
+        std::string reason;
+        if (!heater_temperature_valid(index, &reason)) {
+          return Nack(cmd_name, reason);
+        }
+      }
       set_state_override([&]() {
         control_overrides_.heaters_off = false;
         control_overrides_.all_heaters_override.reset();
@@ -1316,6 +1383,12 @@ std::string SystemController::HandleCommandLine(const std::string& line,
           target < config_.heater_safety.target_min_c ||
           target > config_.heater_safety.target_max_c) {
         return Nack(cmd_name, "target outside configured limits");
+      }
+      {
+        std::string reason;
+        if (!all_heater_temperatures_valid(&reason)) {
+          return Nack(cmd_name, reason + "; SET_ALL_TEMP_TARGETS requires all heater temperatures");
+        }
       }
       set_state_override([&]() {
         control_overrides_.heaters_off = false;
