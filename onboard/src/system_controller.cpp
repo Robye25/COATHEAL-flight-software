@@ -934,7 +934,8 @@ std::string SystemController::HandleCommandLine(const std::string& line,
                        ? "OK"
                        : "FAILED");
       }
-      result << ";comms=" << (last_link_ok ? "OK" : "DEGRADED");
+      result << ";comms="
+             << (telemetry_client_.is_connected() ? "OK" : "DEGRADED");
       return Ack(cmd_name, result.str());
     }
 
@@ -976,7 +977,8 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       const bool spi_ok =
           !(check_motor0 || check_motor1) || tmc_spi_ok_;
       const bool sensor_ok = sensor_probe_ok;
-      const bool comms_ok = !check_comms || last_link_ok;
+      const bool comms_ok =
+          !check_comms || telemetry_client_.is_connected();
       const bool overall = storage_ok && sensor_ok && pwm_ok &&
                            stepper_ok && spi_ok && comms_ok;
       std::ostringstream result;
