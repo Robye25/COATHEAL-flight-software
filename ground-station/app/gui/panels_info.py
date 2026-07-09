@@ -120,7 +120,7 @@ class ValuesPanel(QScrollArea):
         self._row("heater_inhibit", "heater inhibit")
         self._row("resistance_ok", "resistance")
         for component in (
-            "DPS310", "ADS1115", "DAQ132M", "MOTOR0", "MOTOR1", "PWM"
+            "DPS310", "ADS1115", "DAQ132M", "RTD_CLICK", "MOTOR0", "MOTOR1", "PWM"
         ):
             self._row(f"component_{component}", component)
 
@@ -217,7 +217,7 @@ class ValuesPanel(QScrollArea):
             + ";"
         )
         for component in (
-            "DPS310", "ADS1115", "DAQ132M", "MOTOR0", "MOTOR1", "PWM"
+            "DPS310", "ADS1115", "DAQ132M", "RTD_CLICK", "MOTOR0", "MOTOR1", "PWM"
         ):
             state = pkt.component_state.get(component, "UNKNOWN")
             field = f[f"component_{component}"]
