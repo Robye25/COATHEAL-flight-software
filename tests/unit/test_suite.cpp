@@ -398,7 +398,7 @@ void TestConfigParsesReliabilityFields() {
   out << "sensor.rtd_click_spi_device=/dev/spidev0.0\n";
   out << "sensor.rtd_click_cs_line=16\n";
   out << "sensor.rtd_click_drdy_line=25\n";
-  out << "sensor.rtd_click_wires=3\n";
+  out << "sensor.rtd_click_wires=2\n";
   out << "sensor.rtd_click_sample_channel=0\n";
   out << "sensor.rtd_click_reference_ohm=470.0\n";
   out << "sensor.rtd_click_filter_hz=50\n";
