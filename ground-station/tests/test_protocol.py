@@ -59,13 +59,13 @@ HEALTH_DATA = (
     "RTD_CLICK:OK|MOTOR0:OK|MOTOR1:FAILED|PWM:DEGRADED"
 )
 
-RTD_CLICK_S0_DATA = (
+RTD_CLICK_S1_DATA = (
     "DATA,sess-rtd,11,2026-07-10T01:30:00Z,1,22.0,1000.0,nan,"
-    "23.42,nan,nan,nan,nan,nan,nan,nan,"
+    "nan,23.42,nan,nan,nan,nan,nan,nan,"
     "HEATER_DUTY=0|0|0|0|0|0,RESISTANCE=-|-|-|-|-|-|-|-,"
     "PHASE=BOOT,MODE=STANDBY,STATUS=I2C_OK|SPI_OK|SAMPLE_TEMP_OK,"
-    "SENSOR_VALID=AT:1|AP:1|UV:0|S0:1|S1:0|S2:0|S3:0|S4:0|S5:0|S6:0|S7:0,"
-    "SENSOR_AGE_MS=AT:40|AP:40|UV:-1|S0:50|S1:-1|S2:-1|S3:-1|S4:-1|S5:-1|S6:-1|S7:-1,"
+    "SENSOR_VALID=AT:1|AP:1|UV:0|S0:0|S1:1|S2:0|S3:0|S4:0|S5:0|S6:0|S7:0,"
+    "SENSOR_AGE_MS=AT:40|AP:40|UV:-1|S0:-1|S1:50|S2:-1|S3:-1|S4:-1|S5:-1|S6:-1|S7:-1,"
     "COMPONENT_STATE=DPS310:OK|ADS1115:DISABLED|DAQ132M:DISABLED|"
     "RTD_CLICK:OK|MOTOR0:FAILED|MOTOR1:FAILED|PWM:OK"
 )
@@ -181,13 +181,14 @@ class DataFrameTests(unittest.TestCase):
         self.assertEqual(pkt.sensor_age_ms, {})
         self.assertEqual(pkt.component_state, {})
 
-    def test_parse_single_rtd_click_pt100_on_s0(self) -> None:
-        pkt = parse_telemetry_csv(RTD_CLICK_S0_DATA)
+    def test_parse_single_rtd_click_pt100_on_s1(self) -> None:
+        pkt = parse_telemetry_csv(RTD_CLICK_S1_DATA)
         self.assertEqual(len(pkt.sample_temps_c), 8)
-        self.assertAlmostEqual(pkt.sample_temps_c[0], 23.42)
-        self.assertTrue(pkt.sensor_valid["S0"])
-        self.assertFalse(pkt.sensor_valid["S1"])
-        self.assertEqual(pkt.sensor_age_ms["S0"], 50)
+        self.assertTrue(math.isnan(pkt.sample_temps_c[0]))
+        self.assertAlmostEqual(pkt.sample_temps_c[1], 23.42)
+        self.assertFalse(pkt.sensor_valid["S0"])
+        self.assertTrue(pkt.sensor_valid["S1"])
+        self.assertEqual(pkt.sensor_age_ms["S1"], 50)
         self.assertEqual(pkt.component_state["RTD_CLICK"], "OK")
         self.assertEqual(pkt.component_state["PWM"], "OK")
 

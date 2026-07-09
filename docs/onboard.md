@@ -48,7 +48,7 @@ start motor motion. Operators use explicit jog, pull, or `BENDSEQ_*` commands.
 
 | Subsystem | Software model |
 |---|---|
-| Sample temperatures | Current bench: one PT100 through RTD Click/MAX31865 on `S0`; future DAQ132M path can fill 8 channels |
+| Sample temperatures | Current bench: one PT100 through RTD Click/MAX31865 on `S1` for heater 1; future DAQ132M path can fill 8 channels |
 | Ambient pressure / temperature | DPS310 over I2C |
 | UV | GUVA-S12SD analog output through ADS1115 over I2C |
 | Heaters | 6 polyimide heaters through EKM014/UCC27524 MOSFET inputs |

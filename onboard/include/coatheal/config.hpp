@@ -142,9 +142,9 @@ struct SensorHardwareConfig {
   std::string rtd_click_spi_device = "/dev/spidev0.0";
   std::size_t rtd_click_cs_line = 16;
   std::size_t rtd_click_drdy_line = 25;
-  int rtd_click_wires = 2;
-  std::size_t rtd_click_sample_channel = 0;
-  double rtd_click_reference_ohm = 470.0;
+  int rtd_click_wires = 3;
+  std::size_t rtd_click_sample_channel = 1;
+  double rtd_click_reference_ohm = 400.0;
   int rtd_click_filter_hz = 50;
   std::uint32_t rtd_click_spi_speed_hz = 500000;
 

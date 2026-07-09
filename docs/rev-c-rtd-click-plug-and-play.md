@@ -7,7 +7,7 @@ Current temperature source:
 
 - One PT100 probe through RTD Click MIKROE-2815 / MAX31865.
 - RTD Click on SPI0 with manual chip select on BCM 16 and DRDY on BCM 25.
-- Software sample channel `S0` by default.
+- Software sample channel `S1` by default for the heater 1 bench probe.
 - DAQ132M disabled by default, but the DAQ code and config remain available for
   later replacement hardware.
 
@@ -69,9 +69,9 @@ sensor.rtd_click_enabled=true
 sensor.rtd_click_spi_device=/dev/spidev0.0
 sensor.rtd_click_cs_line=16
 sensor.rtd_click_drdy_line=25
-sensor.rtd_click_wires=2
-sensor.rtd_click_sample_channel=0
-sensor.rtd_click_reference_ohm=470.0
+sensor.rtd_click_wires=3
+sensor.rtd_click_sample_channel=1
+sensor.rtd_click_reference_ohm=400.0
 sensor.rtd_click_filter_hz=50
 sensor.rtd_click_spi_speed_hz=500000
 ```
@@ -106,8 +106,8 @@ heater.debug_max_duty=0.25
 heater.debug_max_seconds=10.0
 ```
 
-With only one RTD Click on `S0`, normal heater control is valid only for the
-heater mapped to `S0` by default (`H0`). Other heaters stay inhibited until their
+With only one RTD Click on `S1`, normal heater control is valid only for the
+heater mapped to `S1` by default (`H1`). Other heaters stay inhibited until their
 temperature channels are valid or until you use explicit bench `HEATER_TEST`.
 
 ## One-Command Pi Setup
@@ -227,8 +227,8 @@ Expected partial-bench behavior:
 
 - `CHECK RTD_CLICK` is `OK` when the RTD Click, PT100, SPI, CS, and DRDY path
   work.
-- `COMPONENTS` includes `rtd_click=<state>` and `rtd_click_sample=0`.
-- `SENSOR_VALID` shows `S0:1` only after a valid RTD conversion.
+- `COMPONENTS` includes `rtd_click=<state>` and `rtd_click_sample=1`.
+- `SENSOR_VALID` shows `S1:1` only after a valid RTD conversion.
 - Other sample channels are `nan` and invalid until more sensors are added.
 - `DAQ132M` should be `DISABLED` when `sensor.daq132m_enabled=false`.
 
@@ -293,7 +293,7 @@ PY
 Open-loop manual duty is still feedback-gated:
 
 ```text
-SET_HEATER_DUTY 0 0.10
+SET_HEATER_DUTY 1 0.10
 SET_ALL_DUTY 0.05
 HEATERS_OFF
 ```
@@ -319,7 +319,7 @@ Wrapper command:
 
 ```bash
 python3 scripts/hardware_setup.py heater-test \
-  --heater 0 \
+  --heater 1 \
   --duty 0.10 \
   --seconds 2 \
   --debug-token COATHEAL_DEBUG \
@@ -449,7 +449,7 @@ sudo systemctl restart coatheal-onboard.service
 - [ ] `python3 scripts/hardware_setup.py pin-check --config config/onboard.local.ini` prints `pin-check: OK`.
 - [ ] `systemctl status coatheal-onboard.service --no-pager` is active.
 - [ ] `CHECK RTD_CLICK` returns `overall=OK` with the PT100 connected.
-- [ ] Telemetry shows `S0` valid and other sample channels invalid or `nan`.
+- [ ] Telemetry shows `S1` valid and other sample channels invalid or `nan`.
 - [ ] `DAQ132M` is disabled, not blocking telemetry.
 - [ ] `CHECK PWM` reports usable heater PWM channels.
 - [ ] `heater-test` pulses only the selected dummy-load channel and shuts off.

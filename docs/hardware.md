@@ -99,7 +99,7 @@ board.
 
 The current bench temperature source is one XF-931-FAR PT100 probe connected to
 RTD Click MIKROE-2815 / MAX31865. The RTD Click publishes one software sample
-channel, `S0` by default. Other sample channels remain invalid until additional
+channel, `S1` by default for the heater 1 bench probe. Other sample channels remain invalid until additional
 temperature hardware is available.
 
 Relevant config:
@@ -112,9 +112,9 @@ sensor.rtd_click_enabled=true
 sensor.rtd_click_spi_device=/dev/spidev0.0
 sensor.rtd_click_cs_line=16
 sensor.rtd_click_drdy_line=25
-sensor.rtd_click_wires=2
-sensor.rtd_click_sample_channel=0
-sensor.rtd_click_reference_ohm=470.0
+sensor.rtd_click_wires=3
+sensor.rtd_click_sample_channel=1
+sensor.rtd_click_reference_ohm=400.0
 sensor.rtd_click_filter_hz=50
 sensor.rtd_click_spi_speed_hz=500000
 ```

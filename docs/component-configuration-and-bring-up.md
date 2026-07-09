@@ -110,13 +110,13 @@ python3 scripts/hardware_setup.py wizard \
 ```
 
 For the current bench setup, where one RTD Click populates software sample
-channel `S0`, enter:
+channel `S1` for heater 1, enter:
 
 ```text
 0
 ```
 
-Software indices are zero-based, so RTD sample channel `0` appears as `S0`.
+Software indices are zero-based, so RTD sample channel `1` appears as `S1`.
 
 Validate without touching hardware:
 
@@ -148,9 +148,9 @@ sensor.rtd_click_enabled=true
 sensor.rtd_click_spi_device=/dev/spidev0.0
 sensor.rtd_click_cs_line=16
 sensor.rtd_click_drdy_line=25
-sensor.rtd_click_wires=2
-sensor.rtd_click_sample_channel=0
-sensor.rtd_click_reference_ohm=470.0
+sensor.rtd_click_wires=3
+sensor.rtd_click_sample_channel=1
+sensor.rtd_click_reference_ohm=400.0
 sensor.rtd_click_filter_hz=50
 sensor.rtd_click_spi_speed_hz=500000
 ```
@@ -162,7 +162,7 @@ python3 scripts/hardware_setup.py rtd-check
 ```
 
 Expected result: `CHECK RTD_CLICK` reports `overall=OK` and telemetry shows
-`S0` valid. Other sample channels remain invalid until more temperature
+`S1` valid. Other sample channels remain invalid until more temperature
 hardware is connected.
 
 ## 6B. Future PT100 Through DAQ132M

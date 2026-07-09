@@ -58,7 +58,7 @@ does not duplicate CSV rows.
 | Heater control | Six duties, six PID targets, global/per-channel target controls, PID tuning, and local JSON profiles |
 | Motor dock | Explicit M0/M1 selector, jog/absolute controls, software zero, and runtime sequence editor |
 | Pull events | `EVT,PULL` rows with motor id, steps, hold time, sample group |
-| Temperature plot | PT100 sample temperatures S0..S7. Current bench uses RTD Click on S0; invalid channels show as unavailable |
+| Temperature plot | PT100 sample temperatures S0..S7. Current bench uses RTD Click on S1 for heater 1; invalid channels show as unavailable |
 | Pressure plot | DPS310 pressure |
 | Environment / UV plot | GUVA-S12SD value through ADS1115 |
 | Resistance plot | Compatibility field; normally empty/`-` for final BOM |
