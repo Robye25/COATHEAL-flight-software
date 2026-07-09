@@ -319,7 +319,7 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
         return result;
       }
       if (!command.args.empty()) {
-        command.args[0] = Upper(command.args[0]);
+        command.args[0] = ToUpper(command.args[0]);
       }
       break;
     case CommandType::kBendSeqRun:
