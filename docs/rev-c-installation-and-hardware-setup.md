@@ -2,6 +2,10 @@
 
 This is the operator-facing setup guide for the Rev C final-BOM software.
 
+The authoritative component wiring, configuration, discovery, and
+commissioning procedure is
+[Component Configuration and Bring-Up](component-configuration-and-bring-up.md).
+
 Rev C is manual-first. While the ground-station link is healthy, the onboard
 software does not start autonomous phase-entry motion, fatigue pulls, or
 automatic thermal sequencing. Operators command phase, heaters, and pull cycles

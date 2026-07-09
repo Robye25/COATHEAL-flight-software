@@ -37,6 +37,7 @@ docs/            Architecture, protocol, configuration, and hardware docs
 | [docs/rev-c-installation-and-hardware-setup.md](docs/rev-c-installation-and-hardware-setup.md) | Installation, plug-and-play Ethernet, final component setup, pins, and commands |
 | [docs/hardware.md](docs/hardware.md) | Final Rev C hardware reference and HAL status |
 | [docs/configuration.md](docs/configuration.md) | Full INI configuration reference |
+| [docs/component-configuration-and-bring-up.md](docs/component-configuration-and-bring-up.md) | Authoritative Rev C wiring, discovery, and commissioning guide |
 | [docs/protocol.md](docs/protocol.md) | DATA, `EVT,PULL`, ACK, discovery, and command protocol |
 | [docs/manual-operations.md](docs/manual-operations.md) | Complete CLI workflow for thermal control, zeroing, bend sequences, fallback, and safe stop |
 | [docs/onboard.md](docs/onboard.md) | Onboard C++ module reference |

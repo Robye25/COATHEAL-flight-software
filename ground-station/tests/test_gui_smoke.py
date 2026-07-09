@@ -53,10 +53,12 @@ class GuiSmoke(unittest.TestCase):
             self.assertIn("SET ZERO", labels)
             self.assertIn("LOAD", labels)
             self.assertIn("CHECK", labels)
+            self.assertIn("COMPONENTS", labels)
             self.assertIn("Target", labels)
             self.assertNotIn("BEND ASCENT", labels)
             self.assertNotIn("BEND FLOAT", labels)
             self.assertNotIn("BEND DESCENT", labels)
+            self.assertNotIn("SECONDARY CYCLE", labels)
         finally:
             win.close()
 

@@ -63,6 +63,7 @@ struct StepperChannelConfig {
   // construction. Off for unit tests / bench runs (pulses still issue through
   // Tick() using the same trapezoidal math).
   bool use_pulse_thread = false;
+  int driver_retry_ms = 2000;
 };
 
 // Owns one motor: driver, position, target, speed, microstep schedule. Pulse
@@ -165,6 +166,8 @@ class StepperChannel {
 
   std::thread pulse_thread_;
   std::atomic<bool> pulse_thread_run_{false};
+  std::chrono::steady_clock::time_point last_driver_retry_{};
+  std::uint64_t missed_deadlines_ = 0;
 };
 
 }  // namespace coatheal

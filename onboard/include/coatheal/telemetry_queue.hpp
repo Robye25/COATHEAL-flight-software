@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
@@ -30,6 +31,7 @@ class TelemetryQueue {
 
  private:
   bool PersistLocked(std::string* error);
+  void RetryPersistenceLocked();
   void PruneLocked();
 
   static bool ParseLine(const std::string& line, QueuedTelemetryFrame* out);
@@ -43,6 +45,8 @@ class TelemetryQueue {
 
   mutable std::mutex mu_;
   std::vector<QueuedTelemetryFrame> frames_;
+  bool persistence_enabled_ = true;
+  std::chrono::steady_clock::time_point next_persistence_retry_{};
 };
 
 }  // namespace coatheal

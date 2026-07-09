@@ -22,7 +22,7 @@ fallback.
 1. Apply queued command overrides.
 2. Read `SensorManager` snapshot.
 3. Track link state and activate fallback only after configured link loss.
-4. Update `StateManager` only in fallback or legacy autonomous mode.
+4. Update pressure phase tracking only during link-loss fallback.
 5. Compute requested heater duties.
 6. Apply `HeaterScheduler` limits: max active heaters, thermal power, energy, and `MotionLock`.
 7. Apply duties to `PwmController`.
@@ -41,10 +41,8 @@ When `manual.manual_first=true`:
 | Ground link healthy | Operator commands phase, heaters, and pulls |
 | Link not yet seen | System stays conservative; no fallback automation |
 | Established link lost past timeout | Continue active bend sequences and manual PID targets; stop non-sequence motion; apply +5 C floor only to channels without targets |
-| `manual.manual_first=false` | Legacy autonomous phase/fatigue behavior can run |
-
-Automatic fatigue pulls are disabled for normal Rev C operation. Operators use
-`PULL_ARM` and `PULL_EXECUTE`.
+Rev C configuration requires `manual.manual_first=true`. Phase changes never
+start motor motion. Operators use explicit jog, pull, or `BENDSEQ_*` commands.
 
 ## Final Hardware Model
 
@@ -96,6 +94,10 @@ telemetry reports `HEATER_INHIBITED`.
 
 ## SensorManager
 
+`SensorManager` runs DPS310, ADS1115, and DAQ132M in separate bounded polling
+threads. The 1 Hz main loop only copies the thread-safe cache, so missing or
+timed-out sensors cannot delay commands, logging, or telemetry.
+
 `SensorManager` returns `SensorSnapshot`:
 
 | Field | Final source |
@@ -110,6 +112,9 @@ Simulation is used only when `runtime.use_simulated_sensors=true`. Real mode
 does not replace failed reads with synthetic data and reports `SIMULATED` or
 `REAL_SENSORS` in telemetry.
 
+Each reading also carries current validity and last-success age. Never-valid
+values are `nan`; failed readings retain their last value with validity false.
+
 ## Motion
 
 The two motor channels are configured from `[motor0]`, `[motor1]`, and `[pull]`
@@ -120,8 +125,9 @@ INI keys.
 | M0 | 0,1,2,3 | `/dev/spidev0.0`, CS BCM 22 | BCM 19 / 26 / 12 |
 | M1 | 4,5,6,7 | `/dev/spidev0.0`, CS BCM 23 | BCM 16 / 20 / 21 |
 
-`Tmc5160Driver` uses `SPI_NO_CS`, drives the configured CS GPIO, and performs
-boot-time and `CHECK` register-write passes. Every absolute motion requires a
+`Tmc5160Driver` uses `SPI_NO_CS`, drives the configured CS GPIO, performs
+pipelined register reads, and verifies IOIN/version and written registers.
+Every absolute motion requires a
 software zero established by `SET_POSITION_ZERO`; there are no limit switches.
 `MotionLock` serializes both manual moves and runtime bend sequences.
 
@@ -130,7 +136,7 @@ software zero established by `SET_POSITION_ZERO`; there are no limit switches.
 `SerializeTelemetryDataFrame` emits:
 
 ```text
-DATA,<session>,<seq>,<ts>,<rtc_valid>,<ambient_temp_c>,<ambient_pressure_mbar>,<uv>,<sample_0>..<sample_7>,HEATER_DUTY=d0|..|d5,RESISTANCE=r0|..|r7,PHASE=..,MODE=..,STATUS=..,STEPPER0=..,STEPPER1=..
+DATA,<session>,<seq>,<ts>,<rtc_valid>,<ambient_temp_c>,<ambient_pressure_mbar>,<uv>,<sample_0>..<sample_7>,HEATER_DUTY=..,RESISTANCE=..,PHASE=..,MODE=..,STATUS=..,SENSOR_VALID=..,SENSOR_AGE_MS=..,COMPONENT_STATE=..,STEPPER0=..,STEPPER1=..
 ```
 
 `RESISTANCE=` remains on the wire for parser compatibility. With
@@ -154,6 +160,7 @@ Primary flight commands:
 PING
 STATUS
 CHECK
+COMPONENTS
 ARM
 DISARM
 SET_PHASE <phase>

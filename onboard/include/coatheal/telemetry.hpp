@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "coatheal/component_health.hpp"
 #include "coatheal/phase.hpp"
 #include "coatheal/status_flags.hpp"
 #include "coatheal/stepper_controller.hpp"
@@ -15,7 +16,7 @@ struct SensorSnapshot {
   bool rtc_valid = true;
   std::string timestamp_utc;
   double ambient_temp_c = 0.0;
-  double ambient_pressure_mbar = 1013.25;
+  double ambient_pressure_mbar = 0.0;
   double uv = 0.0;
   std::vector<double> sample_temps_c;
   bool ambient_temp_valid = true;
@@ -23,6 +24,13 @@ struct SensorSnapshot {
   bool uv_valid = true;
   bool sample_temps_valid = true;
   std::vector<bool> sample_temp_valid;
+  std::int64_t ambient_temp_age_ms = -1;
+  std::int64_t ambient_pressure_age_ms = -1;
+  std::int64_t uv_age_ms = -1;
+  std::vector<std::int64_t> sample_temp_age_ms;
+  ComponentHealth dps310;
+  ComponentHealth ads1115;
+  ComponentHealth daq132m;
   bool simulated = false;
   // Compatibility field. The final Rev C BOM has no resistance instrument, so
   // disabled readings are reported as 0.0 here and serialized as "-".
@@ -36,6 +44,7 @@ struct TelemetryRecord {
   SensorSnapshot sensors;
   std::vector<double> heater_duty;
   StatusFlags status;
+  ComponentState pwm_state = ComponentState::kFailed;
   // Vector of motor snapshots. `steppers[0]` = M0, `steppers[1]` = M1.
   // Each motor is emitted as a `STEPPER<n>=...` segment on the wire.
   std::vector<StepperStatus> steppers;

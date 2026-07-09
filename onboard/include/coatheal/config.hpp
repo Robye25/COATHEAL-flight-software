@@ -20,9 +20,9 @@ struct RuntimeConfig {
 struct ManualControlConfig {
   // Rev C manual-first policy:
   //   * while the ground link is healthy, ARM enables operator-directed
-  //     heater/stepper commands but does not run the phase/fatigue automation;
+  //     heater and stepper commands; no phase entry starts motion;
   //   * after an established link is lost, the onboard may fall back to the
-  //     cold-protection floor controller.
+  //     cold-protection floor controller while active sequences continue.
   bool manual_first = true;
   bool link_loss_fallback_enabled = true;
   double link_loss_fallback_s = 10.0;
@@ -53,19 +53,15 @@ struct StorageConfig {
 
 struct PhaseConfig {
   // Rev C fallback floor shared across ASCENT/FLOAT/DESCENT. Connected
-  // operation is manual-first; the floor controller runs only in fallback or
-  // legacy autonomous mode. There is no box heater.
+  // operation is manual-first; the floor controller runs only after link loss.
   double sample_floor_c = 5.0;
   double uniformity_tolerance_c = 2.0;
 };
 
 struct TransitionConfig {
-  // Pressure thresholds in mbar. Ascent->PreFloat at low pressure (near float
-  // altitude), PreFloat->Float when fatigue sequence completes (not pressure-
-  // driven), Float->Descent on re-pressurisation, Descent->Landed once
-  // near-surface pressure is recovered.
+  // Pressure thresholds used only for link-loss fallback phase tracking.
   double pre_float_mbar = 150.0;
-  double ascent_to_float_mbar = 100.0;  // legacy fallback; PRE_FLOAT now gates
+  double ascent_to_float_mbar = 100.0;
   double float_to_descent_mbar = 300.0;
   double descent_to_landed_mbar = 800.0;
   // Number of consecutive pressure samples that must satisfy a threshold before
@@ -73,22 +69,6 @@ struct TransitionConfig {
   // from causing irreversible phase changes. Especially important near the
   // 300 mbar sensor accuracy boundary (±6 mbar).
   int debounce_samples = 5;
-};
-
-// Rev C: mechanical fatigue pull sequence parameters for PRE_FLOAT phase.
-// One batch at a time: pull-release-pull-release (fatigue), then soak (hold).
-struct FatigueConfig {
-  // Number of pull-release cycles per motor batch during PRE_FLOAT.
-  int fatigue_cycles = 30;
-  // Travel distance for each fatigue pull (full steps). 200 = ~1 rev = 1-2 mm.
-  int fatigue_travel_full_steps = 200;
-  // Hold time at end of each fatigue pull before release (seconds).
-  double fatigue_pull_hold_s = 2.0;
-  // Soak (final pull) hold duration after all fatigue cycles (seconds).
-  // Default 900 s = 15 minutes.
-  double soak_hold_s = 900.0;
-  // Soak travel distance (full steps) — usually same as fatigue.
-  int soak_travel_full_steps = 200;
 };
 
 struct HeaterSafetyConfig {
@@ -134,6 +114,16 @@ struct HardwareConfig {
 };
 
 struct SensorHardwareConfig {
+  bool dps310_enabled = true;
+  bool ads1115_enabled = true;
+  bool daq132m_enabled = true;
+  bool dps310_auto_discover = true;
+  bool ads1115_auto_discover = true;
+  bool daq132m_auto_discover = true;
+  int dps310_poll_ms = 1000;
+  int ads1115_poll_ms = 1000;
+  int daq132m_poll_ms = 1000;
+  int stale_after_ms = 3000;
   std::string sample_temperature_source = "daq132m_modbus";
   std::string daq132m_device = "/dev/ttyUSB0";
   int daq132m_baud = 9600;
@@ -146,6 +136,7 @@ struct SensorHardwareConfig {
   int daq132m_register_count = 8;
   double daq132m_c_per_count = 0.1;
   double daq132m_c_offset = 0.0;
+  std::vector<std::size_t> daq132m_enabled_channels;
 
   bool rtd_click_enabled = false;
   std::string rtd_click_spi_device = "/dev/spidev0.0";
@@ -166,6 +157,7 @@ struct SensorHardwareConfig {
 
 struct HeaterOutputConfig {
   std::vector<std::size_t> output_lines;
+  std::vector<std::size_t> temperature_channels;
   double pwm_frequency_hz = 10.0;
   bool active_high = true;
 };
@@ -203,24 +195,14 @@ struct MotorConfig {
   std::size_t enable_line = 12;
   bool invert_direction = false;
   bool enable_active_low = true;
-  double run_current_a_rms = 2.0;
+  double run_current_a_rms = 0.8;
+  double sense_resistor_ohm = 0.075;
   double hold_current_frac = 0.30;
   bool stealth_chop = true;
   std::uint32_t spi_speed_hz = 1000000;
+  int pulse_high_us = 3;
+  int retry_ms = 2000;
   std::vector<std::size_t> samples;
-};
-
-struct BendScheduleConfig {
-  // Per mission-phase bend setpoint + hold duration. Applied on phase entry.
-  // Units: steps (signed, driver-side; sign governed by stepper.invert_direction).
-  std::int64_t ascent_steps = 0;
-  double ascent_hold_s = 0.0;
-  std::int64_t activation_steps = 0;
-  double activation_hold_s = 0.0;
-  std::int64_t float_steps = 0;
-  double float_hold_s = 0.0;
-  std::int64_t descent_steps = 0;
-  double descent_hold_s = 0.0;
 };
 
 struct HalConfig {
@@ -239,7 +221,6 @@ struct OnboardConfig {
   StorageConfig storage;
   PhaseConfig phase;
   TransitionConfig transition;
-  FatigueConfig fatigue;
   PowerConfig power;
   PidConfig pid;
   HardwareConfig hardware;
@@ -251,7 +232,6 @@ struct OnboardConfig {
   StepperConfig stepper;
   PullConfig pull;
   std::array<MotorConfig, 2> motors;
-  BendScheduleConfig bend;
 
   OnboardConfig();
 };

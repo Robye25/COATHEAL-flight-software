@@ -12,6 +12,7 @@ Stepper) and fans telemetry packets + pause toggle to each.
 from __future__ import annotations
 
 from collections import deque
+import math
 from typing import Dict
 
 import numpy as np
@@ -167,10 +168,13 @@ class PlotTabs(QTabWidget):
         seq = pkt.seq
         temps = {}
         for i, t in enumerate(pkt.sample_temps_c[:8]):
-            temps[f"S{i}"] = t
+            if pkt.sensor_valid.get(f"S{i}", True) and math.isfinite(t):
+                temps[f"S{i}"] = t
         if temps:
             self._temp.push(seq, temps)
-        self._pressure.push(seq, {"ambient": pkt.ambient_pressure_mbar})
+        if (pkt.sensor_valid.get("AP", True) and
+                math.isfinite(pkt.ambient_pressure_mbar)):
+            self._pressure.push(seq, {"ambient": pkt.ambient_pressure_mbar})
         heaters = {}
         for i, d in enumerate(pkt.heater_duty[:len(HEATER_LABELS)]):
             heaters[HEATER_LABELS[i]] = d * 100.0

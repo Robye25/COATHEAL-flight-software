@@ -48,6 +48,8 @@ std::string CommandTypeToString(CommandType type) {
       return "SHUTDOWN_SAFE";
     case CommandType::kCheck:
       return "CHECK";
+    case CommandType::kComponents:
+      return "COMPONENTS";
     case CommandType::kArm:
       return "ARM";
     case CommandType::kDisarm:
@@ -56,8 +58,6 @@ std::string CommandTypeToString(CommandType type) {
       return "ENTER_SAFE";
     case CommandType::kExitSafe:
       return "EXIT_SAFE";
-    case CommandType::kSecondaryCycle:
-      return "SECONDARY_CYCLE";
     case CommandType::kArmDebug:
       return "ARM_DEBUG";
     case CommandType::kDisarmDebug:
@@ -184,11 +184,11 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
       {"RESET", CommandType::kResetCtrl},
       {"SHUTDOWN_SAFE", CommandType::kShutdownSafe},
       {"CHECK", CommandType::kCheck},
+      {"COMPONENTS", CommandType::kComponents},
       {"ARM", CommandType::kArm},
       {"DISARM", CommandType::kDisarm},
       {"ENTER_SAFE", CommandType::kEnterSafe},
       {"EXIT_SAFE", CommandType::kExitSafe},
-      {"SECONDARY_CYCLE", CommandType::kSecondaryCycle},
       {"ARM_DEBUG", CommandType::kArmDebug},
       {"DISARM_DEBUG", CommandType::kDisarmDebug},
       {"SET_HEATER_DUTY", CommandType::kSetHeaterDuty},
@@ -287,12 +287,10 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
     case CommandType::kHeatersOff:
     case CommandType::kResetCtrl:
     case CommandType::kShutdownSafe:
-    case CommandType::kCheck:
     case CommandType::kArm:
     case CommandType::kDisarm:
     case CommandType::kEnterSafe:
     case CommandType::kExitSafe:
-    case CommandType::kSecondaryCycle:
     case CommandType::kDisarmDebug:
     case CommandType::kClearOverrides:
     case CommandType::kClearTempTargets:
@@ -310,6 +308,18 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
     case CommandType::kBendSeqStatus:
       if (!require_args(1)) {
         return result;
+      }
+      break;
+    case CommandType::kComponents:
+      if (!require_args(0)) return result;
+      break;
+    case CommandType::kCheck:
+      if (command.args.size() > 1) {
+        result.error = "invalid argument count for CHECK";
+        return result;
+      }
+      if (!command.args.empty()) {
+        command.args[0] = Upper(command.args[0]);
       }
       break;
     case CommandType::kBendSeqRun:

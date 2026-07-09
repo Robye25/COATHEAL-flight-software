@@ -10,7 +10,7 @@ from DPS310, UV from GUVA-S12SD through ADS1115, and two TMC5160 motor channels.
 Sent by the onboard to the ground station over TCP port `4000`.
 
 ```text
-DATA,<session_id>,<seq>,<timestamp>,<rtc_valid>,<ambient_temp_c>,<ambient_pressure_mbar>,<uv>,<sample_0>,...,<sample_7>,HEATER_DUTY=<d0>|...|<d5>,RESISTANCE=<r0>|...|<r7>,PHASE=<phase>,MODE=<mode>,STATUS=<flags>,STEPPER0=<kv>,STEPPER1=<kv>
+DATA,<session_id>,<seq>,<timestamp>,<rtc_valid>,<ambient_temp_c>,<ambient_pressure_mbar>,<uv>,<sample_0>,...,<sample_7>,HEATER_DUTY=<d0>|...|<d5>,RESISTANCE=<r0>|...|<r7>,PHASE=<phase>,MODE=<mode>,STATUS=<flags>,SENSOR_VALID=<kv>,SENSOR_AGE_MS=<kv>,COMPONENT_STATE=<kv>,STEPPER0=<kv>,STEPPER1=<kv>
 ```
 
 | Field | Meaning |
@@ -21,11 +21,18 @@ DATA,<session_id>,<seq>,<timestamp>,<rtc_valid>,<ambient_temp_c>,<ambient_pressu
 | `sample_0..sample_7` | XF-931-FAR PT100 values from DAQ132M Modbus registers |
 | `HEATER_DUTY` | Six polyimide heater duty values, H0..H5 |
 | `RESISTANCE` | Retained compatibility field; final BOM has no resistance instrument, so values serialize as `-` unless `sensor.resistance_source=simulated` |
+| `SENSOR_VALID` | Current validity for ambient temperature (`AT`), pressure (`AP`), UV, and `S0..S7` |
+| `SENSOR_AGE_MS` | Monotonic age of each last successful reading; `-1` means never valid |
+| `COMPONENT_STATE` | Independent state for DPS310, ADS1115, DAQ132M, both motors, and PWM |
 | `STEPPER0`, `STEPPER1` | TMC5160-driven NEMA 17 ball-screw motor snapshots |
 
 The parser locates `HEATER_DUTY=` by token name, so sample count is inferred
 from the position of that token. Frames with any number of sample columns parse
 as long as every column before `HEATER_DUTY=` is numeric.
+
+Never-valid values serialize as `nan`. After a failure, the last good value is
+retained, its validity becomes `0`, and its age increases. Component states are
+`DISABLED`, `DISCOVERING`, `OK`, `DEGRADED`, `STALE`, or `FAILED`.
 
 ### Example
 
@@ -51,10 +58,10 @@ STATUS=SD_OK|USB_OK|I2C_OK|SPI_OK|LINK_OK|T_AMBIENT_OK|P_AMBIENT_OK|UNIFORMITY_O
 | `UNIFORMITY_OK` / `UNIFORMITY_FAIL` | Heated sample spread within tolerance |
 | `OVERTEMP_OK` / `OVERTEMP_FAIL` | No sample over-temperature latch |
 | `ENERGY_OK` / `ENERGY_FAIL` | Heater energy budget not exhausted |
-| `RS485_OK` / `RS485_FAIL` | USB-RS485 / DAQ132M path health |
+| `RS485_OK` / `RS485_FAIL` | DAQ132M Modbus frame and CRC communication health |
 | `PWM_OK` / `PWM_FAIL` | Heater GPIO/PWM backend health |
 | `STEPPER_OK` / `STEPPER_FAIL` | Both motor backends healthy |
-| `SAMPLE_TEMP_OK` / `SAMPLE_TEMP_FAIL` | All configured DAQ132M temperature channels valid |
+| `SAMPLE_TEMP_OK` / `SAMPLE_TEMP_FAIL` | At least one DAQ132M temperature channel valid |
 | `SIMULATED` / `REAL_SENSORS` | Explicit sensor mode |
 | `SEQ_PAUSED` / `SEQ_READY` | At least one bend sequence is paused/faulted, or no sequence fault is active |
 | `HEATER_ACTIVE` / `HEATER_INHIBITED` | Heaters are inhibited while a motor holds `MotionLock` |
@@ -134,7 +141,8 @@ NACK,<COMMAND>,<reason>
 |---|---|---|
 | `PING` | none | Liveness check |
 | `STATUS` | none | Lightweight live state: phase/mode, fallback, queue, current hardware flags, and sequence state |
-| `CHECK` | none | Active storage, DPS310, ADS1115, DAQ132M, PWM, stepper, and TMC5160 SPI probe |
+| `COMPONENTS` | none | Non-invasive cached component state, error, and channel summary |
+| `CHECK` | `[ALL\|DPS310\|ADS1115\|DAQ132M\|PWM\|MOTOR0\|MOTOR1\|STORAGE\|COMMS]` | Active probe of all or one selected component |
 | `ARM` | none | Enable manual flight outputs |
 | `DISARM` | none | Disable outputs, clear heater overrides, stop steppers |
 | `SET_PHASE` | `<phase>` | Set `BOOT`, `ASCENT`, `PRE_FLOAT`, `FLOAT`, `DESCENT`, `LANDED`, or `STOPPED` |

@@ -63,6 +63,10 @@ at load time.
 | Key | Default | Description |
 |---|---:|---|
 | `sensor.sample_temperature_source` | `daq132m_modbus` | Primary PT100 acquisition path. |
+| `sensor.dps310_enabled`, `ads1115_enabled`, `daq132m_enabled` | `true` | Enable each independent polling worker. |
+| `sensor.dps310_auto_discover`, `ads1115_auto_discover`, `daq132m_auto_discover` | `true` | Try only the safe address/path alternatives documented in the bring-up guide. |
+| `sensor.dps310_poll_ms`, `ads1115_poll_ms`, `daq132m_poll_ms` | `1000` | Independent worker polling intervals. |
+| `sensor.stale_after_ms` | `3000` | Age after which a last-good failed reading is `STALE`. |
 | `sensor.daq132m_device` | `/dev/ttyUSB0` | USB-RS485 converter path. |
 | `sensor.daq132m_baud` | `9600` | Modbus RTU baud rate. |
 | `sensor.daq132m_parity` | `N` | Modbus parity. |
@@ -73,6 +77,7 @@ at load time.
 | `sensor.daq132m_register_count` | `8` | Number of PT100 registers. Must cover `sample_count`. |
 | `sensor.daq132m_c_per_count` | `0.1` | Temperature scale; verify against DAQ132M manual. |
 | `sensor.daq132m_c_offset` | `0.0` | Temperature offset applied after scaling. |
+| `sensor.daq132m_enabled_channels` | `0..7` | Zero-based channels expected to be connected. Physical channel 2 is software `S1`. |
 | `sensor.rtd_click_enabled` | `false` | Optional MIKROE-2815/MAX31865 bench path. |
 | `sensor.rtd_click_spi_device` | `/dev/spidev0.0` | RTD Click SPI path if enabled. |
 | `sensor.rtd_click_cs_line` / `drdy_line` | `7` / `25` | RTD Click CS and DRDY GPIO. |
@@ -93,6 +98,7 @@ at load time.
 | `heater.target_min_c` | `0.0` | Lowest accepted manual PID target. |
 | `heater.target_max_c` | `80.0` | Highest accepted manual PID target; must stay below the overtemperature latch. |
 | `heater.output_lines` | `17,18,27,5,6,13` | BCM GPIO lines for HEAT_EN1..6. |
+| `heater.temperature_channels` | `0,1,2,3,4,5` | DAQ sample supplying feedback for H0..H5. |
 | `heater.pwm_frequency_hz` | `10.0` | Requested heater PWM frequency. |
 | `heater.active_high` | `true` | MOSFET input polarity. |
 
@@ -154,10 +160,13 @@ at load time.
 | `motor*.step_line` | `19` | `16` | STEP GPIO. |
 | `motor*.dir_line` | `26` | `20` | DIR GPIO. |
 | `motor*.enable_line` | `12` | `21` | EN GPIO. |
-| `motor*.run_current_a_rms` | `2.0` | `2.0` | Run current request; bench-verify. |
+| `motor*.run_current_a_rms` | `0.8` | `0.8` | Conservative commissioning current; increase only after thermal validation. |
+| `motor*.sense_resistor_ohm` | `0.075` | `0.075` | Verified StepStick sense resistance used in current calculation. |
 | `motor*.hold_current_frac` | `0.30` | `0.30` | Hold current fraction. |
 | `motor*.stealth_chop` | `true` | `true` | StealthChop request. |
 | `motor*.spi_speed_hz` | `1000000` | `1000000` | SPI speed. |
+| `motor*.pulse_high_us` | `3` | `3` | STEP high time. |
+| `motor*.retry_ms` | `2000` | `2000` | Idle driver re-probe interval after a fault. |
 | `motor*.samples` | `0,1,2,3` | `4,5,6,7` | Sample indices pulled by the motor. |
 
 The TMC5160 backend opens SPI with kernel chip-select disabled and drives
@@ -177,8 +186,9 @@ lines in the kernel and conflict with the software-controlled chip selects.
 Disabled LED line values are not claimed. Configuration validation rejects any
 duplicate active BCM assignment across heaters, motors, RTD Click, and LEDs.
 
-## Legacy Bend Schedule
+Rev C requires `manual.manual_first=true`. Legacy `fatigue.*` and `bend.*`
+configuration keys are rejected; runtime `BENDSEQ_*` commands are the only
+sequence definition.
 
-Legacy `bend.*` keys are still parsed for compatibility with
-`manual.manual_first=false`, but the active Rev C configuration omits them.
-Manual operation uses runtime `BENDSEQ_*` definitions.
+See [Component Configuration and Bring-Up](component-configuration-and-bring-up.md)
+for wiring, discovery, scan, validation, and commissioning commands.

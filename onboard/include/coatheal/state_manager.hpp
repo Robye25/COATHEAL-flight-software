@@ -13,8 +13,6 @@ struct StateOverrides {
   bool force_stop = false;
   bool reset_control = false;
   bool shutdown_safe = false;
-  bool secondary_cycle = false;  // retained for compat; no-op in Rev C FSM
-  bool fatigue_complete = false;  // Rev C: set by FatigueSequencer when done
 };
 
 class StateManager {
@@ -40,6 +38,7 @@ class StateManager {
   // Debounce counters: how many consecutive ticks the threshold has been met.
   // Reset to 0 when the condition is not met.
   int debounce_pre_float_ = 0;
+  int debounce_float_ = 0;
   int debounce_descent_ = 0;
   int debounce_landed_ = 0;
 };

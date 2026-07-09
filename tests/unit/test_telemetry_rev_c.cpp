@@ -116,6 +116,31 @@ void TestResistanceFailStatus() {
   assert(Contains(line, "RESISTANCE=-|-|-|-|-|-|-|-"));
 }
 
+void TestHealthMetadataSerialization() {
+  TelemetryRecord r = MakeBaseRecord();
+  r.sensors.ambient_temp_valid = false;
+  r.sensors.ambient_temp_age_ms = -1;
+  r.sensors.sample_temp_valid =
+      {false, true, false, false, false, false, false, false};
+  r.sensors.sample_temp_age_ms =
+      {-1, 125, -1, -1, -1, -1, -1, -1};
+  r.sensors.dps310.state = ComponentState::kFailed;
+  r.sensors.ads1115.state = ComponentState::kOk;
+  r.sensors.daq132m.state = ComponentState::kDegraded;
+  r.pwm_state = ComponentState::kDegraded;
+  StepperStatus m0;
+  m0.healthy = true;
+  m0.missed_deadlines = 3;
+  StepperStatus m1;
+  r.steppers = {m0, m1};
+  const std::string line = SerializeTelemetryDataFrame(r, "sess-health");
+  assert(Contains(line, "SENSOR_VALID=AT:0|AP:1|UV:1|S0:0|S1:1"));
+  assert(Contains(line, "SENSOR_AGE_MS=AT:-1|AP:-1|UV:-1|S0:-1|S1:125"));
+  assert(Contains(line, "COMPONENT_STATE=DPS310:FAILED|ADS1115:OK|DAQ132M:DEGRADED"));
+  assert(Contains(line, "|MOTOR0:OK|MOTOR1:FAILED|PWM:DEGRADED"));
+  assert(Contains(line, "|missed:3|"));
+}
+
 void TestPullEventFrameSerialization() {
   HeatingPullEvent ev;
   ev.pull_id = 3;
@@ -147,6 +172,7 @@ int main() {
   TestResistanceColumn();
   TestDualStepperEmitsIndexedSegments();
   TestResistanceFailStatus();
+  TestHealthMetadataSerialization();
   TestPullEventFrameSerialization();
   TestPullEventEmptySamplesRendersDash();
   return 0;

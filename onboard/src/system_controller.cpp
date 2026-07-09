@@ -13,7 +13,6 @@
 #include <thread>
 
 #include "coatheal/hal/stepper_driver.hpp"
-#include "coatheal/fatigue_sequencer.hpp"
 #include "coatheal/sd_notify.hpp"
 #include "coatheal/stepper_channel.hpp"
 #include "coatheal/telemetry.hpp"
@@ -122,6 +121,7 @@ bool IsSequenceNameValid(const std::string& name) {
 }
 
 bool SystemController::Initialize(std::string* error) {
+  sensor_manager_.Start();
   if (config_.runtime.use_simulated_pwm) {
     pwm_ = std::make_unique<SimulatedPwmController>(config_.hardware.heater_count);
   } else {
@@ -165,6 +165,7 @@ bool SystemController::Initialize(std::string* error) {
     cfg.pull_hold_s = config_.pull.hold_s;
     cfg.enable_on_boot = config_.stepper.enable_on_boot;
     cfg.use_pulse_thread = !config_.runtime.use_simulated_pwm;
+    cfg.driver_retry_ms = config_.motors[i].retry_ms;
     channel_cfgs.push_back(std::move(cfg));
   }
 
@@ -190,9 +191,11 @@ bool SystemController::Initialize(std::string* error) {
       tcfg.enable_active_low = motor.enable_active_low;
       tcfg.microstep = config_.pull.microstep;
       tcfg.run_current_a_rms = motor.run_current_a_rms;
+      tcfg.sense_resistor_ohm = motor.sense_resistor_ohm;
       tcfg.hold_current_frac = motor.hold_current_frac;
       tcfg.stealth_chop = motor.stealth_chop;
       tcfg.spi_speed_hz = motor.spi_speed_hz;
+      tcfg.pulse_high_us = motor.pulse_high_us;
       auto tmc = std::make_unique<Tmc5160Driver>(tcfg);
       if (!tmc->healthy()) {
         tmc_spi_ok_ = false;
@@ -211,7 +214,7 @@ bool SystemController::Initialize(std::string* error) {
   spi_.set_healthy(config_.runtime.use_simulated_pwm || tmc_spi_ok_);
 
   stepper_ = std::make_unique<StepperController>(
-      std::move(channel_cfgs), std::move(drivers), config_.bend);
+      std::move(channel_cfgs), std::move(drivers));
 
   // Routing fix (Agent C, 2026-04-17): StepperController owns its own
   // MotionLock, and that is the one every StepperChannel actually takes on
@@ -226,16 +229,15 @@ bool SystemController::Initialize(std::string* error) {
   // One PullState entry per channel for EVT,PULL edge detection in Run().
   pull_state_.resize(stepper_->channel_count());
 
-  // Rev C: create the fatigue sequencer for PRE_FLOAT phase.
-  fatigue_sequencer_ = std::make_unique<FatigueSequencer>(
-      config_.fatigue, stepper_.get());
-
-  if (!storage_manager_.Initialize(error)) {
-    return false;
+  std::string degraded_error;
+  if (!storage_manager_.Initialize(&degraded_error)) {
+    std::cerr << "[system] storage degraded: " << degraded_error << '\n';
   }
 
-  if (!telemetry_queue_.Initialize(error)) {
-    return false;
+  degraded_error.clear();
+  if (!telemetry_queue_.Initialize(&degraded_error)) {
+    std::cerr << "[system] telemetry queue is memory-only: "
+              << degraded_error << '\n';
   }
 
   if (!command_server_.Start(
@@ -468,8 +470,6 @@ int SystemController::Run() {
       state_overrides_.force_stop = false;
       state_overrides_.reset_control = false;
       state_overrides_.shutdown_safe = false;
-      state_overrides_.secondary_cycle = false;
-      state_overrides_.fatigue_complete = false;
     }
 
     if (state_overrides.reset_control) {
@@ -496,14 +496,10 @@ int SystemController::Run() {
       StopNonSequenceMotionOnFallback();
     }
     link_loss_fallback_was_active_ = link_loss_fallback_active_;
-    const bool legacy_autonomous_run =
-        !config_.manual.manual_first && current_mode == SystemMode::kRun;
     const bool fallback_floor_control =
         link_loss_fallback_active_;
     const bool automatic_phase_tracking =
-        legacy_autonomous_run || link_loss_fallback_active_;
-    const bool automatic_experiment_actions =
-        legacy_autonomous_run;
+        link_loss_fallback_active_;
     COATHEAL_PERF_STAMP(perf_ts[1]);  // stage 0: snapshot overrides + mode load
 
     SensorSnapshot snapshot = sensor_manager_.ReadSnapshot(
@@ -521,22 +517,10 @@ int SystemController::Run() {
           std::chrono::steady_clock::now());
     }
 
-    // Manual-first Rev C: connected operation must not start the irreversible
-    // fatigue sequence automatically. It remains available only for legacy
-    // autonomous builds (`manual.manual_first=false`); flight operators use
-    // PULL_* commands explicitly.
-    if (automatic_experiment_actions &&
-        phase == MissionPhase::kPreFloat && fatigue_sequencer_) {
-      if (fatigue_sequencer_->Tick(tick_duration.count())) {
-        std::lock_guard<std::mutex> lock(overrides_mu_);
-        state_overrides_.fatigue_complete = true;
-      }
-    }
-
     const bool heaters_allowed = (current_mode == SystemMode::kRun);
     ControlOverrides effective_control = control_overrides;
     effective_control.floor_control_enabled =
-        legacy_autonomous_run || fallback_floor_control;
+        fallback_floor_control;
     if (!heaters_allowed) {
       effective_control.heaters_off = true;
     }
@@ -546,8 +530,8 @@ int SystemController::Run() {
         phase, snapshot, tick_duration.count(), effective_control);
     COATHEAL_PERF_STAMP(perf_ts[4]);  // stage 3: thermal controller
 
-    // Autonomous floor control follows flight phases. Explicit operator duty
-    // and temperature commands remain available in any RUN phase.
+    // The fallback floor follows flight phases. Explicit operator duty and
+    // temperature commands remain available in any RUN phase.
     const bool any_flying_phase =
         (phase == MissionPhase::kAscent || phase == MissionPhase::kPreFloat ||
          phase == MissionPhase::kFloat || phase == MissionPhase::kDescent);
@@ -580,7 +564,7 @@ int SystemController::Run() {
 
     if (stepper_) {
       TickBendSequences();
-      stepper_->Tick(phase, tick_duration.count(), false);
+      stepper_->Tick(phase, tick_duration.count());
       const bool sequence_fault =
           !stepper_->AllHealthy() || thermal_controller_.overtemp_latched();
       if (sequence_fault) {
@@ -617,6 +601,14 @@ int SystemController::Run() {
     record.status.energy_ok = !scheduler_.is_budget_exhausted();
     record.status.rs485_ok = sensor_manager_.rs485_ok();
     record.status.pwm_ok = pwm_ != nullptr && pwm_->healthy();
+    if (pwm_ != nullptr && pwm_->channel_count() > 0) {
+      const std::size_t healthy_channels = pwm_->healthy_channel_count();
+      record.pwm_state =
+          healthy_channels == pwm_->channel_count()
+              ? ComponentState::kOk
+              : (healthy_channels > 0 ? ComponentState::kDegraded
+                                      : ComponentState::kFailed);
+    }
     record.status.stepper_ok = stepper_ != nullptr && stepper_->AllHealthy();
     record.status.sample_temp_ok = sensor_manager_.sample_temp_ok();
     record.status.simulated = sensor_manager_.simulated();
@@ -918,51 +910,102 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       return Ack(cmd_name, status.str());
     }
 
+    case CommandType::kComponents: {
+      std::ostringstream result;
+      result << sensor_manager_.ComponentSummary();
+      if (pwm_ == nullptr || pwm_->channel_count() == 0) {
+        result << ";pwm=FAILED";
+      } else {
+        const std::size_t healthy_channels = pwm_->healthy_channel_count();
+        result << ";pwm="
+               << (healthy_channels == pwm_->channel_count()
+                       ? "OK"
+                       : (healthy_channels > 0 ? "DEGRADED" : "FAILED"));
+        for (std::size_t channel = 0; channel < pwm_->channel_count();
+             ++channel) {
+          result << ";heater" << channel << '='
+                 << (pwm_->channel_healthy(channel) ? "OK" : "FAILED");
+        }
+      }
+      for (std::size_t motor = 0;
+           motor < (stepper_ ? stepper_->channel_count() : 0); ++motor) {
+        result << ";motor" << motor << '='
+               << (stepper_->Healthy(static_cast<int>(motor))
+                       ? "OK"
+                       : "FAILED");
+      }
+      result << ";comms=" << (last_link_ok ? "OK" : "DEGRADED");
+      return Ack(cmd_name, result.str());
+    }
+
     case CommandType::kCheck: {
+      const std::string selected =
+          command.args.empty() ? "ALL" : command.args[0];
       std::string storage_details;
-      const bool storage_ok = storage_manager_.ActiveCheck(&storage_details);
-      const std::string sensor_details = sensor_manager_.ActiveCheck();
-      const bool pwm_ok = pwm_ != nullptr && pwm_->healthy();
-      const bool stepper_ok = stepper_ != nullptr && stepper_->ActiveCheck();
-      tmc_spi_ok_ = config_.runtime.use_simulated_pwm || stepper_ok;
-      const bool spi_ok = tmc_spi_ok_;
-      spi_.set_healthy(spi_ok);
-      const bool overall = storage_ok && sensor_manager_.i2c_ok() &&
-                           sensor_manager_.rs485_ok() && pwm_ok &&
-                           stepper_ok && spi_ok;
+      const bool check_storage = selected == "ALL" || selected == "STORAGE";
+      const bool check_sensors =
+          selected == "ALL" || selected == "DPS310" ||
+          selected == "ADS1115" || selected == "DAQ132M";
+      const bool check_pwm = selected == "ALL" || selected == "PWM";
+      const bool check_motor0 = selected == "ALL" || selected == "MOTOR0";
+      const bool check_motor1 = selected == "ALL" || selected == "MOTOR1";
+      const bool check_comms = selected == "ALL" || selected == "COMMS";
+      const bool known = check_storage || check_sensors || check_pwm ||
+                         check_motor0 || check_motor1 || check_comms;
+      if (!known) return Nack(cmd_name, "unknown component");
+
+      const bool storage_ok =
+          !check_storage || storage_manager_.ActiveCheck(&storage_details);
+      std::string sensor_details = "sensors=SKIPPED";
+      const bool sensor_probe_ok =
+          !check_sensors ||
+          sensor_manager_.ActiveCheck(selected, &sensor_details);
+      const bool pwm_ok =
+          !check_pwm || (pwm_ != nullptr && pwm_->healthy());
+      const bool motor0_ok =
+          !check_motor0 ||
+          (stepper_ != nullptr && stepper_->ActiveCheck(0));
+      const bool motor1_ok =
+          !check_motor1 ||
+          (stepper_ != nullptr && stepper_->ActiveCheck(1));
+      const bool stepper_ok = motor0_ok && motor1_ok;
+      if (check_motor0 || check_motor1) {
+        tmc_spi_ok_ = config_.runtime.use_simulated_pwm || stepper_ok;
+        spi_.set_healthy(tmc_spi_ok_);
+      }
+      const bool spi_ok =
+          !(check_motor0 || check_motor1) || tmc_spi_ok_;
+      const bool sensor_ok = sensor_probe_ok;
+      const bool comms_ok = !check_comms || last_link_ok;
+      const bool overall = storage_ok && sensor_ok && pwm_ok &&
+                           stepper_ok && spi_ok && comms_ok;
       std::ostringstream result;
       result << "overall=" << (overall ? "OK" : "FAIL")
-             << ';' << storage_details
+             << ";selected=" << selected
+             << ';' << (check_storage ? storage_details : "storage=SKIPPED")
              << ';' << sensor_details
              << ";pwm=" << (pwm_ok ? "OK" : "FAIL")
-             << ";stepper=" << (stepper_ok ? "OK" : "FAIL")
-             << ";spi=" << (spi_ok ? "OK" : "FAIL");
+             << ";motor0=" << (motor0_ok ? "OK" : "FAIL")
+             << ";motor1=" << (motor1_ok ? "OK" : "FAIL")
+             << ";spi=" << (spi_ok ? "OK" : "FAIL")
+             << ";comms=" << (comms_ok ? "OK" : "FAIL");
       return Ack(cmd_name, result.str());
     }
 
     case CommandType::kForceStart:
-      if (config_.manual.manual_first) {
-        state_manager_.SetPhase(MissionPhase::kAscent);
-        if (fatigue_sequencer_) fatigue_sequencer_->Reset();
-        return Ack(cmd_name, "phase=ASCENT");
-      }
-      set_state_override([&]() { state_overrides_.force_start = true; });
-      return Ack(cmd_name, "override accepted");
+      state_manager_.SetPhase(MissionPhase::kAscent);
+      return Ack(cmd_name, "phase=ASCENT");
 
     case CommandType::kForceStop:
-      if (config_.manual.manual_first) {
-        state_manager_.SetPhase(MissionPhase::kDescent);
-        stop_all_sequences();
-        if (stepper_) {
-          std::string err;
-          for (std::size_t i = 0; i < stepper_->channel_count(); ++i) {
-            stepper_->Stop(static_cast<int>(i), &err);
-          }
+      state_manager_.SetPhase(MissionPhase::kDescent);
+      stop_all_sequences();
+      if (stepper_) {
+        std::string err;
+        for (std::size_t i = 0; i < stepper_->channel_count(); ++i) {
+          stepper_->Stop(static_cast<int>(i), &err);
         }
-        return Ack(cmd_name, "phase=DESCENT;steppers=stopped");
       }
-      set_state_override([&]() { state_overrides_.force_stop = true; });
-      return Ack(cmd_name, "override accepted");
+      return Ack(cmd_name, "phase=DESCENT;steppers=stopped");
 
     case CommandType::kHeatersOff:
       set_state_override([&]() {
@@ -1029,9 +1072,7 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       if (!mode_.compare_exchange_strong(expected, SystemMode::kRun)) {
         return Nack(cmd_name, "ARM requires STANDBY mode");
       }
-      return Ack(cmd_name,
-                 config_.manual.manual_first ? "mode=RUN;manual_control=1"
-                                             : "mode=RUN;autonomous=1");
+      return Ack(cmd_name, "mode=RUN;manual_control=1");
     }
 
     case CommandType::kDisarm: {
@@ -1056,10 +1097,6 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       }
       return Ack(cmd_name, "mode=STANDBY");
     }
-
-    case CommandType::kSecondaryCycle:
-      set_state_override([&]() { state_overrides_.secondary_cycle = true; });
-      return Ack(cmd_name, "secondary heating cycle requested");
 
     case CommandType::kArmDebug:
       if (!config_.runtime.bench_mode) {
@@ -1234,11 +1271,15 @@ std::string SystemController::HandleCommandLine(const std::string& line,
           result << '-';
         }
         result << ";h" << i << "_temp=";
-        if (i < last_sensor_snapshot_.sample_temps_c.size() &&
+        const std::size_t sample =
+            i < config_.heaters.temperature_channels.size()
+                ? config_.heaters.temperature_channels[i]
+                : i;
+        if (sample < last_sensor_snapshot_.sample_temps_c.size() &&
             (last_sensor_snapshot_.sample_temp_valid.empty() ||
-             (i < last_sensor_snapshot_.sample_temp_valid.size() &&
-              last_sensor_snapshot_.sample_temp_valid[i]))) {
-          result << last_sensor_snapshot_.sample_temps_c[i];
+             (sample < last_sensor_snapshot_.sample_temp_valid.size() &&
+              last_sensor_snapshot_.sample_temp_valid[sample]))) {
+          result << last_sensor_snapshot_.sample_temps_c[sample];
         } else {
           result << '-';
         }
@@ -1313,7 +1354,6 @@ std::string SystemController::HandleCommandLine(const std::string& line,
         return Nack(cmd_name, "invalid phase");
       }
       state_manager_.SetPhase(requested);
-      if (fatigue_sequencer_) fatigue_sequencer_->Reset();
       std::ostringstream msg;
       msg << "phase=" << ToString(requested);
       return Ack(cmd_name, msg.str());

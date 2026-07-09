@@ -22,18 +22,9 @@ StepperConfig MakeCfg() {
   return c;
 }
 
-BendScheduleConfig MakeSchedule() {
-  BendScheduleConfig s;
-  s.float_steps = 500;
-  s.float_hold_s = 10.0;
-  s.descent_steps = 0;
-  return s;
-}
-
-std::unique_ptr<StepperController> MakeCtl(StepperConfig cfg = MakeCfg(),
-                                           BendScheduleConfig sch = MakeSchedule()) {
+std::unique_ptr<StepperController> MakeCtl(StepperConfig cfg = MakeCfg()) {
   auto drv = std::make_unique<SimulatedStepperDriver>();
-  return std::make_unique<StepperController>(cfg, sch, std::move(drv));
+  return std::make_unique<StepperController>(cfg, std::move(drv));
 }
 
 void TestMoveStepsIssuesPulses() {
@@ -59,27 +50,15 @@ void TestSpeedLimitsPulsesPerTick() {
   assert(s.moving);
 }
 
-void TestPhaseEntryAppliesBend() {
+void TestPhaseEntryDoesNotStartMotion() {
   auto c = MakeCtl();
-  // Give enough time to reach the 500-step float bend.
+  // Phase changes alone must never create a target or emit a pulse.
   c->Tick(MissionPhase::kFloat, 1.0);
   auto s = c->Snapshot();
-  assert(s.target_steps == 500);
-  // 1000 Hz × 1 s ≥ 500 — should already be at target.
-  assert(s.position_steps == 500);
+  assert(s.target_steps == 0);
+  assert(s.position_steps == 0);
   assert(!s.moving);
-  assert(s.holding);
-  assert(s.hold_remaining_s <= 10.0 && s.hold_remaining_s > 8.0);
-}
-
-void TestHoldCountdown() {
-  auto c = MakeCtl();
-  c->Tick(MissionPhase::kFloat, 1.0);
-  const double before = c->Snapshot().hold_remaining_s;
-  c->Tick(MissionPhase::kFloat, 2.0);
-  const double after = c->Snapshot().hold_remaining_s;
-  assert(after < before);
-  assert(before - after >= 1.9);
+  assert(!s.holding);
 }
 
 void TestStopAbortsMotion() {
@@ -139,8 +118,7 @@ void TestDisabledDriverDoesNotPulse() {
 int main() {
   TestMoveStepsIssuesPulses();
   TestSpeedLimitsPulsesPerTick();
-  TestPhaseEntryAppliesBend();
-  TestHoldCountdown();
+  TestPhaseEntryDoesNotStartMotion();
   TestStopAbortsMotion();
   TestRotateUsesStepsPerRev();
   TestHomeReturnsToZero();

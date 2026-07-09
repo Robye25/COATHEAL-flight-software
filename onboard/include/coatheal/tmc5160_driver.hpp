@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <string>
 
 #include "coatheal/hal/stepper_driver.hpp"
@@ -20,11 +21,13 @@ struct Tmc5160Config {
   bool invert_direction = false;
   bool enable_active_low = true;
 
-  double run_current_a_rms = 2.0;
+  double run_current_a_rms = 0.8;
+  double sense_resistor_ohm = 0.075;
   double hold_current_frac = 0.30;
   int microstep = 4;
   bool stealth_chop = true;
   std::uint32_t spi_speed_hz = 1000000;
+  int pulse_high_us = 3;
 };
 
 class Tmc5160Driver : public StepperDriver {
@@ -48,7 +51,9 @@ class Tmc5160Driver : public StepperDriver {
 
   const Tmc5160Config& config() const { return cfg_; }
 
-  static std::uint32_t EncodeIholdIrun(double run_a_rms, double hold_frac);
+  static std::uint32_t EncodeIholdIrun(
+      double run_a_rms, double hold_frac,
+      double sense_resistor_ohm = 0.075);
   static std::uint32_t EncodeChopconf(int microstep_divisor);
   static std::uint32_t EncodeGconf(bool stealth_chop);
 
@@ -58,6 +63,9 @@ class Tmc5160Driver : public StepperDriver {
   void CloseSpi();
   void CloseGpio();
   bool WriteRegister(std::uint8_t address, std::uint32_t value);
+  bool ReadRegister(std::uint8_t address, std::uint32_t* value);
+  bool Transfer(const std::uint8_t tx[5], std::uint8_t rx[5]);
+  bool EnableUnlocked(bool enable);
 
   Tmc5160Config cfg_;
   int spi_fd_ = -1;
@@ -71,6 +79,7 @@ class Tmc5160Driver : public StepperDriver {
   void* step_handle_ = nullptr;
   void* dir_handle_ = nullptr;
   void* enable_handle_ = nullptr;
+  mutable std::mutex io_mu_;
 };
 
 }  // namespace coatheal

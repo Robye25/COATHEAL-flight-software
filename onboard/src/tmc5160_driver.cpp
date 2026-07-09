@@ -25,16 +25,15 @@ namespace coatheal {
 namespace {
 
 constexpr std::uint8_t kRegGCONF      = 0x00;
+constexpr std::uint8_t kRegGSTAT      = 0x01;
+constexpr std::uint8_t kRegIOIN       = 0x04;
 constexpr std::uint8_t kRegIHOLD_IRUN = 0x10;
 constexpr std::uint8_t kRegTPOWERDOWN = 0x11;
 constexpr std::uint8_t kRegCHOPCONF   = 0x6C;
+constexpr std::uint8_t kRegDRVSTATUS  = 0x6F;
 constexpr std::uint8_t kRegPWMCONF    = 0x70;
 constexpr std::uint8_t kWriteBit = 0x80;
-
-// Board-level current limit is set by the FYSETC TMC5160 module's sense
-// resistor and cooling. Keep the software scale conservative until bench
-// current is measured on the exact modules.
-constexpr double kIrunFullScaleARms = 2.5;
+constexpr std::uint8_t kExpectedVersion = 0x30;
 
 }  // namespace
 
@@ -56,9 +55,12 @@ std::uint32_t Tmc5160Driver::EncodeGconf(bool stealth_chop) {
 }
 
 std::uint32_t Tmc5160Driver::EncodeIholdIrun(double run_a_rms,
-                                             double hold_frac) {
-  const double scale = std::clamp(run_a_rms, 0.0, kIrunFullScaleARms);
-  const double irun_f = std::round(scale / kIrunFullScaleARms * 31.0);
+                                             double hold_frac,
+                                             double sense_resistor_ohm) {
+  const double rsense = std::max(0.001, sense_resistor_ohm);
+  const double irun_f =
+      std::round(run_a_rms * 32.0 * std::sqrt(2.0) *
+                 (rsense + 0.02) / 0.325 - 1.0);
   const int irun = static_cast<int>(std::clamp(irun_f, 0.0, 31.0));
   int ihold = static_cast<int>(
       std::round(irun * std::clamp(hold_frac, 0.0, 1.0)));
@@ -173,8 +175,6 @@ void Tmc5160Driver::CloseGpio() {
 
 bool Tmc5160Driver::WriteRegister(std::uint8_t address, std::uint32_t value) {
 #if COATHEAL_HAS_SPIDEV
-  if (spi_fd_ < 0) return false;
-
   std::uint8_t tx[5];
   std::uint8_t rx[5] = {0, 0, 0, 0, 0};
   tx[0] = static_cast<std::uint8_t>(address | kWriteBit);
@@ -183,42 +183,7 @@ bool Tmc5160Driver::WriteRegister(std::uint8_t address, std::uint32_t value) {
   tx[3] = static_cast<std::uint8_t>((value >> 8) & 0xFF);
   tx[4] = static_cast<std::uint8_t>(value & 0xFF);
 
-  struct spi_ioc_transfer xfer {};
-  xfer.tx_buf = reinterpret_cast<__u64>(tx);
-  xfer.rx_buf = reinterpret_cast<__u64>(rx);
-  xfer.len = sizeof(tx);
-  xfer.speed_hz = cfg_.spi_speed_hz;
-  xfer.bits_per_word = 8;
-  xfer.cs_change = 0;
-
-  int rc = -1;
-  bool cs_released = false;
-#ifdef COATHEAL_HAS_LIBGPIOD
-  if (!gpio_healthy_ || cs_handle_ == nullptr ||
-      !SetGpioOutput(static_cast<GpioOutput*>(cs_handle_), false)) {
-    gpio_healthy_ = false;
-    healthy_ = false;
-    return false;
-  }
-  rc = ::ioctl(spi_fd_, SPI_IOC_MESSAGE(1), &xfer);
-  cs_released =
-      SetGpioOutput(static_cast<GpioOutput*>(cs_handle_), true);
-#else
-  return false;
-#endif
-  if (rc < 0) {
-    healthy_ = false;
-    std::cerr << "[tmc5160] SPI_IOC_MESSAGE failed for reg 0x"
-              << std::hex << static_cast<int>(address) << std::dec
-              << ": " << std::strerror(errno) << '\n';
-    return false;
-  }
-  if (!cs_released) {
-    gpio_healthy_ = false;
-    healthy_ = false;
-    return false;
-  }
-  return true;
+  return Transfer(tx, rx);
 #else
   (void)address;
   (void)value;
@@ -226,10 +191,77 @@ bool Tmc5160Driver::WriteRegister(std::uint8_t address, std::uint32_t value) {
 #endif
 }
 
+bool Tmc5160Driver::Transfer(const std::uint8_t tx[5],
+                             std::uint8_t rx[5]) {
+#if COATHEAL_HAS_SPIDEV && defined(COATHEAL_HAS_LIBGPIOD)
+  if (spi_fd_ < 0 || !gpio_healthy_ || cs_handle_ == nullptr) return false;
+  struct spi_ioc_transfer xfer {};
+  xfer.tx_buf = reinterpret_cast<__u64>(tx);
+  xfer.rx_buf = reinterpret_cast<__u64>(rx);
+  xfer.len = 5;
+  xfer.speed_hz = cfg_.spi_speed_hz;
+  xfer.bits_per_word = 8;
+  if (!SetGpioOutput(static_cast<GpioOutput*>(cs_handle_), false)) {
+    gpio_healthy_ = false;
+    return false;
+  }
+  const int rc = ::ioctl(spi_fd_, SPI_IOC_MESSAGE(1), &xfer);
+  const bool released =
+      SetGpioOutput(static_cast<GpioOutput*>(cs_handle_), true);
+  if (rc < 0 || !released) {
+    gpio_healthy_ = false;
+    return false;
+  }
+  return true;
+#else
+  (void)tx;
+  (void)rx;
+  return false;
+#endif
+}
+
+bool Tmc5160Driver::ReadRegister(std::uint8_t address,
+                                 std::uint32_t* value) {
+  if (value == nullptr) return false;
+  std::uint8_t tx[5] = {
+      static_cast<std::uint8_t>(address & 0x7FU), 0, 0, 0, 0};
+  std::uint8_t rx[5] = {0, 0, 0, 0, 0};
+  if (!Transfer(tx, rx) || !Transfer(tx, rx)) return false;
+  *value = (static_cast<std::uint32_t>(rx[1]) << 24U) |
+           (static_cast<std::uint32_t>(rx[2]) << 16U) |
+           (static_cast<std::uint32_t>(rx[3]) << 8U) |
+           static_cast<std::uint32_t>(rx[4]);
+  return true;
+}
+
 bool Tmc5160Driver::Reinitialize() {
+  std::lock_guard<std::mutex> lock(io_mu_);
+  const bool restore_enabled = enabled_;
+  if (enable_handle_ != nullptr) {
+    EnableUnlocked(false);
+  }
+  if (!gpio_healthy_) {
+    CloseGpio();
+    if (!OpenGpio()) {
+      healthy_ = false;
+      return false;
+    }
+  }
+  if (spi_fd_ < 0 && !OpenSpi()) {
+    healthy_ = false;
+    return false;
+  }
+
+  std::uint32_t ioin = 0;
+  if (!ReadRegister(kRegIOIN, &ioin) ||
+      static_cast<std::uint8_t>(ioin >> 24U) != kExpectedVersion) {
+    healthy_ = false;
+    return false;
+  }
   const std::uint32_t gconf = EncodeGconf(cfg_.stealth_chop);
   const std::uint32_t ihold_irun =
-      EncodeIholdIrun(cfg_.run_current_a_rms, cfg_.hold_current_frac);
+      EncodeIholdIrun(cfg_.run_current_a_rms, cfg_.hold_current_frac,
+                      cfg_.sense_resistor_ohm);
   const std::uint32_t chopconf = EncodeChopconf(microstep_);
   const std::uint32_t pwmconf = 0xC10D0024u;
   const std::uint32_t tpowerdown = 0x0000000Au;
@@ -240,11 +272,30 @@ bool Tmc5160Driver::Reinitialize() {
   ok = WriteRegister(kRegTPOWERDOWN, tpowerdown) && ok;
   ok = WriteRegister(kRegCHOPCONF, chopconf) && ok;
   ok = WriteRegister(kRegPWMCONF, pwmconf) && ok;
+  std::uint32_t verify = 0;
+  ok = ReadRegister(kRegGCONF, &verify) && verify == gconf && ok;
+  ok = ReadRegister(kRegIHOLD_IRUN, &verify) &&
+       (verify & 0x000F1F1FU) == (ihold_irun & 0x000F1F1FU) && ok;
+  ok = ReadRegister(kRegCHOPCONF, &verify) && verify == chopconf && ok;
+  std::uint32_t gstat = 0;
+  std::uint32_t drv_status = 0;
+  ok = ReadRegister(kRegGSTAT, &gstat) && ok;
+  ok = ReadRegister(kRegDRVSTATUS, &drv_status) && ok;
+  (void)drv_status;
+  ok = (gstat & 0x00000002U) == 0U && ok;
   healthy_ = ok && gpio_healthy_;
-  return ok;
+  if (healthy_ && restore_enabled) {
+    healthy_ = EnableUnlocked(true);
+  }
+  return healthy_;
 }
 
 bool Tmc5160Driver::Enable(bool enable) {
+  std::lock_guard<std::mutex> lock(io_mu_);
+  return EnableUnlocked(enable);
+}
+
+bool Tmc5160Driver::EnableUnlocked(bool enable) {
   if (!gpio_healthy_ || (enable && !healthy_)) return false;
 #ifdef COATHEAL_HAS_LIBGPIOD
   const int value = enable ? (cfg_.enable_active_low ? 0 : 1)
@@ -260,7 +311,21 @@ bool Tmc5160Driver::Enable(bool enable) {
 }
 
 bool Tmc5160Driver::Step(bool direction_forward) {
+  std::lock_guard<std::mutex> lock(io_mu_);
   if (!healthy_ || !enabled_) return false;
+  if (pulses_ > 0 && pulses_ % 256U == 0U) {
+    std::uint32_t gstat = 0;
+    std::uint32_t drv_status = 0;
+    constexpr std::uint32_t kDriverFaultMask = 0x7F000000U;
+    if (!ReadRegister(kRegGSTAT, &gstat) ||
+        !ReadRegister(kRegDRVSTATUS, &drv_status) ||
+        (gstat & 0x00000002U) != 0U ||
+        (drv_status & kDriverFaultMask) != 0U) {
+      healthy_ = false;
+      EnableUnlocked(false);
+      return false;
+    }
+  }
 #ifdef COATHEAL_HAS_LIBGPIOD
   const bool physical_direction = direction_forward != cfg_.invert_direction;
   if (physical_direction != last_direction_forward_) {
@@ -268,6 +333,7 @@ bool Tmc5160Driver::Step(bool direction_forward) {
                        physical_direction)) {
       gpio_healthy_ = false;
       healthy_ = false;
+      enabled_ = false;
       return false;
     }
     last_direction_forward_ = physical_direction;
@@ -276,12 +342,19 @@ bool Tmc5160Driver::Step(bool direction_forward) {
   if (!SetGpioOutput(static_cast<GpioOutput*>(step_handle_), true)) {
     gpio_healthy_ = false;
     healthy_ = false;
+    SetGpioOutput(static_cast<GpioOutput*>(enable_handle_),
+                  cfg_.enable_active_low);
+    enabled_ = false;
     return false;
   }
-  std::this_thread::sleep_for(std::chrono::microseconds(2));
+  std::this_thread::sleep_for(
+      std::chrono::microseconds(std::max(1, cfg_.pulse_high_us)));
   if (!SetGpioOutput(static_cast<GpioOutput*>(step_handle_), false)) {
     gpio_healthy_ = false;
     healthy_ = false;
+    SetGpioOutput(static_cast<GpioOutput*>(enable_handle_),
+                  cfg_.enable_active_low);
+    enabled_ = false;
     return false;
   }
 #endif
@@ -291,8 +364,12 @@ bool Tmc5160Driver::Step(bool direction_forward) {
 
 void Tmc5160Driver::SetMicrostep(int divisor) {
   if (divisor <= 0) return;
+  std::lock_guard<std::mutex> lock(io_mu_);
   microstep_ = divisor;
-  if (!WriteRegister(kRegCHOPCONF, EncodeChopconf(divisor))) {
+  const std::uint32_t requested = EncodeChopconf(divisor);
+  std::uint32_t verify = 0;
+  if (!WriteRegister(kRegCHOPCONF, requested) ||
+      !ReadRegister(kRegCHOPCONF, &verify) || verify != requested) {
     healthy_ = false;
   }
 }

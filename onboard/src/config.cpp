@@ -72,6 +72,8 @@ bool ParseSizeList(const std::string& value, std::vector<std::size_t>* out) {
 
 OnboardConfig::OnboardConfig() {
   heaters.output_lines = {17, 18, 27, 5, 6, 13};
+  heaters.temperature_channels = {0, 1, 2, 3, 4, 5};
+  sensors.daq132m_enabled_channels = {0, 1, 2, 3, 4, 5, 6, 7};
   stepper.step_line = 19;
   stepper.dir_line = 26;
   stepper.enable_line = 12;
@@ -299,17 +301,6 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
     } else if (key == "transition.debounce_samples") {
       if (!parse_int(key, value, &config->transition.debounce_samples, line_no)) return false;
 
-    } else if (key == "fatigue.fatigue_cycles") {
-      if (!parse_int(key, value, &config->fatigue.fatigue_cycles, line_no)) return false;
-    } else if (key == "fatigue.fatigue_travel_full_steps") {
-      if (!parse_int(key, value, &config->fatigue.fatigue_travel_full_steps, line_no)) return false;
-    } else if (key == "fatigue.fatigue_pull_hold_s") {
-      if (!parse_double(key, value, &config->fatigue.fatigue_pull_hold_s, line_no)) return false;
-    } else if (key == "fatigue.soak_hold_s") {
-      if (!parse_double(key, value, &config->fatigue.soak_hold_s, line_no)) return false;
-    } else if (key == "fatigue.soak_travel_full_steps") {
-      if (!parse_int(key, value, &config->fatigue.soak_travel_full_steps, line_no)) return false;
-
     } else if (key == "power.max_active_heaters") {
       if (!parse_size_t(key, value, &config->power.max_active_heaters, line_no)) return false;
     } else if (key == "power.max_thermal_w") {
@@ -339,6 +330,26 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
     } else if (key == "hardware.electronics_heater_index") {
       if (!parse_size_t(key, value, &config->hardware.electronics_heater_index, line_no)) return false;
 
+    } else if (key == "sensor.dps310_enabled") {
+      if (!parse_bool(key, value, &config->sensors.dps310_enabled, line_no)) return false;
+    } else if (key == "sensor.ads1115_enabled") {
+      if (!parse_bool(key, value, &config->sensors.ads1115_enabled, line_no)) return false;
+    } else if (key == "sensor.daq132m_enabled") {
+      if (!parse_bool(key, value, &config->sensors.daq132m_enabled, line_no)) return false;
+    } else if (key == "sensor.dps310_auto_discover") {
+      if (!parse_bool(key, value, &config->sensors.dps310_auto_discover, line_no)) return false;
+    } else if (key == "sensor.ads1115_auto_discover") {
+      if (!parse_bool(key, value, &config->sensors.ads1115_auto_discover, line_no)) return false;
+    } else if (key == "sensor.daq132m_auto_discover") {
+      if (!parse_bool(key, value, &config->sensors.daq132m_auto_discover, line_no)) return false;
+    } else if (key == "sensor.dps310_poll_ms") {
+      if (!parse_int(key, value, &config->sensors.dps310_poll_ms, line_no)) return false;
+    } else if (key == "sensor.ads1115_poll_ms") {
+      if (!parse_int(key, value, &config->sensors.ads1115_poll_ms, line_no)) return false;
+    } else if (key == "sensor.daq132m_poll_ms") {
+      if (!parse_int(key, value, &config->sensors.daq132m_poll_ms, line_no)) return false;
+    } else if (key == "sensor.stale_after_ms") {
+      if (!parse_int(key, value, &config->sensors.stale_after_ms, line_no)) return false;
     } else if (key == "sensor.sample_temperature_source") {
       config->sensors.sample_temperature_source = value;
     } else if (key == "sensor.daq132m_device") {
@@ -363,6 +374,11 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
       if (!parse_double(key, value, &config->sensors.daq132m_c_per_count, line_no)) return false;
     } else if (key == "sensor.daq132m_c_offset") {
       if (!parse_double(key, value, &config->sensors.daq132m_c_offset, line_no)) return false;
+    } else if (key == "sensor.daq132m_enabled_channels") {
+      if (!ParseSizeList(value, &config->sensors.daq132m_enabled_channels)) {
+        if (error != nullptr) *error = "invalid sensor.daq132m_enabled_channels";
+        return false;
+      }
     } else if (key == "sensor.rtd_click_enabled") {
       if (!parse_bool(key, value, &config->sensors.rtd_click_enabled, line_no)) return false;
     } else if (key == "sensor.rtd_click_spi_device") {
@@ -394,6 +410,11 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
           *error = "invalid GPIO list for heater.output_lines at line " +
                    std::to_string(line_no);
         }
+        return false;
+      }
+    } else if (key == "heater.temperature_channels") {
+      if (!ParseSizeList(value, &config->heaters.temperature_channels)) {
+        if (error != nullptr) *error = "invalid heater.temperature_channels";
         return false;
       }
     } else if (key == "heater.pwm_frequency_hz") {
@@ -466,6 +487,8 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
         if (!parse_bool(key, value, &motor.enable_active_low, line_no)) return false;
       } else if (suffix == "run_current_a_rms") {
         if (!parse_double(key, value, &motor.run_current_a_rms, line_no)) return false;
+      } else if (suffix == "sense_resistor_ohm") {
+        if (!parse_double(key, value, &motor.sense_resistor_ohm, line_no)) return false;
       } else if (suffix == "hold_current_frac") {
         if (!parse_double(key, value, &motor.hold_current_frac, line_no)) return false;
       } else if (suffix == "stealth_chop") {
@@ -474,6 +497,10 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
         int speed = 0;
         if (!parse_int(key, value, &speed, line_no)) return false;
         motor.spi_speed_hz = static_cast<std::uint32_t>(speed);
+      } else if (suffix == "pulse_high_us") {
+        if (!parse_int(key, value, &motor.pulse_high_us, line_no)) return false;
+      } else if (suffix == "retry_ms") {
+        if (!parse_int(key, value, &motor.retry_ms, line_no)) return false;
       } else if (suffix == "samples") {
         if (!ParseSizeList(value, &motor.samples)) {
           if (error != nullptr) {
@@ -490,22 +517,6 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
         return false;
       }
 
-    } else if (key == "bend.ascent_steps") {
-      if (!parse_i64(key, value, &config->bend.ascent_steps, line_no)) return false;
-    } else if (key == "bend.ascent_hold_s") {
-      if (!parse_double(key, value, &config->bend.ascent_hold_s, line_no)) return false;
-    } else if (key == "bend.activation_steps") {
-      if (!parse_i64(key, value, &config->bend.activation_steps, line_no)) return false;
-    } else if (key == "bend.activation_hold_s") {
-      if (!parse_double(key, value, &config->bend.activation_hold_s, line_no)) return false;
-    } else if (key == "bend.float_steps") {
-      if (!parse_i64(key, value, &config->bend.float_steps, line_no)) return false;
-    } else if (key == "bend.float_hold_s") {
-      if (!parse_double(key, value, &config->bend.float_hold_s, line_no)) return false;
-    } else if (key == "bend.descent_steps") {
-      if (!parse_i64(key, value, &config->bend.descent_steps, line_no)) return false;
-    } else if (key == "bend.descent_hold_s") {
-      if (!parse_double(key, value, &config->bend.descent_hold_s, line_no)) return false;
     } else {
       // Reject unknown keys so final-BOM configuration drift fails at startup.
       if (error != nullptr) {
@@ -563,6 +574,25 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
       *error = "heater.pwm_frequency_hz must be > 0";
     }
     return false;
+  }
+  if (!config->manual.manual_first) {
+    if (error != nullptr) {
+      *error = "manual.manual_first must be true in Rev C";
+    }
+    return false;
+  }
+  if (config->heaters.temperature_channels.size() !=
+      config->hardware.heater_count) {
+    if (error != nullptr) {
+      *error = "heater.temperature_channels count must equal hardware.heater_count";
+    }
+    return false;
+  }
+  for (const std::size_t channel : config->heaters.temperature_channels) {
+    if (channel >= config->hardware.sample_count) {
+      if (error != nullptr) *error = "heater temperature channel out of range";
+      return false;
+    }
   }
 
   if (config->heater_safety.target_min_c >= config->heater_safety.target_max_c ||
@@ -691,8 +721,10 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
       return false;
     }
     if (motor.spi_device.empty() || motor.run_current_a_rms <= 0.0 ||
+        motor.sense_resistor_ohm <= 0.0 ||
         motor.hold_current_frac < 0.0 || motor.hold_current_frac > 1.0 ||
-        motor.spi_speed_hz == 0U || motor.samples.empty()) {
+        motor.spi_speed_hz == 0U || motor.pulse_high_us < 1 ||
+        motor.retry_ms < 100 || motor.samples.empty()) {
       if (error != nullptr) {
         *error = "invalid motor" + std::to_string(i) + " configuration";
       }
@@ -742,6 +774,20 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
        !claim_gpio(config->sensors.rtd_click_drdy_line,
                    "sensor.rtd_click_drdy_line"))) {
     return false;
+  }
+  if (config->sensors.dps310_poll_ms <= 0 ||
+      config->sensors.ads1115_poll_ms <= 0 ||
+      config->sensors.daq132m_poll_ms <= 0 ||
+      config->sensors.stale_after_ms <= 0) {
+    if (error != nullptr) *error = "sensor poll/stale intervals must be > 0";
+    return false;
+  }
+  for (const std::size_t channel :
+       config->sensors.daq132m_enabled_channels) {
+    if (channel >= config->hardware.sample_count) {
+      if (error != nullptr) *error = "DAQ132M enabled channel out of range";
+      return false;
+    }
   }
   if (config->hal.status_led_enabled &&
       !claim_gpio(config->hal.status_led_line, "hal.status_led_line")) {

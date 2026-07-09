@@ -14,6 +14,9 @@ class PwmController {
   virtual ~PwmController() = default;
   virtual bool SetDuty(std::size_t channel, double duty) = 0;
   virtual bool healthy() const = 0;
+  virtual bool channel_healthy(std::size_t channel) const = 0;
+  virtual std::size_t channel_count() const = 0;
+  virtual std::size_t healthy_channel_count() const = 0;
 };
 
 class SimulatedPwmController : public PwmController {
@@ -22,6 +25,11 @@ class SimulatedPwmController : public PwmController {
 
   bool SetDuty(std::size_t channel, double duty) override;
   bool healthy() const override { return true; }
+  bool channel_healthy(std::size_t channel) const override {
+    return channel < duty_.size();
+  }
+  std::size_t channel_count() const override { return duty_.size(); }
+  std::size_t healthy_channel_count() const override { return duty_.size(); }
 
   const std::vector<double>& duty() const { return duty_; }
 
@@ -40,6 +48,9 @@ class LibgpiodPwmController : public PwmController {
 
   bool SetDuty(std::size_t channel, double duty) override;
   bool healthy() const override { return healthy_.load(); }
+  bool channel_healthy(std::size_t channel) const override;
+  std::size_t channel_count() const override { return duty_.size(); }
+  std::size_t healthy_channel_count() const override;
 
  private:
   std::string chip_;
@@ -51,10 +62,12 @@ class LibgpiodPwmController : public PwmController {
   std::atomic<bool> running_{false};
   std::thread worker_;
   mutable std::mutex mu_;
+  mutable std::mutex handles_mu_;
   std::vector<void*> line_handles_;
 
   void PwmLoop();
   bool WriteLine(std::size_t channel, bool on);
+  void RetryMissingLines();
   void AllOff();
 };
 

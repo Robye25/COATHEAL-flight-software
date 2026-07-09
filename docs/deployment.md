@@ -5,6 +5,8 @@ This guide covers first-time Raspberry Pi 4 setup, building the onboard software
 For the current Rev C operator procedure, including plug-and-play Ethernet,
 manual-first operation, and the current component/pin map, use
 [rev-c-installation-and-hardware-setup.md](rev-c-installation-and-hardware-setup.md).
+For component commissioning and all pin/bus configuration, use
+[component-configuration-and-bring-up.md](component-configuration-and-bring-up.md).
 
 ---
 
