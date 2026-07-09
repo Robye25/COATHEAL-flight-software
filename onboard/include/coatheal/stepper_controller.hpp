@@ -21,10 +21,12 @@ struct StepperStatus {
   double step_hz = 0.0;                 // configured step rate
   int microstep = 1;                    // current microstep divisor
   bool enabled = false;                 // driver power stage state
+  bool healthy = false;
   bool moving = false;                  // pulses currently being issued
   bool holding = false;                 // at target, bend-hold countdown active
   double hold_remaining_s = 0.0;        // 0 when not holding
   std::uint64_t pulses_total = 0;       // driver.pulses_issued() mirror
+  std::uint64_t missed_deadlines = 0;
   std::string last_source;              // "phase:FLOAT_HOLD", "cmd:MOVE", ...
 };
 
@@ -50,28 +52,22 @@ struct StepperChannelConfig;
 //   3. AddChannel() — append a pre-built channel (used by tests / plugins).
 class StepperController {
  public:
-  // Legacy single-channel constructor. Behaves like the older single-motor
-  // path; Tick() still applies phase-based bend setpoints to channel 0.
+  // Single-channel constructor retained for focused controller tests.
   StepperController(const StepperConfig& cfg,
-                    const BendScheduleConfig& schedule,
                     std::unique_ptr<StepperDriver> driver);
 
   // Multi-channel constructor. `channel_cfgs[i]` pairs with `drivers[i]`.
   // Throws std::invalid_argument if the vectors differ in size.
   StepperController(std::vector<StepperChannelConfig> channel_cfgs,
-                    std::vector<std::unique_ptr<StepperDriver>> drivers,
-                    const BendScheduleConfig& schedule);
+                    std::vector<std::unique_ptr<StepperDriver>> drivers);
 
   ~StepperController();
 
   StepperController(const StepperController&) = delete;
   StepperController& operator=(const StepperController&) = delete;
 
-  // Called once per control-loop tick with the wall-clock dt since the last
-  // call. Applies phase-based bend setpoints (to channel 0 only) and ticks
-  // every owned channel so their ramp schedulers advance.
-  void Tick(MissionPhase phase, double dt_s,
-            bool apply_phase_setpoints = true);
+  // Mission phase is accepted for source compatibility but never starts motion.
+  void Tick(MissionPhase phase, double dt_s);
 
   // ---- Legacy single-motor command surface (routes to channel 0) ----
   bool MoveSteps(std::int64_t delta_steps, std::string* error);
@@ -108,6 +104,7 @@ class StepperController {
   bool Healthy(int motor_id) const;
   bool AllHealthy() const;
   bool ActiveCheck();
+  bool ActiveCheck(int motor_id);
 
   std::size_t channel_count() const;
   // Lookup samples() for a channel (empty if invalid id).
@@ -116,18 +113,13 @@ class StepperController {
   MotionLock* motion_lock() { return &lock_; }
 
  private:
-  void ApplyPhaseSetpoint(MissionPhase phase);
-  bool ResolvePhaseBend(MissionPhase phase, std::int64_t* steps, double* hold_s) const;
   StepperChannel* ChannelById(int motor_id);
   const StepperChannel* ChannelById(int motor_id) const;
 
-  BendScheduleConfig schedule_;
   MotionLock lock_;
   std::vector<std::unique_ptr<StepperChannel>> channels_;
 
   mutable std::mutex mu_;
-  MissionPhase last_phase_ = MissionPhase::kBoot;
-  bool last_phase_valid_ = false;
 };
 
 }  // namespace coatheal

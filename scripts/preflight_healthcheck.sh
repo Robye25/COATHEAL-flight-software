@@ -37,13 +37,11 @@ PRIMARY_LOG="$(resolve_path "$PRIMARY_LOG_RAW")"
 SECONDARY_LOG="$(resolve_path "$SECONDARY_LOG_RAW")"
 QUEUE_DIR="$(resolve_path "$QUEUE_DIR_RAW")"
 
-mkdir -p "$(dirname "$PRIMARY_LOG")" "$(dirname "$SECONDARY_LOG")" "$QUEUE_DIR"
-
-touch "$PRIMARY_LOG" "$SECONDARY_LOG"
-
-if [[ ! -w "$PRIMARY_LOG" || ! -w "$SECONDARY_LOG" || ! -w "$QUEUE_DIR" ]]; then
-  echo "[preflight] storage paths are not writable" >&2
-  exit 1
+if ! mkdir -p "$(dirname "$PRIMARY_LOG")" "$(dirname "$SECONDARY_LOG")" "$QUEUE_DIR" ||
+   ! touch "$PRIMARY_LOG" "$SECONDARY_LOG"; then
+  echo "[preflight] warn: storage unavailable; onboard will run degraded" >&2
+elif [[ ! -w "$PRIMARY_LOG" || ! -w "$SECONDARY_LOG" || ! -w "$QUEUE_DIR" ]]; then
+  echo "[preflight] warn: storage paths are not writable; onboard will run degraded" >&2
 fi
 
 # --- Network environment checks (fail fast) -------------------------------
@@ -66,8 +64,7 @@ udp_port_in_use() {
 }
 
 if udp_port_in_use 4100; then
-  echo "[preflight] UDP 4100 (discovery) is already in use by another process" >&2
-  exit 1
+  echo "[preflight] warn: UDP 4100 is in use; discovery may be degraded" >&2
 fi
 
 # At least one non-loopback interface must be up. /sys/class/net/*/operstate
@@ -86,8 +83,7 @@ if [[ -d /sys/class/net ]]; then
 fi
 
 if [[ "$have_link" -ne 1 ]]; then
-  echo "[preflight] no non-loopback network interface is up (/sys/class/net)" >&2
-  exit 1
+  echo "[preflight] warn: no network link; onboard will wait for one" >&2
 fi
 
 echo "[preflight] ok config=$CONFIG_PATH"

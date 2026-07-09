@@ -9,7 +9,6 @@ add_library(coatheal_onboard_core
   src/command_parser.cpp
   src/command_server.cpp
   src/config.cpp
-  src/fatigue_sequencer.cpp
   src/heater_scheduler.cpp
   src/motion_lock.cpp
   src/pid_controller.cpp

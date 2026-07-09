@@ -13,7 +13,7 @@ NotifyAccess=main
 User=coatheal
 WorkingDirectory=/bexus/code/coatheal
 Environment=COATHEAL_ENV=debug
-ExecStartPre=/bexus/code/coatheal/scripts/preflight_healthcheck.sh /bexus/code/coatheal/config/onboard.debug.ini
+ExecStartPre=/usr/bin/bash /bexus/code/coatheal/scripts/preflight_healthcheck.sh /bexus/code/coatheal/config/onboard.debug.ini
 ExecStart=/bexus/code/coatheal/build/onboard/coatheal_onboard --config /bexus/code/coatheal/config/onboard.debug.ini
 Restart=always
 RestartSec=2

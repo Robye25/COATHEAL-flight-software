@@ -72,12 +72,26 @@ std::vector<double> ThermalController::ComputeRequestedDuty(
     active_targets_c_.assign(heater_count, std::nullopt);
   }
   std::vector<double> duty(heater_count, 0.0);
+  const auto sensor_channel = [&](std::size_t heater) {
+    return heater < config_.heaters.temperature_channels.size()
+               ? config_.heaters.temperature_channels[heater]
+               : heater;
+  };
+  const auto temp_valid_for = [&](std::size_t heater) {
+    const std::size_t sample = sensor_channel(heater);
+    return sample < sensors.sample_temps_c.size() &&
+           (sensors.sample_temp_valid.empty() ||
+            (sample < sensors.sample_temp_valid.size() &&
+             sensors.sample_temp_valid[sample]));
+  };
 
   // Per-channel over-temp latch. Rev C fallback is a floor
   // controller but we still cut off any heated channel that pegs the RTD).
   for (std::size_t i = 0; i < heater_count; ++i) {
-    if (i < sensors.sample_temps_c.size() &&
-        sensors.sample_temps_c[i] > config_.heater_safety.max_sample_temp_c) {
+    const std::size_t sample = sensor_channel(i);
+    if (temp_valid_for(i) &&
+        sensors.sample_temps_c[sample] >
+            config_.heater_safety.max_sample_temp_c) {
       channel_latched_[i] = true;
     }
   }
@@ -88,11 +102,17 @@ std::vector<double> ThermalController::ComputeRequestedDuty(
   // Only the 6 heated samples (index < heater_count) participate.
   uniformity_ok_ = true;
   if (ShouldHeatPhase(phase) && !sensors.sample_temps_c.empty() && heater_count > 0) {
-    const std::size_t end = std::min(heater_count, sensors.sample_temps_c.size());
-    if (end > 0) {
-      const auto begin_it = sensors.sample_temps_c.begin();
-      const auto end_it = begin_it + static_cast<std::ptrdiff_t>(end);
-      const auto [lo, hi] = std::minmax_element(begin_it, end_it);
+    std::vector<double> valid_temperatures;
+    for (std::size_t i = 0; i < heater_count; ++i) {
+      if (temp_valid_for(i)) {
+        valid_temperatures.push_back(
+            sensors.sample_temps_c[sensor_channel(i)]);
+      }
+    }
+    if (valid_temperatures.size() > 1) {
+      const auto [lo, hi] =
+          std::minmax_element(valid_temperatures.begin(),
+                              valid_temperatures.end());
       if ((*hi - *lo) > config_.phase.uniformity_tolerance_c) {
         uniformity_ok_ = false;
       }
@@ -132,10 +152,7 @@ std::vector<double> ThermalController::ComputeRequestedDuty(
   if (has_temp_targets ||
       (overrides.floor_control_enabled && ShouldHeatPhase(phase))) {
     for (std::size_t i = 0; i < sample_pids_.size() && i < heater_count; ++i) {
-      const bool temp_valid =
-          i < sensors.sample_temps_c.size() &&
-          (sensors.sample_temp_valid.empty() ||
-           (i < sensors.sample_temp_valid.size() && sensors.sample_temp_valid[i]));
+      const bool temp_valid = temp_valid_for(i);
       if (!temp_valid) {
         sample_heating_[i] = false;
         sample_pids_[i].Reset();
@@ -154,7 +171,8 @@ std::vector<double> ThermalController::ComputeRequestedDuty(
 
       const double target = explicit_target ? overrides.temp_targets_c[i].value()
                                             : config_.phase.sample_floor_c;
-      const double measured = sensors.sample_temps_c[i];
+      const double measured =
+          sensors.sample_temps_c[sensor_channel(i)];
       active_targets_c_[i] = target;
 
       if (explicit_target) {
@@ -215,11 +233,7 @@ std::vector<double> ThermalController::ComputeRequestedDuty(
   // override can energize a heater whose RTD is unavailable, or re-arm a
   // tripped channel without RESET_CONTROL.
   for (std::size_t i = 0; i < heater_count; ++i) {
-    const bool temp_valid =
-        i < sensors.sample_temps_c.size() &&
-        (sensors.sample_temp_valid.empty() ||
-         (i < sensors.sample_temp_valid.size() &&
-          sensors.sample_temp_valid[i]));
+    const bool temp_valid = temp_valid_for(i);
     if (!temp_valid || channel_latched_[i]) {
       duty[i] = 0.0;
     }

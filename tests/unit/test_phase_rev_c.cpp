@@ -51,12 +51,6 @@ void TestRevCDefaults() {
   assert(cfg.power.heater_nominal_w == 5.0);
   assert(cfg.power.max_thermal_w == 20.0);
   assert(cfg.power.max_active_heaters == 4);
-  // Rev C fatigue defaults.
-  assert(cfg.fatigue.fatigue_cycles == 30);
-  assert(cfg.fatigue.fatigue_travel_full_steps == 200);
-  assert(cfg.fatigue.fatigue_pull_hold_s == 2.0);
-  assert(cfg.fatigue.soak_hold_s == 900.0);
-  assert(cfg.fatigue.soak_travel_full_steps == 200);
 }
 
 void TestDutyVectorSizeIsSix() {
@@ -148,6 +142,22 @@ void TestNoHeatInBootLandedStopped() {
   }
 }
 
+void TestMappedInvalidSensorInhibitsManualDuty() {
+  auto cfg = MakeConfig();
+  cfg.heaters.temperature_channels = {1, 0, 2, 3, 4, 5};
+  coatheal::ThermalController tc(cfg);
+  auto snap = SnapshotWithSamples(10.0, 8);
+  snap.sample_temp_valid.assign(8, true);
+  snap.sample_temp_valid[1] = false;
+  coatheal::ControlOverrides ov;
+  ov.floor_control_enabled = false;
+  ov.all_heaters_override = 0.5;
+  const auto duty = tc.ComputeRequestedDuty(
+      coatheal::MissionPhase::kAscent, snap, 1.0, ov);
+  assert(duty[0] == 0.0);
+  assert(std::fabs(duty[1] - 0.5) < 1e-9);
+}
+
 void TestAllFlyingPhasesShareFloor() {
   // ASCENT/PRE_FLOAT/FLOAT/DESCENT all demand heat when sample is below floor.
   const auto cfg = MakeConfig();
@@ -192,14 +202,13 @@ void TestPhaseTransitionsWithDebounce() {
   p = sm.Update(100.0, samples, {}, t0);
   assert(p == coatheal::MissionPhase::kPreFloat);
 
-  // PRE_FLOAT doesn't transition to FLOAT on pressure alone.
+  // PRE_FLOAT applies a separate debounce at the lower float threshold.
   p = sm.Update(50.0, samples, {}, t0);
   assert(p == coatheal::MissionPhase::kPreFloat);
 
-  // PRE_FLOAT -> FLOAT requires fatigue_complete signal.
-  coatheal::StateOverrides ov;
-  ov.fatigue_complete = true;
-  p = sm.Update(50.0, samples, ov, t0);
+  p = sm.Update(50.0, samples, {}, t0);
+  assert(p == coatheal::MissionPhase::kPreFloat);
+  p = sm.Update(50.0, samples, {}, t0);
   assert(p == coatheal::MissionPhase::kFloat);
 }
 
@@ -268,14 +277,8 @@ void TestFullPhaseTransitionSequence() {
   p = sm.Update(150.0, samples, {}, t0);
   assert(p == coatheal::MissionPhase::kPreFloat);
 
-  // Still PRE_FLOAT without fatigue_complete.
+  // PRE_FLOAT -> FLOAT at the lower pressure threshold.
   p = sm.Update(80.0, samples, {}, t0);
-  assert(p == coatheal::MissionPhase::kPreFloat);
-
-  // PRE_FLOAT -> FLOAT on fatigue_complete.
-  coatheal::StateOverrides ov;
-  ov.fatigue_complete = true;
-  p = sm.Update(80.0, samples, ov, t0);
   assert(p == coatheal::MissionPhase::kFloat);
 
   // Still at float altitude — stays in FLOAT.
@@ -328,6 +331,7 @@ int main() {
   TestDutyVectorSizeIsSix();
   TestFloorHysteresisCycle();
   TestNoHeatInBootLandedStopped();
+  TestMappedInvalidSensorInhibitsManualDuty();
   TestAllFlyingPhasesShareFloor();
   TestPhaseTransitionsWithDebounce();
   TestDebounceResetOnBounce();

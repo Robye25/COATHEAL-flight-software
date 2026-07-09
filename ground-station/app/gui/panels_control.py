@@ -14,6 +14,7 @@ correctly.
 """
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -175,7 +176,6 @@ class ModePanel(QGroupBox):
         row2 = QHBoxLayout(); outer.addLayout(row2)
         self._btn_safe_in  = self._mk_cmd(row2, "ENTER SAFE",      "ENTER_SAFE",      "#e67e22", confirm_title="Enter SAFE mode?")
         self._btn_safe_out = self._mk_cmd(row2, "EXIT SAFE",       "EXIT_SAFE",       "#7f8c8d")
-        self._btn_second   = self._mk_cmd(row2, "SECONDARY CYCLE", "SECONDARY_CYCLE", "#8e44ad", confirm_title="Request secondary cycle?")
 
         row3 = QHBoxLayout(); outer.addLayout(row3)
         self._btn_radio_off = self._mk_cmd(row3, "RADIO SILENCE", "RADIO_SILENCE", "#c0392b", confirm_title="Silence downlink?")
@@ -540,7 +540,9 @@ class HeaterPanel(QGroupBox):
         duties = pkt.heater_duty + [0.0] * (n - len(pkt.heater_duty))
         temps = list(pkt.sample_temps_c)
         for i in range(n):
-            t = temps[i] if i < len(temps) else None
+            t = (temps[i] if i < len(temps) and
+                 pkt.sensor_valid.get(f"S{i}", True) and
+                 math.isfinite(temps[i]) else None)
             self._cells[i].update_live(duties[i], t)
 
 
@@ -827,14 +829,16 @@ class CommandPanel(QGroupBox):
         self._disp = dispatcher
         outer = QVBoxLayout(self); outer.setContentsMargins(6, 6, 6, 6); outer.setSpacing(4)
 
-        row = QHBoxLayout()
+        row = QGridLayout()
         b_ping = QPushButton("PING");   _style_button(b_ping,   bg="#2980b9"); b_ping.clicked.connect(lambda: self._disp.send("PING",   tag=b_ping))
         b_stat = QPushButton("STATUS"); _style_button(b_stat,   bg="#2980b9"); b_stat.clicked.connect(lambda: self._disp.send("STATUS", tag=b_stat))
         b_check = QPushButton("CHECK"); _style_button(b_check, bg="#2980b9"); b_check.clicked.connect(lambda: self._disp.send("CHECK", tag=b_check))
-        row.addWidget(b_ping); row.addWidget(b_stat); row.addWidget(b_check)
+        b_components = QPushButton("COMPONENTS"); _style_button(b_components, bg="#2980b9"); b_components.clicked.connect(lambda: self._disp.send("COMPONENTS", tag=b_components))
+        row.addWidget(b_ping, 0, 0); row.addWidget(b_stat, 0, 1)
+        row.addWidget(b_check, 0, 2); row.addWidget(b_components, 1, 0, 1, 2)
         b_reset = QPushButton("RESET_CTRL"); _style_button(b_reset, bg="#e67e22")
         b_reset.clicked.connect(lambda: self._confirm_send(b_reset, "RESET_CTRL", "Reset controller?"))
-        row.addWidget(b_reset)
+        row.addWidget(b_reset, 1, 2)
         outer.addLayout(row)
 
         hz_row = QHBoxLayout()

@@ -4,13 +4,11 @@
 
 namespace coatheal {
 
-// Rev C mission FSM. All flying phases share a single thermal policy
-// (floor >= +5 C). PRE_FLOAT runs the mechanical fatigue pull sequence
-// near float altitude; FLOAT is monitoring-only after pulls complete.
+// Rev C mission phase label. Phase changes never start motor motion.
 enum class MissionPhase {
   kBoot,
   kAscent,
-  kPreFloat,   // Fatigue pull sequence near float altitude
+  kPreFloat,
   kFloat,
   kDescent,
   kLanded,

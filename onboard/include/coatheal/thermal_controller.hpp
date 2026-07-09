@@ -28,8 +28,7 @@ struct ControlOverrides {
 
 // Rev C per-sample thermal controller:
 //   * Explicit operator targets run in any RUN phase.
-//   * Untargeted channels use phase.sample_floor_c only when fallback/legacy
-//     floor control is enabled.
+//   * Untargeted channels use phase.sample_floor_c only during link fallback.
 //   * The fallback PID uses a hysteresis dead-band around the floor target.
 //   * 6 heaters drive samples 0..5 1:1 (heater[i] <-> sample[i]). Samples 6
 //     and 7 are pulled but unheated — PT100 measured only.

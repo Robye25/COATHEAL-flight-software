@@ -52,6 +52,7 @@ class TelemetryReceiver(QThread):
         "uv", "sample_temps_c", "heater_duty",
         "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7",
         "phase", "status", "mode",
+        "sensor_valid", "sensor_age_ms", "component_state",
         # Motor 0 (legacy column names kept).
         "stepper_pos", "stepper_tgt", "stepper_hz", "stepper_us",
         "stepper_en", "stepper_mv", "stepper_hold", "stepper_hold_s",
@@ -271,6 +272,12 @@ def _packet_to_csv_row(pkt: TelemetryPacket) -> dict:
         "phase": pkt.phase,
         "status": pkt.status,
         "mode": pkt.mode,
+        "sensor_valid": "|".join(
+            f"{key}:{int(value)}" for key, value in pkt.sensor_valid.items()),
+        "sensor_age_ms": "|".join(
+            f"{key}:{value}" for key, value in pkt.sensor_age_ms.items()),
+        "component_state": "|".join(
+            f"{key}:{value}" for key, value in pkt.component_state.items()),
     }
     # r0..r7: one column per sample. Empty string for unmeasured (None) or
     # when the onboard omitted the segment entirely.

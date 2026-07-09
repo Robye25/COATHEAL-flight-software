@@ -94,6 +94,13 @@ void TestCommandParser() {
   auto check = parser.ParseLine("CHECK");
   assert(check.ok);
   assert(check.command.type == coatheal::CommandType::kCheck);
+  auto targeted_check = parser.ParseLine("CHECK daq132m");
+  assert(targeted_check.ok);
+  assert(targeted_check.command.args[0] == "DAQ132M");
+  auto components = parser.ParseLine("COMPONENTS");
+  assert(components.ok);
+  assert(components.command.type == coatheal::CommandType::kComponents);
+  assert(!parser.ParseLine("COMPONENTS extra").ok);
 
   // SET_TICK_HZ — flight-safe (no debug arm needed at parser layer).
   auto tick = parser.ParseLine("SET_TICK_HZ 0.5");
@@ -201,9 +208,7 @@ void TestVacuumRegime() {
   assert(p == coatheal::MissionPhase::kAscent);
   p = sm.Update(120.0, samples, {}, std::chrono::steady_clock::now());
   assert(p == coatheal::MissionPhase::kPreFloat);
-  coatheal::StateOverrides ov;
-  ov.fatigue_complete = true;
-  p = sm.Update(120.0, samples, ov, std::chrono::steady_clock::now());
+  p = sm.Update(80.0, samples, {}, std::chrono::steady_clock::now());
   assert(p == coatheal::MissionPhase::kFloat);
   // Vacuum-regime pressure (5 mbar) must NOT trip the descent transition.
   p = sm.Update(5.0, samples, {}, std::chrono::steady_clock::now());
@@ -454,9 +459,10 @@ void TestConfigRejectsGpioCollisions() {
 }
 
 void TestStateTransitions() {
-  // Rev C FSM: pressure enters PRE_FLOAT; FLOAT requires pull completion.
+  // Fallback phase tracking is pressure-only and never starts motion.
   coatheal::OnboardConfig config;
   config.transition.pre_float_mbar = 200.0;
+  config.transition.ascent_to_float_mbar = 160.0;
   config.transition.float_to_descent_mbar = 350.0;
   config.transition.descent_to_landed_mbar = 800.0;
   config.transition.debounce_samples = 1;
@@ -471,9 +477,7 @@ void TestStateTransitions() {
   // 150 mbar: <= ascent_to_float_mbar (200). Transitions to FLOAT.
   phase = sm.Update(150.0, samples, {}, std::chrono::steady_clock::now());
   assert(phase == coatheal::MissionPhase::kPreFloat);
-  coatheal::StateOverrides ov;
-  ov.fatigue_complete = true;
-  phase = sm.Update(150.0, samples, ov, std::chrono::steady_clock::now());
+  phase = sm.Update(150.0, samples, {}, std::chrono::steady_clock::now());
   assert(phase == coatheal::MissionPhase::kFloat);
 
   // 400 mbar: >= float_to_descent_mbar (350). Transitions to DESCENT.

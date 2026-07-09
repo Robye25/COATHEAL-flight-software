@@ -298,8 +298,7 @@ void TestControllerMultiChannelDispatch() {
   drvs.emplace_back(std::make_unique<SimulatedStepperDriver>());
   drvs.emplace_back(std::make_unique<SimulatedStepperDriver>());
 
-  BendScheduleConfig sched;  // default zeros; no phase interference
-  StepperController ctl(std::move(cfgs), std::move(drvs), sched);
+  StepperController ctl(std::move(cfgs), std::move(drvs));
   assert(ctl.channel_count() == 2);
   assert(ctl.SamplesForMotor(0) == std::vector<std::size_t>({0, 1, 2, 3}));
   assert(ctl.SamplesForMotor(1) == std::vector<std::size_t>({4, 5, 6, 7}));
@@ -312,7 +311,7 @@ void TestControllerMultiChannelDispatch() {
   // MotionLock serializes all motion, including ordinary manual jogs.
   assert(!ctl.MoveSteps(0, 200, &err));
   for (int i = 0; i < 10000 && ctl.Snapshot(1).moving; ++i) {
-    ctl.Tick(MissionPhase::kAscent, 0.001, false);
+    ctl.Tick(MissionPhase::kAscent, 0.001);
   }
   assert(!ctl.Snapshot(1).moving);
   assert(ctl.MoveSteps(0, 200, &err));

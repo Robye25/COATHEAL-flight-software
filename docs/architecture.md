@@ -15,12 +15,13 @@ Raspberry Pi 4
       TelemetryClient :4000 + UDP discovery :4100
       TelemetryQueue + StorageManager
       SensorManager
+        independent bounded polling workers + thread-safe cache
         DAQ132M over USB-RS485 Modbus: PT100 samples 0..7
         DPS310 over I2C: pressure + ambient temperature
         ADS1115 over I2C: GUVA-S12SD UV analog input
         optional RTD Click over SPI for bench PT100 validation
       ThermalController
-        6 sample floor PIDs, used only during fallback/autonomous mode
+        6 manual target PIDs; fallback floor for untargeted channels
       HeaterScheduler
         4 active / 20 W / energy budget / MotionLock gate
       PwmController
@@ -41,7 +42,7 @@ Ground station laptop
 ```text
 Sensors
   -> SensorSnapshot
-  -> StateManager only if fallback/autonomous mode is active
+  -> StateManager only if link-loss fallback is active
   -> ThermalController
   -> HeaterScheduler
   -> PwmController
@@ -70,7 +71,6 @@ Ground command
 |---|---|---|---|
 | Connected Rev C | Operator commands `SET_PHASE` | Operator commands duties or PID targets; safety scheduler still applies | Operator jogs or runtime bend sequences |
 | Link-loss fallback | Pressure FSM | Existing targets continue; untargeted channels use +5 C floor | Active sequence continues; non-sequence motion stops |
-| Legacy autonomous | Pressure FSM + fatigue sequencer | +5 C floor controller | Automatic fatigue path can run |
 
 ## Network Topology
 
@@ -100,7 +100,7 @@ where telemetry should be returned.
 ## Telemetry Shape
 
 ```text
-DATA,<session>,<seq>,<timestamp>,<rtc_valid>,<ambient_temp_c>,<ambient_pressure_mbar>,<uv>,<sample_0>..<sample_7>,HEATER_DUTY=d0|..|d5,RESISTANCE=r0|..|r7,PHASE=..,MODE=..,STATUS=..,STEPPER0=..,STEPPER1=..
+DATA,<session>,<seq>,<timestamp>,<rtc_valid>,<ambient_temp_c>,<ambient_pressure_mbar>,<uv>,<sample_0>..<sample_7>,HEATER_DUTY=..,RESISTANCE=..,PHASE=..,MODE=..,STATUS=..,SENSOR_VALID=..,SENSOR_AGE_MS=..,COMPONENT_STATE=..,STEPPER0=..,STEPPER1=..
 ```
 
 The ground station accepts the compatibility `RESISTANCE=` field, but the final

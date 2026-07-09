@@ -37,6 +37,11 @@ bool StorageManager::Initialize(std::string* error) {
 
 void StorageManager::AppendLine(const std::string& path, const std::string& line,
                                 bool write_header, bool sync, bool* ok) {
+  *ok = true;
+  if (!EnsureParentDirectory(path)) {
+    *ok = false;
+    return;
+  }
   std::FILE* fp = std::fopen(path.c_str(), "ab");
   if (fp == nullptr) {
     *ok = false;

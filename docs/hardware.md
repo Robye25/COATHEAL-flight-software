@@ -4,6 +4,9 @@ This document is the active hardware reference for the final component list.
 Use it with [rev-c-installation-and-hardware-setup.md](rev-c-installation-and-hardware-setup.md)
 and `config/onboard.example.ini`.
 
+The authoritative connection and commissioning procedure is
+[component-configuration-and-bring-up.md](component-configuration-and-bring-up.md).
+
 The software is manual-first. Hardware outputs are commanded by the operator
 while the ground link is healthy; pressure/thermal fallback is only used after
 link loss.
@@ -116,6 +119,11 @@ sensor.daq132m_register_count=8
 sensor.daq132m_c_per_count=0.1
 sensor.daq132m_c_offset=0.0
 ```
+
+`RS485_OK` indicates that a valid Modbus frame and CRC were received.
+Disconnected DAQ inputs do not fail the bus; `SAMPLE_TEMP_OK` requires at
+least one valid channel, and thermal control inhibits each invalid channel
+independently.
 
 The Modbus RTU read, CRC validation, range checks, function code, register base,
 scale, and offset are implemented. The exact register map and engineering-unit

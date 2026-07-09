@@ -117,6 +117,10 @@ The parser keeps compatibility with the `RESISTANCE=` field. In final-BOM Rev C
 operation, no resistance instrument is carried, so that field normally contains
 `-` placeholders.
 
+Invalid samples are not added to plots. Before a sensor has ever succeeded the
+readout is `N/A`; after a failure it shows the last good value and stale age.
+The component panel reports each sensor, motor, and PWM subsystem separately.
+
 ## CSV Logs
 
 The GUI writes received DATA frames to `logs/ground_telemetry.csv`. Pull events

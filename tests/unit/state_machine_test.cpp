@@ -39,15 +39,13 @@ void TestModeCommandsParse() {
   assert(legacy.ok);
   assert(legacy.command.type == coatheal::CommandType::kShutdownSafe);
 
-  auto sec = parser.ParseLine("SECONDARY_CYCLE");
-  assert(sec.ok);
-  assert(sec.command.type == coatheal::CommandType::kSecondaryCycle);
 }
 
-void TestDefaultAscentToFloatAt100Mbar() {
-  // Legacy autonomous fallback: FLOAT begins when pressure falls to 100 mbar.
+void TestFallbackPressurePhases() {
+  // Link-loss fallback uses PRE_FLOAT and FLOAT pressure thresholds.
   coatheal::OnboardConfig config;
   assert(config.transition.ascent_to_float_mbar == 100.0);
+  config.transition.debounce_samples = 1;
 
   coatheal::StateManager sm(config);
   const std::vector<double> samples(8, 5.0);
@@ -56,27 +54,26 @@ void TestDefaultAscentToFloatAt100Mbar() {
   auto p = sm.Update(900.0, samples, {}, std::chrono::steady_clock::now());
   assert(p == coatheal::MissionPhase::kAscent);
 
-  // 120 mbar: still above the 100 mbar threshold — stays in ASCENT.
+  // 120 mbar enters PRE_FLOAT at the 150 mbar threshold.
   p = sm.Update(120.0, samples, {}, std::chrono::steady_clock::now());
-  assert(p == coatheal::MissionPhase::kAscent);
+  assert(p == coatheal::MissionPhase::kPreFloat);
 
-  // 101 mbar: still above (>) 100 — still ASCENT.
+  // 101 mbar remains PRE_FLOAT above the lower FLOAT threshold.
   p = sm.Update(101.0, samples, {}, std::chrono::steady_clock::now());
-  assert(p == coatheal::MissionPhase::kAscent);
+  assert(p == coatheal::MissionPhase::kPreFloat);
 
   // 100 mbar: at threshold (<=) — FLOAT triggers.
   p = sm.Update(100.0, samples, {}, std::chrono::steady_clock::now());
   assert(p == coatheal::MissionPhase::kFloat);
 }
 
-void TestSecondaryCycleNoOpInRevC() {
-  // Rev C has no timed FLOAT hold or secondary-cycle re-entry to an activation
-  // ramp. `secondary_cycle` is kept on the
-  // StateOverrides struct for wire-compat but the FSM ignores it.
+void TestFloatToDescentIsPressureDriven() {
+  // No timer or motor action is coupled to phase tracking.
   coatheal::OnboardConfig config;
   config.transition.ascent_to_float_mbar = 100.0;
   config.transition.float_to_descent_mbar = 300.0;
   config.transition.descent_to_landed_mbar = 800.0;
+  config.transition.debounce_samples = 1;
 
   coatheal::StateManager sm(config);
   const std::vector<double> samples(8, 5.0);
@@ -86,15 +83,11 @@ void TestSecondaryCycleNoOpInRevC() {
   auto p = sm.Update(900.0, samples, {}, t0);
   assert(p == coatheal::MissionPhase::kAscent);
   p = sm.Update(80.0, samples, {}, t0);
+  assert(p == coatheal::MissionPhase::kPreFloat);
+  p = sm.Update(80.0, samples, {}, t0);
   assert(p == coatheal::MissionPhase::kFloat);
 
-  // Secondary cycle while in FLOAT: no-op (stays in FLOAT).
-  coatheal::StateOverrides ov;
-  ov.secondary_cycle = true;
-  p = sm.Update(80.0, samples, ov, t0 + std::chrono::minutes(1));
-  assert(p == coatheal::MissionPhase::kFloat);
-
-  // Pressure rising drives DESCENT — no timed float expiry.
+  // Pressure rising drives DESCENT.
   p = sm.Update(350.0, samples, {}, t0 + std::chrono::minutes(5));
   assert(p == coatheal::MissionPhase::kDescent);
 }
@@ -117,8 +110,8 @@ void TestStandbyRunSafeTransitionsViaCommands() {
 int main() {
   TestSystemModeToString();
   TestModeCommandsParse();
-  TestDefaultAscentToFloatAt100Mbar();
-  TestSecondaryCycleNoOpInRevC();
+  TestFallbackPressurePhases();
+  TestFloatToDescentIsPressureDriven();
   TestStandbyRunSafeTransitionsViaCommands();
   std::cout << "State machine tests passed.\n";
   return 0;

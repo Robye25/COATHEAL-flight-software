@@ -1,8 +1,10 @@
 #include "coatheal/command_server.hpp"
 
+#include <chrono>
 #include <cstring>
 #include <sstream>
 #include <string>
+#include <thread>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -73,59 +75,63 @@ void CommandServer::Stop() {
 }
 
 void CommandServer::RunLoop() {
-  listen_fd_ = static_cast<int>(socket(AF_INET, SOCK_STREAM, 0));
-  if (listen_fd_ < 0) {
-    running_ = false;
-    return;
-  }
-
-  const int opt = 1;
-#ifdef _WIN32
-  setsockopt(static_cast<SOCKET>(listen_fd_), SOL_SOCKET, SO_REUSEADDR,
-             reinterpret_cast<const char*>(&opt), sizeof(opt));
-#else
-  setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-#endif
-
-  sockaddr_in addr{};
-  addr.sin_family = AF_INET;
-  addr.sin_addr.s_addr = htonl(INADDR_ANY);
-  addr.sin_port = htons(static_cast<uint16_t>(port_));
-
-  if (bind(listen_fd_, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) != 0) {
-    running_ = false;
-    CloseListenSocket();
-    return;
-  }
-
-  if (listen(listen_fd_, 4) != 0) {
-    running_ = false;
-    CloseListenSocket();
-    return;
-  }
-
   while (running_) {
-    sockaddr_in client_addr{};
-    socklen_t client_len = sizeof(client_addr);
-    int client_fd = static_cast<int>(accept(listen_fd_, reinterpret_cast<sockaddr*>(&client_addr), &client_len));
-    if (client_fd < 0) {
-      if (!running_) {
-        break;
-      }
+    listen_fd_ = static_cast<int>(socket(AF_INET, SOCK_STREAM, 0));
+    if (listen_fd_ < 0) {
+      std::this_thread::sleep_for(std::chrono::seconds(1));
       continue;
     }
 
-    char ip_buf[INET_ADDRSTRLEN] = {0};
-    std::string peer_ip;
-    if (inet_ntop(AF_INET, &client_addr.sin_addr, ip_buf, sizeof(ip_buf)) != nullptr) {
-      peer_ip = ip_buf;
+    const int opt = 1;
+#ifdef _WIN32
+    setsockopt(static_cast<SOCKET>(listen_fd_), SOL_SOCKET, SO_REUSEADDR,
+               reinterpret_cast<const char*>(&opt), sizeof(opt));
+#else
+    setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+#endif
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons(static_cast<uint16_t>(port_));
+
+    if (bind(listen_fd_, reinterpret_cast<const sockaddr*>(&addr),
+             sizeof(addr)) != 0) {
+      CloseListenSocket();
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+      continue;
     }
 
-    HandleClient(client_fd, peer_ip);
-    CloseFd(&client_fd);
-  }
+    if (listen(listen_fd_, 4) != 0) {
+      CloseListenSocket();
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+      continue;
+    }
 
-  CloseListenSocket();
+    while (running_) {
+      sockaddr_in client_addr{};
+      socklen_t client_len = sizeof(client_addr);
+      int client_fd = static_cast<int>(accept(
+          listen_fd_, reinterpret_cast<sockaddr*>(&client_addr), &client_len));
+      if (client_fd < 0) {
+        if (!running_) {
+          break;
+        }
+        continue;
+      }
+
+      char ip_buf[INET_ADDRSTRLEN] = {0};
+      std::string peer_ip;
+      if (inet_ntop(AF_INET, &client_addr.sin_addr, ip_buf,
+                    sizeof(ip_buf)) != nullptr) {
+        peer_ip = ip_buf;
+      }
+
+      HandleClient(client_fd, peer_ip);
+      CloseFd(&client_fd);
+    }
+    CloseListenSocket();
+  }
 }
 
 void CommandServer::HandleClient(int client_fd, const std::string& peer_ip) {

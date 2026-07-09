@@ -4,6 +4,7 @@ import argparse
 import collections
 import csv
 import json
+import math
 import socket
 import threading
 import time
@@ -314,6 +315,9 @@ class TelemetryServer:
                     "phase",
                     "mode",
                     "status",
+                    "sensor_valid",
+                    "sensor_age_ms",
+                    "component_state",
                     *stepper_cols,
                 ],
                 # `extrasaction='ignore'` lets us pass the full asdict()
@@ -431,7 +435,12 @@ class TelemetryServer:
                     self._last_packet_time = time.time()
                     # No box sensor. Use the hottest sample
                     # reading as the over-temperature trigger instead.
-                    hot = max(packet.sample_temps_c) if packet.sample_temps_c else None
+                    valid_temps = [
+                        value for i, value in enumerate(packet.sample_temps_c)
+                        if packet.sensor_valid.get(f"S{i}", True)
+                        and math.isfinite(value)
+                    ]
+                    hot = max(valid_temps) if valid_temps else None
                     if hot is not None and hot > self.alert_temp_c:
                         print(f"[alert] sample temp high: {hot:.2f} C")
 
@@ -456,6 +465,15 @@ class TelemetryServer:
                     row = asdict(packet)
                     row["sample_temps_c"] = "|".join(f"{x:.2f}" for x in packet.sample_temps_c)
                     row["heater_duty"] = "|".join(f"{x:.3f}" for x in packet.heater_duty)
+                    row["sensor_valid"] = "|".join(
+                        f"{key}:{int(value)}"
+                        for key, value in packet.sensor_valid.items())
+                    row["sensor_age_ms"] = "|".join(
+                        f"{key}:{value}"
+                        for key, value in packet.sensor_age_ms.items())
+                    row["component_state"] = "|".join(
+                        f"{key}:{value}"
+                        for key, value in packet.component_state.items())
                     # Also emit one column per sample/heater so the
                     # CSV is self-describing and easy to plot directly. Fills
                     # a `-` placeholder when the wire frame is short so no
@@ -510,12 +528,30 @@ class TelemetryServer:
                     f.flush()
 
                     if self._plotter is not None:
-                        self._plotter.push(packet.seq, packet.ambient_temp_c, packet.ambient_pressure_mbar)
+                        plot_temp = (
+                            packet.ambient_temp_c
+                            if packet.sensor_valid.get("AT", True) and
+                            math.isfinite(packet.ambient_temp_c)
+                            else math.nan
+                        )
+                        plot_pressure = (
+                            packet.ambient_pressure_mbar
+                            if packet.sensor_valid.get("AP", True) and
+                            math.isfinite(packet.ambient_pressure_mbar)
+                            else math.nan
+                        )
+                        self._plotter.push(packet.seq, plot_temp, plot_pressure)
 
                     hot_str = f"{hot:.2f}C" if hot is not None else "—"
+                    pressure_text = (
+                        f"{packet.ambient_pressure_mbar:.1f}mbar"
+                        if packet.sensor_valid.get("AP", True) and
+                        math.isfinite(packet.ambient_pressure_mbar)
+                        else "N/A"
+                    )
                     print(
                         f"[telemetry] session={packet.session_id} seq={packet.seq} phase={packet.phase} "
-                        f"P={packet.ambient_pressure_mbar:.1f}mbar Thot={hot_str}"
+                        f"P={pressure_text} Thot={hot_str}"
                     )
 
     def _append_pull_log(self, pull: PullEvent, raw_line: str) -> None:

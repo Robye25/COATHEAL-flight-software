@@ -35,9 +35,8 @@ StepperChannelConfig BuildLegacyChannelConfig(const StepperConfig& cfg) {
 }  // namespace
 
 StepperController::StepperController(const StepperConfig& cfg,
-                                     const BendScheduleConfig& schedule,
                                      std::unique_ptr<StepperDriver> driver)
-    : schedule_(schedule) {
+{
   StepperChannelConfig ccfg = BuildLegacyChannelConfig(cfg);
   channels_.emplace_back(std::make_unique<StepperChannel>(
       std::move(ccfg), std::move(driver), &lock_));
@@ -45,9 +44,7 @@ StepperController::StepperController(const StepperConfig& cfg,
 
 StepperController::StepperController(
     std::vector<StepperChannelConfig> channel_cfgs,
-    std::vector<std::unique_ptr<StepperDriver>> drivers,
-    const BendScheduleConfig& schedule)
-    : schedule_(schedule) {
+    std::vector<std::unique_ptr<StepperDriver>> drivers) {
   if (channel_cfgs.size() != drivers.size()) {
     throw std::invalid_argument(
         "StepperController: channel config / driver count mismatch");
@@ -85,63 +82,7 @@ std::vector<std::size_t> StepperController::SamplesForMotor(int motor_id) const 
   return ch->samples();
 }
 
-bool StepperController::ResolvePhaseBend(MissionPhase phase,
-                                         std::int64_t* steps,
-                                         double* hold_s) const {
-  switch (phase) {
-    case MissionPhase::kBoot:
-    case MissionPhase::kPreFloat:  // Rev C: FatigueSequencer owns the motors
-      return false;
-    case MissionPhase::kAscent:
-      *steps = schedule_.ascent_steps;
-      *hold_s = schedule_.ascent_hold_s;
-      return true;
-    case MissionPhase::kFloat:
-      // Legacy phase-bend schedule maps float motion to the FLOAT phase.
-      *steps = schedule_.float_steps;
-      *hold_s = schedule_.float_hold_s;
-      return true;
-    case MissionPhase::kDescent:
-      *steps = schedule_.descent_steps;
-      *hold_s = schedule_.descent_hold_s;
-      return true;
-    case MissionPhase::kLanded:
-    case MissionPhase::kStopped:
-      return false;
-  }
-  return false;
-}
-
-void StepperController::ApplyPhaseSetpoint(MissionPhase phase) {
-  std::int64_t steps = 0;
-  double hold_s = 0.0;
-  if (!ResolvePhaseBend(phase, &steps, &hold_s)) return;
-  // Phase setpoints target channel 0 only (single bending actuator); the
-  // second pulling motor is commanded explicitly via PULL_* rather than the
-  // phase schedule.
-  StepperChannel* ch = ChannelById(0);
-  if (!ch) return;
-  std::string err;
-  ch->MoveToSteps(steps, hold_s, &err);
-}
-
-void StepperController::Tick(MissionPhase phase, double dt_s,
-                             bool apply_phase_setpoints) {
-  bool need_phase_apply = false;
-  {
-    std::lock_guard<std::mutex> lock(mu_);
-    if (apply_phase_setpoints && (!last_phase_valid_ || phase != last_phase_)) {
-      last_phase_ = phase;
-      last_phase_valid_ = true;
-      need_phase_apply = true;
-    }
-  }
-  // Apply phase setpoint outside mu_ to avoid nested locks with channel
-  // mutexes (MoveToSteps takes the channel's own mutex).
-  if (need_phase_apply) {
-    ApplyPhaseSetpoint(phase);
-  }
-
+void StepperController::Tick(MissionPhase, double dt_s) {
   for (auto& ch : channels_) {
     if (ch) ch->Tick(dt_s);
   }
@@ -289,6 +230,14 @@ bool StepperController::ActiveCheck() {
     healthy = ch->ActiveCheck() && healthy;
   }
   return healthy;
+}
+
+bool StepperController::ActiveCheck(int motor_id) {
+  StepperChannel* channel = ChannelById(motor_id);
+  if (channel == nullptr) return false;
+  const StepperStatus status = channel->Snapshot();
+  if (status.moving || status.holding) return false;
+  return channel->ActiveCheck();
 }
 
 }  // namespace coatheal

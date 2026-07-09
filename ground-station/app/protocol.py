@@ -11,10 +11,12 @@ class StepperSnapshot:
     hz: float = 0.0
     microstep: int = 1
     enabled: bool = False
+    healthy: bool = False
     moving: bool = False
     holding: bool = False
     hold_s: float = 0.0
     pulses: int = 0
+    missed_deadlines: int = 0
     source: str = ""
 
 
@@ -36,6 +38,9 @@ class TelemetryPacket:
     phase: str
     status: str
     mode: str = ""
+    sensor_valid: Dict[str, bool] = field(default_factory=dict)
+    sensor_age_ms: Dict[str, int] = field(default_factory=dict)
+    component_state: Dict[str, str] = field(default_factory=dict)
     # Multi-motor snapshot list. `steppers[0]` = M0, `steppers[1]` = M1.
     # Length: 0 (no stepper segment), 1 (legacy single STEPPER=... segment),
     # or 2+ (new STEPPER0=/STEPPER1=... segments). Entries are dicts matching
@@ -68,6 +73,8 @@ def _parse_stepper_segment(value: str) -> StepperSnapshot:
                 s.microstep = int(raw)
             elif key == "en":
                 s.enabled = raw not in ("0", "false", "False")
+            elif key == "ok":
+                s.healthy = raw not in ("0", "false", "False")
             elif key == "mv":
                 s.moving = raw not in ("0", "false", "False")
             elif key == "hold":
@@ -76,6 +83,8 @@ def _parse_stepper_segment(value: str) -> StepperSnapshot:
                 s.hold_s = float(raw)
             elif key == "pulses":
                 s.pulses = int(raw)
+            elif key == "missed":
+                s.missed_deadlines = int(raw)
             elif key == "src":
                 s.source = raw
             # unknown keys silently ignored (forward-compat)
@@ -92,10 +101,12 @@ def _snapshot_to_dict(snap: StepperSnapshot, motor_id: int) -> Dict:
         "hz": snap.hz,
         "microstep": snap.microstep,
         "enabled": snap.enabled,
+        "healthy": snap.healthy,
         "moving": snap.moving,
         "holding": snap.holding,
         "hold_s": snap.hold_s,
         "pulses": snap.pulses,
+        "missed_deadlines": snap.missed_deadlines,
         "source": snap.source,
     }
 
@@ -142,6 +153,12 @@ def parse_telemetry_csv(line: str) -> TelemetryPacket:
     sample_resistance_ohm: List[Optional[float]] = []
     legacy_stepper: Optional[StepperSnapshot] = None
     indexed_steppers: Dict[int, StepperSnapshot] = {}
+    sensor_valid: Dict[str, bool] = {
+        "AT": True, "AP": True, "UV": True,
+        **{f"S{i}": True for i in range(len(sample_temps_c))},
+    }
+    sensor_age_ms: Dict[str, int] = {}
+    component_state: Dict[str, str] = {}
     for token in parts[heater_field_index + 1 :]:
         if token.startswith("PHASE="):
             phase = token.split('=', 1)[1]
@@ -166,6 +183,31 @@ def parse_telemetry_csv(line: str) -> TelemetryPacket:
                             raise TelemetryParseError(
                                 f"invalid RESISTANCE value {piece!r}: {exc}"
                             ) from exc
+        elif token.startswith("SENSOR_VALID="):
+            sensor_valid = {}
+            for piece in token.split("=", 1)[1].split("|"):
+                if ":" not in piece:
+                    continue
+                key, raw = piece.split(":", 1)
+                sensor_valid[key] = raw == "1"
+        elif token.startswith("SENSOR_AGE_MS="):
+            sensor_age_ms = {}
+            for piece in token.split("=", 1)[1].split("|"):
+                if ":" not in piece:
+                    continue
+                key, raw = piece.split(":", 1)
+                try:
+                    sensor_age_ms[key] = int(raw)
+                except ValueError as exc:
+                    raise TelemetryParseError(
+                        f"invalid sensor age {piece!r}") from exc
+        elif token.startswith("COMPONENT_STATE="):
+            component_state = {}
+            for piece in token.split("=", 1)[1].split("|"):
+                if ":" not in piece:
+                    continue
+                key, state = piece.split(":", 1)
+                component_state[key] = state
         elif token.startswith("STEPPER="):
             legacy_stepper = _parse_stepper_segment(token.split('=', 1)[1])
         elif token.startswith("STEPPER"):
@@ -208,6 +250,9 @@ def parse_telemetry_csv(line: str) -> TelemetryPacket:
         phase=phase,
         status=status,
         mode=mode,
+        sensor_valid=sensor_valid,
+        sensor_age_ms=sensor_age_ms,
+        component_state=component_state,
         steppers=steppers_list,
         stepper=primary_snapshot,
     )
@@ -228,6 +273,7 @@ KNOWN_COMMANDS = {
     "PING",
     "STATUS",
     "CHECK",
+    "COMPONENTS",
     "FORCE_START",
     "FORCE_STOP",
     "ON",
@@ -256,7 +302,6 @@ KNOWN_COMMANDS = {
     "DISARM",
     "ENTER_SAFE",
     "EXIT_SAFE",
-    "SECONDARY_CYCLE",
     "STEPPER_MOVE",
     "STEPPER_MOVETO",
     "STEPPER_ROTATE",

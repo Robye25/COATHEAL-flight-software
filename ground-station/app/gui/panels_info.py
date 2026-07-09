@@ -2,6 +2,7 @@
 command history, log."""
 from __future__ import annotations
 
+import math
 import time
 from collections import deque
 from typing import Deque
@@ -118,6 +119,10 @@ class ValuesPanel(QScrollArea):
         self._row("rs485", "RS-485")
         self._row("heater_inhibit", "heater inhibit")
         self._row("resistance_ok", "resistance")
+        for component in (
+            "DPS310", "ADS1115", "DAQ132M", "MOTOR0", "MOTOR1", "PWM"
+        ):
+            self._row(f"component_{component}", component)
 
         self._lay.addStretch()
 
@@ -136,6 +141,15 @@ class ValuesPanel(QScrollArea):
         self._fields[key] = val
 
     def on_packet(self, pkt: TelemetryPacket) -> None:
+        def reading(key: str, value: float, precision: int) -> str:
+            valid = pkt.sensor_valid.get(key, True)
+            if valid and math.isfinite(value):
+                return f"{value:.{precision}f}"
+            age = pkt.sensor_age_ms.get(key, -1)
+            if math.isfinite(value) and age >= 0:
+                return f"{value:.{precision}f} stale {age / 1000.0:.1f}s"
+            return "N/A"
+
         f = self._fields
         f["phase"].setText(pkt.phase)
         f["mode"].setText(pkt.mode or "—")
@@ -143,12 +157,16 @@ class ValuesPanel(QScrollArea):
         f["timestamp"].setText(pkt.timestamp)
         f["rtc_valid"].setText("1" if pkt.rtc_valid else "0")
         f["session_id"].setText(pkt.session_id[:12])
-        f["ambient_temp_c"].setText(f"{pkt.ambient_temp_c:.2f}")
-        f["ambient_pressure_mbar"].setText(f"{pkt.ambient_pressure_mbar:.1f}")
-        f["uv"].setText(f"{pkt.uv:.3f}")
+        f["ambient_temp_c"].setText(reading("AT", pkt.ambient_temp_c, 2))
+        f["ambient_pressure_mbar"].setText(
+            reading("AP", pkt.ambient_pressure_mbar, 1))
+        f["uv"].setText(reading("UV", pkt.uv, 3))
         for i in range(8):
             if i < len(pkt.sample_temps_c):
-                f[f"sample_{i}"].setText(f"{pkt.sample_temps_c[i]:.2f}")
+                f[f"sample_{i}"].setText(
+                    reading(f"S{i}", pkt.sample_temps_c[i], 2))
+            else:
+                f[f"sample_{i}"].setText("N/A")
         # Compatibility resistance rows. A literal '-' on the wire surfaces
         # as None here; show an em-dash so the operator knows it's an
         # unmeasured channel rather than a broken sensor.
@@ -198,6 +216,22 @@ class ValuesPanel(QScrollArea):
             + ("#2ecc71" if res_ok else "#e74c3c" if res_fail else "#888")
             + ";"
         )
+        for component in (
+            "DPS310", "ADS1115", "DAQ132M", "MOTOR0", "MOTOR1", "PWM"
+        ):
+            state = pkt.component_state.get(component, "UNKNOWN")
+            field = f[f"component_{component}"]
+            field.setText(state)
+            color = (
+                "#2ecc71" if state == "OK"
+                else "#f39c12"
+                if state in ("DEGRADED", "STALE", "DISCOVERING")
+                else "#888"
+                if state in ("DISABLED", "UNKNOWN")
+                else "#e74c3c"
+            )
+            field.setStyleSheet(
+                f"font-family: monospace; font-size: 11px; color: {color};")
 
 
 # ── Preflight checklist ───────────────────────────────────────────────────────
@@ -231,7 +265,8 @@ class PreflightPanel(QWidget):
             dot, _ = self._items[key]
             dot.set_color("#2ecc71" if good else "#e74c3c")
         mark("rtc", bool(pkt.rtc_valid))
-        mark("ambient", "T_AMBIENT_FAIL" not in pkt.status and "P_AMBIENT_FAIL" not in pkt.status)
+        mark("ambient", pkt.sensor_valid.get("AT", True) and
+             pkt.sensor_valid.get("AP", True))
         mark("heaters", len(pkt.heater_duty) >= 6)
         mark("stepper_en", pkt.stepper is not None and pkt.stepper.enabled)
         mark("link", link_ok)

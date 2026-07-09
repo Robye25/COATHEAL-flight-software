@@ -1,3 +1,4 @@
+import math
 import sys
 import unittest
 from pathlib import Path
@@ -45,6 +46,17 @@ DUAL_STEPPER_DATA = (
     "|UNIFORMITY_OK|OVERTEMP_OK|ENERGY_OK|RS485_OK|HEATER_INHIBITED|RESISTANCE_OK,"
     "STEPPER0=pos:100|tgt:200|hz:400|us:16|en:1|mv:1|hold:0|hold_s:0|pulses:100|src:cmd:MOVE,"
     "STEPPER1=pos:-50|tgt:-50|hz:200|us:8|en:1|mv:0|hold:1|hold_s:3.5|pulses:50|src:phase:FLOAT"
+)
+
+HEALTH_DATA = (
+    "DATA,sess-health,9,2026-07-09T01:00:00Z,1,nan,100.0,nan,"
+    "nan,21.5,nan,nan,nan,nan,nan,nan,"
+    "HEATER_DUTY=0|0|0|0|0|0,RESISTANCE=-|-|-|-|-|-|-|-,"
+    "PHASE=ASCENT,MODE=RUN,STATUS=I2C_FAIL|RS485_OK,"
+    "SENSOR_VALID=AT:0|AP:1|UV:0|S0:0|S1:1|S2:0|S3:0|S4:0|S5:0|S6:0|S7:0,"
+    "SENSOR_AGE_MS=AT:-1|AP:20|UV:-1|S0:-1|S1:125|S2:-1|S3:-1|S4:-1|S5:-1|S6:-1|S7:-1,"
+    "COMPONENT_STATE=DPS310:DEGRADED|ADS1115:FAILED|DAQ132M:DEGRADED|"
+    "MOTOR0:OK|MOTOR1:FAILED|PWM:DEGRADED"
 )
 
 
@@ -139,6 +151,23 @@ class DataFrameTests(unittest.TestCase):
         self.assertEqual(pkt.steppers[0]["position"], -50)
         self.assertEqual(pkt.steppers[1]["motor_id"], 1)
         self.assertEqual(pkt.steppers[1]["position"], 100)
+
+    def test_parse_component_health_and_partial_sensor_validity(self) -> None:
+        pkt = parse_telemetry_csv(HEALTH_DATA)
+        self.assertFalse(pkt.sensor_valid["AT"])
+        self.assertTrue(pkt.sensor_valid["S1"])
+        self.assertEqual(pkt.sensor_age_ms["S1"], 125)
+        self.assertEqual(pkt.component_state["DAQ132M"], "DEGRADED")
+        self.assertEqual(pkt.component_state["PWM"], "DEGRADED")
+        self.assertTrue(math.isnan(pkt.sample_temps_c[0]))
+        self.assertAlmostEqual(pkt.sample_temps_c[1], 21.5)
+
+    def test_legacy_frame_defaults_sensor_values_to_valid(self) -> None:
+        pkt = parse_telemetry_csv(LEGACY_DATA)
+        self.assertTrue(pkt.sensor_valid["AT"])
+        self.assertTrue(pkt.sensor_valid["S0"])
+        self.assertEqual(pkt.sensor_age_ms, {})
+        self.assertEqual(pkt.component_state, {})
 
 
 class ResistanceTests(unittest.TestCase):

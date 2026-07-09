@@ -17,11 +17,13 @@ void AppendStepperSegment(std::ostringstream& oss, const StepperStatus& st,
       << "|tgt:" << st.target_steps
       << "|hz:" << std::setprecision(2) << st.step_hz
       << "|us:" << st.microstep
+      << "|ok:" << (st.healthy ? 1 : 0)
       << "|en:" << (st.enabled ? 1 : 0)
       << "|mv:" << (st.moving ? 1 : 0)
       << "|hold:" << (st.holding ? 1 : 0)
       << "|hold_s:" << std::setprecision(2) << st.hold_remaining_s
       << "|pulses:" << st.pulses_total
+      << "|missed:" << st.missed_deadlines
       << "|src:" << (st.last_source.empty() ? std::string("-") : st.last_source);
 }
 
@@ -77,6 +79,39 @@ std::string SerializeTelemetryDataFrame(const TelemetryRecord& record,
 
   oss << ",PHASE=" << ToString(record.phase) << ",MODE=" << ToString(record.mode)
       << ",STATUS=" << ToStatusBitfield(record.status);
+
+  oss << ",SENSOR_VALID=AT:"
+      << (record.sensors.ambient_temp_valid ? 1 : 0)
+      << "|AP:" << (record.sensors.ambient_pressure_valid ? 1 : 0)
+      << "|UV:" << (record.sensors.uv_valid ? 1 : 0);
+  for (std::size_t i = 0; i < record.sensors.sample_temps_c.size(); ++i) {
+    const bool valid =
+        i < record.sensors.sample_temp_valid.size() &&
+        record.sensors.sample_temp_valid[i];
+    oss << "|S" << i << ':' << (valid ? 1 : 0);
+  }
+
+  oss << ",SENSOR_AGE_MS=AT:" << record.sensors.ambient_temp_age_ms
+      << "|AP:" << record.sensors.ambient_pressure_age_ms
+      << "|UV:" << record.sensors.uv_age_ms;
+  for (std::size_t i = 0; i < record.sensors.sample_temps_c.size(); ++i) {
+    const std::int64_t age =
+        i < record.sensors.sample_temp_age_ms.size()
+            ? record.sensors.sample_temp_age_ms[i]
+            : -1;
+    oss << "|S" << i << ':' << age;
+  }
+
+  const bool motor0_ok =
+      record.steppers.size() > 0 && record.steppers[0].healthy;
+  const bool motor1_ok =
+      record.steppers.size() > 1 && record.steppers[1].healthy;
+  oss << ",COMPONENT_STATE=DPS310:" << ToString(record.sensors.dps310.state)
+      << "|ADS1115:" << ToString(record.sensors.ads1115.state)
+      << "|DAQ132M:" << ToString(record.sensors.daq132m.state)
+      << "|MOTOR0:" << (motor0_ok ? "OK" : "FAILED")
+      << "|MOTOR1:" << (motor1_ok ? "OK" : "FAILED")
+      << "|PWM:" << ToString(record.pwm_state);
 
   // Dual-stepper telemetry: one STEPPER<n>= segment per motor.
   for (std::size_t i = 0; i < record.steppers.size(); ++i) {

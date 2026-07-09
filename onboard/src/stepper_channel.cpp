@@ -114,7 +114,17 @@ std::int64_t StepperChannel::IssuePulses(std::int64_t allowed_usteps) {
 
   std::int64_t issued = 0;
   for (std::int64_t i = 0; i < allowed_usteps; ++i) {
-    if (!driver_->Step(forward)) break;
+    if (!driver_->Step(forward)) {
+      driver_->Enable(false);
+      enabled_ = false;
+      target_ = position_;
+      moving_ = false;
+      mode_ = Mode::kIdle;
+      hold_remaining_s_ = 0.0;
+      retract_after_hold_ = false;
+      ReleaseLockIfHeld();
+      break;
+    }
     position_ += forward ? 1 : -1;
     ++issued;
   }
@@ -124,6 +134,21 @@ std::int64_t StepperChannel::IssuePulses(std::int64_t allowed_usteps) {
 void StepperChannel::Tick(double dt_s) {
   std::lock_guard<std::mutex> lock(mu_);
   if (dt_s <= 0.0) return;
+  if (driver_ != nullptr && !driver_->healthy() &&
+      mode_ == Mode::kIdle) {
+    const auto now = std::chrono::steady_clock::now();
+    if (last_driver_retry_.time_since_epoch().count() == 0 ||
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - last_driver_retry_).count() >= cfg_.driver_retry_ms) {
+      last_driver_retry_ = now;
+      if (driver_->ActiveCheck()) {
+        driver_->SetMicrostep(microstep_);
+        if (enabled_) {
+          enabled_ = driver_->Enable(true);
+        }
+      }
+    }
+  }
 
   if (mode_ == Mode::kHolding) {
     hold_remaining_s_ = std::max(0.0, hold_remaining_s_ - dt_s);
@@ -247,6 +272,12 @@ void StepperChannel::PulseThreadBody() {
         std::chrono::duration<double>(1.0 / ustep_rate));
     next_pulse += period;
     lock.unlock();
+    const auto now = clock::now();
+    if (now > next_pulse) {
+      std::lock_guard<std::mutex> count_lock(mu_);
+      ++missed_deadlines_;
+      next_pulse = now + period;
+    }
     std::this_thread::sleep_until(next_pulse);
   }
 }
@@ -491,10 +522,12 @@ StepperStatus StepperChannel::Snapshot() const {
   s.step_hz = step_hz_;
   s.microstep = microstep_;
   s.enabled = enabled_;
+  s.healthy = driver_ != nullptr && driver_->healthy();
   s.moving = moving_;
   s.holding = (mode_ == Mode::kHolding);
   s.hold_remaining_s = hold_remaining_s_;
   s.pulses_total = driver_ ? driver_->pulses_issued() : 0;
+  s.missed_deadlines = missed_deadlines_;
   s.last_source = last_source_;
   return s;
 }

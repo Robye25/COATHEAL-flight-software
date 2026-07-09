@@ -37,6 +37,7 @@ bool TelemetryQueue::Initialize(std::string* error) {
   std::error_code ec;
   std::filesystem::create_directories(queue_dir_, ec);
   if (ec) {
+    persistence_enabled_ = false;
     if (error != nullptr) {
       *error = "unable to create queue directory: " + queue_dir_;
     }
@@ -49,6 +50,7 @@ bool TelemetryQueue::Initialize(std::string* error) {
   if (!in.is_open()) {
     std::ofstream create(queue_file_, std::ios::app);
     if (!create.is_open()) {
+      persistence_enabled_ = false;
       if (error != nullptr) {
         *error = "unable to initialize queue file: " + queue_file_;
       }
@@ -67,6 +69,7 @@ bool TelemetryQueue::Initialize(std::string* error) {
 
     QueuedTelemetryFrame frame;
     if (!ParseLine(line, &frame)) {
+      persistence_enabled_ = false;
       if (error != nullptr) {
         *error = "failed to parse queue line " + std::to_string(line_no);
       }
@@ -82,7 +85,13 @@ bool TelemetryQueue::Enqueue(const QueuedTelemetryFrame& frame, std::string* err
   std::lock_guard<std::mutex> lock(mu_);
   frames_.push_back(frame);
   PruneLocked();
-  return PersistLocked(error);
+  RetryPersistenceLocked();
+  if (!persistence_enabled_) return true;
+  if (!PersistLocked(error)) {
+    persistence_enabled_ = false;
+    return true;
+  }
+  return true;
 }
 
 bool TelemetryQueue::Acknowledge(const std::string& session_id,
@@ -101,7 +110,13 @@ bool TelemetryQueue::Acknowledge(const std::string& session_id,
   }
 
   frames_.erase(remove_from, frames_.end());
-  return PersistLocked(error);
+  RetryPersistenceLocked();
+  if (!persistence_enabled_) return true;
+  if (!PersistLocked(error)) {
+    persistence_enabled_ = false;
+    return true;
+  }
+  return true;
 }
 
 std::vector<QueuedTelemetryFrame> TelemetryQueue::PendingFrames() const {
@@ -152,6 +167,21 @@ bool TelemetryQueue::PersistLocked(std::string* error) {
   }
 
   return true;
+}
+
+void TelemetryQueue::RetryPersistenceLocked() {
+  if (persistence_enabled_) return;
+  const auto now = std::chrono::steady_clock::now();
+  if (next_persistence_retry_.time_since_epoch().count() != 0 &&
+      now < next_persistence_retry_) {
+    return;
+  }
+  next_persistence_retry_ = now + std::chrono::seconds(5);
+  std::error_code ec;
+  std::filesystem::create_directories(queue_dir_, ec);
+  if (ec) return;
+  persistence_enabled_ = true;
+  if (!PersistLocked(nullptr)) persistence_enabled_ = false;
 }
 
 void TelemetryQueue::PruneLocked() {

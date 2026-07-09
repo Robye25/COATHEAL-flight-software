@@ -1,6 +1,8 @@
 // Rev C SensorManager resistance compatibility coverage.
 
 #include <cassert>
+#include <chrono>
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -78,10 +80,48 @@ void TestDisabledResistanceIgnoresPullNotifications() {
   }
 }
 
+void TestMissingSensorsReturnImmediatelyWithInvalidNanValues() {
+  OnboardConfig config;
+  config.runtime.use_simulated_sensors = false;
+  config.sensors.dps310_enabled = false;
+  config.sensors.ads1115_enabled = false;
+  config.sensors.daq132m_enabled = false;
+  Ina3221Adapter ina;
+  SpiAdapter spi;
+  I2cAdapter i2c;
+  RtcAdapter rtc;
+  SensorManager sm(config, &spi, &i2c, &rtc, &ina);
+  sm.Start();
+  const auto begin = std::chrono::steady_clock::now();
+  const SensorSnapshot snap = sm.ReadSnapshot(
+      MissionPhase::kAscent, std::vector<double>(6, 0.0), 1.0);
+  const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - begin);
+  assert(elapsed.count() < 50);
+  assert(!snap.ambient_temp_valid);
+  assert(!snap.ambient_pressure_valid);
+  assert(!snap.uv_valid);
+  assert(std::isnan(snap.ambient_temp_c));
+  assert(std::isnan(snap.ambient_pressure_mbar));
+  assert(std::isnan(snap.uv));
+  assert(snap.sample_temps_c.size() == 8);
+  assert(snap.sample_temp_valid.size() == 8);
+  for (std::size_t i = 0; i < snap.sample_temps_c.size(); ++i) {
+    assert(std::isnan(snap.sample_temps_c[i]));
+    assert(!snap.sample_temp_valid[i]);
+    assert(snap.sample_temp_age_ms[i] == -1);
+  }
+  assert(snap.dps310.state == ComponentState::kDisabled);
+  assert(snap.ads1115.state == ComponentState::kDisabled);
+  assert(snap.daq132m.state == ComponentState::kDisabled);
+  sm.Stop();
+}
+
 }  // namespace
 
 int main() {
   TestDisabledResistanceSerializesAsDashes();
   TestDisabledResistanceIgnoresPullNotifications();
+  TestMissingSensorsReturnImmediatelyWithInvalidNanValues();
   return 0;
 }

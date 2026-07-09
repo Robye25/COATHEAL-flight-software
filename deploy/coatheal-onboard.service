@@ -14,7 +14,7 @@ User=coatheal
 WorkingDirectory=/bexus/code/coatheal
 Environment=COATHEAL_ENV=flight
 EnvironmentFile=-/etc/coatheal/env
-ExecStartPre=/bexus/code/coatheal/scripts/preflight_healthcheck.sh ${COATHEAL_CONFIG}
+ExecStartPre=/usr/bin/bash /bexus/code/coatheal/scripts/preflight_healthcheck.sh ${COATHEAL_CONFIG}
 ExecStart=/bexus/code/coatheal/build/onboard/coatheal_onboard --config ${COATHEAL_CONFIG}
 Restart=always
 RestartSec=2
