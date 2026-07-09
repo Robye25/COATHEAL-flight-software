@@ -801,6 +801,7 @@ int SystemController::Run() {
   {
     std::lock_guard<std::mutex> lock(overrides_mu_);
     heater_test_.active = false;
+    control_overrides_.bench_open_loop_heaters = false;
   }
   command_server_.Stop();
   telemetry_client_.Stop();
@@ -1106,6 +1107,7 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       set_state_override([&]() {
         control_overrides_.heaters_off = true;
         heater_test_.active = false;
+        control_overrides_.bench_open_loop_heaters = false;
         control_overrides_.single_heater_override.reset();
         control_overrides_.all_heaters_override.reset();
         std::fill(control_overrides_.heater_duty_overrides.begin(),
@@ -1116,7 +1118,11 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       return Ack(cmd_name, "all heaters disabled");
 
     case CommandType::kResetCtrl:
-      set_state_override([&]() { state_overrides_.reset_control = true; });
+      set_state_override([&]() {
+        state_overrides_.reset_control = true;
+        heater_test_.active = false;
+        control_overrides_.bench_open_loop_heaters = false;
+      });
       return Ack(cmd_name, "control loop reset queued");
 
     case CommandType::kShutdownSafe:
@@ -1126,6 +1132,7 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       set_state_override([&]() {
         control_overrides_.heaters_off = true;
         heater_test_.active = false;
+        control_overrides_.bench_open_loop_heaters = false;
         state_overrides_.shutdown_safe = true;
       });
       stop_all_sequences();
@@ -1138,6 +1145,7 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       set_state_override([&]() {
         control_overrides_.heaters_off = true;
         heater_test_.active = false;
+        control_overrides_.bench_open_loop_heaters = false;
         control_overrides_.single_heater_override.reset();
         control_overrides_.all_heaters_override.reset();
         std::fill(control_overrides_.heater_duty_overrides.begin(),
@@ -1181,6 +1189,7 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       set_state_override([&]() {
         control_overrides_.heaters_off = true;
         heater_test_.active = false;
+        control_overrides_.bench_open_loop_heaters = false;
         control_overrides_.single_heater_override.reset();
         control_overrides_.all_heaters_override.reset();
         std::fill(control_overrides_.heater_duty_overrides.begin(),
@@ -1212,7 +1221,10 @@ std::string SystemController::HandleCommandLine(const std::string& line,
         return Nack(cmd_name, "debug not armed");
       }
       debug_armed_ = false;
-      set_state_override([&]() { heater_test_.active = false; });
+      set_state_override([&]() {
+        heater_test_.active = false;
+        control_overrides_.bench_open_loop_heaters = false;
+      });
       return Ack(cmd_name, "debug disarmed");
 
     case CommandType::kSetHeaterDuty: {
@@ -1232,12 +1244,13 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       }
       if (duty > 0.0) {
         std::string reason;
-        if (!heater_temperature_valid(index, &reason)) {
+        if (!require_debug_arm() && !heater_temperature_valid(index, &reason)) {
           return Nack(cmd_name, reason + "; use HEATER_TEST for bench-only open-loop output test");
         }
       }
       set_state_override([&]() {
         control_overrides_.heaters_off = false;
+        control_overrides_.bench_open_loop_heaters = require_debug_arm();
         control_overrides_.single_heater_override.reset();
         control_overrides_.all_heaters_override.reset();
         control_overrides_.heater_duty_overrides[index] = duty;
@@ -1259,12 +1272,13 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       }
       if (duty > 0.0) {
         std::string reason;
-        if (!all_heater_temperatures_valid(&reason)) {
+        if (!require_debug_arm() && !all_heater_temperatures_valid(&reason)) {
           return Nack(cmd_name, reason + "; SET_ALL_DUTY requires all heater temperatures");
         }
       }
       set_state_override([&]() {
         control_overrides_.heaters_off = false;
+        control_overrides_.bench_open_loop_heaters = require_debug_arm();
         control_overrides_.all_heaters_override = duty;
         control_overrides_.single_heater_override.reset();
         std::fill(control_overrides_.heater_duty_overrides.begin(),
@@ -1367,6 +1381,7 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       }
       set_state_override([&]() {
         control_overrides_.heaters_off = false;
+        control_overrides_.bench_open_loop_heaters = false;
         control_overrides_.all_heaters_override.reset();
         control_overrides_.heater_duty_overrides[index].reset();
         control_overrides_.temp_targets_c[index] = target;
@@ -1392,6 +1407,7 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       }
       set_state_override([&]() {
         control_overrides_.heaters_off = false;
+        control_overrides_.bench_open_loop_heaters = false;
         control_overrides_.all_heaters_override.reset();
         std::fill(control_overrides_.heater_duty_overrides.begin(),
                   control_overrides_.heater_duty_overrides.end(), std::nullopt);
@@ -1455,6 +1471,7 @@ std::string SystemController::HandleCommandLine(const std::string& line,
     case CommandType::kClearOverrides:
       set_state_override([&]() {
         control_overrides_.heaters_off = false;
+        control_overrides_.bench_open_loop_heaters = false;
         control_overrides_.single_heater_override.reset();
         control_overrides_.all_heaters_override.reset();
         std::fill(control_overrides_.heater_duty_overrides.begin(),

@@ -11,10 +11,11 @@ Current temperature source:
 - DAQ132M disabled by default, but the DAQ code and config remain available for
   later replacement hardware.
 
-Normal heater control remains strict: a heater can run only when its mapped
-temperature channel is valid and fresh. For bench commissioning only, the
-bounded `HEATER_TEST` command can pulse one heater without valid feedback after
-bench debug arming.
+Normal heater control remains strict: without bench debug arming, a heater can
+run only when its mapped temperature channel is valid and fresh. For bench
+commissioning only, `ARM_DEBUG` allows `SET_HEATER_DUTY` / `SET_ALL_DUTY` to
+drive open-loop channels without temperature feedback, and the bounded
+`HEATER_TEST` command can pulse one heater for a fixed duration.
 
 Reference documents:
 
@@ -108,7 +109,8 @@ heater.debug_max_seconds=10.0
 
 With only one RTD Click on `S1`, normal heater control is valid only for the
 heater mapped to `S1` by default (`H1`). Other heaters stay inhibited until their
-temperature channels are valid or until you use explicit bench `HEATER_TEST`.
+temperature channels are valid, unless bench debug is armed for open-loop manual
+duty commands.
 
 ## One-Command Pi Setup
 

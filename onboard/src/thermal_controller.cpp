@@ -229,12 +229,14 @@ std::vector<double> ThermalController::ComputeRequestedDuty(
     }
   }
 
-  // Enforce sensor validity and the per-channel latch last so no open-loop
-  // override can energize a heater whose RTD is unavailable, or re-arm a
-  // tripped channel without RESET_CONTROL.
+  // Enforce the per-channel latch last so no override can re-arm a tripped
+  // channel without RESET_CONTROL. Normal control also requires valid sample
+  // feedback; bench/debug open-loop duty overrides deliberately skip only
+  // that feedback-validity clamp.
   for (std::size_t i = 0; i < heater_count; ++i) {
     const bool temp_valid = temp_valid_for(i);
-    if (!temp_valid || channel_latched_[i]) {
+    if ((!temp_valid && !overrides.bench_open_loop_heaters) ||
+        channel_latched_[i]) {
       duty[i] = 0.0;
     }
   }

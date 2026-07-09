@@ -117,6 +117,11 @@ void TestInvalidSampleForcesHeaterOff() {
   const auto duty = ctrl.ComputeRequestedDuty(
       coatheal::MissionPhase::kFloat, snapshot, 1.0, ov);
   assert(duty[2] == 0.0);
+
+  ov.bench_open_loop_heaters = true;
+  const auto bench_duty = ctrl.ComputeRequestedDuty(
+      coatheal::MissionPhase::kFloat, snapshot, 1.0, ov);
+  assert(bench_duty[2] == 1.0);
 }
 
 void TestManualTemperatureTargetAndPid() {

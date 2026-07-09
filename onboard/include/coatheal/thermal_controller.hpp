@@ -24,6 +24,7 @@ struct ControlOverrides {
   std::vector<std::optional<double>> temp_targets_c;
   std::vector<std::optional<PidGains>> pid_overrides;
   std::optional<PidGains> pid_override;
+  bool bench_open_loop_heaters = false;
 };
 
 // Rev C per-sample thermal controller:
