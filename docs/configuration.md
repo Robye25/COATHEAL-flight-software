@@ -54,7 +54,7 @@ at load time.
 
 | Key | Default | Description |
 |---|---:|---|
-| `hardware.sample_count` | `8` | Software sample channels. Current bench uses RTD Click on `S0`; DAQ132M can later fill all eight. |
+| `hardware.sample_count` | `8` | Software sample channels. Current bench uses RTD Click on `S1` for heater 1; DAQ132M can later fill all eight. |
 | `hardware.heater_count` | `6` | Polyimide heater channels, samples 0-5. |
 | `hardware.electronics_heater_index` | `SIZE_MAX` | Optional box heater; omitted for final BOM. |
 
@@ -81,9 +81,9 @@ at load time.
 | `sensor.rtd_click_enabled` | `true` | Current MIKROE-2815/MAX31865 bench path. |
 | `sensor.rtd_click_spi_device` | `/dev/spidev0.0` | RTD Click SPI path if enabled. |
 | `sensor.rtd_click_cs_line` / `drdy_line` | `16` / `25` | RTD Click CS and DRDY GPIO. |
-| `sensor.rtd_click_wires` | `2` | PT100 wire mode; must be 2, 3, or 4. |
-| `sensor.rtd_click_sample_channel` | `0` | Software sample channel populated by RTD Click. |
-| `sensor.rtd_click_reference_ohm` | `470.0` | MAX31865 reference resistor value used for PT100 conversion. |
+| `sensor.rtd_click_wires` | `3` | PT100 wire mode; must be 2, 3, or 4. |
+| `sensor.rtd_click_sample_channel` | `1` | Software sample channel populated by RTD Click. |
+| `sensor.rtd_click_reference_ohm` | `400.0` | MAX31865 reference resistor value used for PT100 conversion. |
 | `sensor.rtd_click_filter_hz` | `50` | MAX31865 mains filter, `50` or `60`. |
 | `sensor.rtd_click_spi_speed_hz` | `500000` | RTD Click SPI speed. |
 | `sensor.pressure_source` | `dps310` | Final pressure/ambient-T source. |

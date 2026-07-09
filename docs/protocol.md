@@ -20,7 +20,7 @@ DATA,<session_id>,<seq>,<timestamp>,<rtc_valid>,<ambient_temp_c>,<ambient_pressu
 | `ambient_temp_c` | DPS310 ambient temperature value |
 | `ambient_pressure_mbar` | DPS310 pressure value |
 | `uv` | GUVA-S12SD analog output through ADS1115 |
-| `sample_0..sample_7` | PT100 sample values. Current bench publishes RTD Click on `S0`; disabled or missing channels serialize as `nan` |
+| `sample_0..sample_7` | PT100 sample values. Current bench publishes RTD Click on `S1` for heater 1; disabled or missing channels serialize as `nan` |
 | `HEATER_DUTY` | Six polyimide heater duty values, H0..H5 |
 | `RESISTANCE` | Retained compatibility field; final BOM has no resistance instrument, so values serialize as `-` unless `sensor.resistance_source=simulated` |
 | `SENSOR_VALID` | Current validity for ambient temperature (`AT`), pressure (`AP`), UV, and `S0..S7` |

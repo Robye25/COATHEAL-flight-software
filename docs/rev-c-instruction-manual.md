@@ -577,7 +577,7 @@ Commands:
 
 ```bash
 printf 'ARM\n' | nc 127.0.0.1 5000
-printf 'SET_HEATER_DUTY 0 0.05\n' | nc 127.0.0.1 5000
+printf 'SET_HEATER_DUTY 1 0.05\n' | nc 127.0.0.1 5000
 printf 'GET_THERMAL\n' | nc 127.0.0.1 5000
 printf 'HEATERS_OFF\n' | nc 127.0.0.1 5000
 ```
