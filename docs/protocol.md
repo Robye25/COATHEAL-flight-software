@@ -158,8 +158,8 @@ NACK,<COMMAND>,<reason>
 | `SET_TICK_HZ` | `<hz>` | Runtime tick/downlink rate, `0.1..5.0` Hz |
 | `RADIO_SILENCE` | none | Stop telemetry transmission while keeping the queue |
 | `RADIO_RESUME` | none | Resume telemetry transmission |
-| `SET_HEATER_DUTY` | `<index> <duty>` | Set one heater duty, index `0..5` |
-| `SET_ALL_DUTY` | `<duty>` | Set all heater duties |
+| `SET_HEATER_DUTY` | `<index> <duty>` | Set one heater duty, index `0..5`. Normal mode requires valid mapped temperature feedback; bench/debug arm allows open-loop duty on channels without feedback. |
+| `SET_ALL_DUTY` | `<duty>` | Set all heater duties. Normal mode requires valid temperature feedback for every heater; bench/debug arm allows open-loop duty on channels without feedback. |
 | `SET_TEMP_TARGET` | `<index> <temp_c>` | Set one closed-loop target within configured limits |
 | `SET_ALL_TEMP_TARGETS` | `<temp_c>` | Set all six closed-loop targets |
 | `CLEAR_TEMP_TARGET` | `<index>` | Clear one target |
