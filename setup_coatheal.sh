@@ -51,8 +51,8 @@ Next steps:
 1. Clone repository into /bexus/code/coatheal
    Use a GitHub SSH deploy key or a Personal Access Token. GitHub account
    passwords do not work for private-repo Git clone/pull operations.
-2. Reboot to activate I2C and SPI. The onboard software drives the configured
-   TMC5160 chip-select GPIO lines (BCM 22/23) directly:
+2. Reboot to activate I2C and SPI. The onboard software drives each configured
+   TMC2240 chip-select GPIO line directly:
    sudo reboot
 3. Build onboard app:
    cmake -S . -B build

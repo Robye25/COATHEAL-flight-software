@@ -31,7 +31,40 @@ class HardwareSetupTests(unittest.TestCase):
         broken = hardware_setup.replace_ini(
             source, {"motor0.step_line": "17"})
         errors = hardware_setup.validate_candidate(broken)
-        self.assertTrue(any("BCM GPIO 17" in error for error in errors))
+        self.assertTrue(
+            any("/dev/gpiochip0 line 17" in error for error in errors))
+
+    def test_same_line_on_different_gpio_chips_is_valid(self) -> None:
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        candidate = hardware_setup.replace_ini(
+            source,
+            {
+                "motor0.gpio_chip": "/dev/gpiochip1",
+                "motor0.step_line": "17",
+            },
+        )
+        self.assertEqual(hardware_setup.validate_candidate(candidate), [])
+
+    def test_tmc2240_current_must_fit_selected_range(self) -> None:
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        candidate = hardware_setup.replace_ini(
+            source,
+            {
+                "motor0.run_current_a_rms": "0.8",
+                "motor0.current_range_a_peak": "1",
+            },
+        )
+        errors = hardware_setup.validate_candidate(candidate)
+        self.assertTrue(any("does not fit selected peak range" in error
+                            for error in errors))
+
+    def test_tmc2240_rejects_unusable_global_scaler(self) -> None:
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        candidate = hardware_setup.replace_ini(
+            source, {"motor0.run_current_a_rms": "0.01"})
+        errors = hardware_setup.validate_candidate(candidate)
+        self.assertTrue(any("invalid GLOBALSCALER" in error
+                            for error in errors))
 
     def test_example_configuration_mappings_are_valid(self) -> None:
         source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")

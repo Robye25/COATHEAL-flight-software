@@ -7,6 +7,16 @@
 
 namespace coatheal {
 
+namespace {
+
+bool IsSupportedMicrostep(int divisor) {
+  return divisor == 1 || divisor == 2 || divisor == 4 || divisor == 8 ||
+         divisor == 16 || divisor == 32 || divisor == 64 ||
+         divisor == 128 || divisor == 256;
+}
+
+}  // namespace
+
 // Kinematic brake distance: full-step distance to bring current_hz → 0 at
 // accel (full-step/s²) is v² / (2a). Used implicitly in UpdateRampSpeed() via
 // the inverse formula (max safe current_hz for a given remaining distance is
@@ -22,7 +32,7 @@ StepperChannel::StepperChannel(StepperChannelConfig cfg,
   if (cfg_.default_step_hz <= 0.0) {
     cfg_.default_step_hz = cfg_.max_step_hz;
   }
-  microstep_ = std::max(1, cfg_.microstep);
+  microstep_ = IsSupportedMicrostep(cfg_.microstep) ? cfg_.microstep : 4;
   step_hz_ = cfg_.default_step_hz;
 
   if (driver_) {
@@ -410,17 +420,10 @@ bool StepperChannel::SetSpeed(double full_step_hz, std::string* error) {
 }
 
 bool StepperChannel::SetMicrostep(int divisor, std::string* error) {
-  if (divisor <= 0) {
-    if (error) *error = "microstep must be > 0";
-    return false;
-  }
-  if (!cfg_.allow_extended_microstep) {
-    if (divisor != 4 && divisor != 5) {
-      if (error) *error = "microstep must be 4 or 5";
-      return false;
+  if (!IsSupportedMicrostep(divisor)) {
+    if (error) {
+      *error = "microstep must be 1, 2, 4, 8, 16, 32, 64, 128, or 256";
     }
-  } else if (divisor > 32) {
-    if (error) *error = "microstep must be <= 32";
     return false;
   }
   std::lock_guard<std::mutex> lock(mu_);

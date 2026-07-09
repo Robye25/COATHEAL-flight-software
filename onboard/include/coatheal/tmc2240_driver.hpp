@@ -9,9 +9,9 @@
 
 namespace coatheal {
 
-// FYSETC TMC5160 setup. Motion remains STEP/DIR/EN; SPI is used to program
-// current, microstep, and chopper/stealthChop registers at startup.
-struct Tmc5160Config {
+// TMC2240 setup. Motion uses STEP/DIR/EN; SPI configures and verifies the
+// driver before EN may become active.
+struct Tmc2240Config {
   std::string gpio_chip = "/dev/gpiochip0";
   std::string spi_device = "/dev/spidev0.0";
   std::size_t cs_line = 22;
@@ -22,7 +22,7 @@ struct Tmc5160Config {
   bool enable_active_low = true;
 
   double run_current_a_rms = 0.8;
-  double sense_resistor_ohm = 0.075;
+  double current_range_a_peak = 0.0;  // 0 selects the lowest fitting range.
   double hold_current_frac = 0.30;
   int microstep = 4;
   bool stealth_chop = true;
@@ -30,15 +30,22 @@ struct Tmc5160Config {
   int pulse_high_us = 3;
 };
 
-class Tmc5160Driver : public StepperDriver {
- public:
-  explicit Tmc5160Driver(const Tmc5160Config& cfg);
-  ~Tmc5160Driver() override;
+struct Tmc2240CurrentSettings {
+  std::uint8_t range_code = 0;
+  double range_a_peak = 0.0;
+  std::uint8_t global_scaler = 0;
+  std::uint32_t ihold_irun = 0;
+};
 
-  Tmc5160Driver(const Tmc5160Driver&) = delete;
-  Tmc5160Driver& operator=(const Tmc5160Driver&) = delete;
-  Tmc5160Driver(Tmc5160Driver&&) = delete;
-  Tmc5160Driver& operator=(Tmc5160Driver&&) = delete;
+class Tmc2240Driver : public StepperDriver {
+ public:
+  explicit Tmc2240Driver(const Tmc2240Config& cfg);
+  ~Tmc2240Driver() override;
+
+  Tmc2240Driver(const Tmc2240Driver&) = delete;
+  Tmc2240Driver& operator=(const Tmc2240Driver&) = delete;
+  Tmc2240Driver(Tmc2240Driver&&) = delete;
+  Tmc2240Driver& operator=(Tmc2240Driver&&) = delete;
 
   bool Enable(bool enable) override;
   bool Step(bool direction_forward) override;
@@ -49,11 +56,11 @@ class Tmc5160Driver : public StepperDriver {
 
   bool Reinitialize();
 
-  const Tmc5160Config& config() const { return cfg_; }
+  const Tmc2240Config& config() const { return cfg_; }
 
-  static std::uint32_t EncodeIholdIrun(
-      double run_a_rms, double hold_frac,
-      double sense_resistor_ohm = 0.075);
+  static bool CalculateCurrentSettings(
+      double run_a_rms, double hold_frac, double requested_range_a_peak,
+      Tmc2240CurrentSettings* settings);
   static std::uint32_t EncodeChopconf(int microstep_divisor);
   static std::uint32_t EncodeGconf(bool stealth_chop);
 
@@ -67,12 +74,12 @@ class Tmc5160Driver : public StepperDriver {
   bool Transfer(const std::uint8_t tx[5], std::uint8_t rx[5]);
   bool EnableUnlocked(bool enable);
 
-  Tmc5160Config cfg_;
+  Tmc2240Config cfg_;
   int spi_fd_ = -1;
   bool healthy_ = false;
   bool gpio_healthy_ = false;
   bool enabled_ = false;
-  bool last_direction_forward_ = true;
+  bool last_direction_forward_ = false;
   int microstep_ = 1;
   std::uint64_t pulses_ = 0;
   void* cs_handle_ = nullptr;

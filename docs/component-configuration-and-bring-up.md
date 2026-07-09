@@ -4,6 +4,10 @@ This is the authoritative wiring, configuration, and commissioning procedure
 for the Rev C flight stack. Do not energize heaters or motor power until the
 logic-only checks in this document pass.
 
+For a complete start-to-finish operator procedure, including safe GPIO changes,
+service installation, normal operation, and fault recovery, use
+[COATHEAL Rev C Instruction Manual](rev-c-instruction-manual.md).
+
 ## 1. Operating Model
 
 - Production uses `config/onboard.local.ini`.
@@ -11,7 +15,7 @@ logic-only checks in this document pass.
 - Sensor polling runs independently from the 1 Hz telemetry/control loop.
 - A failed sensor retains its last good value with `valid=0` and an age.
 - A heater is always off when its mapped PT100 is invalid or stale.
-- Motors remain disabled until TMC5160 SPI readback succeeds.
+- Motors remain disabled until TMC2240 SPI readback succeeds.
 - With no limit switches, relative jog is allowed before zeroing. Absolute
   moves and bend sequences require `SET_POSITION_ZERO`.
 - Simulation is only enabled by `config/onboard.debug.ini`.
@@ -24,12 +28,12 @@ logic-only checks in this document pass.
    the Pi or any sensor.
 3. Power the Pi from one 5 V source only. Do not simultaneously back-power its
    5 V header and USB-C input.
-4. Join Pi, DAQ, USB-RS485, ADS1115, DPS310, MOSFET boards, TMC5160 VIO, and
+4. Join Pi, DAQ, USB-RS485, ADS1115, DPS310, MOSFET boards, TMC2240 VIO, and
    regulator signal grounds.
 5. Route motor and heater return currents separately from sensor ground wiring.
 6. Fit an external pull-down on every active-high `HEAT_EN` line and an
-   external pull-up on every active-low TMC5160 `EN` line.
-7. Fit heatsinks to both TMC5160 boards before motor power is applied.
+   external pull-up on every active-low TMC2240 `EN` line.
+7. Fit heatsinks to both TMC2240 carriers before motor power is applied.
 8. Power each polyimide heater from a fused, current-limited rail matching its
    rated voltage. The component list does not define a universal heater
    voltage; do not assume 12 V without checking the heater label/datasheet.
@@ -87,7 +91,7 @@ gpioinfo gpiochip0
 Expected I2C addresses are DPS310 `0x77` or `0x76` and ADS1115 `0x48` through
 `0x4B`. Both boards must use 3.3 V so their I2C pull-ups remain Pi-safe.
 
-Do not install `dtoverlay=spi0-2cs`. Both TMC5160 boards share
+Do not install `dtoverlay=spi0-2cs`. Both TMC2240 carriers share
 `/dev/spidev0.0`; the software drives CS on BCM 22 and BCM 23.
 
 ## 5. Guided Configuration
@@ -210,26 +214,27 @@ Test each output with an LED or meter before attaching heaters. A missing GPIO
 disables only that heater channel. Any invalid mapped PT100 forces duty to
 zero, including manual-duty commands.
 
-## 9. FYSETC TMC5160 and Motors
+## 9. TMC2240 and Motors
 
-For each standard StepStick:
+For each TMC2240 carrier:
 
-1. Select SPI plus STEP/DIR mode according to the exact FYSETC board revision.
+1. Select SPI plus STEP/DIR mode according to the exact carrier revision.
 2. Connect VIO to 3.3 V and VM to the fused 12 V motor rail.
-3. Connect CLK to ground if the board requires this for its internal clock.
+3. Follow the carrier documentation for CLK and IREF; do not infer jumper
+   positions from a different driver family.
 4. Connect shared MOSI, MISO, and SCLK; use separate CS lines.
 5. Verify motor coil pairs with an ohmmeter. Connect one coil to A1/A2 and the
    other to B1/B2. Never connect/disconnect a motor while VM is powered.
-6. Confirm the board's sense resistor before enabling. The supplied standard
-   profile uses `0.075 Ω`.
+6. Confirm the carrier's IREF/full-scale-current hardware before enabling.
+   TMC2240 uses integrated current sensing, not phase sense resistors.
 
 Commissioning configuration:
 
 ```ini
 motor0.run_current_a_rms=0.8
 motor1.run_current_a_rms=0.8
-motor0.sense_resistor_ohm=0.075
-motor1.sense_resistor_ohm=0.075
+motor0.current_range_a_peak=0
+motor1.current_range_a_peak=0
 motor0.pulse_high_us=3
 motor1.pulse_high_us=3
 motor0.retry_ms=2000
@@ -238,9 +243,12 @@ stepper.enable_on_boot=false
 pull.microstep=4
 ```
 
-The onboard software performs pipelined IOIN readback, verifies the TMC5160
-version and configured registers, and reads GSTAT/DRV_STATUS. EN remains
+The onboard software performs pipelined IOIN readback, requires TMC2240
+version `0x40`, verifies configured registers, and reads GSTAT/DRV_STATUS. EN remains
 inactive if verification fails.
+
+See [TMC2240 pin configuration and commissioning](tmc2240-pin-configuration-and-commissioning.md)
+before applying motor power.
 
 With the mechanism unloaded and clear:
 

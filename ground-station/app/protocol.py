@@ -503,8 +503,8 @@ def validate_speed_hz(hz: float, max_hz: float = 5000.0) -> Tuple[bool, str]:
 
 
 def validate_microstep(divisor: int) -> Tuple[bool, str]:
-    if divisor not in (1, 2, 4, 8, 16, 32):
-        return False, "microstep must be 1, 2, 4, 8, 16 or 32"
+    if divisor not in (1, 2, 4, 8, 16, 32, 64, 128, 256):
+        return False, "microstep must be a power of two from 1 through 256"
     return True, str(divisor)
 
 

@@ -319,6 +319,9 @@ void TestControllerMultiChannelDispatch() {
   assert(ctl.Snapshot(1).target_steps == 400);
 
   ctl.Stop(0, &err);
+  assert(ctl.SetMicrostep(0, 64, &err));
+  assert(ctl.Snapshot(0).microstep == 64);
+  assert(!ctl.SetMicrostep(0, 5, &err));
   assert(ctl.SetPositionZero(1, &err));
   assert(ctl.Snapshot(1).position_steps == 0);
   assert(ctl.Snapshot(1).target_steps == 0);

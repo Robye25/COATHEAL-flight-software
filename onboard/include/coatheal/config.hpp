@@ -163,18 +163,13 @@ struct HeaterOutputConfig {
 };
 
 struct StepperConfig {
-  // Shared motion defaults. Per-motor TMC5160 SPI and GPIO wiring live in
-  // MotorConfig and are loaded from motor0.* / motor1.* keys.
+  // Shared motion defaults. All electrical wiring and polarity are per motor.
   int steps_per_rev = 200;           // NEMA 17 full-step default
+  // Legacy single-channel constructor fields; production INI uses pull.*.
   int microstep = 4;
   double default_step_hz = 100.0;
   double max_step_hz = 100.0;
   std::int64_t max_position_steps = 200000;  // absolute travel limit
-  std::size_t step_line = 19;        // Motor 0 BCM lines; see docs/hardware.md
-  std::size_t dir_line = 26;
-  std::size_t enable_line = 12;
-  bool invert_direction = false;
-  bool enable_active_low = true;     // most step/dir drivers have active-low /EN
   bool enable_on_boot = false;       // stay de-energised until commanded
 };
 
@@ -187,7 +182,8 @@ struct PullConfig {
 };
 
 struct MotorConfig {
-  std::string driver = "tmc5160";
+  std::string driver = "tmc2240";
+  std::string gpio_chip = "/dev/gpiochip0";
   std::string spi_device = "/dev/spidev0.0";
   std::size_t cs_line = 22;
   std::size_t step_line = 19;
@@ -196,7 +192,7 @@ struct MotorConfig {
   bool invert_direction = false;
   bool enable_active_low = true;
   double run_current_a_rms = 0.8;
-  double sense_resistor_ohm = 0.075;
+  double current_range_a_peak = 0.0;
   double hold_current_frac = 0.30;
   bool stealth_chop = true;
   std::uint32_t spi_speed_hz = 1000000;

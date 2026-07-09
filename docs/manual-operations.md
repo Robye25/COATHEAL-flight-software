@@ -20,7 +20,7 @@ python main.py command --cmd ARM
 
 `STATUS` reports cached live state and does not disturb hardware. `CHECK`
 actively opens/flushes both log paths, reads DPS310, ADS1115, and DAQ132M,
-checks the PWM/stepper GPIO backends, and re-runs the TMC5160 SPI setup. Run
+checks the PWM/stepper GPIO backends, and re-runs the TMC2240 SPI setup. Run
 `CHECK` only while both motors are idle.
 
 ## Thermal Control

@@ -38,6 +38,8 @@ docs/            Architecture, protocol, configuration, and hardware docs
 | [docs/hardware.md](docs/hardware.md) | Final Rev C hardware reference and HAL status |
 | [docs/configuration.md](docs/configuration.md) | Full INI configuration reference |
 | [docs/component-configuration-and-bring-up.md](docs/component-configuration-and-bring-up.md) | Authoritative Rev C wiring, discovery, and commissioning guide |
+| [docs/rev-c-instruction-manual.md](docs/rev-c-instruction-manual.md) | Complete installation, pin configuration, commissioning, operation, and troubleshooting manual |
+| [docs/tmc2240-pin-configuration-and-commissioning.md](docs/tmc2240-pin-configuration-and-commissioning.md) | TMC2240 wiring, configurable pins, current setup, and supervised motor commissioning |
 | [docs/protocol.md](docs/protocol.md) | DATA, `EVT,PULL`, ACK, discovery, and command protocol |
 | [docs/manual-operations.md](docs/manual-operations.md) | Complete CLI workflow for thermal control, zeroing, bend sequences, fallback, and safe stop |
 | [docs/onboard.md](docs/onboard.md) | Onboard C++ module reference |
@@ -97,8 +99,8 @@ python -m unittest discover -s ground-station/tests -p "test_*.py"
 
 | Subsystem | Component | Interface |
 |---|---|---|
-| Stepper driver | FYSETC TMC5160 | SPI + STEP/DIR/EN |
-| Linear actuator | NEMA 17 external ball-screw linear stepper, 2.5 A, 48 mm | Through TMC5160 |
+| Stepper driver | TMC2240 carrier | SPI mode 3 + STEP/DIR/EN |
+| Linear actuator | NEMA 17 external ball-screw linear stepper, 2.5 A, 48 mm | Through TMC2240 |
 | Sample PT100s | XF-931-FAR PT100 Class B probes | Into DAQ132M |
 | Temperature DAQ | DAQ132M 8-channel PT100 card | USB-RS485 Modbus RTU |
 | Optional bench PT100 | RTD Click MIKROE-2815 / MAX31865 | SPI + DRDY |
@@ -131,7 +133,7 @@ See [docs/protocol.md](docs/protocol.md) for the complete command list.
 
 ## Hardware Status
 
-The real hardware paths are implemented for libgpiod heater PWM, TMC5160
+The real hardware paths are implemented for libgpiod heater PWM, TMC2240
 configuration with GPIO chip-select, STEP/DIR/EN pulses, DPS310, ADS1115, and
 configurable DAQ132M Modbus RTU. `runtime.use_simulated_sensors=true` and
 `runtime.use_simulated_pwm=true` are explicit debug-only switches. Bench

@@ -617,7 +617,9 @@ class StepperPanel(QGroupBox):
 
         us_row = QHBoxLayout()
         us_row.addWidget(QLabel("µstep:"))
-        self._us = QComboBox(); self._us.addItems(["1", "2", "4", "8", "16", "32"]); self._us.setCurrentText("16")
+        self._us = QComboBox()
+        self._us.addItems(["1", "2", "4", "8", "16", "32", "64", "128", "256"])
+        self._us.setCurrentText("16")
         us_btn = QPushButton("Set"); _style_button(us_btn, bg="#2980b9", min_height=22)
         us_btn.clicked.connect(self._on_set_microstep)
         us_row.addWidget(self._us, 1); us_row.addWidget(us_btn); us_row.addStretch()
