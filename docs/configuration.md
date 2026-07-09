@@ -13,7 +13,7 @@ at load time.
 | Key | Default | Description |
 |---|---:|---|
 | `runtime.tick_hz` | `1.0` | Main loop and telemetry rate. |
-| `runtime.bench_mode` | `false` | Enables bench-only commands after `ARM_DEBUG`, including open-loop manual heater duty commands without temperature feedback. |
+| `runtime.bench_mode` | `false` | Enables bench-only commands after `ARM_DEBUG`, including open-loop manual heater duty commands without temperature feedback or scheduler clamping. |
 | `runtime.debug_arm_code` | `COATHEAL_DEBUG` | Debug token; change before serious testing. |
 | `runtime.use_simulated_pwm` | `false` | Uses simulated heater/stepper/LED backends. |
 | `runtime.use_simulated_sensors` | `false` | Explicitly enables synthetic sensor data. Real mode never silently falls back to simulation. |

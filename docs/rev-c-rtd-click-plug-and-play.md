@@ -14,8 +14,8 @@ Current temperature source:
 Normal heater control remains strict: without bench debug arming, a heater can
 run only when its mapped temperature channel is valid and fresh. For bench
 commissioning only, `ARM_DEBUG` allows `SET_HEATER_DUTY` / `SET_ALL_DUTY` to
-drive open-loop channels without temperature feedback, and the bounded
-`HEATER_TEST` command can pulse one heater for a fixed duration.
+drive open-loop channels without temperature feedback or scheduler clamping,
+and the bounded `HEATER_TEST` command can pulse one heater for a fixed duration.
 
 Reference documents:
 
