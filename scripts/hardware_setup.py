@@ -54,7 +54,7 @@ FINAL_PIN_VALUES = {
     "sensor.rtd_click_drdy_line": "25",
     "sensor.rtd_click_wires": "3",
     "sensor.rtd_click_sample_channel": "0",
-    "sensor.rtd_click_reference_ohm": "400.0",
+    "sensor.rtd_click_reference_ohm": "470.0",
     "sensor.rtd_click_filter_hz": "50",
     "sensor.rtd_click_spi_speed_hz": "500000",
     "motor0.current_range_a_peak": "0",
