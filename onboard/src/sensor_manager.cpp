@@ -619,26 +619,14 @@ bool SensorManager::ReadRtdClickMax31865(double* temperature_c,
     return false;
   }
 
-  const auto deadline = std::chrono::steady_clock::now() +
+  const auto conversion_time =
       std::chrono::milliseconds(config_.sensors.rtd_click_filter_hz == 50 ? 80 : 70);
-  bool drdy_seen = false;
-  while (std::chrono::steady_clock::now() < deadline) {
-    bool drdy_high = true;
-    if (ReadGpioInputOnce(config_.runtime.gpio_chip,
-                          config_.sensors.rtd_click_drdy_line,
-                          "coatheal-rtd-drdy", &drdy_high)) {
-      if (!drdy_high) {
-        drdy_seen = true;
-        break;
-      }
-    } else {
-      break;
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(2));
-  }
-  if (!drdy_seen) {
-    std::this_thread::sleep_until(deadline);
-  }
+  // DRDY can already be low from a previous one-shot conversion. Treating that
+  // stale low as "ready" reads the RTD registers before the new conversion has
+  // completed, which produces raw code 0 on the bench RTD Click. Wait the
+  // bounded conversion window after issuing one-shot; this is still short
+  // enough for active CHECK and the RTD polling loop.
+  std::this_thread::sleep_for(conversion_time);
 
   std::uint8_t raw[2] = {0, 0};
   std::uint8_t fault = 0;
