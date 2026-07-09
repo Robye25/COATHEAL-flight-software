@@ -29,7 +29,7 @@ class GuiSmoke(unittest.TestCase):
     def test_mainwindow_builds_and_handles_packet(self) -> None:
         from app.gui.main_window import MainWindow
         from app.protocol import parse_telemetry_csv
-        from PyQt6.QtWidgets import QPushButton
+        from PyQt6.QtWidgets import QLabel, QPushButton
 
         win = MainWindow(bind="127.0.0.1", tel_port=44000, cmd_port=45000,
                          cmd_host="127.0.0.1", log_path=Path("logs/smoke.csv"),
@@ -55,6 +55,8 @@ class GuiSmoke(unittest.TestCase):
             self.assertIn("CHECK", labels)
             self.assertIn("COMPONENTS", labels)
             self.assertIn("Target", labels)
+            label_texts = {label.text() for label in win.findChildren(QLabel)}
+            self.assertIn("RTD_CLICK", label_texts)
             self.assertNotIn("BEND ASCENT", labels)
             self.assertNotIn("BEND FLOAT", labels)
             self.assertNotIn("BEND DESCENT", labels)
