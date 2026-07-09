@@ -572,10 +572,23 @@ int SystemController::Run() {
                       return value.has_value();
                     }) ||
         debug_heat_requested;
-    const std::vector<double> scheduled_duty = scheduler_.Schedule(
-        requested_duty,
-        heaters_allowed && (any_flying_phase || manual_heat_requested),
-        tick_duration.count());
+    const bool bench_open_loop_active =
+        heaters_allowed &&
+        config_.runtime.bench_mode &&
+        debug_armed_.load() &&
+        control_overrides.bench_open_loop_heaters;
+    std::vector<double> scheduled_duty;
+    if (bench_open_loop_active) {
+      scheduled_duty = requested_duty;
+      for (double& duty : scheduled_duty) {
+        duty = std::clamp(duty, 0.0, 1.0);
+      }
+    } else {
+      scheduled_duty = scheduler_.Schedule(
+          requested_duty,
+          heaters_allowed && (any_flying_phase || manual_heat_requested),
+          tick_duration.count());
+    }
     COATHEAL_PERF_STAMP(perf_ts[5]);  // stage 4: heater scheduler
 
     for (std::size_t i = 0; i < scheduled_duty.size(); ++i) {

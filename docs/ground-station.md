@@ -100,7 +100,7 @@ RESET
 
 Thermal profiles are stored locally in `profiles/thermal_profiles.json`. The Pi
 does not persist targets or tuned gains; applying a profile re-sends them.
-Bench-only commands require `runtime.bench_mode=true` and `ARM_DEBUG`. After debug arming, manual heater duty commands can drive open-loop channels without mapped temperature feedback.
+Bench-only commands require `runtime.bench_mode=true` and `ARM_DEBUG`. After debug arming, manual heater duty commands can drive open-loop channels without mapped temperature feedback or scheduler clamping.
 
 ## Protocol Parser
 

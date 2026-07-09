@@ -280,6 +280,18 @@ class MainWindow(QMainWindow):
     def _on_connection_changed(self, connected: bool, addr: str) -> None:
         self._link_ok = connected
         self._connection.set_connected(connected, addr)
+        if connected:
+            host = addr.rsplit(":", 1)[0].strip()
+            user_host = self._connection.onboard_host_value()
+            if host and not user_host and host != self._discovered_host:
+                self._dispatcher.set_endpoint(host, self._cmd_port)
+                self._discovered_host = host
+                self._discovered_cmd_port = self._cmd_port
+                self._connection.set_discovered(
+                    host, self._cmd_port, self._tel_port, "telemetry", "coatheal")
+                self._log.append(
+                    f"[discovery] command target from telemetry peer => {host}:{self._cmd_port}")
+                self._top.set_discovery(f"cmd: {host}:{self._cmd_port}", "#2ecc71")
         self.statusBar().showMessage(f"{'Connected: ' + addr if connected else 'Waiting for onboard…'}")
 
     def _on_packet(self, pkt: TelemetryPacket) -> None:
