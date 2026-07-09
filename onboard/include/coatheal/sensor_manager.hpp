@@ -4,6 +4,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <iosfwd>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -75,6 +76,7 @@ class SensorManager {
   std::int64_t AgeMs(
       const std::chrono::steady_clock::time_point& value,
       bool has_value) const;
+  void AppendRtdClickDiagnostics(std::ostringstream* oss) const;
   ComponentState FailedState(bool has_success,
                              const std::chrono::steady_clock::time_point& last_success) const;
 
@@ -83,6 +85,15 @@ class SensorManager {
     bool has_value = false;
     bool valid = false;
     std::chrono::steady_clock::time_point last_success{};
+  };
+
+  struct RtdClickDiagnostics {
+    bool has_sample = false;
+    std::uint16_t raw_rtd_code = 0;
+    double resistance_ohm = 0.0;
+    std::uint8_t fault = 0;
+    double reference_ohm = 0.0;
+    int wires = 0;
   };
 
   OnboardConfig config_;
@@ -118,6 +129,7 @@ class SensorManager {
   ComponentHealth ads_health_;
   ComponentHealth daq_health_;
   ComponentHealth rtd_health_;
+  RtdClickDiagnostics rtd_diag_;
   int resolved_dps_address_ = -1;
   int resolved_ads_address_ = -1;
   std::string resolved_daq_device_;

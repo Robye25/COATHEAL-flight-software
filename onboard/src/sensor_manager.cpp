@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <iomanip>
 #include <limits>
 #include <numeric>
 #include <set>
@@ -532,6 +533,13 @@ bool SensorManager::ReadRtdClickMax31865(double* temperature_c,
                                          std::string* error) {
   if (temperature_c == nullptr) return false;
 #if COATHEAL_HAS_MAX31865_IO && defined(COATHEAL_HAS_LIBGPIOD)
+  {
+    std::lock_guard<std::mutex> lock(cache_mu_);
+    rtd_diag_ = {};
+    rtd_diag_.reference_ohm = config_.sensors.rtd_click_reference_ohm;
+    rtd_diag_.wires = config_.sensors.rtd_click_wires;
+  }
+
   const int fd = ::open(config_.sensors.rtd_click_spi_device.c_str(), O_RDWR);
   if (fd < 0) {
     if (error != nullptr) *error = "SPI_OPEN_FAILED";
@@ -645,6 +653,18 @@ bool SensorManager::ReadRtdClickMax31865(double* temperature_c,
   const std::uint16_t raw16 =
       static_cast<std::uint16_t>((static_cast<std::uint16_t>(raw[0]) << 8U) |
                                  raw[1]);
+  const std::uint16_t code = static_cast<std::uint16_t>(raw16 >> 1U);
+  const double resistance =
+      Max31865CodeToResistance(code, config_.sensors.rtd_click_reference_ohm);
+  {
+    std::lock_guard<std::mutex> lock(cache_mu_);
+    rtd_diag_.has_sample = true;
+    rtd_diag_.raw_rtd_code = code;
+    rtd_diag_.resistance_ohm = resistance;
+    rtd_diag_.fault = fault;
+    rtd_diag_.reference_ohm = config_.sensors.rtd_click_reference_ohm;
+    rtd_diag_.wires = config_.sensors.rtd_click_wires;
+  }
   if ((raw16 & 0x0001U) != 0U || fault != 0U) {
     if (error != nullptr) {
       std::ostringstream oss;
@@ -653,9 +673,6 @@ bool SensorManager::ReadRtdClickMax31865(double* temperature_c,
     }
     return false;
   }
-  const std::uint16_t code = static_cast<std::uint16_t>(raw16 >> 1U);
-  const double resistance =
-      Max31865CodeToResistance(code, config_.sensors.rtd_click_reference_ohm);
   if (!Pt100TemperatureFromResistance(resistance, temperature_c)) {
     if (error != nullptr) *error = "TEMPERATURE_RANGE";
     return false;
@@ -1094,6 +1111,27 @@ SensorSnapshot SensorManager::ReadSnapshot(
   return snapshot;
 }
 
+void SensorManager::AppendRtdClickDiagnostics(std::ostringstream* oss) const {
+  if (oss == nullptr ||
+      (rtd_diag_.reference_ohm <= 0.0 && rtd_diag_.wires == 0)) {
+    return;
+  }
+  const std::ios_base::fmtflags flags = oss->flags();
+  const std::streamsize precision = oss->precision();
+  *oss << ";rtd_click_reference_ohm=" << rtd_diag_.reference_ohm
+       << ";rtd_click_wires=" << rtd_diag_.wires
+       << ";rtd_click_fault=0x" << std::hex << std::uppercase
+       << static_cast<int>(rtd_diag_.fault) << std::nouppercase
+       << std::dec;
+  if (rtd_diag_.has_sample) {
+    *oss << ";rtd_click_raw_code=" << rtd_diag_.raw_rtd_code
+         << ";rtd_click_resistance_ohm=" << std::fixed
+         << std::setprecision(3) << rtd_diag_.resistance_ohm;
+  }
+  oss->flags(flags);
+  oss->precision(precision);
+}
+
 bool SensorManager::ActiveCheck(const std::string& component,
                                 std::string* details) {
   if (simulated_) {
@@ -1193,6 +1231,10 @@ bool SensorManager::ActiveCheck(const std::string& component,
         << ";rtd_click=" << (!rtd_requested ? "SKIPPED"
                                              : (rtd_ok ? "OK" : "FAIL"))
         << ";rtd_click_error=" << (!rtd_requested ? "SKIPPED" : rtd_error);
+    if (rtd_requested) {
+      std::lock_guard<std::mutex> lock(cache_mu_);
+      AppendRtdClickDiagnostics(&oss);
+    }
     *details = oss.str();
   }
   return dps_ok && ads_ok && daq_ok && rtd_ok;
@@ -1278,8 +1320,9 @@ std::string SensorManager::ComponentSummary() const {
       << ";rtd_click=" << ToString(rtd.state)
       << ";rtd_click_error=" << rtd.error
       << ";rtd_click_age_ms=" << rtd.last_success_age_ms
-      << ";rtd_click_sample=" << config_.sensors.rtd_click_sample_channel
-      << ";sample_valid_channels=" << sample_valid_channels
+      << ";rtd_click_sample=" << config_.sensors.rtd_click_sample_channel;
+  AppendRtdClickDiagnostics(&oss);
+  oss << ";sample_valid_channels=" << sample_valid_channels
       << ";daq_valid_channels=" << daq_valid_channels
       << ";daq_device="
       << (daq_device.empty() ? "-" : daq_device)

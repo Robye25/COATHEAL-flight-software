@@ -400,7 +400,7 @@ void TestConfigParsesReliabilityFields() {
   out << "sensor.rtd_click_drdy_line=25\n";
   out << "sensor.rtd_click_wires=3\n";
   out << "sensor.rtd_click_sample_channel=0\n";
-  out << "sensor.rtd_click_reference_ohm=400.0\n";
+  out << "sensor.rtd_click_reference_ohm=470.0\n";
   out << "sensor.rtd_click_filter_hz=50\n";
   out << "sensor.rtd_click_spi_speed_hz=500000\n";
   out << "sensor.pressure_source=dps310\n";
@@ -479,7 +479,7 @@ void TestConfigParsesReliabilityFields() {
   assert(std::fabs(cfg.sensors.daq132m_c_offset - (-5.0)) < 1e-9);
   assert(cfg.sensors.rtd_click_enabled);
   assert(cfg.sensors.rtd_click_sample_channel == 0U);
-  assert(std::fabs(cfg.sensors.rtd_click_reference_ohm - 400.0) < 1e-9);
+  assert(std::fabs(cfg.sensors.rtd_click_reference_ohm - 470.0) < 1e-9);
   assert(cfg.sensors.rtd_click_filter_hz == 50);
   assert(cfg.sensors.rtd_click_spi_speed_hz == 500000U);
   assert(std::fabs(cfg.heater_safety.target_min_c - 0.0) < 1e-9);
