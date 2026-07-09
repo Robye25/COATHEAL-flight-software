@@ -134,7 +134,15 @@ def atomic_write(path: Path, text: str) -> None:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
+        try:
+            os.chmod(tmp_name, 0o644)
+        except OSError:
+            pass
         os.replace(tmp_name, path)
+        try:
+            os.chmod(path, 0o644)
+        except OSError:
+            pass
     finally:
         if os.path.exists(tmp_name):
             os.unlink(tmp_name)

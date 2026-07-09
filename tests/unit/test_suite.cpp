@@ -85,9 +85,17 @@ void TestCommandParser() {
   assert(ping.ok);
   assert(ping.command.type == coatheal::CommandType::kPing);
 
+  auto lower_ping = parser.ParseLine("ping");
+  assert(lower_ping.ok);
+  assert(lower_ping.command.type == coatheal::CommandType::kPing);
+
   auto alias = parser.ParseLine("ON");
   assert(alias.ok);
   assert(alias.command.type == coatheal::CommandType::kForceStart);
+
+  auto spaced_alias = parser.ParseLine("force start");
+  assert(spaced_alias.ok);
+  assert(spaced_alias.command.type == coatheal::CommandType::kForceStart);
 
   auto invalid = parser.ParseLine("SET_PID 1 2");
   assert(!invalid.ok);
@@ -100,6 +108,12 @@ void TestCommandParser() {
   auto target = parser.ParseLine("SET_TEMP_TARGET 3 42.5");
   assert(target.ok);
   assert(target.command.type == coatheal::CommandType::kSetTempTarget);
+
+  auto spaced_target = parser.ParseLine("set temp target 3 42.5");
+  assert(spaced_target.ok);
+  assert(spaced_target.command.type == coatheal::CommandType::kSetTempTarget);
+  assert(spaced_target.command.args[0] == "3");
+  assert(spaced_target.command.args[1] == "42.5");
 
   auto sequence =
       parser.ParseLine("BENDSEQ_LOAD 1 flex 800:2.5:50 0:1");
@@ -120,6 +134,9 @@ void TestCommandParser() {
   auto rtd_check = parser.ParseLine("CHECK rtd_click");
   assert(rtd_check.ok);
   assert(rtd_check.command.args[0] == "RTD_CLICK");
+  auto spaced_rtd_check = parser.ParseLine("check rtd click");
+  assert(spaced_rtd_check.ok);
+  assert(spaced_rtd_check.command.args[0] == "RTD_CLICK");
   auto components = parser.ParseLine("COMPONENTS");
   assert(components.ok);
   assert(components.command.type == coatheal::CommandType::kComponents);

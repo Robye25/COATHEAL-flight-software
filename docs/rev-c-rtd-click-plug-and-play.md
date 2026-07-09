@@ -166,6 +166,17 @@ systemctl status coatheal-onboard.service --no-pager
 journalctl -u coatheal-onboard.service -n 120 --no-pager
 ```
 
+If the journal says `awk: cannot open ".../config/onboard.local.ini"
+(Permission denied)`, fix the config permissions and restart:
+
+```bash
+cd /bexus/code/coatheal
+sudo chmod 0644 config/onboard.local.ini
+sudo chown coatheal:coatheal config/onboard.local.ini
+sudo systemctl reset-failed coatheal-onboard.service
+sudo systemctl restart coatheal-onboard.service
+```
+
 The installer now prefers `config/onboard.local.ini` when it exists. Confirm:
 
 ```bash
@@ -245,7 +256,7 @@ Check Linux devices:
 
 ```bash
 ls -l /dev/spidev0.0 /dev/gpiochip0
-gpioinfo gpiochip0 | egrep 'line +7:|line +25:|line +22:|line +23:'
+gpioinfo gpiochip0 | egrep 'line +16:|line +25:|line +22:|line +23:'
 ```
 
 Run active RTD check:
