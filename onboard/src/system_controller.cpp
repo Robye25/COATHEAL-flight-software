@@ -528,6 +528,29 @@ int SystemController::Run() {
 
     std::vector<double> requested_duty = thermal_controller_.ComputeRequestedDuty(
         phase, snapshot, tick_duration.count(), effective_control);
+    bool debug_heat_requested = false;
+    {
+      std::lock_guard<std::mutex> lock(overrides_mu_);
+      if (heater_test_.active) {
+        const bool motion_active =
+            active_motion_lock_ != nullptr && active_motion_lock_->holder() != -1;
+        const bool still_allowed =
+            config_.runtime.bench_mode &&
+            debug_armed_.load() &&
+            current_mode == SystemMode::kRun &&
+            !motion_active &&
+            std::chrono::steady_clock::now() < heater_test_.until;
+        if (!still_allowed) {
+          heater_test_.active = false;
+        } else {
+          std::fill(requested_duty.begin(), requested_duty.end(), 0.0);
+          if (heater_test_.heater_index < requested_duty.size()) {
+            requested_duty[heater_test_.heater_index] = heater_test_.duty;
+            debug_heat_requested = heater_test_.duty > 0.0;
+          }
+        }
+      }
+    }
     COATHEAL_PERF_STAMP(perf_ts[4]);  // stage 3: thermal controller
 
     // The fallback floor follows flight phases. Explicit operator duty and
@@ -547,7 +570,8 @@ int SystemController::Run() {
                     control_overrides.temp_targets_c.end(),
                     [](const std::optional<double>& value) {
                       return value.has_value();
-                    });
+                    }) ||
+        debug_heat_requested;
     const std::vector<double> scheduled_duty = scheduler_.Schedule(
         requested_duty,
         heaters_allowed && (any_flying_phase || manual_heat_requested),
@@ -774,6 +798,10 @@ int SystemController::Run() {
 #endif
 
   SdNotify("STOPPING=1");
+  {
+    std::lock_guard<std::mutex> lock(overrides_mu_);
+    heater_test_.active = false;
+  }
   command_server_.Stop();
   telemetry_client_.Stop();
   return 0;
@@ -805,6 +833,21 @@ bool SystemController::DrainTelemetryQueue(bool* link_ok, std::string* error) {
         *error = "failed to send telemetry frame";
       }
       return false;
+    }
+
+    const bool event_ack =
+        frame.frame.rfind("EVT,", 0) == 0 &&
+        ack.session_id == frame.session_id &&
+        ack.seq == 0U;
+    if (event_ack) {
+      if (!telemetry_queue_.AcknowledgeExact(frame, error)) {
+        return false;
+      }
+      if (link_ok != nullptr) {
+        *link_ok = true;
+      }
+      ++drained;
+      continue;
     }
 
     if (ack.session_id != frame.session_id || ack.seq < frame.seq) {
@@ -946,7 +989,8 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       const bool check_storage = selected == "ALL" || selected == "STORAGE";
       const bool check_sensors =
           selected == "ALL" || selected == "DPS310" ||
-          selected == "ADS1115" || selected == "DAQ132M";
+          selected == "ADS1115" || selected == "DAQ132M" ||
+          selected == "RTD_CLICK";
       const bool check_pwm = selected == "ALL" || selected == "PWM";
       const bool check_motor0 = selected == "ALL" || selected == "MOTOR0";
       const bool check_motor1 = selected == "ALL" || selected == "MOTOR1";
@@ -1012,6 +1056,7 @@ std::string SystemController::HandleCommandLine(const std::string& line,
     case CommandType::kHeatersOff:
       set_state_override([&]() {
         control_overrides_.heaters_off = true;
+        heater_test_.active = false;
         control_overrides_.single_heater_override.reset();
         control_overrides_.all_heaters_override.reset();
         std::fill(control_overrides_.heater_duty_overrides.begin(),
@@ -1031,6 +1076,7 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       // state_overrides_.shutdown_safe, which StateManager handles.
       set_state_override([&]() {
         control_overrides_.heaters_off = true;
+        heater_test_.active = false;
         state_overrides_.shutdown_safe = true;
       });
       stop_all_sequences();
@@ -1042,6 +1088,7 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       stop_all_sequences();
       set_state_override([&]() {
         control_overrides_.heaters_off = true;
+        heater_test_.active = false;
         control_overrides_.single_heater_override.reset();
         control_overrides_.all_heaters_override.reset();
         std::fill(control_overrides_.heater_duty_overrides.begin(),
@@ -1084,6 +1131,7 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       }
       set_state_override([&]() {
         control_overrides_.heaters_off = true;
+        heater_test_.active = false;
         control_overrides_.single_heater_override.reset();
         control_overrides_.all_heaters_override.reset();
         std::fill(control_overrides_.heater_duty_overrides.begin(),
@@ -1115,6 +1163,7 @@ std::string SystemController::HandleCommandLine(const std::string& line,
         return Nack(cmd_name, "debug not armed");
       }
       debug_armed_ = false;
+      set_state_override([&]() { heater_test_.active = false; });
       return Ack(cmd_name, "debug disarmed");
 
     case CommandType::kSetHeaterDuty: {
@@ -1163,6 +1212,45 @@ std::string SystemController::HandleCommandLine(const std::string& line,
                   control_overrides_.temp_targets_c.end(), std::nullopt);
       });
       return Ack(cmd_name, "global override applied");
+    }
+
+    case CommandType::kHeaterTest: {
+      if (!require_debug_arm()) {
+        return Nack(cmd_name, "bench debug arm required");
+      }
+      if (mode_.load() != SystemMode::kRun) {
+        return Nack(cmd_name, "RUN mode required");
+      }
+      if (active_motion_lock_ != nullptr && active_motion_lock_->holder() != -1) {
+        return Nack(cmd_name, "blocked during motor motion");
+      }
+      std::size_t index = 0;
+      double duty = 0.0;
+      double seconds = 0.0;
+      if (!ParseIndex(command.args[0], &index) ||
+          !ParseDouble(command.args[1], &duty) ||
+          !ParseDouble(command.args[2], &seconds) ||
+          index >= config_.hardware.heater_count) {
+        return Nack(cmd_name, "invalid heater test args");
+      }
+      if (duty < 0.0 || duty > config_.heaters.debug_max_duty) {
+        return Nack(cmd_name, "duty exceeds heater.debug_max_duty");
+      }
+      if (seconds <= 0.0 || seconds > config_.heaters.debug_max_seconds) {
+        return Nack(cmd_name, "duration exceeds heater.debug_max_seconds");
+      }
+      set_state_override([&]() {
+        control_overrides_.heaters_off = false;
+        heater_test_.active = true;
+        heater_test_.heater_index = index;
+        heater_test_.duty = duty;
+        heater_test_.until = std::chrono::steady_clock::now() +
+            std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<double>(seconds));
+      });
+      std::ostringstream msg;
+      msg << "heater=" << index << ";duty=" << duty << ";seconds=" << seconds;
+      return Ack(cmd_name, msg.str());
     }
 
     case CommandType::kSetPid: {

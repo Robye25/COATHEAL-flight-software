@@ -25,6 +25,7 @@ class TelemetryQueue {
   bool Initialize(std::string* error);
   bool Enqueue(const QueuedTelemetryFrame& frame, std::string* error);
   bool Acknowledge(const std::string& session_id, std::uint64_t seq, std::string* error);
+  bool AcknowledgeExact(const QueuedTelemetryFrame& frame, std::string* error);
 
   std::vector<QueuedTelemetryFrame> PendingFrames() const;
   std::size_t size() const;

@@ -8,6 +8,12 @@ For a complete start-to-finish operator procedure, including safe GPIO changes,
 service installation, normal operation, and fault recovery, use
 [COATHEAL Rev C Instruction Manual](rev-c-instruction-manual.md).
 
+Current bench note: the DAQ132M/Modbus path is disabled until replacement
+hardware is available. Use
+[Rev C RTD Click Plug-And-Play Bring-Up](rev-c-rtd-click-plug-and-play.md) for
+the active one-PT100 RTD Click/MAX31865 setup, config migration, and automated
+Pi checks.
+
 ## 1. Operating Model
 
 - Production uses `config/onboard.local.ini`.
@@ -63,11 +69,11 @@ Configuration uses BCM GPIO numbers, not physical header numbers.
 | Motor 1 STEP | 36 | 16 | `motor1.step_line` |
 | Motor 1 DIR | 38 | 20 | `motor1.dir_line` |
 | Motor 1 EN | 40 | 21 | `motor1.enable_line` |
-| Optional RTD Click DRDY | 22 | 25 | disabled |
-| Optional RTD Click CS | 26 | 7 | disabled |
+| RTD Click DRDY | 22 | 25 | `sensor.rtd_click_drdy_line` |
+| RTD Click CS | 26 | 7 | `sensor.rtd_click_cs_line` |
 
-The DAQ132M uses USB and consumes no Pi header GPIO. Status LEDs are disabled
-because BCM 17 and 27 are heater outputs.
+The DAQ132M uses USB and consumes no Pi header GPIO when it is re-enabled.
+Status LEDs are disabled because BCM 17 and 27 are heater outputs.
 
 ## 4. Pi Interface Setup
 
@@ -103,14 +109,14 @@ python3 scripts/hardware_setup.py wizard \
   --config config/onboard.local.ini
 ```
 
-For the current bench setup, where only physical DAQ channel 2 is connected,
-enter:
+For the current bench setup, where one RTD Click populates software sample
+channel `S0`, enter:
 
 ```text
-1
+0
 ```
 
-Software indices are zero-based, so physical DAQ channel 2 is `S1`.
+Software indices are zero-based, so RTD sample channel `0` appears as `S0`.
 
 Validate without touching hardware:
 
@@ -127,7 +133,39 @@ sudo ./scripts/install_onboard_service.sh \
   /bexus/code/coatheal/config/onboard.local.ini
 ```
 
-## 6. PT100 and DAQ132M
+## 6. Current PT100 Through RTD Click
+
+For the current bench, connect one XF-931-FAR PT100 to RTD Click
+MIKROE-2815/MAX31865. Wire RTD Click to Pi SPI0, CS BCM 7, and DRDY BCM 25.
+Power the board from 3.3 V.
+
+Relevant configuration:
+
+```ini
+sensor.sample_temperature_source=rtd_click_max31865
+sensor.daq132m_enabled=false
+sensor.rtd_click_enabled=true
+sensor.rtd_click_spi_device=/dev/spidev0.0
+sensor.rtd_click_cs_line=7
+sensor.rtd_click_drdy_line=25
+sensor.rtd_click_wires=3
+sensor.rtd_click_sample_channel=0
+sensor.rtd_click_reference_ohm=400.0
+sensor.rtd_click_filter_hz=50
+sensor.rtd_click_spi_speed_hz=500000
+```
+
+Check it:
+
+```bash
+python3 scripts/hardware_setup.py rtd-check
+```
+
+Expected result: `CHECK RTD_CLICK` reports `overall=OK` and telemetry shows
+`S0` valid. Other sample channels remain invalid until more temperature
+hardware is connected.
+
+## 6B. Future PT100 Through DAQ132M
 
 Connect each XF-931-FAR PT100 to the matching DAQ input using the DAQ
 manufacturer's two-wire or three-wire terminal arrangement. Do not infer the
@@ -142,6 +180,7 @@ differ between manufacturers.
 Relevant configuration:
 
 ```ini
+sensor.sample_temperature_source=daq132m_modbus
 sensor.daq132m_enabled=true
 sensor.daq132m_device=/dev/serial/by-id/<adapter>
 sensor.daq132m_auto_discover=true

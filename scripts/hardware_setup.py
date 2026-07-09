@@ -26,6 +26,54 @@ except ImportError:  # Allows configuration helpers to be tested on Windows.
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = ROOT / "config" / "onboard.local.ini"
 EXAMPLE_CONFIG = ROOT / "config" / "onboard.example.ini"
+LEGACY_CONFIG = ROOT / "config" / "onboard.ini"
+FINAL_PIN_VALUES = {
+    "heater.output_lines": "17,18,27,5,6,13",
+    "heater.temperature_channels": "0,1,2,3,4,5",
+    "hal.status_led_enabled": "false",
+    "hal.mode_led_enabled": "false",
+    "motor0.driver": "tmc2240",
+    "motor0.gpio_chip": "/dev/gpiochip0",
+    "motor0.spi_device": "/dev/spidev0.0",
+    "motor0.cs_line": "22",
+    "motor0.enable_line": "12",
+    "motor0.step_line": "19",
+    "motor0.dir_line": "26",
+    "motor1.driver": "tmc2240",
+    "motor1.gpio_chip": "/dev/gpiochip0",
+    "motor1.spi_device": "/dev/spidev0.0",
+    "motor1.cs_line": "23",
+    "motor1.enable_line": "21",
+    "motor1.step_line": "16",
+    "motor1.dir_line": "20",
+    "sensor.sample_temperature_source": "rtd_click_max31865",
+    "sensor.daq132m_enabled": "false",
+    "sensor.rtd_click_enabled": "true",
+    "sensor.rtd_click_spi_device": "/dev/spidev0.0",
+    "sensor.rtd_click_cs_line": "7",
+    "sensor.rtd_click_drdy_line": "25",
+    "sensor.rtd_click_wires": "3",
+    "sensor.rtd_click_sample_channel": "0",
+    "sensor.rtd_click_reference_ohm": "400.0",
+    "sensor.rtd_click_filter_hz": "50",
+    "sensor.rtd_click_spi_speed_hz": "500000",
+    "motor0.current_range_a_peak": "0",
+    "motor1.current_range_a_peak": "0",
+}
+OBSOLETE_CONFIG_KEYS = {
+    "stepper.microstep",
+    "stepper.microsteps",
+    "stepper.max_step_hz",
+    "stepper.step_line",
+    "stepper.dir_line",
+    "stepper.enable_line",
+    "stepper.invert_direction",
+    "stepper.enable_active_low",
+    "motor0.sense_resistor",
+    "motor1.sense_resistor",
+    "motor0.sense_resistance",
+    "motor1.sense_resistance",
+}
 
 
 def serial_candidates() -> list[str]:
@@ -131,6 +179,30 @@ def validate_candidate(text: str) -> list[str]:
         errors.append("sensor channel mapping is outside hardware.sample_count")
     if len(set(enabled_channels)) != len(enabled_channels):
         errors.append("DAQ enabled channels contain duplicates")
+    if values.get("sensor.sample_temperature_source") not in {
+            "daq132m_modbus", "rtd_click_max31865"}:
+        errors.append("unsupported sensor.sample_temperature_source")
+    if values.get("sensor.sample_temperature_source") == "rtd_click_max31865":
+        if values.get("sensor.rtd_click_enabled") != "true":
+            errors.append("sensor.rtd_click_enabled must be true for RTD Click")
+    if values.get("sensor.sample_temperature_source") == "daq132m_modbus":
+        if values.get("sensor.daq132m_enabled") != "true":
+            errors.append("sensor.daq132m_enabled must be true for DAQ source")
+    try:
+        rtd_channel = int(values["sensor.rtd_click_sample_channel"], 0)
+        rtd_ref = float(values["sensor.rtd_click_reference_ohm"])
+        rtd_filter = int(values["sensor.rtd_click_filter_hz"], 0)
+        rtd_speed = int(values["sensor.rtd_click_spi_speed_hz"], 0)
+        if not 0 <= rtd_channel < samples:
+            errors.append("sensor.rtd_click_sample_channel out of range")
+        if not math.isfinite(rtd_ref) or rtd_ref <= 0.0:
+            errors.append("sensor.rtd_click_reference_ohm must be > 0")
+        if rtd_filter not in (50, 60):
+            errors.append("sensor.rtd_click_filter_hz must be 50 or 60")
+        if not 0 < rtd_speed <= 5_000_000:
+            errors.append("sensor.rtd_click_spi_speed_hz must be in [1, 5000000]")
+    except (KeyError, ValueError):
+        errors.append("invalid or missing RTD Click setting")
 
     runtime_chip = values.get("runtime.gpio_chip", "/dev/gpiochip0")
     gpio_claims: dict[tuple[str, int], str] = {}
@@ -138,6 +210,16 @@ def validate_candidate(text: str) -> list[str]:
         (runtime_chip, f"heater.output_lines[{index}]", line)
         for index, line in enumerate(output_lines)
     ]
+    if values.get("sensor.rtd_click_enabled") == "true":
+        try:
+            gpio_keys.append((
+                runtime_chip, "sensor.rtd_click_cs_line",
+                int(values["sensor.rtd_click_cs_line"], 0)))
+            gpio_keys.append((
+                runtime_chip, "sensor.rtd_click_drdy_line",
+                int(values["sensor.rtd_click_drdy_line"], 0)))
+        except (KeyError, ValueError):
+            errors.append("invalid or missing RTD Click GPIO line")
     for motor in (0, 1):
         chip_key = f"motor{motor}.gpio_chip"
         chip = values.get(chip_key, "")
@@ -192,36 +274,127 @@ def validate_candidate(text: str) -> list[str]:
     return errors
 
 
+def _backup_path(path: Path) -> Path:
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    return path.with_name(f"{path.name}.bak.{stamp}")
+
+
+def _candidate_from_existing(existing: Path | None) -> str:
+    template = EXAMPLE_CONFIG.read_text(encoding="utf-8")
+    template_keys = set(_ini_values(template))
+    updates: dict[str, str] = {}
+    if existing is not None and existing.exists():
+        for key, value in _ini_values(existing.read_text(encoding="utf-8")).items():
+            if key in template_keys and key not in OBSOLETE_CONFIG_KEYS:
+                updates[key] = value
+    updates.update(FINAL_PIN_VALUES)
+    return replace_ini(template, updates)
+
+
+def _check_with_binary(config_text: str) -> int:
+    binary = ROOT / "build" / "onboard" / "coatheal_onboard"
+    if not binary.exists():
+        return 0
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", suffix=".ini", delete=False,
+    ) as candidate:
+        candidate.write(config_text)
+        candidate_path = Path(candidate.name)
+    try:
+        check = subprocess.run(
+            [str(binary), "--config", str(candidate_path), "--check-config"],
+            check=False,
+        )
+        return check.returncode
+    finally:
+        candidate_path.unlink(missing_ok=True)
+
+
+def migrate_config(args: argparse.Namespace) -> int:
+    source = args.migrate_from
+    if source is not None and not source.exists():
+        source = None
+    text = _candidate_from_existing(source)
+    errors = validate_candidate(text)
+    if errors:
+        for error in errors:
+            print(f"Configuration error: {error}", file=sys.stderr)
+        return 2
+    check_rc = _check_with_binary(text)
+    if check_rc != 0:
+        print("Onboard rejected the migrated configuration.", file=sys.stderr)
+        return check_rc
+    if source is not None:
+        backup = _backup_path(source)
+        shutil.copy2(source, backup)
+        print(f"Backed up {source} -> {backup}")
+    if args.config.exists() and not args.yes:
+        answer = input(f"Overwrite {args.config}? [y/N]: ").strip().lower()
+        if answer not in ("y", "yes"):
+            print("No files changed.")
+            return 1
+    atomic_write(args.config, text)
+    print(f"Configuration migrated and written: {args.config}")
+    return 0
+
+
+def _load_config(path: Path) -> tuple[str, dict[str, str]]:
+    text = path.read_text(encoding="utf-8")
+    return text, _ini_values(text)
+
+
+def pin_check(args: argparse.Namespace) -> int:
+    if not args.config.exists():
+        print(f"Config missing: {args.config}", file=sys.stderr)
+        return 2
+    text, values = _load_config(args.config)
+    errors = validate_candidate(text)
+    for key, expected in FINAL_PIN_VALUES.items():
+        if key.startswith("sensor.") and key not in {
+                "sensor.rtd_click_cs_line",
+                "sensor.rtd_click_drdy_line",
+                "sensor.rtd_click_spi_device",
+                "sensor.sample_temperature_source",
+                "sensor.daq132m_enabled",
+                "sensor.rtd_click_enabled",
+                "sensor.rtd_click_sample_channel",
+                "sensor.rtd_click_reference_ohm",
+                "sensor.rtd_click_filter_hz",
+                "sensor.rtd_click_spi_speed_hz"}:
+            continue
+        actual = values.get(key)
+        if actual != expected:
+            errors.append(f"{key}={actual!r}, expected {expected!r}")
+    if os.name != "nt":
+        for path_key in ("runtime.gpio_chip", "motor0.gpio_chip", "motor1.gpio_chip"):
+            path = Path(values.get(path_key, ""))
+            if path and not path.exists():
+                errors.append(f"{path_key} does not exist: {path}")
+        for path_key in ("motor0.spi_device", "motor1.spi_device",
+                         "sensor.rtd_click_spi_device"):
+            path = Path(values.get(path_key, ""))
+            if path and not path.exists():
+                errors.append(f"{path_key} does not exist: {path}")
+    if errors:
+        for error in errors:
+            print(f"pin-check: {error}", file=sys.stderr)
+        return 1
+    print("pin-check: OK")
+    return 0
+
+
 def wizard(args: argparse.Namespace) -> int:
     found = discover()
     print(json.dumps(found, indent=2))
-    serial = found["serial"]
-    if len(serial) == 1:
-        device = serial[0]
-    elif args.yes:
-        print(f"Expected one RS485 adapter, found: {serial}", file=sys.stderr)
-        return 2
-    else:
-        device = input(
-            "Stable RS485 device path (prefer /dev/serial/by-id/...): "
-        ).strip()
-        if not device:
-            print("A serial device path is required.", file=sys.stderr)
-            return 2
-    channels = (
-        "0,1,2,3,4,5,6,7" if args.yes else
-        input("Enabled DAQ channels, zero-based [0,1,2,3,4,5,6,7]: ").strip()
-        or "0,1,2,3,4,5,6,7"
+    channel = (
+        "0" if args.yes else
+        input("RTD Click sample channel, zero-based [0]: ").strip() or "0"
     )
     updates = {
-        "sensor.daq132m_device": device,
-        "sensor.daq132m_enabled_channels": channels,
-        "motor0.driver": "tmc2240",
-        "motor1.driver": "tmc2240",
+        **FINAL_PIN_VALUES,
+        "sensor.rtd_click_sample_channel": channel,
         "motor0.run_current_a_rms": "0.8",
         "motor1.run_current_a_rms": "0.8",
-        "motor0.current_range_a_peak": "0",
-        "motor1.current_range_a_peak": "0",
     }
     text = replace_ini(EXAMPLE_CONFIG.read_text(encoding="utf-8"), updates)
     errors = validate_candidate(text)
@@ -398,6 +571,8 @@ def motor_test(args: argparse.Namespace) -> int:
     for command in commands:
         response = send_command(command)
         print(response)
+        if command == "ARM" and response.startswith("NACK") and "requires STANDBY" in response:
+            continue
         if not response.startswith("ACK"):
             return 1
     time.sleep(max(1.0, abs(args.steps) / max(1.0, args.speed * 4.0) + 1.0))
@@ -412,6 +587,98 @@ def motor_test(args: argparse.Namespace) -> int:
     return 0
 
 
+def rtd_check(args: argparse.Namespace) -> int:
+    response = send_command("CHECK RTD_CLICK", args.host, args.port)
+    print(response)
+    return 0 if "overall=OK" in response and "rtd_click=OK" in response else 1
+
+
+def heater_test(args: argparse.Namespace) -> int:
+    if not args.confirm_load:
+        print("--confirm-load is required", file=sys.stderr)
+        return 2
+    if not 0 <= args.heater <= 5 or not 0.0 <= args.duty <= 0.25 or not 0 < args.seconds <= 10:
+        print("Use heater 0..5, duty 0..0.25, seconds 0..10.", file=sys.stderr)
+        return 2
+    for command in (
+        f"ARM_DEBUG {args.debug_token}",
+        "ARM",
+        f"HEATER_TEST {args.heater} {args.duty} {args.seconds}",
+    ):
+        response = send_command(command, args.host, args.port)
+        print(response)
+        if command == "ARM" and response.startswith("NACK") and "requires STANDBY" in response:
+            continue
+        if not response.startswith("ACK"):
+            return 1
+    time.sleep(args.seconds + 0.5)
+    response = send_command("HEATERS_OFF", args.host, args.port)
+    print(response)
+    return 0 if response.startswith("ACK") else 1
+
+
+def doctor(args: argparse.Namespace) -> int:
+    rc = pin_check(argparse.Namespace(config=args.config))
+    print(json.dumps(discover(), indent=2))
+    failures = rc != 0
+    for command in ("COMPONENTS", "CHECK RTD_CLICK", "CHECK PWM",
+                    "CHECK MOTOR0", "CHECK MOTOR1"):
+        try:
+            response = send_command(command, args.host, args.port)
+        except OSError as exc:
+            print(f"{command}: command connection failed: {exc}",
+                  file=sys.stderr)
+            failures = True
+            continue
+        print(response)
+        if command.startswith("CHECK") and "overall=OK" not in response:
+            failures = True
+    return 1 if failures else 0
+
+
+def plug_and_play(args: argparse.Namespace) -> int:
+    migrate_args = argparse.Namespace(
+        config=args.config,
+        migrate_from=args.migrate_from,
+        yes=args.yes,
+    )
+    rc = migrate_config(migrate_args)
+    if rc != 0:
+        return rc
+    rc = pin_check(argparse.Namespace(config=args.config))
+    if rc != 0:
+        return rc
+    if not args.skip_build:
+        build = subprocess.run(
+            ["cmake", "--build", "build", "--parallel", str(args.jobs)],
+            cwd=ROOT, check=False,
+        )
+        if build.returncode != 0:
+            print("Build failed. Run cmake -S . -B build first if build/ is missing.",
+                  file=sys.stderr)
+            return build.returncode
+    install = subprocess.run(
+        ["bash", str(ROOT / "scripts" / "install_onboard_service.sh"),
+         str(ROOT), str(args.config.resolve())],
+        cwd=ROOT, check=False,
+    )
+    if install.returncode != 0:
+        return install.returncode
+    status = subprocess.run(
+        ["systemctl", "is-active", "--quiet", "coatheal-onboard.service"],
+        check=False,
+    )
+    if status.returncode != 0:
+        subprocess.run(
+            ["journalctl", "-u", "coatheal-onboard.service", "-n", "80",
+             "--no-pager"],
+            check=False,
+        )
+        return status.returncode
+    print("plug-and-play: service active")
+    return 0
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
     commands = root.add_subparsers(dest="command", required=True)
@@ -422,6 +689,27 @@ def parser() -> argparse.ArgumentParser:
     wizard_cmd.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     wizard_cmd.add_argument("--yes", action="store_true")
     wizard_cmd.set_defaults(handler=wizard)
+
+    migrate = commands.add_parser("migrate-config")
+    migrate.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    migrate.add_argument("--migrate-from", type=Path, default=LEGACY_CONFIG)
+    migrate.add_argument("--yes", action="store_true")
+    migrate.set_defaults(handler=migrate_config)
+
+    pins = commands.add_parser("pin-check")
+    pins.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    pins.set_defaults(handler=pin_check)
+
+    doctor_cmd = commands.add_parser("doctor")
+    doctor_cmd.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    doctor_cmd.add_argument("--host", default="127.0.0.1")
+    doctor_cmd.add_argument("--port", type=int, default=5000)
+    doctor_cmd.set_defaults(handler=doctor)
+
+    rtd = commands.add_parser("rtd-check")
+    rtd.add_argument("--host", default="127.0.0.1")
+    rtd.add_argument("--port", type=int, default=5000)
+    rtd.set_defaults(handler=rtd_check)
 
     scan = commands.add_parser("daq-scan")
     scan.add_argument("--device", default="auto")
@@ -443,6 +731,24 @@ def parser() -> argparse.ArgumentParser:
     motor.add_argument("--speed", type=float, default=25.0)
     motor.add_argument("--confirm-motion", action="store_true")
     motor.set_defaults(handler=motor_test)
+
+    heater = commands.add_parser("heater-test")
+    heater.add_argument("--heater", type=int, required=True)
+    heater.add_argument("--duty", type=float, default=0.10)
+    heater.add_argument("--seconds", type=float, default=2.0)
+    heater.add_argument("--host", default="127.0.0.1")
+    heater.add_argument("--port", type=int, default=5000)
+    heater.add_argument("--debug-token", default="COATHEAL_DEBUG")
+    heater.add_argument("--confirm-load", action="store_true")
+    heater.set_defaults(handler=heater_test)
+
+    pap = commands.add_parser("plug-and-play")
+    pap.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    pap.add_argument("--migrate-from", type=Path, default=LEGACY_CONFIG)
+    pap.add_argument("--yes", action="store_true")
+    pap.add_argument("--skip-build", action="store_true")
+    pap.add_argument("--jobs", type=int, default=2)
+    pap.set_defaults(handler=plug_and_play)
     return root
 
 

@@ -3,6 +3,12 @@
 This manual describes how to install, configure, wire, validate, operate, and
 troubleshoot the COATHEAL Rev C onboard software and ground station.
 
+Current bench update: use
+[Rev C RTD Click Plug-And-Play Bring-Up](rev-c-rtd-click-plug-and-play.md) for
+the active one-PT100 RTD Click/MAX31865 temperature source, config migration,
+and automated Pi checks. DAQ132M/Modbus is currently disabled until replacement
+hardware is available.
+
 The software is manual-first. It does not start motor movements or heater
 profiles automatically while the ground station is connected. If an established
 ground link is lost, the onboard software:
@@ -40,9 +46,8 @@ ground link is lost, the onboard software:
 | Onboard controller | Raspberry Pi 4B | Linux, GPIO, I2C, SPI, USB, Ethernet |
 | Motor driver 0/1 | TMC2240 carrier | SPI mode 3 plus STEP/DIR/EN |
 | Linear actuator 0/1 | NEMA 17 external ball-screw stepper, 2.5 A | TMC2240 |
-| Sample temperature | Eight XF-931-FAR PT100 probes | DAQ132M inputs |
-| Temperature DAQ | DAQ132M eight-channel card | USB-RS485 Modbus RTU |
-| Optional bench RTD | RTD Click MIKROE-2815 | Reserved SPI/DRDY pins |
+| Current sample temperature | One XF-931-FAR PT100 probe | RTD Click MIKROE-2815 / MAX31865 |
+| Future multi-channel temperature | DAQ132M eight-channel card | USB-RS485 Modbus RTU, currently disabled |
 | UV conversion | Adafruit ADS1115 | I2C |
 | UV measurement | GUVA-S12SD breakout | ADS1115 analog input |
 | Pressure/ambient T | Adafruit DPS310 | I2C |
@@ -193,8 +198,8 @@ not reassigned in the INI file.
 | Motor 1 STEP | 36 | 16 | `motor1.step_line` |
 | Motor 1 DIR | 38 | 20 | `motor1.dir_line` |
 | Motor 1 EN | 40 | 21 | `motor1.enable_line` |
-| Optional RTD Click DRDY | 22 | 25 | `sensor.rtd_click_drdy_line` |
-| Optional RTD Click CS | 26 | 7 | `sensor.rtd_click_cs_line` |
+| RTD Click DRDY | 22 | 25 | `sensor.rtd_click_drdy_line` |
+| RTD Click CS | 26 | 7 | `sensor.rtd_click_cs_line` |
 
 The DAQ132M is connected through USB-RS485 and has no configurable Pi GPIO.
 
@@ -602,6 +607,7 @@ Targeted checks:
 ```bash
 printf 'CHECK DPS310\n' | nc 127.0.0.1 5000
 printf 'CHECK ADS1115\n' | nc 127.0.0.1 5000
+printf 'CHECK RTD_CLICK\n' | nc 127.0.0.1 5000
 printf 'CHECK DAQ132M\n' | nc 127.0.0.1 5000
 printf 'CHECK PWM\n' | nc 127.0.0.1 5000
 printf 'CHECK MOTOR0\n' | nc 127.0.0.1 5000

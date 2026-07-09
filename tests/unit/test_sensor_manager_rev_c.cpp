@@ -86,6 +86,7 @@ void TestMissingSensorsReturnImmediatelyWithInvalidNanValues() {
   config.sensors.dps310_enabled = false;
   config.sensors.ads1115_enabled = false;
   config.sensors.daq132m_enabled = false;
+  config.sensors.rtd_click_enabled = false;
   Ina3221Adapter ina;
   SpiAdapter spi;
   I2cAdapter i2c;
@@ -114,7 +115,25 @@ void TestMissingSensorsReturnImmediatelyWithInvalidNanValues() {
   assert(snap.dps310.state == ComponentState::kDisabled);
   assert(snap.ads1115.state == ComponentState::kDisabled);
   assert(snap.daq132m.state == ComponentState::kDisabled);
+  assert(snap.rtd_click.state == ComponentState::kDisabled);
   sm.Stop();
+}
+
+void TestMax31865Pt100Conversion() {
+  const double r0 = SensorManager::Max31865CodeToResistance(8192, 400.0);
+  assert(std::fabs(r0 - 100.0) < 1e-9);
+
+  double temp = 0.0;
+  assert(SensorManager::Pt100TemperatureFromResistance(100.0, &temp));
+  assert(std::fabs(temp) < 0.05);
+
+  assert(SensorManager::Pt100TemperatureFromResistance(138.5055, &temp));
+  assert(std::fabs(temp - 100.0) < 0.1);
+
+  assert(SensorManager::Pt100TemperatureFromResistance(80.306, &temp));
+  assert(std::fabs(temp - (-50.0)) < 0.2);
+
+  assert(!SensorManager::Pt100TemperatureFromResistance(1000.0, &temp));
 }
 
 }  // namespace
@@ -123,5 +142,6 @@ int main() {
   TestDisabledResistanceSerializesAsDashes();
   TestDisabledResistanceIgnoresPullNotifications();
   TestMissingSensorsReturnImmediatelyWithInvalidNanValues();
+  TestMax31865Pt100Conversion();
   return 0;
 }

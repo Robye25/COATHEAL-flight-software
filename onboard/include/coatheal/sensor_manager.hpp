@@ -53,17 +53,24 @@ class SensorManager {
 
   void NotePullCompleted(int motor_id);
 
+  static double Max31865CodeToResistance(std::uint16_t code,
+                                         double reference_ohm);
+  static bool Pt100TemperatureFromResistance(double resistance_ohm,
+                                             double* temperature_c);
+
  private:
   bool ReadDps310At(int address, double* temp_c, double* pressure_mbar);
   bool ReadAds1115At(int address, double* voltage);
   bool ReadDaq132m(std::vector<double>* temperatures,
                    std::vector<bool>* valid);
+  bool ReadRtdClickMax31865(double* temperature_c, std::string* error);
   SensorSnapshot ReadSimulatedSnapshot(MissionPhase phase,
                                        const std::vector<double>& heater_duty,
                                        double dt_seconds);
   void DpsLoop();
   void AdsLoop();
   void DaqLoop();
+  void RtdClickLoop();
   bool WaitForPoll(int milliseconds);
   std::int64_t AgeMs(
       const std::chrono::steady_clock::time_point& value,
@@ -102,6 +109,7 @@ class SensorManager {
   std::thread dps_thread_;
   std::thread ads_thread_;
   std::thread daq_thread_;
+  std::thread rtd_thread_;
   ScalarCache ambient_temp_cache_;
   ScalarCache pressure_cache_;
   ScalarCache uv_cache_;
@@ -109,12 +117,14 @@ class SensorManager {
   ComponentHealth dps_health_;
   ComponentHealth ads_health_;
   ComponentHealth daq_health_;
+  ComponentHealth rtd_health_;
   int resolved_dps_address_ = -1;
   int resolved_ads_address_ = -1;
   std::string resolved_daq_device_;
   mutable std::mutex dps_io_mu_;
   mutable std::mutex ads_io_mu_;
   mutable std::mutex daq_io_mu_;
+  mutable std::mutex rtd_io_mu_;
 };
 
 }  // namespace coatheal

@@ -116,7 +116,7 @@ struct HardwareConfig {
 struct SensorHardwareConfig {
   bool dps310_enabled = true;
   bool ads1115_enabled = true;
-  bool daq132m_enabled = true;
+  bool daq132m_enabled = false;
   bool dps310_auto_discover = true;
   bool ads1115_auto_discover = true;
   bool daq132m_auto_discover = true;
@@ -124,7 +124,7 @@ struct SensorHardwareConfig {
   int ads1115_poll_ms = 1000;
   int daq132m_poll_ms = 1000;
   int stale_after_ms = 3000;
-  std::string sample_temperature_source = "daq132m_modbus";
+  std::string sample_temperature_source = "rtd_click_max31865";
   std::string daq132m_device = "/dev/ttyUSB0";
   int daq132m_baud = 9600;
   std::string daq132m_parity = "N";
@@ -138,11 +138,15 @@ struct SensorHardwareConfig {
   double daq132m_c_offset = 0.0;
   std::vector<std::size_t> daq132m_enabled_channels;
 
-  bool rtd_click_enabled = false;
+  bool rtd_click_enabled = true;
   std::string rtd_click_spi_device = "/dev/spidev0.0";
   std::size_t rtd_click_cs_line = 7;
   std::size_t rtd_click_drdy_line = 25;
   int rtd_click_wires = 3;
+  std::size_t rtd_click_sample_channel = 0;
+  double rtd_click_reference_ohm = 400.0;
+  int rtd_click_filter_hz = 50;
+  std::uint32_t rtd_click_spi_speed_hz = 500000;
 
   std::string pressure_source = "dps310";
   int dps310_i2c_addr = 0x77;
@@ -160,6 +164,8 @@ struct HeaterOutputConfig {
   std::vector<std::size_t> temperature_channels;
   double pwm_frequency_hz = 10.0;
   bool active_high = true;
+  double debug_max_duty = 0.25;
+  double debug_max_seconds = 10.0;
 };
 
 struct StepperConfig {

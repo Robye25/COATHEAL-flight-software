@@ -91,10 +91,10 @@ where telemetry should be returned.
 | TMC2240 SPI setup | Yes | GPIO-CS SPI mode 3 register writes implemented; bench validation required |
 | STEP/DIR/EN GPIO | Yes | libgpiod pulse backend implemented; bench timing validation required |
 | Heater MOSFET outputs | Yes | zero-safe software PWM implemented; dummy-load validation required |
-| DAQ132M Modbus | Yes | RTU/CRC/scaling implemented; exact register map must be verified |
+| DAQ132M Modbus | Yes | RTU/CRC/scaling implemented; disabled until replacement hardware is available |
 | DPS310 I2C | Yes | compensated `i2c-dev` reads implemented |
 | ADS1115 I2C | Yes | single-ended `i2c-dev` reads implemented |
-| RTD Click | Optional config | Pins reserved; active MAX31865 read path not implemented |
+| RTD Click | Yes | active MAX31865 SPI/libgpiod read path implemented; current bench PT100 source |
 | Resistance instrument | Disabled | Compatibility telemetry field only |
 
 ## Telemetry Shape

@@ -12,7 +12,7 @@ fallback.
 `SystemController`, calls `Initialize`, then `Run`.
 
 ```bash
-./build/onboard/coatheal_onboard --config config/onboard.example.ini
+./build/onboard/coatheal_onboard --config config/onboard.local.ini
 ```
 
 ## Main Loop
@@ -48,7 +48,7 @@ start motor motion. Operators use explicit jog, pull, or `BENDSEQ_*` commands.
 
 | Subsystem | Software model |
 |---|---|
-| Sample temperatures | 8 PT100 channels from DAQ132M over USB-RS485 Modbus |
+| Sample temperatures | Current bench: one PT100 through RTD Click/MAX31865 on `S0`; future DAQ132M path can fill 8 channels |
 | Ambient pressure / temperature | DPS310 over I2C |
 | UV | GUVA-S12SD analog output through ADS1115 over I2C |
 | Heaters | 6 polyimide heaters through EKM014/UCC27524 MOSFET inputs |
@@ -56,9 +56,11 @@ start motor motion. Operators use explicit jog, pull, or `BENDSEQ_*` commands.
 | Resistance | Disabled in final BOM; telemetry field retained for compatibility |
 
 Real backends are implemented for libgpiod heater PWM and STEP/DIR/EN,
-software-CS TMC2240 SPI setup, DPS310 and ADS1115 through Linux `i2c-dev`, and
-DAQ132M Modbus RTU. They still require bench validation against the exact
-boards, wiring, DAQ register map, current limits, and powered loads.
+software-CS TMC2240 SPI setup, RTD Click/MAX31865 through Linux `spidev`,
+DPS310 and ADS1115 through Linux `i2c-dev`, and DAQ132M Modbus RTU. They still
+require bench validation against the exact boards, wiring, current limits, and
+powered loads. DAQ132M remains disabled until replacement Modbus hardware is
+available.
 
 ## Thermal Control
 
@@ -74,9 +76,10 @@ boards, wiring, DAQ register map, current limits, and powered loads.
 | Duty range | `0.0..1.0` |
 
 Manual targets and per-channel PID gains are runtime controls. A duty override
-clears the same channel's target; a target clears its duty override. Invalid
-DAQ132M data forces that heater off even in open-loop duty mode. Fallback keeps
-existing targets and applies the floor controller only to untargeted channels.
+clears the same channel's target; a target clears its duty override. Invalid or
+stale mapped temperature data forces that heater off even in open-loop duty
+mode. Fallback keeps existing targets and applies the floor controller only to
+untargeted channels.
 
 ## Heater Scheduler
 
@@ -94,9 +97,10 @@ telemetry reports `HEATER_INHIBITED`.
 
 ## SensorManager
 
-`SensorManager` runs DPS310, ADS1115, and DAQ132M in separate bounded polling
-threads. The 1 Hz main loop only copies the thread-safe cache, so missing or
-timed-out sensors cannot delay commands, logging, or telemetry.
+`SensorManager` runs DPS310, ADS1115, RTD Click, and DAQ132M when enabled in
+separate bounded polling threads. The 1 Hz main loop only copies the
+thread-safe cache, so missing or timed-out sensors cannot delay commands,
+logging, or telemetry.
 
 `SensorManager` returns `SensorSnapshot`:
 
@@ -105,7 +109,7 @@ timed-out sensors cannot delay commands, logging, or telemetry.
 | `ambient_temp_c` | DPS310 |
 | `ambient_pressure_mbar` | DPS310 |
 | `uv` | GUVA-S12SD through ADS1115 |
-| `sample_temps_c` | 8 DAQ132M PT100 channels |
+| `sample_temps_c` | RTD Click sample plus any enabled DAQ132M PT100 channels |
 | `sample_resistance_ohm` | Disabled final-BOM compatibility vector |
 
 Simulation is used only when `runtime.use_simulated_sensors=true`. Real mode

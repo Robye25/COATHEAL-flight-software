@@ -9,6 +9,7 @@
 #include <thread>
 
 #include "coatheal/hal/gpio_output.hpp"
+#include "coatheal/hal/spi_bus_lock.hpp"
 
 #if defined(__linux__) && __has_include(<linux/spi/spidev.h>)
 #  define COATHEAL_HAS_SPIDEV 1
@@ -241,6 +242,7 @@ bool Tmc2240Driver::Transfer(const std::uint8_t tx[5],
                              std::uint8_t rx[5]) {
 #if COATHEAL_HAS_SPIDEV && defined(COATHEAL_HAS_LIBGPIOD)
   if (spi_fd_ < 0 || !gpio_healthy_ || cs_handle_ == nullptr) return false;
+  std::lock_guard<std::mutex> bus_lock(SpiBusMutex(cfg_.spi_device));
   struct spi_ioc_transfer xfer {};
   xfer.tx_buf = reinterpret_cast<__u64>(tx);
   xfer.rx_buf = reinterpret_cast<__u64>(rx);

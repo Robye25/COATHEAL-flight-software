@@ -127,6 +127,7 @@ void TestHealthMetadataSerialization() {
   r.sensors.dps310.state = ComponentState::kFailed;
   r.sensors.ads1115.state = ComponentState::kOk;
   r.sensors.daq132m.state = ComponentState::kDegraded;
+  r.sensors.rtd_click.state = ComponentState::kOk;
   r.pwm_state = ComponentState::kDegraded;
   StepperStatus m0;
   m0.healthy = true;
@@ -136,7 +137,7 @@ void TestHealthMetadataSerialization() {
   const std::string line = SerializeTelemetryDataFrame(r, "sess-health");
   assert(Contains(line, "SENSOR_VALID=AT:0|AP:1|UV:1|S0:0|S1:1"));
   assert(Contains(line, "SENSOR_AGE_MS=AT:-1|AP:-1|UV:-1|S0:-1|S1:125"));
-  assert(Contains(line, "COMPONENT_STATE=DPS310:FAILED|ADS1115:OK|DAQ132M:DEGRADED"));
+  assert(Contains(line, "COMPONENT_STATE=DPS310:FAILED|ADS1115:OK|DAQ132M:DEGRADED|RTD_CLICK:OK"));
   assert(Contains(line, "|MOTOR0:OK|MOTOR1:FAILED|PWM:DEGRADED"));
   assert(Contains(line, "|missed:3|"));
 }

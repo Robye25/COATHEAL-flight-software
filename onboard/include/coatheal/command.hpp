@@ -23,6 +23,7 @@ enum class CommandType {
   kDisarmDebug,
   kSetHeaterDuty,
   kSetAllDuty,
+  kHeaterTest,
   kSetPid,
   kSetTempTarget,
   kSetAllTempTargets,

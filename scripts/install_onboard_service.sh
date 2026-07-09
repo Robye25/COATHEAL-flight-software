@@ -5,7 +5,13 @@ set -euo pipefail
 # the deploy/ tree. Idempotent: safe to re-run.
 
 PROJECT_DIR="${1:-/bexus/code/coatheal}"
-CONFIG_PATH="${2:-$PROJECT_DIR/config/onboard.example.ini}"
+if [[ $# -ge 2 ]]; then
+  CONFIG_PATH="$2"
+elif [[ -f "$PROJECT_DIR/config/onboard.local.ini" ]]; then
+  CONFIG_PATH="$PROJECT_DIR/config/onboard.local.ini"
+else
+  CONFIG_PATH="$PROJECT_DIR/config/onboard.example.ini"
+fi
 DEPLOY_DIR="$PROJECT_DIR/deploy"
 SYSTEMD_DIR="/etc/systemd/system"
 BINARY_PATH="$PROJECT_DIR/build/onboard/coatheal_onboard"

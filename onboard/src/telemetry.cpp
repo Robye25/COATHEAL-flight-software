@@ -109,6 +109,7 @@ std::string SerializeTelemetryDataFrame(const TelemetryRecord& record,
   oss << ",COMPONENT_STATE=DPS310:" << ToString(record.sensors.dps310.state)
       << "|ADS1115:" << ToString(record.sensors.ads1115.state)
       << "|DAQ132M:" << ToString(record.sensors.daq132m.state)
+      << "|RTD_CLICK:" << ToString(record.sensors.rtd_click.state)
       << "|MOTOR0:" << (motor0_ok ? "OK" : "FAILED")
       << "|MOTOR1:" << (motor1_ok ? "OK" : "FAILED")
       << "|PWM:" << ToString(record.pwm_state);
