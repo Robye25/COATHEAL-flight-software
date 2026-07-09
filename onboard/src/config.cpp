@@ -386,6 +386,16 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
       if (!parse_size_t(key, value, &config->sensors.rtd_click_drdy_line, line_no)) return false;
     } else if (key == "sensor.rtd_click_wires") {
       if (!parse_int(key, value, &config->sensors.rtd_click_wires, line_no)) return false;
+    } else if (key == "sensor.rtd_click_sample_channel") {
+      if (!parse_size_t(key, value, &config->sensors.rtd_click_sample_channel, line_no)) return false;
+    } else if (key == "sensor.rtd_click_reference_ohm") {
+      if (!parse_double(key, value, &config->sensors.rtd_click_reference_ohm, line_no)) return false;
+    } else if (key == "sensor.rtd_click_filter_hz") {
+      if (!parse_int(key, value, &config->sensors.rtd_click_filter_hz, line_no)) return false;
+    } else if (key == "sensor.rtd_click_spi_speed_hz") {
+      int speed = 0;
+      if (!parse_int(key, value, &speed, line_no)) return false;
+      config->sensors.rtd_click_spi_speed_hz = static_cast<std::uint32_t>(speed);
     } else if (key == "sensor.pressure_source") {
       config->sensors.pressure_source = value;
     } else if (key == "sensor.dps310_i2c_addr") {
@@ -418,6 +428,10 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
       if (!parse_double(key, value, &config->heaters.pwm_frequency_hz, line_no)) return false;
     } else if (key == "heater.active_high") {
       if (!parse_bool(key, value, &config->heaters.active_high, line_no)) return false;
+    } else if (key == "heater.debug_max_duty") {
+      if (!parse_double(key, value, &config->heaters.debug_max_duty, line_no)) return false;
+    } else if (key == "heater.debug_max_seconds") {
+      if (!parse_double(key, value, &config->heaters.debug_max_seconds, line_no)) return false;
 
     } else if (key == "hal.status_led_enabled") {
       if (!parse_bool(key, value, &config->hal.status_led_enabled, line_no)) return false;
@@ -642,11 +656,14 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
     return false;
   }
 
-  if (config->sensors.sample_temperature_source != "daq132m_modbus" ||
+  const bool sample_source_ok =
+      config->sensors.sample_temperature_source == "daq132m_modbus" ||
+      config->sensors.sample_temperature_source == "rtd_click_max31865";
+  if (!sample_source_ok ||
       config->sensors.pressure_source != "dps310" ||
       config->sensors.uv_source != "guva_s12sd_ads1115") {
     if (error != nullptr) {
-      *error = "sensor sources must match the Rev C final BOM";
+      *error = "sensor sources must match Rev C supported hardware";
     }
     return false;
   }
@@ -675,6 +692,40 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
   if (config->sensors.rtd_click_wires < 2 || config->sensors.rtd_click_wires > 4) {
     if (error != nullptr) {
       *error = "sensor.rtd_click_wires must be 2, 3, or 4";
+    }
+    return false;
+  }
+  if (config->sensors.rtd_click_sample_channel >= config->hardware.sample_count ||
+      config->sensors.rtd_click_reference_ohm <= 0.0 ||
+      (config->sensors.rtd_click_filter_hz != 50 &&
+       config->sensors.rtd_click_filter_hz != 60) ||
+      config->sensors.rtd_click_spi_speed_hz == 0U ||
+      config->sensors.rtd_click_spi_speed_hz > 5000000U) {
+    if (error != nullptr) {
+      *error = "invalid RTD Click configuration";
+    }
+    return false;
+  }
+  if (config->sensors.sample_temperature_source == "rtd_click_max31865" &&
+      !config->sensors.rtd_click_enabled) {
+    if (error != nullptr) {
+      *error = "sensor.rtd_click_enabled must be true for rtd_click_max31865";
+    }
+    return false;
+  }
+  if (config->sensors.sample_temperature_source == "daq132m_modbus" &&
+      !config->sensors.daq132m_enabled) {
+    if (error != nullptr) {
+      *error = "sensor.daq132m_enabled must be true for daq132m_modbus";
+    }
+    return false;
+  }
+  if (config->heaters.debug_max_duty < 0.0 ||
+      config->heaters.debug_max_duty > 1.0 ||
+      config->heaters.debug_max_seconds <= 0.0 ||
+      config->heaters.debug_max_seconds > 60.0) {
+    if (error != nullptr) {
+      *error = "invalid heater debug limits";
     }
     return false;
   }

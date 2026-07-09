@@ -54,7 +54,7 @@ at load time.
 
 | Key | Default | Description |
 |---|---:|---|
-| `hardware.sample_count` | `8` | XF-931-FAR PT100 sample channels on DAQ132M. |
+| `hardware.sample_count` | `8` | Software sample channels. Current bench uses RTD Click on `S0`; DAQ132M can later fill all eight. |
 | `hardware.heater_count` | `6` | Polyimide heater channels, samples 0-5. |
 | `hardware.electronics_heater_index` | `SIZE_MAX` | Optional box heater; omitted for final BOM. |
 
@@ -62,8 +62,8 @@ at load time.
 
 | Key | Default | Description |
 |---|---:|---|
-| `sensor.sample_temperature_source` | `daq132m_modbus` | Primary PT100 acquisition path. |
-| `sensor.dps310_enabled`, `ads1115_enabled`, `daq132m_enabled` | `true` | Enable each independent polling worker. |
+| `sensor.sample_temperature_source` | `rtd_click_max31865` | Current PT100 acquisition path. `daq132m_modbus` remains available later. |
+| `sensor.dps310_enabled`, `ads1115_enabled`, `daq132m_enabled` | `true`, `true`, `false` | Enable each independent polling worker. |
 | `sensor.dps310_auto_discover`, `ads1115_auto_discover`, `daq132m_auto_discover` | `true` | Try only the safe address/path alternatives documented in the bring-up guide. |
 | `sensor.dps310_poll_ms`, `ads1115_poll_ms`, `daq132m_poll_ms` | `1000` | Independent worker polling intervals. |
 | `sensor.stale_after_ms` | `3000` | Age after which a last-good failed reading is `STALE`. |
@@ -78,10 +78,14 @@ at load time.
 | `sensor.daq132m_c_per_count` | `0.1` | Temperature scale; verify against DAQ132M manual. |
 | `sensor.daq132m_c_offset` | `0.0` | Temperature offset applied after scaling. |
 | `sensor.daq132m_enabled_channels` | `0..7` | Zero-based channels expected to be connected. Physical channel 2 is software `S1`. |
-| `sensor.rtd_click_enabled` | `false` | Optional MIKROE-2815/MAX31865 bench path. |
+| `sensor.rtd_click_enabled` | `true` | Current MIKROE-2815/MAX31865 bench path. |
 | `sensor.rtd_click_spi_device` | `/dev/spidev0.0` | RTD Click SPI path if enabled. |
 | `sensor.rtd_click_cs_line` / `drdy_line` | `7` / `25` | RTD Click CS and DRDY GPIO. |
 | `sensor.rtd_click_wires` | `3` | PT100 wire mode; must be 2, 3, or 4. |
+| `sensor.rtd_click_sample_channel` | `0` | Software sample channel populated by RTD Click. |
+| `sensor.rtd_click_reference_ohm` | `400.0` | MAX31865 reference resistor value used for PT100 conversion. |
+| `sensor.rtd_click_filter_hz` | `50` | MAX31865 mains filter, `50` or `60`. |
+| `sensor.rtd_click_spi_speed_hz` | `500000` | RTD Click SPI speed. |
 | `sensor.pressure_source` | `dps310` | Final pressure/ambient-T source. |
 | `sensor.dps310_i2c_addr` | `0x77` | DPS310 I2C address. |
 | `sensor.uv_source` | `guva_s12sd_ads1115` | Final UV path. |
@@ -101,6 +105,8 @@ at load time.
 | `heater.temperature_channels` | `0,1,2,3,4,5` | DAQ sample supplying feedback for H0..H5. |
 | `heater.pwm_frequency_hz` | `10.0` | Requested heater PWM frequency. |
 | `heater.active_high` | `true` | MOSFET input polarity. |
+| `heater.debug_max_duty` | `0.25` | Bench-only maximum `HEATER_TEST` duty. |
+| `heater.debug_max_seconds` | `10.0` | Bench-only maximum `HEATER_TEST` duration. |
 
 ## Power
 

@@ -66,6 +66,8 @@ std::string CommandTypeToString(CommandType type) {
       return "SET_HEATER_DUTY";
     case CommandType::kSetAllDuty:
       return "SET_ALL_DUTY";
+    case CommandType::kHeaterTest:
+      return "HEATER_TEST";
     case CommandType::kSetPid:
       return "SET_PID";
     case CommandType::kSetTempTarget:
@@ -193,6 +195,7 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
       {"DISARM_DEBUG", CommandType::kDisarmDebug},
       {"SET_HEATER_DUTY", CommandType::kSetHeaterDuty},
       {"SET_ALL_DUTY", CommandType::kSetAllDuty},
+      {"HEATER_TEST", CommandType::kHeaterTest},
       {"SET_PID", CommandType::kSetPid},
       {"SET_TEMP_TARGET", CommandType::kSetTempTarget},
       {"SET_ALL_TEMP_TARGETS", CommandType::kSetAllTempTargets},
@@ -388,6 +391,11 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
       break;
     case CommandType::kSetAllDuty:
       if (!require_args(1)) {
+        return result;
+      }
+      break;
+    case CommandType::kHeaterTest:
+      if (!require_args(3)) {
         return result;
       }
       break;

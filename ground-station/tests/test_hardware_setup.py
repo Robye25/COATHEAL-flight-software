@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import argparse
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -33,6 +35,14 @@ class HardwareSetupTests(unittest.TestCase):
         errors = hardware_setup.validate_candidate(broken)
         self.assertTrue(
             any("/dev/gpiochip0 line 17" in error for error in errors))
+
+    def test_validate_candidate_detects_rtd_drdy_conflict(self) -> None:
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        broken = hardware_setup.replace_ini(
+            source, {"sensor.rtd_click_drdy_line": "17"})
+        errors = hardware_setup.validate_candidate(broken)
+        self.assertTrue(
+            any("sensor.rtd_click_drdy_line" in error for error in errors))
 
     def test_same_line_on_different_gpio_chips_is_valid(self) -> None:
         source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
@@ -69,6 +79,44 @@ class HardwareSetupTests(unittest.TestCase):
     def test_example_configuration_mappings_are_valid(self) -> None:
         source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
         self.assertEqual(hardware_setup.validate_candidate(source), [])
+
+    def test_migrate_config_removes_stale_keys_and_forces_rtd_tmc2240(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old_path = root / "onboard.ini"
+            new_path = root / "onboard.local.ini"
+            old_text = hardware_setup.replace_ini(
+                hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8"),
+                {
+                    "motor0.driver": "tmc5160",
+                    "motor1.driver": "tmc5160",
+                    "sensor.sample_temperature_source": "daq132m_modbus",
+                    "sensor.daq132m_enabled": "true",
+                    "sensor.rtd_click_enabled": "false",
+                },
+            )
+            old_text += "stepper.microstep=16\nmotor0.sense_resistor=0.075\n"
+            old_path.write_text(old_text, encoding="utf-8")
+
+            rc = hardware_setup.migrate_config(argparse.Namespace(
+                config=new_path,
+                migrate_from=old_path,
+                yes=True,
+            ))
+            self.assertEqual(rc, 0)
+            migrated = new_path.read_text(encoding="utf-8")
+            values = hardware_setup._ini_values(migrated)
+            self.assertEqual(values["motor0.driver"], "tmc2240")
+            self.assertEqual(values["motor1.driver"], "tmc2240")
+            self.assertEqual(
+                values["sensor.sample_temperature_source"],
+                "rtd_click_max31865",
+            )
+            self.assertEqual(values["sensor.daq132m_enabled"], "false")
+            self.assertEqual(values["sensor.rtd_click_enabled"], "true")
+            self.assertNotIn("stepper.microstep=", migrated)
+            self.assertNotIn("motor0.sense_resistor=", migrated)
+            self.assertTrue(list(root.glob("onboard.ini.bak.*")))
 
 
 if __name__ == "__main__":

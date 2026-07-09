@@ -15,4 +15,9 @@ GpioOutput* RequestGpioOutput(const std::string& chip_path,
 bool SetGpioOutput(GpioOutput* output, bool value);
 void ReleaseGpioOutput(GpioOutput* output);
 
+bool ReadGpioInputOnce(const std::string& chip_path,
+                       std::size_t offset,
+                       const char* consumer,
+                       bool* value);
+
 }  // namespace coatheal

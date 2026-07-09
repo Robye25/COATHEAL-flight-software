@@ -119,6 +119,31 @@ bool TelemetryQueue::Acknowledge(const std::string& session_id,
   return true;
 }
 
+bool TelemetryQueue::AcknowledgeExact(const QueuedTelemetryFrame& frame,
+                                      std::string* error) {
+  std::lock_guard<std::mutex> lock(mu_);
+
+  auto remove_from = std::remove_if(frames_.begin(),
+                                    frames_.end(),
+                                    [&](const QueuedTelemetryFrame& pending) {
+                                      return pending.session_id == frame.session_id &&
+                                             pending.seq == frame.seq &&
+                                             pending.frame == frame.frame;
+                                    });
+  if (remove_from == frames_.end()) {
+    return true;
+  }
+
+  frames_.erase(remove_from, frames_.end());
+  RetryPersistenceLocked();
+  if (!persistence_enabled_) return true;
+  if (!PersistLocked(error)) {
+    persistence_enabled_ = false;
+    return true;
+  }
+  return true;
+}
+
 std::vector<QueuedTelemetryFrame> TelemetryQueue::PendingFrames() const {
   std::lock_guard<std::mutex> lock(mu_);
   return frames_;

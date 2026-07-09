@@ -56,7 +56,7 @@ HEALTH_DATA = (
     "SENSOR_VALID=AT:0|AP:1|UV:0|S0:0|S1:1|S2:0|S3:0|S4:0|S5:0|S6:0|S7:0,"
     "SENSOR_AGE_MS=AT:-1|AP:20|UV:-1|S0:-1|S1:125|S2:-1|S3:-1|S4:-1|S5:-1|S6:-1|S7:-1,"
     "COMPONENT_STATE=DPS310:DEGRADED|ADS1115:FAILED|DAQ132M:DEGRADED|"
-    "MOTOR0:OK|MOTOR1:FAILED|PWM:DEGRADED"
+    "RTD_CLICK:OK|MOTOR0:OK|MOTOR1:FAILED|PWM:DEGRADED"
 )
 
 
@@ -158,6 +158,7 @@ class DataFrameTests(unittest.TestCase):
         self.assertTrue(pkt.sensor_valid["S1"])
         self.assertEqual(pkt.sensor_age_ms["S1"], 125)
         self.assertEqual(pkt.component_state["DAQ132M"], "DEGRADED")
+        self.assertEqual(pkt.component_state["RTD_CLICK"], "OK")
         self.assertEqual(pkt.component_state["PWM"], "DEGRADED")
         self.assertTrue(math.isnan(pkt.sample_temps_c[0]))
         self.assertAlmostEqual(pkt.sample_temps_c[1], 21.5)

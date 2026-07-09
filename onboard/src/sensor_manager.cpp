@@ -13,6 +13,9 @@
 #include <sstream>
 #include <thread>
 
+#include "coatheal/hal/gpio_output.hpp"
+#include "coatheal/hal/spi_bus_lock.hpp"
+
 #if defined(__linux__) && __has_include(<linux/i2c-dev.h>)
 #define COATHEAL_HAS_LINUX_SENSOR_IO 1
 #include <fcntl.h>
@@ -24,6 +27,16 @@
 #define COATHEAL_HAS_LINUX_SENSOR_IO 0
 #endif
 
+#if defined(__linux__) && __has_include(<linux/spi/spidev.h>)
+#define COATHEAL_HAS_MAX31865_IO 1
+#include <fcntl.h>
+#include <linux/spi/spidev.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+#else
+#define COATHEAL_HAS_MAX31865_IO 0
+#endif
+
 namespace coatheal {
 namespace {
 
@@ -31,6 +44,19 @@ constexpr double kInitialResistanceOhm = 100.0;
 constexpr double kResistanceDecayPerPull = 0.05;
 constexpr const char* kI2cDevice = "/dev/i2c-1";
 constexpr double kNoReading = std::numeric_limits<double>::quiet_NaN();
+constexpr double kPt100R0Ohm = 100.0;
+constexpr double kCvdA = 3.90830e-3;
+constexpr double kCvdB = -5.77500e-7;
+constexpr double kCvdC = -4.18301e-12;
+
+double Pt100ResistanceAt(double temp_c) {
+  if (temp_c >= 0.0) {
+    return kPt100R0Ohm * (1.0 + kCvdA * temp_c + kCvdB * temp_c * temp_c);
+  }
+  return kPt100R0Ohm *
+         (1.0 + kCvdA * temp_c + kCvdB * temp_c * temp_c +
+          kCvdC * (temp_c - 100.0) * temp_c * temp_c * temp_c);
+}
 
 std::int32_t SignExtend(std::uint32_t value, int bits) {
   const std::uint32_t sign = 1U << (bits - 1);
@@ -152,6 +178,10 @@ SensorManager::SensorManager(const OnboardConfig& config,
   daq_health_.state = config_.sensors.daq132m_enabled
                           ? ComponentState::kDiscovering
                           : ComponentState::kDisabled;
+  rtd_health_.state = config_.sensors.rtd_click_enabled
+                          ? ComponentState::kDiscovering
+                          : ComponentState::kDisabled;
+  rs485_ok_ = !config_.sensors.daq132m_enabled;
 }
 
 SensorManager::~SensorManager() { Stop(); }
@@ -167,6 +197,9 @@ void SensorManager::Start() {
   if (config_.sensors.daq132m_enabled) {
     daq_thread_ = std::thread(&SensorManager::DaqLoop, this);
   }
+  if (config_.sensors.rtd_click_enabled) {
+    rtd_thread_ = std::thread(&SensorManager::RtdClickLoop, this);
+  }
 }
 
 void SensorManager::Stop() {
@@ -175,6 +208,7 @@ void SensorManager::Stop() {
   if (dps_thread_.joinable()) dps_thread_.join();
   if (ads_thread_.joinable()) ads_thread_.join();
   if (daq_thread_.joinable()) daq_thread_.join();
+  if (rtd_thread_.joinable()) rtd_thread_.join();
 }
 
 bool SensorManager::WaitForPoll(int milliseconds) {
@@ -462,6 +496,178 @@ bool SensorManager::ReadDaq132m(std::vector<double>* temperatures,
 #endif
 }
 
+double SensorManager::Max31865CodeToResistance(std::uint16_t code,
+                                               double reference_ohm) {
+  return static_cast<double>(code & 0x7FFFU) * reference_ohm / 32768.0;
+}
+
+bool SensorManager::Pt100TemperatureFromResistance(double resistance_ohm,
+                                                   double* temperature_c) {
+  if (temperature_c == nullptr || !std::isfinite(resistance_ohm) ||
+      resistance_ohm <= 0.0) {
+    return false;
+  }
+  constexpr double kMinTemp = -200.0;
+  constexpr double kMaxTemp = 850.0;
+  const double min_r = Pt100ResistanceAt(kMinTemp);
+  const double max_r = Pt100ResistanceAt(kMaxTemp);
+  if (resistance_ohm < min_r || resistance_ohm > max_r) {
+    return false;
+  }
+  double lo = kMinTemp;
+  double hi = kMaxTemp;
+  for (int i = 0; i < 64; ++i) {
+    const double mid = (lo + hi) * 0.5;
+    if (Pt100ResistanceAt(mid) < resistance_ohm) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+  *temperature_c = (lo + hi) * 0.5;
+  return std::isfinite(*temperature_c);
+}
+
+bool SensorManager::ReadRtdClickMax31865(double* temperature_c,
+                                         std::string* error) {
+  if (temperature_c == nullptr) return false;
+#if COATHEAL_HAS_MAX31865_IO && defined(COATHEAL_HAS_LIBGPIOD)
+  const int fd = ::open(config_.sensors.rtd_click_spi_device.c_str(), O_RDWR);
+  if (fd < 0) {
+    if (error != nullptr) *error = "SPI_OPEN_FAILED";
+    return false;
+  }
+
+  std::uint8_t mode = SPI_MODE_3 | SPI_NO_CS;
+  std::uint8_t bits = 8;
+  std::uint32_t speed = config_.sensors.rtd_click_spi_speed_hz;
+  if (::ioctl(fd, SPI_IOC_WR_MODE, &mode) < 0 ||
+      ::ioctl(fd, SPI_IOC_WR_BITS_PER_WORD, &bits) < 0 ||
+      ::ioctl(fd, SPI_IOC_WR_MAX_SPEED_HZ, &speed) < 0) {
+    ::close(fd);
+    if (error != nullptr) *error = "SPI_CONFIG_FAILED";
+    return false;
+  }
+
+  GpioOutput* cs = RequestGpioOutput(
+      config_.runtime.gpio_chip, config_.sensors.rtd_click_cs_line,
+      "coatheal-rtd-cs", true);
+  if (cs == nullptr) {
+    ::close(fd);
+    if (error != nullptr) *error = "CS_GPIO_FAILED";
+    return false;
+  }
+
+  auto finish = [&]() {
+    SetGpioOutput(cs, true);
+    ReleaseGpioOutput(cs);
+    ::close(fd);
+  };
+
+  auto transfer = [&](std::uint8_t* tx, std::uint8_t* rx,
+                      std::size_t size) -> bool {
+    std::lock_guard<std::mutex> bus_lock(
+        SpiBusMutex(config_.sensors.rtd_click_spi_device));
+    struct spi_ioc_transfer xfer {};
+    xfer.tx_buf = reinterpret_cast<__u64>(tx);
+    xfer.rx_buf = reinterpret_cast<__u64>(rx);
+    xfer.len = static_cast<__u32>(size);
+    xfer.speed_hz = config_.sensors.rtd_click_spi_speed_hz;
+    xfer.bits_per_word = 8;
+    if (!SetGpioOutput(cs, false)) return false;
+    const int rc = ::ioctl(fd, SPI_IOC_MESSAGE(1), &xfer);
+    const bool released = SetGpioOutput(cs, true);
+    return rc >= 0 && released;
+  };
+
+  auto write_reg = [&](std::uint8_t reg, std::uint8_t value) -> bool {
+    std::uint8_t tx[2] = {static_cast<std::uint8_t>(reg | 0x80U), value};
+    std::uint8_t rx[2] = {0, 0};
+    return transfer(tx, rx, sizeof(tx));
+  };
+
+  auto read_regs = [&](std::uint8_t reg, std::uint8_t* values,
+                       std::size_t count) -> bool {
+    std::vector<std::uint8_t> tx(count + 1, 0);
+    std::vector<std::uint8_t> rx(count + 1, 0);
+    tx[0] = static_cast<std::uint8_t>(reg & 0x7FU);
+    if (!transfer(tx.data(), rx.data(), tx.size())) return false;
+    std::copy(rx.begin() + 1, rx.end(), values);
+    return true;
+  };
+
+  const std::uint8_t wire_bit =
+      config_.sensors.rtd_click_wires == 3 ? 0x10U : 0x00U;
+  const std::uint8_t filter_bit =
+      config_.sensors.rtd_click_filter_hz == 50 ? 0x01U : 0x00U;
+  const std::uint8_t base_cfg = static_cast<std::uint8_t>(wire_bit | filter_bit);
+
+  bool ok = write_reg(0x00, static_cast<std::uint8_t>(0x80U | base_cfg | 0x02U));
+  std::this_thread::sleep_for(std::chrono::milliseconds(12));
+  ok = write_reg(0x00, static_cast<std::uint8_t>(0x80U | base_cfg | 0x20U)) && ok;
+  if (!ok) {
+    finish();
+    if (error != nullptr) *error = "CONFIG_WRITE_FAILED";
+    return false;
+  }
+
+  const auto deadline = std::chrono::steady_clock::now() +
+      std::chrono::milliseconds(config_.sensors.rtd_click_filter_hz == 50 ? 80 : 70);
+  bool drdy_seen = false;
+  while (std::chrono::steady_clock::now() < deadline) {
+    bool drdy_high = true;
+    if (ReadGpioInputOnce(config_.runtime.gpio_chip,
+                          config_.sensors.rtd_click_drdy_line,
+                          "coatheal-rtd-drdy", &drdy_high)) {
+      if (!drdy_high) {
+        drdy_seen = true;
+        break;
+      }
+    } else {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  if (!drdy_seen) {
+    std::this_thread::sleep_until(deadline);
+  }
+
+  std::uint8_t raw[2] = {0, 0};
+  std::uint8_t fault = 0;
+  ok = read_regs(0x01, raw, sizeof(raw));
+  ok = read_regs(0x07, &fault, 1) && ok;
+  write_reg(0x00, base_cfg);
+  finish();
+  if (!ok) {
+    if (error != nullptr) *error = "DATA_READ_FAILED";
+    return false;
+  }
+  const std::uint16_t raw16 =
+      static_cast<std::uint16_t>((static_cast<std::uint16_t>(raw[0]) << 8U) |
+                                 raw[1]);
+  if ((raw16 & 0x0001U) != 0U || fault != 0U) {
+    if (error != nullptr) {
+      std::ostringstream oss;
+      oss << "FAULT_0x" << std::hex << static_cast<int>(fault);
+      *error = oss.str();
+    }
+    return false;
+  }
+  const std::uint16_t code = static_cast<std::uint16_t>(raw16 >> 1U);
+  const double resistance =
+      Max31865CodeToResistance(code, config_.sensors.rtd_click_reference_ohm);
+  if (!Pt100TemperatureFromResistance(resistance, temperature_c)) {
+    if (error != nullptr) *error = "TEMPERATURE_RANGE";
+    return false;
+  }
+  return *temperature_c >= -250.0 && *temperature_c <= 850.0;
+#else
+  (void)temperature_c;
+  if (error != nullptr) *error = "SPI_OR_GPIO_UNAVAILABLE";
+  return false;
+#endif
+}
+
 void SensorManager::DpsLoop() {
   while (running_.load()) {
     double temp = 0.0;
@@ -622,7 +828,57 @@ void SensorManager::DaqLoop() {
         daq_health_.last_success_age_ms = AgeMs(newest, any_previous);
       }
       rs485_ok_ = ok;
-      sample_temp_ok_ = valid_count > 0;
+      sample_temp_ok_ = std::any_of(
+          sample_cache_.begin(), sample_cache_.end(),
+          [this](const ScalarCache& sample) {
+            const std::int64_t age =
+                AgeMs(sample.last_success, sample.has_value);
+            return sample.valid && age >= 0 &&
+                   age < config_.sensors.stale_after_ms;
+          });
+    }
+    if (WaitForPoll(config_.sensors.daq132m_poll_ms)) break;
+  }
+}
+
+void SensorManager::RtdClickLoop() {
+  while (running_.load()) {
+    double temp = 0.0;
+    std::string error = "NO_RESPONSE";
+    bool ok = false;
+    {
+      std::lock_guard<std::mutex> io_lock(rtd_io_mu_);
+      ok = ReadRtdClickMax31865(&temp, &error);
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    {
+      std::lock_guard<std::mutex> lock(cache_mu_);
+      const std::size_t channel = config_.sensors.rtd_click_sample_channel;
+      if (ok && channel < sample_cache_.size()) {
+        sample_cache_[channel] = {temp, true, true, now};
+        rtd_health_ = {ComponentState::kOk, "NONE", 0};
+      } else {
+        if (channel < sample_cache_.size()) {
+          sample_cache_[channel].valid = false;
+        }
+        const bool has_success =
+            channel < sample_cache_.size() && sample_cache_[channel].has_value;
+        const auto last_success =
+            has_success ? sample_cache_[channel].last_success
+                        : std::chrono::steady_clock::time_point{};
+        rtd_health_.state = FailedState(has_success, last_success);
+        rtd_health_.error = error.empty() ? "NO_RESPONSE" : error;
+        rtd_health_.last_success_age_ms = AgeMs(last_success, has_success);
+      }
+      sample_temp_ok_ = std::any_of(
+          sample_cache_.begin(), sample_cache_.end(),
+          [this](const ScalarCache& sample) {
+            const std::int64_t age =
+                AgeMs(sample.last_success, sample.has_value);
+            return sample.valid && age >= 0 &&
+                   age < config_.sensors.stale_after_ms;
+          });
     }
     if (WaitForPoll(config_.sensors.daq132m_poll_ms)) break;
   }
@@ -670,6 +926,7 @@ SensorSnapshot SensorManager::ReadSimulatedSnapshot(
   snapshot.dps310 = {ComponentState::kOk, "SIMULATED", 0};
   snapshot.ads1115 = {ComponentState::kOk, "SIMULATED", 0};
   snapshot.daq132m = {ComponentState::kOk, "SIMULATED", 0};
+  snapshot.rtd_click = {ComponentState::kOk, "SIMULATED", 0};
   snapshot.simulated = true;
   i2c_ok_ = rs485_ok_ = sample_temp_ok_ = uv_ok_ = true;
   return snapshot;
@@ -733,6 +990,7 @@ SensorSnapshot SensorManager::ReadSnapshot(
     snapshot.dps310 = dps_health_;
     snapshot.ads1115 = ads_health_;
     snapshot.daq132m = daq_health_;
+    snapshot.rtd_click = rtd_health_;
     snapshot.dps310.last_success_age_ms =
         snapshot.ambient_temp_age_ms;
     snapshot.ads1115.last_success_age_ms = snapshot.uv_age_ms;
@@ -750,6 +1008,20 @@ SensorSnapshot SensorManager::ReadSnapshot(
           snapshot.uv_age_ms >= config_.sensors.stale_after_ms
               ? ComponentState::kStale
               : ComponentState::kDegraded;
+    }
+    const std::size_t rtd_channel = config_.sensors.rtd_click_sample_channel;
+    if (rtd_channel < sample_cache_.size()) {
+      snapshot.rtd_click.last_success_age_ms =
+          snapshot.sample_temp_age_ms[rtd_channel];
+      if (config_.sensors.rtd_click_enabled &&
+          sample_cache_[rtd_channel].has_value &&
+          !snapshot.sample_temp_valid[rtd_channel]) {
+        snapshot.rtd_click.state =
+            snapshot.sample_temp_age_ms[rtd_channel] >=
+                    config_.sensors.stale_after_ms
+                ? ComponentState::kStale
+                : ComponentState::kDegraded;
+      }
     }
     std::size_t enabled_with_value = 0;
     std::size_t fresh_enabled = 0;
@@ -782,12 +1054,16 @@ SensorSnapshot SensorManager::ReadSnapshot(
                 : ComponentState::kDegraded;
       }
     }
+    const bool any_fresh_sample =
+        std::any_of(snapshot.sample_temp_valid.begin(),
+                    snapshot.sample_temp_valid.end(),
+                    [](bool valid) { return valid; });
     i2c_ok_ =
         (!config_.sensors.dps310_enabled ||
          (snapshot.ambient_temp_valid && snapshot.ambient_pressure_valid)) &&
         (!config_.sensors.ads1115_enabled || snapshot.uv_valid);
     uv_ok_ = snapshot.uv_valid;
-    sample_temp_ok_ = fresh_enabled > 0;
+    sample_temp_ok_ = any_fresh_sample;
   }
 
   if (config_.sensors.resistance_source == "disabled") {
@@ -886,12 +1162,22 @@ bool SensorManager::ActiveCheck(const std::string& component,
 #endif
   };
 
+  auto check_rtd = [&]() {
+    if (!config_.sensors.rtd_click_enabled) return true;
+    double temp = 0.0;
+    std::string rtd_error;
+    std::lock_guard<std::mutex> lock(rtd_io_mu_);
+    return ReadRtdClickMax31865(&temp, &rtd_error);
+  };
+
   const bool dps_requested = component == "ALL" || component == "DPS310";
   const bool ads_requested = component == "ALL" || component == "ADS1115";
   const bool daq_requested = component == "ALL" || component == "DAQ132M";
+  const bool rtd_requested = component == "ALL" || component == "RTD_CLICK";
   const bool dps_ok = !dps_requested || check_dps();
   const bool ads_ok = !ads_requested || check_ads();
   const bool daq_ok = !daq_requested || check_daq();
+  const bool rtd_ok = !rtd_requested || check_rtd();
   if (details != nullptr) {
     std::ostringstream oss;
     oss << "dps310=" << (!dps_requested ? "SKIPPED"
@@ -899,16 +1185,20 @@ bool SensorManager::ActiveCheck(const std::string& component,
         << ";ads1115=" << (!ads_requested ? "SKIPPED"
                                           : (ads_ok ? "OK" : "FAIL"))
         << ";daq132m=" << (!daq_requested ? "SKIPPED"
-                                          : (daq_ok ? "OK" : "FAIL"));
+                                          : (daq_ok ? "OK" : "FAIL"))
+        << ";rtd_click=" << (!rtd_requested ? "SKIPPED"
+                                             : (rtd_ok ? "OK" : "FAIL"));
     *details = oss.str();
   }
-  return dps_ok && ads_ok && daq_ok;
+  return dps_ok && ads_ok && daq_ok && rtd_ok;
 }
 
 std::string SensorManager::ComponentSummary() const {
   if (simulated_) {
-    return "dps310=OK;ads1115=OK;daq132m=OK;daq_valid_channels=" +
-           std::to_string(config_.hardware.sample_count) + ";simulated=1";
+    return "dps310=OK;ads1115=OK;daq132m=OK;rtd_click=OK;sample_valid_channels=" +
+           std::to_string(config_.hardware.sample_count) +
+           ";daq_valid_channels=" + std::to_string(config_.hardware.sample_count) +
+           ";simulated=1";
   }
   std::string daq_device;
   {
@@ -919,6 +1209,7 @@ std::string SensorManager::ComponentSummary() const {
   ComponentHealth dps = dps_health_;
   ComponentHealth ads = ads_health_;
   ComponentHealth daq = daq_health_;
+  ComponentHealth rtd = rtd_health_;
   dps.last_success_age_ms =
       AgeMs(ambient_temp_cache_.last_success, ambient_temp_cache_.has_value);
   ads.last_success_age_ms =
@@ -931,7 +1222,15 @@ std::string SensorManager::ComponentSummary() const {
       ads.last_success_age_ms >= config_.sensors.stale_after_ms) {
     ads.state = ComponentState::kStale;
   }
-  const std::size_t valid_channels =
+  const std::size_t rtd_channel = config_.sensors.rtd_click_sample_channel;
+  if (rtd_channel < sample_cache_.size() && sample_cache_[rtd_channel].has_value) {
+    rtd.last_success_age_ms = AgeMs(sample_cache_[rtd_channel].last_success, true);
+    if (config_.sensors.rtd_click_enabled &&
+        rtd.last_success_age_ms >= config_.sensors.stale_after_ms) {
+      rtd.state = ComponentState::kStale;
+    }
+  }
+  const std::size_t sample_valid_channels =
       static_cast<std::size_t>(std::count_if(
           sample_cache_.begin(), sample_cache_.end(),
           [this](const ScalarCache& sample) {
@@ -941,6 +1240,7 @@ std::string SensorManager::ComponentSummary() const {
                        config_.sensors.stale_after_ms;
           }));
   std::int64_t newest_daq_age = -1;
+  std::size_t daq_valid_channels = 0;
   for (const std::size_t channel :
        config_.sensors.daq132m_enabled_channels) {
     if (channel >= sample_cache_.size() ||
@@ -950,9 +1250,13 @@ std::string SensorManager::ComponentSummary() const {
     const std::int64_t age =
         AgeMs(sample_cache_[channel].last_success, true);
     if (newest_daq_age < 0 || age < newest_daq_age) newest_daq_age = age;
+    if (sample_cache_[channel].valid &&
+        age >= 0 && age < config_.sensors.stale_after_ms) {
+      ++daq_valid_channels;
+    }
   }
   daq.last_success_age_ms = newest_daq_age;
-  if (config_.sensors.daq132m_enabled && valid_channels == 0 &&
+  if (config_.sensors.daq132m_enabled && daq_valid_channels == 0 &&
       newest_daq_age >= config_.sensors.stale_after_ms) {
     daq.state = ComponentState::kStale;
   }
@@ -966,7 +1270,12 @@ std::string SensorManager::ComponentSummary() const {
       << ";daq132m=" << ToString(daq.state)
       << ";daq132m_error=" << daq.error
       << ";daq132m_age_ms=" << daq.last_success_age_ms
-      << ";daq_valid_channels=" << valid_channels
+      << ";rtd_click=" << ToString(rtd.state)
+      << ";rtd_click_error=" << rtd.error
+      << ";rtd_click_age_ms=" << rtd.last_success_age_ms
+      << ";rtd_click_sample=" << config_.sensors.rtd_click_sample_channel
+      << ";sample_valid_channels=" << sample_valid_channels
+      << ";daq_valid_channels=" << daq_valid_channels
       << ";daq_device="
       << (daq_device.empty() ? "-" : daq_device)
       << ";simulated=0";

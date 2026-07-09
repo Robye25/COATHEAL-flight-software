@@ -31,6 +31,7 @@ struct SensorSnapshot {
   ComponentHealth dps310;
   ComponentHealth ads1115;
   ComponentHealth daq132m;
+  ComponentHealth rtd_click;
   bool simulated = false;
   // Compatibility field. The final Rev C BOM has no resistance instrument, so
   // disabled readings are reported as 0.0 here and serialized as "-".

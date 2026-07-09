@@ -117,6 +117,9 @@ void TestCommandParser() {
   auto targeted_check = parser.ParseLine("CHECK daq132m");
   assert(targeted_check.ok);
   assert(targeted_check.command.args[0] == "DAQ132M");
+  auto rtd_check = parser.ParseLine("CHECK rtd_click");
+  assert(rtd_check.ok);
+  assert(rtd_check.command.args[0] == "RTD_CLICK");
   auto components = parser.ParseLine("COMPONENTS");
   assert(components.ok);
   assert(components.command.type == coatheal::CommandType::kComponents);
@@ -141,6 +144,12 @@ void TestCommandParser() {
   auto manual_heat = parser.ParseLine("SET_ALL_DUTY 0.25");
   assert(manual_heat.ok);
   assert(!manual_heat.command.is_extended);
+
+  auto heater_test = parser.ParseLine("HEATER_TEST 0 0.1 2.5");
+  assert(heater_test.ok);
+  assert(heater_test.command.type == coatheal::CommandType::kHeaterTest);
+  assert(heater_test.command.args.size() == 3);
+  assert(!parser.ParseLine("HEATER_TEST 0 0.1").ok);
 }
 
 void TestHeaterSchedulerEnergyBudget() {
@@ -278,10 +287,19 @@ void TestTelemetryQueuePersistenceAndAck() {
     f2.seq = 2;
     f2.frame = "DATA,s1,2,2026-01-01T00:00:02Z,1,0,0,0,0,0,HEATER_DUTY=0.0,PHASE=ASCENT,STATUS=SD_OK";
 
+    coatheal::QueuedTelemetryFrame ev;
+    ev.queued_epoch_s = coatheal::CurrentUnixEpochSeconds();
+    ev.session_id = "s1";
+    ev.seq = 3;
+    ev.frame = "EVT,PULL,s1,3,0,2026-01-01T00:00:03Z,200,1.00,0|1";
+
     assert(queue.Enqueue(f1, &error));
     assert(queue.Enqueue(f2, &error));
-    assert(queue.size() == 2);
+    assert(queue.Enqueue(ev, &error));
+    assert(queue.size() == 3);
     assert(queue.Acknowledge("s1", 1, &error));
+    assert(queue.size() == 2);
+    assert(queue.AcknowledgeExact(ev, &error));
     assert(queue.size() == 1);
   }
 
@@ -344,7 +362,8 @@ void TestConfigParsesReliabilityFields() {
   // Final BOM: 8 samples, 6 heaters, no box heater.
   out << "hardware.sample_count=8\n";
   out << "hardware.heater_count=6\n";
-  out << "sensor.sample_temperature_source=daq132m_modbus\n";
+  out << "sensor.sample_temperature_source=rtd_click_max31865\n";
+  out << "sensor.daq132m_enabled=false\n";
   out << "sensor.daq132m_device=/dev/ttyUSB0\n";
   out << "sensor.daq132m_baud=9600\n";
   out << "sensor.daq132m_parity=N\n";
@@ -358,11 +377,15 @@ void TestConfigParsesReliabilityFields() {
   out << "sensor.daq132m_c_offset=-5.0\n";
   out << "heater.target_min_c=0.0\n";
   out << "heater.target_max_c=80.0\n";
-  out << "sensor.rtd_click_enabled=false\n";
+  out << "sensor.rtd_click_enabled=true\n";
   out << "sensor.rtd_click_spi_device=/dev/spidev0.0\n";
   out << "sensor.rtd_click_cs_line=7\n";
   out << "sensor.rtd_click_drdy_line=25\n";
   out << "sensor.rtd_click_wires=3\n";
+  out << "sensor.rtd_click_sample_channel=0\n";
+  out << "sensor.rtd_click_reference_ohm=400.0\n";
+  out << "sensor.rtd_click_filter_hz=50\n";
+  out << "sensor.rtd_click_spi_speed_hz=500000\n";
   out << "sensor.pressure_source=dps310\n";
   out << "sensor.dps310_i2c_addr=0x77\n";
   out << "sensor.uv_source=guva_s12sd_ads1115\n";
@@ -373,6 +396,8 @@ void TestConfigParsesReliabilityFields() {
   out << "heater.output_lines=17,18,27,5,6,13\n";
   out << "heater.pwm_frequency_hz=10.0\n";
   out << "heater.active_high=true\n";
+  out << "heater.debug_max_duty=0.25\n";
+  out << "heater.debug_max_seconds=10.0\n";
   out << "hal.status_led_enabled=false\n";
   out << "hal.mode_led_enabled=false\n";
   out << "pull.max_step_hz=100.0\n";
@@ -429,11 +454,17 @@ void TestConfigParsesReliabilityFields() {
   assert(cfg.hardware.electronics_heater_index == static_cast<std::size_t>(-1));
   assert(std::fabs(cfg.power.heater_nominal_w - 5.0) < 1e-9);
   assert(std::fabs(cfg.power.max_thermal_w - 20.0) < 1e-9);
-  assert(cfg.sensors.sample_temperature_source == "daq132m_modbus");
+  assert(cfg.sensors.sample_temperature_source == "rtd_click_max31865");
+  assert(!cfg.sensors.daq132m_enabled);
   assert(cfg.sensors.daq132m_device == "/dev/ttyUSB0");
   assert(cfg.sensors.daq132m_register_count == 8);
   assert(cfg.sensors.daq132m_function_code == 4);
   assert(std::fabs(cfg.sensors.daq132m_c_offset - (-5.0)) < 1e-9);
+  assert(cfg.sensors.rtd_click_enabled);
+  assert(cfg.sensors.rtd_click_sample_channel == 0U);
+  assert(std::fabs(cfg.sensors.rtd_click_reference_ohm - 400.0) < 1e-9);
+  assert(cfg.sensors.rtd_click_filter_hz == 50);
+  assert(cfg.sensors.rtd_click_spi_speed_hz == 500000U);
   assert(std::fabs(cfg.heater_safety.target_min_c - 0.0) < 1e-9);
   assert(std::fabs(cfg.heater_safety.target_max_c - 80.0) < 1e-9);
   assert(cfg.sensors.dps310_i2c_addr == 0x77);
@@ -445,6 +476,8 @@ void TestConfigParsesReliabilityFields() {
   assert(cfg.heaters.output_lines[5] == 13U);
   assert(std::fabs(cfg.heaters.pwm_frequency_hz - 10.0) < 1e-9);
   assert(cfg.heaters.active_high);
+  assert(std::fabs(cfg.heaters.debug_max_duty - 0.25) < 1e-9);
+  assert(std::fabs(cfg.heaters.debug_max_seconds - 10.0) < 1e-9);
   assert(cfg.pull.microstep == 4);
   assert(cfg.pull.travel_full_steps == 200);
   assert(cfg.motors[0].driver == "tmc2240");

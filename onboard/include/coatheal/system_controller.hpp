@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <map>
 #include <cstdint>
 #include <memory>
@@ -116,6 +117,14 @@ class SystemController {
   mutable std::mutex sequence_mu_;
   std::vector<BendSequenceRuntime> bend_sequences_;
   std::vector<bool> motor_zeroed_;
+
+  struct HeaterTestRuntime {
+    bool active = false;
+    std::size_t heater_index = 0;
+    double duty = 0.0;
+    std::chrono::steady_clock::time_point until{};
+  };
+  HeaterTestRuntime heater_test_;
 
   // Pull-event bookkeeping: emit EVT,PULL after each motor completes a
   // pull cycle. Edge-detects channel moving true->false while the MotionLock

@@ -1,11 +1,11 @@
 # Hardware Reference (Rev C Final BOM)
 
 This document is the active hardware reference for the final component list.
-Use it with [rev-c-installation-and-hardware-setup.md](rev-c-installation-and-hardware-setup.md)
-and `config/onboard.example.ini`.
+Use it with [rev-c-rtd-click-plug-and-play.md](rev-c-rtd-click-plug-and-play.md)
+and `config/onboard.local.ini`.
 
-The authoritative connection and commissioning procedure is
-[component-configuration-and-bring-up.md](component-configuration-and-bring-up.md).
+The current bench commissioning procedure is
+[rev-c-rtd-click-plug-and-play.md](rev-c-rtd-click-plug-and-play.md).
 
 The software is manual-first. Hardware outputs are commanded by the operator
 while the ground link is healthy; pressure/thermal fallback is only used after
@@ -17,9 +17,8 @@ link loss.
 |---|---|---|---|
 | Stepper drivers | TMC2240 carriers | SPI mode 3 + STEP/DIR/EN GPIO | `motor0.*`, `motor1.*`, `pull.*` |
 | Linear actuators | NEMA 17 external ball-screw linear stepper, 2.5 A, 48 mm | STEP/DIR/EN through TMC2240 | `stepper.*`, `motor*.samples` |
-| Sample temperature | XF-931-FAR PT100 probes | PT100 into DAQ132M | `hardware.sample_count=8` |
-| PT100 acquisition | DAQ132M 8-channel thermocouple/PT100 RS485 Modbus card | USB-RS485, Modbus RTU | `sensor.daq132m_*` |
-| Optional PT100 bench path | RTD Click MIKROE-2815 / MAX31865 | SPI + DRDY GPIO | `sensor.rtd_click_*` |
+| Current bench temperature | XF-931-FAR PT100 probe | PT100 into RTD Click/MAX31865 | `sensor.rtd_click_*` |
+| Future multi-channel PT100 acquisition | DAQ132M 8-channel thermocouple/PT100 RS485 Modbus card | USB-RS485, Modbus RTU, currently disabled | `sensor.daq132m_*` |
 | UV | GUVA-S12SD analog UV sensor | Analog into ADS1115 | `sensor.uv_*` |
 | ADC | Adafruit ADS1115 16-bit 4-channel PGA | I2C, STEMMA QT/Qwiic | `sensor.ads1115_i2c_addr` |
 | Pressure / ambient T | Adafruit DPS310 precision pressure/altitude sensor | I2C, STEMMA QT/Qwiic | `sensor.dps310_i2c_addr` |
@@ -84,10 +83,10 @@ Do not energize heaters or motors until these points are verified:
 7. The final diagram provides no limit switches. Software position is unknown
    after reboot, so travel must remain mechanically constrained and low-speed
    commissioning must establish safe step limits before any full pull.
-8. SPI0 has three possible targets. The TMC2240 backend uses `/dev/spidev0.0`
-   with kernel CS disabled and software-controlled CS on BCM 22/23. Do not
-   install the old `spi0-2cs` overlay. RTD Click on BCM 7 remains an optional
-   bench path and must stay disabled until its MAX31865 read path is validated.
+8. SPI0 has three current targets. The TMC2240 backend uses `/dev/spidev0.0`
+   with software-controlled CS on BCM 22/23. RTD Click uses the same SPI0 bus
+   with software-controlled CS on BCM 7 and DRDY on BCM 25. `pin-check` must
+   pass before the service is started.
 
 The ADS1115 and DPS310 may share I2C-1 at default addresses `0x48` and `0x77`.
 Power both STEMMA QT boards from 3.3 V so their I2C pull-ups cannot raise SDA or
@@ -96,17 +95,42 @@ board.
 
 ## Sensors
 
-### XF-931-FAR PT100 + DAQ132M
+### Current XF-931-FAR PT100 + RTD Click/MAX31865
 
-The eight XF-931-FAR PT100 probes are the primary sample-temperature source.
-They connect to the DAQ132M 8-channel card, which is read over Modbus RTU via
-the USB-to-RS485 converter.
+The current bench temperature source is one XF-931-FAR PT100 probe connected to
+RTD Click MIKROE-2815 / MAX31865. The RTD Click publishes one software sample
+channel, `S0` by default. Other sample channels remain invalid until additional
+temperature hardware is available.
 
 Relevant config:
 
 ```ini
 hardware.sample_count=8
+sensor.sample_temperature_source=rtd_click_max31865
+sensor.daq132m_enabled=false
+sensor.rtd_click_enabled=true
+sensor.rtd_click_spi_device=/dev/spidev0.0
+sensor.rtd_click_cs_line=7
+sensor.rtd_click_drdy_line=25
+sensor.rtd_click_wires=3
+sensor.rtd_click_sample_channel=0
+sensor.rtd_click_reference_ohm=400.0
+sensor.rtd_click_filter_hz=50
+sensor.rtd_click_spi_speed_hz=500000
+```
+
+`CHECK RTD_CLICK` actively performs a MAX31865 conversion. Normal heater control
+is allowed only for heaters whose mapped sample channel is valid and fresh.
+
+### Future XF-931-FAR PT100 + DAQ132M
+
+The DAQ132M path remains implemented but is disabled for the current bench
+because the Modbus hardware is unavailable. Re-enable it only after read-only
+`daq-scan` confirms the replacement card's register map and scaling.
+
+```ini
 sensor.sample_temperature_source=daq132m_modbus
+sensor.daq132m_enabled=true
 sensor.daq132m_device=/dev/ttyUSB0
 sensor.daq132m_baud=9600
 sensor.daq132m_parity=N
@@ -128,24 +152,6 @@ independently.
 The Modbus RTU read, CRC validation, range checks, function code, register base,
 scale, and offset are implemented. The exact register map and engineering-unit
 conversion must still be verified against the supplied DAQ132M manual.
-
-### RTD Click MIKROE-2815
-
-The RTD Click is a MAX31865 single-channel SPI RTD board. It is not the primary
-eight-sample path because it handles one RTD channel. Its pins and configuration
-are reserved, but the active Rev C sensor manager does not read it; keep
-`sensor.rtd_click_enabled=false`.
-
-```ini
-sensor.rtd_click_enabled=false
-sensor.rtd_click_spi_device=/dev/spidev0.0
-sensor.rtd_click_cs_line=7
-sensor.rtd_click_drdy_line=25
-sensor.rtd_click_wires=3
-```
-
-Do not enable it for flight until a dedicated MAX31865 backend and bench test
-are added.
 
 ### DPS310
 
@@ -217,9 +223,9 @@ connecting flight heaters.
 | TMC2240 SPI setup | GPIO chip-select and register writes implemented; integrated current scaling must be bench-verified |
 | STEP/DIR/EN GPIO pulse backend | Implemented with libgpiod; waveform timing needs Pi bench validation |
 | Heater PWM | Implemented as a zero-safe libgpiod software PWM thread; validate with dummy loads |
-| DAQ132M Modbus | RTU read/CRC/range handling implemented; register map and scaling need card validation |
+| DAQ132M Modbus | RTU read/CRC/range handling implemented; disabled until replacement hardware is available |
 | DPS310 / ADS1115 I2C | Linux `i2c-dev` reads implemented; validate addresses and calibration on the assembled bus |
-| RTD Click MAX31865 | Pins/config reserved; active read backend not implemented |
+| RTD Click MAX31865 | Active SPI/libgpiod read backend implemented; current bench PT100 source |
 
 ## Bring-Up Commands
 
@@ -232,7 +238,10 @@ i2cdetect -y 1
 ls -l /dev/spidev*
 ls -l /dev/ttyUSB*
 gpioinfo gpiochip0
-./build/onboard/coatheal_onboard --config config/onboard.example.ini
+python3 scripts/hardware_setup.py plug-and-play \
+  --config config/onboard.local.ini \
+  --migrate-from config/onboard.ini \
+  --yes
 ```
 
 Expected I2C devices:
@@ -245,18 +254,19 @@ Expected I2C devices:
 Expected SPI device:
 
 ```text
-/dev/spidev0.0  shared bus for both TMC2240 drivers
+/dev/spidev0.0  shared bus for both TMC2240 drivers and RTD Click
 ```
 
-After the onboard command server starts, run `CHECK`. It actively probes
-DPS310, ADS1115, DAQ132M, storage, PWM/stepper backends, and TMC2240 SPI:
+After the onboard command server starts, run active checks:
 
-```powershell
-python main.py command --cmd CHECK
+```bash
+python3 scripts/hardware_setup.py doctor --config config/onboard.local.ini
+python3 scripts/hardware_setup.py rtd-check
 ```
 
-Expected RS485:
+Expected current temperature state:
 
 ```text
-/dev/ttyUSB0  DAQ132M through USB-RS485 converter
+RTD_CLICK: OK with PT100 connected
+DAQ132M: DISABLED
 ```
