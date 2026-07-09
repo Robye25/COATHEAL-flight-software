@@ -180,6 +180,11 @@ bool Tmc2240Driver::OpenGpio() {
       cfg_.gpio_chip, cfg_.enable_line, "coatheal-tmc-enable", disabled != 0);
   if (cs_handle_ == nullptr || step_handle_ == nullptr ||
       dir_handle_ == nullptr || enable_handle_ == nullptr) {
+    std::cerr << "[tmc2240] GPIO request failed on " << cfg_.gpio_chip
+              << " cs=" << cfg_.cs_line
+              << " step=" << cfg_.step_line
+              << " dir=" << cfg_.dir_line
+              << " en=" << cfg_.enable_line << '\n';
     CloseGpio();
     return false;
   }
@@ -187,6 +192,7 @@ bool Tmc2240Driver::OpenGpio() {
   gpio_healthy_ = true;
   return true;
 #else
+  std::cerr << "[tmc2240] libgpiod support not available in this build\n";
   return false;
 #endif
 }
@@ -291,24 +297,47 @@ bool Tmc2240Driver::Reinitialize() {
   if (!gpio_healthy_) {
     CloseGpio();
     if (!OpenGpio()) {
+      std::cerr << "[tmc2240] reinitialize failed: GPIO unavailable\n";
       healthy_ = false;
       return false;
     }
   }
   if (spi_fd_ < 0 && !OpenSpi()) {
+    std::cerr << "[tmc2240] reinitialize failed: SPI unavailable\n";
     healthy_ = false;
     return false;
   }
 
   std::uint32_t ioin = 0;
-  if (!ReadRegister(kRegIOIN, &ioin) ||
-      static_cast<std::uint8_t>(ioin >> 24U) != kExpectedVersion) {
+  if (!ReadRegister(kRegIOIN, &ioin)) {
+    std::cerr << "[tmc2240] IOIN read failed on " << cfg_.spi_device
+              << " cs=" << cfg_.cs_line << '\n';
+    healthy_ = false;
+    return false;
+  }
+  const std::uint8_t version = static_cast<std::uint8_t>(ioin >> 24U);
+  if (version != kExpectedVersion) {
+    std::cerr << "[tmc2240] IOIN version mismatch on " << cfg_.spi_device
+              << " cs=" << cfg_.cs_line
+              << " got=0x" << std::hex << static_cast<int>(version)
+              << " expected=0x" << static_cast<int>(kExpectedVersion)
+              << std::dec << " raw=0x" << std::hex << ioin
+              << std::dec << '\n';
     healthy_ = false;
     return false;
   }
   std::uint32_t initial_gstat = 0;
-  if (!ReadRegister(kRegGSTAT, &initial_gstat) ||
-      !WriteRegister(kRegGSTAT, initial_gstat & kGlobalFaultMask)) {
+  if (!ReadRegister(kRegGSTAT, &initial_gstat)) {
+    std::cerr << "[tmc2240] GSTAT read failed on " << cfg_.spi_device
+              << " cs=" << cfg_.cs_line << '\n';
+    healthy_ = false;
+    return false;
+  }
+  if (!WriteRegister(kRegGSTAT, initial_gstat & kGlobalFaultMask)) {
+    std::cerr << "[tmc2240] GSTAT clear failed on " << cfg_.spi_device
+              << " cs=" << cfg_.cs_line
+              << " gstat=0x" << std::hex << initial_gstat
+              << std::dec << '\n';
     healthy_ = false;
     return false;
   }
@@ -317,6 +346,10 @@ bool Tmc2240Driver::Reinitialize() {
   if (!CalculateCurrentSettings(
           cfg_.run_current_a_rms, cfg_.hold_current_frac,
           cfg_.current_range_a_peak, &current)) {
+    std::cerr << "[tmc2240] invalid current settings run_a_rms="
+              << cfg_.run_current_a_rms
+              << " hold_frac=" << cfg_.hold_current_frac
+              << " range_a_peak=" << cfg_.current_range_a_peak << '\n';
     healthy_ = false;
     return false;
   }
@@ -335,8 +368,18 @@ bool Tmc2240Driver::Reinitialize() {
   ok = WriteRegister(kRegTPOWERDOWN, tpowerdown) && ok;
   ok = WriteRegister(kRegCHOPCONF, chopconf) && ok;
   ok = WriteRegister(kRegPWMCONF, pwmconf) && ok;
+  if (!ok) {
+    std::cerr << "[tmc2240] configuration write failed on " << cfg_.spi_device
+              << " cs=" << cfg_.cs_line << '\n';
+  }
   std::uint32_t verify = 0;
   ok = ReadRegister(kRegGCONF, &verify) && verify == gconf && ok;
+  if (!ok) {
+    std::cerr << "[tmc2240] GCONF verify failed on " << cfg_.spi_device
+              << " cs=" << cfg_.cs_line
+              << " got=0x" << std::hex << verify
+              << " expected=0x" << gconf << std::dec << '\n';
+  }
   ok = ReadRegister(kRegDRVCONF, &verify) &&
        (verify & 0x00000033U) == drvconf && ok;
   ok = ReadRegister(kRegGLOBALSCALER, &verify) &&
@@ -349,8 +392,19 @@ bool Tmc2240Driver::Reinitialize() {
   std::uint32_t drv_status = 0;
   ok = ReadRegister(kRegGSTAT, &gstat) && ok;
   ok = ReadRegister(kRegDRVSTATUS, &drv_status) && ok;
-  ok = (gstat & kGlobalFaultMask) == 0U && ok;
-  ok = (drv_status & kDriverFaultMask) == 0U && ok;
+  if ((gstat & kGlobalFaultMask) != 0U) {
+    std::cerr << "[tmc2240] GSTAT fault on " << cfg_.spi_device
+              << " cs=" << cfg_.cs_line
+              << " gstat=0x" << std::hex << gstat << std::dec << '\n';
+    ok = false;
+  }
+  if ((drv_status & kDriverFaultMask) != 0U) {
+    std::cerr << "[tmc2240] DRV_STATUS fault on " << cfg_.spi_device
+              << " cs=" << cfg_.cs_line
+              << " drv_status=0x" << std::hex << drv_status
+              << std::dec << '\n';
+    ok = false;
+  }
   healthy_ = ok && gpio_healthy_;
   if (healthy_ && restore_enabled) {
     healthy_ = EnableUnlocked(true);

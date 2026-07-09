@@ -1162,12 +1162,16 @@ bool SensorManager::ActiveCheck(const std::string& component,
 #endif
   };
 
+  std::string rtd_error = "SKIPPED";
   auto check_rtd = [&]() {
     if (!config_.sensors.rtd_click_enabled) return true;
     double temp = 0.0;
-    std::string rtd_error;
+    rtd_error.clear();
     std::lock_guard<std::mutex> lock(rtd_io_mu_);
-    return ReadRtdClickMax31865(&temp, &rtd_error);
+    const bool ok = ReadRtdClickMax31865(&temp, &rtd_error);
+    if (ok && rtd_error.empty()) rtd_error = "NONE";
+    if (!ok && rtd_error.empty()) rtd_error = "UNKNOWN";
+    return ok;
   };
 
   const bool dps_requested = component == "ALL" || component == "DPS310";
@@ -1187,7 +1191,8 @@ bool SensorManager::ActiveCheck(const std::string& component,
         << ";daq132m=" << (!daq_requested ? "SKIPPED"
                                           : (daq_ok ? "OK" : "FAIL"))
         << ";rtd_click=" << (!rtd_requested ? "SKIPPED"
-                                             : (rtd_ok ? "OK" : "FAIL"));
+                                             : (rtd_ok ? "OK" : "FAIL"))
+        << ";rtd_click_error=" << (!rtd_requested ? "SKIPPED" : rtd_error);
     *details = oss.str();
   }
   return dps_ok && ads_ok && daq_ok && rtd_ok;
