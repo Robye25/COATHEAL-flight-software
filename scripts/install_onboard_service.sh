@@ -53,6 +53,20 @@ if [[ $EUID -ne 0 ]]; then
   SUDO="sudo"
 fi
 
+$SUDO chmod 0644 "$CONFIG_PATH" || true
+if [[ -n "$SUDO" ]]; then
+  config_readable_cmd=("$SUDO" -u coatheal test -r "$CONFIG_PATH")
+elif command -v runuser >/dev/null 2>&1; then
+  config_readable_cmd=(runuser -u coatheal -- test -r "$CONFIG_PATH")
+else
+  config_readable_cmd=(test -r "$CONFIG_PATH")
+fi
+if ! "${config_readable_cmd[@]}" 2>/dev/null; then
+  echo "[install-service] config is not readable by service user coatheal: $CONFIG_PATH" >&2
+  echo "[install-service] fix with: sudo chmod 0644 '$CONFIG_PATH'" >&2
+  exit 1
+fi
+
 for unit in "${UNITS[@]}"; do
   src="$DEPLOY_DIR/$unit"
   if [[ ! -f "$src" ]]; then

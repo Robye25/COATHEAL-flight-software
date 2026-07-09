@@ -62,6 +62,15 @@ class GuiSmoke(unittest.TestCase):
         finally:
             win.close()
 
+    def test_command_dispatcher_uses_static_host_for_blank_endpoint(self) -> None:
+        from app.gui.dispatch import CommandDispatcher, DEFAULT_COMMAND_HOST
+
+        dispatcher = CommandDispatcher("", 5000)
+        self.assertEqual(dispatcher.host, DEFAULT_COMMAND_HOST)
+        dispatcher.set_endpoint("   ", 5001)
+        self.assertEqual(dispatcher.host, DEFAULT_COMMAND_HOST)
+        self.assertEqual(dispatcher.port, 5001)
+
 
 if __name__ == "__main__":
     unittest.main()

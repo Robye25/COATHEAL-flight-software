@@ -28,6 +28,8 @@ from ..protocol import (
     parse_telemetry_csv,
 )
 
+DEFAULT_COMMAND_HOST = "169.254.10.10"
+
 
 # ── telemetry receiver ────────────────────────────────────────────────────────
 class TelemetryReceiver(QThread):
@@ -341,14 +343,19 @@ class CommandDispatcher(QObject):
 
     def __init__(self, host: str, port: int, history_size: int = 200):
         super().__init__()
-        self.host = host
+        self.host = self._normalize_host(host)
         self.port = port
         self._pool = QThreadPool.globalInstance()
         self._history: Deque[CommandHistoryEntry] = deque(maxlen=history_size)
         self.response_received.connect(self._on_response)
 
+    @staticmethod
+    def _normalize_host(host: str) -> str:
+        value = (host or "").strip()
+        return value or DEFAULT_COMMAND_HOST
+
     def set_endpoint(self, host: str, port: int) -> None:
-        self.host = host
+        self.host = self._normalize_host(host)
         self.port = port
 
     def send(self, command: str, tag: Optional[object] = None, timeout: float = 3.0) -> None:

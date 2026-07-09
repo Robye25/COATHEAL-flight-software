@@ -171,9 +171,6 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
     return result;
   }
 
-  const std::string cmd = ToUpper(tokens.front());
-  tokens.erase(tokens.begin());
-
   const std::unordered_map<std::string, CommandType> command_map = {
       {"PING", CommandType::kPing},
       {"STATUS", CommandType::kStatus},
@@ -229,6 +226,30 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
       {"PULL_ARM", CommandType::kPullArm},
       {"PULL_EXECUTE", CommandType::kPullExecute},
   };
+
+  std::string cmd;
+  std::size_t consumed_tokens = 0;
+  const std::size_t max_command_words = std::min<std::size_t>(4, tokens.size());
+  for (std::size_t words = max_command_words; words > 0; --words) {
+    std::ostringstream candidate;
+    for (std::size_t i = 0; i < words; ++i) {
+      if (i > 0) candidate << '_';
+      candidate << ToUpper(tokens[i]);
+    }
+    const std::string key = candidate.str();
+    if (command_map.find(key) != command_map.end()) {
+      cmd = key;
+      consumed_tokens = words;
+      break;
+    }
+  }
+
+  if (consumed_tokens == 0) {
+    result.error = "unknown command: " + ToUpper(tokens.front());
+    return result;
+  }
+
+  tokens.erase(tokens.begin(), tokens.begin() + consumed_tokens);
 
   auto it = command_map.find(cmd);
   if (it == command_map.end()) {
@@ -318,10 +339,13 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
       break;
     case CommandType::kCheck:
       if (command.args.size() > 1) {
-        result.error = "invalid argument count for CHECK";
-        return result;
-      }
-      if (!command.args.empty()) {
+        std::ostringstream component;
+        for (std::size_t i = 0; i < command.args.size(); ++i) {
+          if (i > 0) component << '_';
+          component << ToUpper(command.args[i]);
+        }
+        command.args.assign(1, component.str());
+      } else if (!command.args.empty()) {
         command.args[0] = ToUpper(command.args[0]);
       }
       break;

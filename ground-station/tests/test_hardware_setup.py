@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import argparse
+import os
 import sys
 import tempfile
 import unittest
@@ -117,6 +118,8 @@ class HardwareSetupTests(unittest.TestCase):
             self.assertNotIn("stepper.microstep=", migrated)
             self.assertNotIn("motor0.sense_resistor=", migrated)
             self.assertTrue(list(root.glob("onboard.ini.bak.*")))
+            if os.name != "nt":
+                self.assertEqual(new_path.stat().st_mode & 0o777, 0o644)
 
 
 if __name__ == "__main__":
