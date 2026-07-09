@@ -66,7 +66,7 @@ those pins when SPI0 is enabled. Select the bus with `motor*.spi_device`.
 | Motor 0 DIR | 37 | 26 | `motor0.dir_line` |
 | Motor 0 EN/DRV_ENN | 32 | 12 | `motor0.enable_line` |
 | Motor 1 CSN | 16 | 23 | `motor1.cs_line` |
-| Motor 1 STEP | 36 | 16 | `motor1.step_line` |
+| Motor 1 STEP | 18 | 24 | `motor1.step_line` |
 | Motor 1 DIR | 38 | 20 | `motor1.dir_line` |
 | Motor 1 EN/DRV_ENN | 40 | 21 | `motor1.enable_line` |
 
@@ -135,7 +135,7 @@ motor1.driver=tmc2240
 motor1.gpio_chip=/dev/gpiochip0
 motor1.spi_device=/dev/spidev0.0
 motor1.cs_line=23
-motor1.step_line=16
+motor1.step_line=24
 motor1.dir_line=20
 motor1.enable_line=21
 motor1.invert_direction=false

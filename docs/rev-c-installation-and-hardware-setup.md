@@ -329,9 +329,9 @@ This map matches the final pinout diagram. GPIO values are BCM numbers.
 | Heater input polarity | active-high | `heater.active_high` |
 | Motor 0 STEP/DIR/EN | BCM 19 / 26 / 12 | `motor0.step_line`, `motor0.dir_line`, `motor0.enable_line` |
 | Motor 0 SPI | `/dev/spidev0.0`, CS BCM 22 | `motor0.spi_device`, `motor0.cs_line` |
-| Motor 1 STEP/DIR/EN | BCM 16 / 20 / 21 | `motor1.step_line`, `motor1.dir_line`, `motor1.enable_line` |
+| Motor 1 STEP/DIR/EN | BCM 24 / 20 / 21 | `motor1.step_line`, `motor1.dir_line`, `motor1.enable_line` |
 | Motor 1 SPI | `/dev/spidev0.0`, CS BCM 23 | `motor1.spi_device`, `motor1.cs_line` |
-| RTD Click CS/DRDY | BCM 7 / 25 | `sensor.rtd_click_cs_line`, `sensor.rtd_click_drdy_line` |
+| RTD Click CS/DRDY | BCM 16 / 25 | `sensor.rtd_click_cs_line`, `sensor.rtd_click_drdy_line` |
 | I2C bus | Pi I2C-1, SDA BCM 2, SCL BCM 3 | fixed by Pi |
 | DPS310 address | `0x77` | `sensor.dps310_i2c_addr` |
 | ADS1115 address | `0x48` | `sensor.ads1115_i2c_addr` |
@@ -385,7 +385,7 @@ sensor.sample_temperature_source=rtd_click_max31865
 sensor.daq132m_enabled=false
 sensor.rtd_click_enabled=true
 sensor.rtd_click_spi_device=/dev/spidev0.0
-sensor.rtd_click_cs_line=7
+sensor.rtd_click_cs_line=16
 sensor.rtd_click_drdy_line=25
 sensor.rtd_click_wires=3
 sensor.rtd_click_sample_channel=0
@@ -422,7 +422,7 @@ motor1.driver=tmc2240
 motor1.gpio_chip=/dev/gpiochip0
 motor1.spi_device=/dev/spidev0.0
 motor1.cs_line=23
-motor1.step_line=16
+motor1.step_line=24
 motor1.dir_line=20
 motor1.enable_line=21
 motor1.run_current_a_rms=0.8

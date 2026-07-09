@@ -90,7 +90,7 @@ OnboardConfig::OnboardConfig() {
   motors[1].gpio_chip = runtime.gpio_chip;
   motors[1].spi_device = "/dev/spidev0.0";
   motors[1].cs_line = 23;
-  motors[1].step_line = 16;
+  motors[1].step_line = 24;
   motors[1].dir_line = 20;
   motors[1].enable_line = 21;
   motors[1].samples = {4, 5, 6, 7};

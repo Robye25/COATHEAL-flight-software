@@ -195,11 +195,11 @@ not reassigned in the INI file.
 | Motor 0 STEP | 35 | 19 | `motor0.step_line` |
 | Motor 0 DIR | 37 | 26 | `motor0.dir_line` |
 | Motor 1 CS | 16 | 23 | `motor1.cs_line` |
-| Motor 1 STEP | 36 | 16 | `motor1.step_line` |
+| Motor 1 STEP | 18 | 24 | `motor1.step_line` |
 | Motor 1 DIR | 38 | 20 | `motor1.dir_line` |
 | Motor 1 EN | 40 | 21 | `motor1.enable_line` |
 | RTD Click DRDY | 22 | 25 | `sensor.rtd_click_drdy_line` |
-| RTD Click CS | 26 | 7 | `sensor.rtd_click_cs_line` |
+| RTD Click CS | 36 | 16 | `sensor.rtd_click_cs_line` |
 
 The DAQ132M is connected through USB-RS485 and has no configurable Pi GPIO.
 
@@ -315,7 +315,7 @@ Motor 1:
 ```ini
 motor1.cs_line=23
 motor1.gpio_chip=/dev/gpiochip0
-motor1.step_line=16
+motor1.step_line=24
 motor1.dir_line=20
 motor1.enable_line=21
 ```

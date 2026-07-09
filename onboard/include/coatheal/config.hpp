@@ -140,7 +140,7 @@ struct SensorHardwareConfig {
 
   bool rtd_click_enabled = true;
   std::string rtd_click_spi_device = "/dev/spidev0.0";
-  std::size_t rtd_click_cs_line = 7;
+  std::size_t rtd_click_cs_line = 16;
   std::size_t rtd_click_drdy_line = 25;
   int rtd_click_wires = 3;
   std::size_t rtd_click_sample_channel = 0;

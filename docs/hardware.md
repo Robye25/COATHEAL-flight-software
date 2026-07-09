@@ -51,10 +51,10 @@ numbers are included to prevent BCM/physical-number confusion.
 | Motor 0 / STEP1 STEP | 35 | 19 | `motor0.step_line` |
 | Motor 0 / STEP1 DIR | 37 | 26 | `motor0.dir_line` |
 | Motor 1 / STEP2 CS | 16 | 23 | `motor1.cs_line` |
-| Motor 1 / STEP2 STEP | 36 | 16 | `motor1.step_line` |
+| Motor 1 / STEP2 STEP | 18 | 24 | `motor1.step_line` |
 | Motor 1 / STEP2 DIR | 38 | 20 | `motor1.dir_line` |
 | Motor 1 / STEP2 EN | 40 | 21 | `motor1.enable_line` |
-| RTD Click CS | 26 | 7 | `sensor.rtd_click_cs_line` |
+| RTD Click CS | 36 | 16 | `sensor.rtd_click_cs_line` |
 | RTD Click DRDY | 22 | 25 | `sensor.rtd_click_drdy_line` |
 | I2C SDA / SCL | 3 / 5 | 2 / 3 | Fixed Pi I2C-1 |
 | SPI0 MOSI / MISO / SCLK | 19 / 21 / 23 | 10 / 9 / 11 | Shared SPI0 bus |
@@ -85,7 +85,7 @@ Do not energize heaters or motors until these points are verified:
    commissioning must establish safe step limits before any full pull.
 8. SPI0 has three current targets. The TMC2240 backend uses `/dev/spidev0.0`
    with software-controlled CS on BCM 22/23. RTD Click uses the same SPI0 bus
-   with software-controlled CS on BCM 7 and DRDY on BCM 25. `pin-check` must
+   with software-controlled CS on BCM 16 and DRDY on BCM 25. `pin-check` must
    pass before the service is started.
 
 The ADS1115 and DPS310 may share I2C-1 at default addresses `0x48` and `0x77`.
@@ -110,7 +110,7 @@ sensor.sample_temperature_source=rtd_click_max31865
 sensor.daq132m_enabled=false
 sensor.rtd_click_enabled=true
 sensor.rtd_click_spi_device=/dev/spidev0.0
-sensor.rtd_click_cs_line=7
+sensor.rtd_click_cs_line=16
 sensor.rtd_click_drdy_line=25
 sensor.rtd_click_wires=3
 sensor.rtd_click_sample_channel=0
