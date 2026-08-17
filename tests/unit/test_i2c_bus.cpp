@@ -33,6 +33,9 @@ void TestFakeServesRegisterWindow() {
 void TestFakeRejectsReadPastEndOfImage() {
   FakeI2cBus bus;
   bus.SetImage(Ramp(40));
+  // Must be open, or this would pass for the wrong reason (rejected as
+  // "not open" rather than as "runs off the end of the image").
+  assert(bus.Open(0x40));
 
   std::uint8_t buf[8] = {};
   assert(!bus.ReadRegisters(36, buf, 8));
@@ -42,6 +45,7 @@ void TestFakeHonoursMaxReadLength() {
   FakeI2cBus bus;
   bus.SetImage(Ramp(140));
   bus.SetMaxReadLength(4);
+  assert(bus.Open(0x40));
 
   std::uint8_t big[32] = {};
   assert(!bus.ReadRegisters(0, big, 32));
@@ -54,11 +58,47 @@ void TestFakeInjectsReadFailures() {
   FakeI2cBus bus;
   bus.SetImage(Ramp(140));
   bus.FailNextReads(2);
+  assert(bus.Open(0x40));
 
   std::uint8_t buf[1] = {};
   assert(!bus.ReadRegisters(0, buf, 1));
   assert(!bus.ReadRegisters(0, buf, 1));
   assert(bus.ReadRegisters(0, buf, 1));
+}
+
+void TestFakeRejectsReadBeforeOpen() {
+  // LinuxI2cBus returns false when fd_ < 0; the double must agree, or
+  // driver code that forgets to Open() passes here and fails on hardware.
+  FakeI2cBus bus;
+  bus.SetImage(Ramp(140));
+
+  std::uint8_t buf[4] = {};
+  assert(!bus.ReadRegisters(0, buf, 4));
+}
+
+void TestFakeRejectsReadAfterClose() {
+  FakeI2cBus bus;
+  bus.SetImage(Ramp(140));
+  assert(bus.Open(0x40));
+
+  std::uint8_t buf[4] = {};
+  assert(bus.ReadRegisters(0, buf, 4));
+
+  bus.Close();
+  assert(!bus.ReadRegisters(0, buf, 4));
+}
+
+void TestFakeRejectsReadAfterFailedOpen() {
+  // A failed Open() must leave the bus just as unusable as one that was
+  // never opened at all — mirrors LinuxI2cBus, where a failed ::open() or
+  // ioctl() leaves fd_ at -1.
+  FakeI2cBus bus;
+  bus.SetImage(Ramp(140));
+  bus.SetOpenFails(true);
+  assert(!bus.Open(0x40));
+
+  std::uint8_t buf[4] = {};
+  assert(!bus.ReadRegisters(0, buf, 4));
 }
 
 void TestLinuxBusReportsAvailabilityWithoutCrashing() {
@@ -78,6 +118,9 @@ int main() {
   TestFakeRejectsReadPastEndOfImage();
   TestFakeHonoursMaxReadLength();
   TestFakeInjectsReadFailures();
+  TestFakeRejectsReadBeforeOpen();
+  TestFakeRejectsReadAfterClose();
+  TestFakeRejectsReadAfterFailedOpen();
   TestLinuxBusReportsAvailabilityWithoutCrashing();
   return 0;
 }
