@@ -226,9 +226,15 @@ void TestStorageSafeModeWrites() {
   store.WriteLine("world");
   store.FlushAndSync();
 
-  std::ifstream in(primary);
-  std::string content((std::istreambuf_iterator<char>(in)),
-                      std::istreambuf_iterator<char>());
+  std::string content;
+  {
+    // Scoped so the ifstream's handle on primary.csv is released before
+    // remove_all below — Windows refuses to unlink an open file (Linux
+    // silently allows it, which is why this only surfaced here).
+    std::ifstream in(primary);
+    content.assign(std::istreambuf_iterator<char>(in),
+                   std::istreambuf_iterator<char>());
+  }
   assert(content.find("hello") != std::string::npos);
   assert(content.find("world") != std::string::npos);
   fs::remove_all(tmp);
