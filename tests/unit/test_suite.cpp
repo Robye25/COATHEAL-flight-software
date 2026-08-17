@@ -332,10 +332,16 @@ void TestTelemetryQueuePersistenceAndAck() {
   std::filesystem::remove_all(queue_dir, ec);
 }
 
-void TestConfigParsesReliabilityFields() {
+// Writes a complete, valid baseline config to a unique temp path, with
+// `extra` appended so a test can override or add individual keys. Returns
+// the path. The INI parser is last-assignment-wins, so an appended line
+// overrides the same key in the baseline.
+std::string WriteTempConfig(const std::string& extra = "") {
+  static int counter = 0;
   const std::filesystem::path cfg_path =
       std::filesystem::temp_directory_path() /
-      ("coatheal_cfg_test_" + std::to_string(coatheal::CurrentUnixEpochSeconds()) + ".ini");
+      ("coatheal_cfg_test_" + std::to_string(coatheal::CurrentUnixEpochSeconds()) +
+       "_" + std::to_string(++counter) + ".ini");
 
   std::ofstream out(cfg_path);
   out << "runtime.tick_hz=1.0\n";
@@ -448,11 +454,18 @@ void TestConfigParsesReliabilityFields() {
   out << "motor1.stealth_chop=true\n";
   out << "motor1.spi_speed_hz=1000000\n";
   out << "motor1.samples=4,5,6,7\n";
+  out << extra;
   out.close();
+
+  return cfg_path.string();
+}
+
+void TestConfigParsesReliabilityFields() {
+  const std::string cfg_path = WriteTempConfig();
 
   coatheal::OnboardConfig cfg;
   std::string error;
-  assert(coatheal::LoadConfigFromIni(cfg_path.string(), &cfg, &error));
+  assert(coatheal::LoadConfigFromIni(cfg_path, &cfg, &error));
   assert(cfg.comms.discovery_enabled);
   assert(cfg.comms.telemetry_host.empty());
   assert(cfg.comms.static_ground_ip.empty());
@@ -534,6 +547,60 @@ void TestConfigRejectsGpioCollisions() {
 
   std::error_code ec;
   std::filesystem::remove(cfg_path, ec);
+}
+
+void TestSequentRtdConfigDefaultsAndParsing() {
+  coatheal::OnboardConfig defaults;
+  assert(defaults.sensors.sequent_rtd_stack == 0);
+  assert(defaults.sensors.sequent_rtd_poll_ms == 1000);
+  assert(defaults.sensors.sequent_rtd_expect_sensor_type == "pt100");
+  assert(defaults.sensors.sequent_rtd_channels.size() == 8);
+  assert(defaults.sensors.sequent_rtd_channels[0] == 1);
+  assert(defaults.sensors.sequent_rtd_channels[7] == 8);
+
+  const std::string path = WriteTempConfig(
+      "sensor.sequent_rtd_stack=2\n"
+      "sensor.sequent_rtd_channels=3,2,1,4,5,6,7,8\n"
+      "sensor.sequent_rtd_poll_ms=500\n"
+      "sensor.sequent_rtd_expect_sensor_type=pt1000\n"
+      "sensor.sequent_rtd_resistance_min_ohm=70.0\n"
+      "sensor.sequent_rtd_resistance_max_ohm=380.0\n"
+      "sensor.sequent_rtd_crosscheck_tol_c=1.5\n");
+
+  coatheal::OnboardConfig cfg;
+  std::string error;
+  assert(coatheal::LoadConfigFromIni(path, &cfg, &error));
+  assert(cfg.sensors.sequent_rtd_stack == 2);
+  assert(cfg.sensors.sequent_rtd_channels[0] == 3);
+  assert(cfg.sensors.sequent_rtd_poll_ms == 500);
+  assert(cfg.sensors.sequent_rtd_expect_sensor_type == "pt1000");
+  assert(std::fabs(cfg.sensors.sequent_rtd_crosscheck_tol_c - 1.5) < 1e-9);
+
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+}
+
+void TestSequentRtdConfigRejectsBadValues() {
+  struct Case { const char* body; const char* fragment; };
+  const Case cases[] = {
+    {"sensor.sequent_rtd_stack=8\n", "sequent_rtd_stack"},
+    {"sensor.sequent_rtd_channels=1,2,3\n", "sequent_rtd_channels"},
+    {"sensor.sequent_rtd_channels=1,1,3,4,5,6,7,8\n", "sequent_rtd_channels"},
+    {"sensor.sequent_rtd_channels=0,2,3,4,5,6,7,8\n", "sequent_rtd_channels"},
+    {"sensor.sequent_rtd_channels=9,2,3,4,5,6,7,8\n", "sequent_rtd_channels"},
+    {"sensor.sequent_rtd_expect_sensor_type=pt500\n", "expect_sensor_type"},
+    {"sensor.sequent_rtd_resistance_min_ohm=400.0\n", "resistance"},
+  };
+  for (const Case& c : cases) {
+    const std::string path = WriteTempConfig(c.body);
+    coatheal::OnboardConfig cfg;
+    std::string error;
+    assert(!coatheal::LoadConfigFromIni(path, &cfg, &error));
+    assert(error.find(c.fragment) != std::string::npos);
+
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+  }
 }
 
 void TestStateTransitions() {
@@ -638,6 +705,8 @@ int main() {
   TestTelemetryQueuePersistenceAndAck();
   TestConfigParsesReliabilityFields();
   TestConfigRejectsGpioCollisions();
+  TestSequentRtdConfigDefaultsAndParsing();
+  TestSequentRtdConfigRejectsBadValues();
   TestStateTransitions();
   TestManualHeaterOverrideWithoutFloorControl();
   TestVacuumRegime();
