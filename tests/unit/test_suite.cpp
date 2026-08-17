@@ -575,6 +575,13 @@ void TestSequentRtdConfigDefaultsAndParsing() {
   assert(cfg.sensors.sequent_rtd_poll_ms == 500);
   assert(cfg.sensors.sequent_rtd_expect_sensor_type == "pt1000");
   assert(std::fabs(cfg.sensors.sequent_rtd_crosscheck_tol_c - 1.5) < 1e-9);
+  assert(std::fabs(cfg.sensors.sequent_rtd_resistance_min_ohm - 70.0) < 1e-9);
+  assert(std::fabs(cfg.sensors.sequent_rtd_resistance_max_ohm - 380.0) < 1e-9);
+
+  // Full order, not just the first entry: a reversed or mis-assigned list
+  // would otherwise slip through.
+  const std::vector<std::size_t> expected_channels = {3, 2, 1, 4, 5, 6, 7, 8};
+  assert(cfg.sensors.sequent_rtd_channels == expected_channels);
 
   std::error_code ec;
   std::filesystem::remove(path, ec);
@@ -584,12 +591,12 @@ void TestSequentRtdConfigRejectsBadValues() {
   struct Case { const char* body; const char* fragment; };
   const Case cases[] = {
     {"sensor.sequent_rtd_stack=8\n", "sequent_rtd_stack"},
-    {"sensor.sequent_rtd_channels=1,2,3\n", "sequent_rtd_channels"},
-    {"sensor.sequent_rtd_channels=1,1,3,4,5,6,7,8\n", "sequent_rtd_channels"},
-    {"sensor.sequent_rtd_channels=0,2,3,4,5,6,7,8\n", "sequent_rtd_channels"},
-    {"sensor.sequent_rtd_channels=9,2,3,4,5,6,7,8\n", "sequent_rtd_channels"},
+    {"sensor.sequent_rtd_channels=1,2,3\n", "must have hardware.sample_count"},
+    {"sensor.sequent_rtd_channels=1,1,3,4,5,6,7,8\n", "contains duplicates"},
+    {"sensor.sequent_rtd_channels=0,2,3,4,5,6,7,8\n", "entries must be 1..8"},
+    {"sensor.sequent_rtd_channels=9,2,3,4,5,6,7,8\n", "entries must be 1..8"},
     {"sensor.sequent_rtd_expect_sensor_type=pt500\n", "expect_sensor_type"},
-    {"sensor.sequent_rtd_resistance_min_ohm=400.0\n", "resistance"},
+    {"sensor.sequent_rtd_resistance_min_ohm=400.0\n", "sequent_rtd_resistance_min_ohm"},
   };
   for (const Case& c : cases) {
     const std::string path = WriteTempConfig(c.body);
