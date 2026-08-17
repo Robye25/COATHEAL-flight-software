@@ -24,6 +24,11 @@ class FakeI2cBus : public I2cBus {
   int open_count() const { return open_count_; }
   int address() const { return address_; }
   std::size_t last_read_length() const { return last_read_len_; }
+  // Every size ReadRegisters was ever called with, in order, including
+  // attempts the guards below then reject. Lets a test assert what was
+  // actually put on the wire, not just what most recently succeeded.
+  const std::vector<std::size_t>& read_lengths() const { return read_lengths_; }
+  void ClearReadLog() { read_lengths_.clear(); }
 
   bool Open(int address) override {
     ++open_count_;
@@ -34,6 +39,7 @@ class FakeI2cBus : public I2cBus {
 
   bool ReadRegisters(std::uint8_t reg, std::uint8_t* data,
                      std::size_t size) override {
+    read_lengths_.push_back(size);
     if (!open_ || data == nullptr) return false;
     last_read_len_ = size;
     if (fail_reads_ > 0) {
@@ -58,6 +64,7 @@ class FakeI2cBus : public I2cBus {
   int open_count_ = 0;
   int address_ = -1;
   std::size_t last_read_len_ = 0;
+  std::vector<std::size_t> read_lengths_;
 };
 
 }  // namespace coatheal

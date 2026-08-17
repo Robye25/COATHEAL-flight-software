@@ -2,6 +2,7 @@
 // Runs with no hardware attached via FakeI2cBus.
 
 #include <cassert>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -214,6 +215,152 @@ void TestProbeReportsUnverifiableSensorTypeOnOldHardware() {
   assert(error.find("SENSOR_TYPE_UNVERIFIABLE") != std::string::npos);
 }
 
+std::vector<std::uint8_t> ImageWithChannels(const float* temps,
+                                            const float* resistances) {
+  std::vector<std::uint8_t> image = BlankImage();
+  for (int i = 0; i < sequent_rtd::kChannels; ++i) {
+    PutFloat(&image, sequent_rtd::kRtdVal1 + 4 * i, temps[i]);
+    PutFloat(&image, sequent_rtd::kRtdRes1 + 4 * i, resistances[i]);
+  }
+  return image;
+}
+
+void TestReadAllDecodesFloat32Channels() {
+  const float temps[8] = {0.0f, 10.5f, -40.25f, 85.0f,
+                          21.0f, 22.0f, 23.0f, 24.0f};
+  const float res[8] = {100.0f, 104.1f, 84.27f, 132.8f,
+                        108.2f, 108.6f, 109.0f, 109.4f};
+
+  FakeI2cBus bus;
+  bus.SetImage(ImageWithChannels(temps, res));
+
+  SequentRtdAdapter adapter(&bus, SequentRtdAdapter::Options{});
+  SequentRtdAdapter::Reading reading;
+  std::string error;
+  assert(adapter.ReadAll(&reading, &error));
+
+  for (int i = 0; i < 8; ++i) {
+    assert(std::fabs(reading.temperature_c[i] - temps[i]) < 1e-4);
+    assert(std::fabs(reading.resistance_ohm[i] - res[i]) < 1e-4);
+  }
+}
+
+void TestChannelMapRemapsLogicalSamples() {
+  // Card channel 8 is dead; remap logical sample 0 onto card channel 3.
+  const float temps[8] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f};
+  const float res[8] = {101.f, 102.f, 103.f, 104.f, 105.f, 106.f, 107.f, 108.f};
+
+  FakeI2cBus bus;
+  bus.SetImage(ImageWithChannels(temps, res));
+
+  SequentRtdAdapter::Options options;
+  options.channel_map = {3, 2, 1, 4, 5, 6, 7, 8};
+  SequentRtdAdapter adapter(&bus, options);
+
+  SequentRtdAdapter::Reading reading;
+  std::string error;
+  assert(adapter.ReadAll(&reading, &error));
+
+  // Logical 0 <- card channel 3 (1-indexed) == temps[2].
+  assert(std::fabs(reading.temperature_c[0] - 3.0) < 1e-4);
+  assert(std::fabs(reading.temperature_c[1] - 2.0) < 1e-4);
+  assert(std::fabs(reading.temperature_c[2] - 1.0) < 1e-4);
+  assert(std::fabs(reading.resistance_ohm[0] - 103.0) < 1e-4);
+}
+
+void TestFallbackMatchesBurstResults() {
+  const float temps[8] = {0.0f, 10.5f, -40.25f, 85.0f,
+                          21.0f, 22.0f, 23.0f, 24.0f};
+  const float res[8] = {100.0f, 104.1f, 84.27f, 132.8f,
+                        108.2f, 108.6f, 109.0f, 109.4f};
+  const std::vector<std::uint8_t> image = ImageWithChannels(temps, res);
+
+  FakeI2cBus burst_bus;
+  burst_bus.SetImage(image);
+  SequentRtdAdapter burst(&burst_bus, SequentRtdAdapter::Options{});
+  SequentRtdAdapter::Reading burst_reading;
+  std::string error;
+  assert(burst.ReadAll(&burst_reading, &error));
+  assert(burst.burst_mode());
+
+  FakeI2cBus slow_bus;
+  slow_bus.SetImage(image);
+  slow_bus.SetMaxReadLength(4);  // firmware refuses long reads
+  SequentRtdAdapter slow(&slow_bus, SequentRtdAdapter::Options{});
+  SequentRtdAdapter::Reading slow_reading;
+  assert(slow.ReadAll(&slow_reading, &error));
+  assert(!slow.burst_mode());
+
+  for (int i = 0; i < 8; ++i) {
+    assert(std::fabs(burst_reading.temperature_c[i] -
+                     slow_reading.temperature_c[i]) < 1e-9);
+    assert(std::fabs(burst_reading.resistance_ohm[i] -
+                     slow_reading.resistance_ohm[i]) < 1e-9);
+  }
+}
+
+void TestFallbackLatchesOnce() {
+  const float temps[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+  const float res[8] = {101, 102, 103, 104, 105, 106, 107, 108};
+
+  FakeI2cBus bus;
+  bus.SetImage(ImageWithChannels(temps, res));
+  bus.SetMaxReadLength(4);  // firmware refuses long reads
+
+  SequentRtdAdapter adapter(&bus, SequentRtdAdapter::Options{});
+  SequentRtdAdapter::Reading reading;
+  std::string error;
+
+  assert(adapter.ReadAll(&reading, &error));
+  assert(!adapter.burst_mode());
+
+  // Second poll must not re-attempt the 32-byte burst. Without the latch
+  // the adapter would retry a doomed long read on every poll for the whole
+  // flight, so assert directly that no oversized read was attempted.
+  bus.ClearReadLog();
+  assert(adapter.ReadAll(&reading, &error));
+  for (const std::size_t len : bus.read_lengths()) {
+    assert(len <= 4);
+  }
+  assert(!bus.read_lengths().empty());
+}
+
+void TestReadAllDecodesDiagnostics() {
+  std::vector<std::uint8_t> image = BlankImage();
+  image[sequent_rtd::kDiagTemp] = static_cast<std::uint8_t>(
+      static_cast<std::int8_t>(-12));            // -12 degC
+  image[sequent_rtd::kDiag5V] = 0x88;            // 5000 mV little-endian
+  image[sequent_rtd::kDiag5V + 1] = 0x13;
+  image[sequent_rtd::kRtdReinit] = 0x05;         // 5 re-inits
+  image[sequent_rtd::kRtdReinit + 1] = 0x00;
+  image[sequent_rtd::kRtdReinit + 2] = 0x00;
+  image[sequent_rtd::kRtdReinit + 3] = 0x00;
+
+  FakeI2cBus bus;
+  bus.SetImage(image);
+
+  SequentRtdAdapter adapter(&bus, SequentRtdAdapter::Options{});
+  SequentRtdAdapter::Reading reading;
+  std::string error;
+  assert(adapter.ReadAll(&reading, &error));
+
+  assert(std::fabs(reading.card_temp_c - (-12.0)) < 1e-9);
+  assert(std::fabs(reading.rail_5v - 5.0) < 1e-6);
+  assert(reading.adc_reinit_count == 5U);
+}
+
+void TestReadAllFailsWhenBusFails() {
+  FakeI2cBus bus;
+  bus.SetImage(BlankImage());
+  bus.FailNextReads(100);
+
+  SequentRtdAdapter adapter(&bus, SequentRtdAdapter::Options{});
+  SequentRtdAdapter::Reading reading;
+  std::string error;
+  assert(!adapter.ReadAll(&reading, &error));
+  assert(!error.empty());
+}
+
 }  // namespace
 
 int main() {
@@ -229,5 +376,11 @@ int main() {
   TestSensorTypeIgnoresHighNibbleWhenPt1000();
   TestProbeReopensAfterIoFailure();
   TestProbeReportsUnverifiableSensorTypeOnOldHardware();
+  TestReadAllDecodesFloat32Channels();
+  TestChannelMapRemapsLogicalSamples();
+  TestFallbackMatchesBurstResults();
+  TestFallbackLatchesOnce();
+  TestReadAllDecodesDiagnostics();
+  TestReadAllFailsWhenBusFails();
   return 0;
 }
