@@ -265,8 +265,10 @@ void TestMotionLockExclusion() {
   assert(!lock.TryAcquire(1));  // second motor must be rejected
   assert(lock.holder() == 0);
 
-  // Same holder re-acquire is idempotent.
-  assert(lock.TryAcquire(0));
+  // Re-acquire by the same holder without releasing first MUST fail — this
+  // is a hard flight rule (see motion_lock.hpp), not an idempotent no-op.
+  // Matches the paranoid contract enforced in test_safety_rev_c.cpp.
+  assert(!lock.TryAcquire(0));
   assert(lock.holder() == 0);
 
   lock.Release(0);
