@@ -1,5 +1,7 @@
 #include "coatheal/hal/sequent_rtd_adapter.hpp"
 
+#include <cmath>
+#include <cstdint>
 #include <cstring>
 
 namespace coatheal {
@@ -8,6 +10,12 @@ namespace {
 
 void SetError(std::string* error, const char* text) {
   if (error != nullptr) *error = text;
+}
+
+double FloatAt(const std::uint8_t* bytes) {
+  float value = 0.0f;
+  std::memcpy(&value, bytes, sizeof(float));
+  return static_cast<double>(value);
 }
 
 }  // namespace
@@ -108,13 +116,78 @@ bool SequentRtdAdapter::Probe(Identity* out, std::string* error) {
   return true;
 }
 
-bool SequentRtdAdapter::ReadFloatBlock(int, std::array<double, kChannelCount>*) {
-  return false;  // Task 3
+// Reads eight consecutive float32 values starting at `base`, then applies
+// the 1-indexed channel map. Tries one 32-byte burst first for a
+// time-coherent snapshot across channels; if the firmware refuses reads
+// longer than four bytes, latches into per-channel mode permanently.
+bool SequentRtdAdapter::ReadFloatBlock(int base,
+                                       std::array<double, kChannelCount>* out) {
+  std::uint8_t raw[kChannelCount * 4] = {};
+
+  if (burst_mode_) {
+    if (bus_->ReadRegisters(static_cast<std::uint8_t>(base), raw, sizeof(raw))) {
+      for (std::size_t i = 0; i < kChannelCount; ++i) {
+        const std::uint8_t channel = options_.channel_map[i];
+        (*out)[i] = FloatAt(raw + 4 * (channel - 1));
+      }
+      return true;
+    }
+    burst_mode_ = false;
+  }
+
+  for (std::size_t i = 0; i < kChannelCount; ++i) {
+    const std::uint8_t channel = options_.channel_map[i];
+    std::uint8_t bytes[4] = {};
+    const int offset = base + 4 * (static_cast<int>(channel) - 1);
+    if (!bus_->ReadRegisters(static_cast<std::uint8_t>(offset), bytes,
+                             sizeof(bytes))) {
+      return false;
+    }
+    (*out)[i] = FloatAt(bytes);
+  }
+  return true;
 }
 
-bool SequentRtdAdapter::ReadAll(Reading*, std::string* error) {
-  SetError(error, "NOT_IMPLEMENTED");
-  return false;  // Task 3
+bool SequentRtdAdapter::ReadAll(Reading* out, std::string* error) {
+  if (out == nullptr) {
+    SetError(error, "NULL_OUT");
+    return false;
+  }
+  if (!EnsureOpen(error)) return false;
+
+  if (!ReadFloatBlock(sequent_rtd::kRtdVal1, &out->temperature_c)) {
+    SetError(error, "TEMPERATURE_READ_FAILED");
+    open_ = false;
+    return false;
+  }
+  if (!ReadFloatBlock(sequent_rtd::kRtdRes1, &out->resistance_ohm)) {
+    SetError(error, "RESISTANCE_READ_FAILED");
+    open_ = false;
+    return false;
+  }
+
+  // Diagnostics only. Byte interpretations are inferred from the register
+  // map; a wrong guess degrades a log line, never a control value.
+  std::uint8_t diag[3] = {};
+  if (bus_->ReadRegisters(sequent_rtd::kDiagTemp, diag, sizeof(diag))) {
+    out->card_temp_c = static_cast<double>(static_cast<std::int8_t>(diag[0]));
+    const std::uint16_t millivolts =
+        static_cast<std::uint16_t>(diag[1]) |
+        static_cast<std::uint16_t>(static_cast<std::uint16_t>(diag[2]) << 8U);
+    out->rail_5v = static_cast<double>(millivolts) / 1000.0;
+  }
+
+  std::uint8_t reinit[4] = {};
+  if (bus_->ReadRegisters(sequent_rtd::kRtdReinit, reinit, sizeof(reinit))) {
+    out->adc_reinit_count = static_cast<std::uint32_t>(reinit[0]) |
+                            (static_cast<std::uint32_t>(reinit[1]) << 8U) |
+                            (static_cast<std::uint32_t>(reinit[2]) << 16U) |
+                            (static_cast<std::uint32_t>(reinit[3]) << 24U);
+  }
+
+  out->channel_valid.fill(true);  // narrowed in Task 4
+  SetError(error, "");
+  return true;
 }
 
 }  // namespace coatheal
