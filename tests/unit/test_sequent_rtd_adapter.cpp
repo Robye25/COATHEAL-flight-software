@@ -146,7 +146,26 @@ void TestProbeAcceptsMatchingPt1000() {
 }
 
 void TestSensorTypeMasksLowNibble() {
-  // Vendor reads sensor type as `0x0f & buff`; high bits are not ours.
+  // 0xF0 masks to 0x00 -> PT100. Without the 0x0f mask the raw byte is
+  // nonzero and would be misread as PT1000, so this value — unlike a value
+  // with the low nibble set — actually discriminates masked from unmasked.
+  std::vector<std::uint8_t> image = BlankImage();
+  image[sequent_rtd::kPt1000] = 0xF0;
+
+  FakeI2cBus bus;
+  bus.SetImage(image);
+
+  SequentRtdAdapter::Options options;
+  options.expect_pt1000 = false;
+  SequentRtdAdapter adapter(&bus, options);
+
+  SequentRtdAdapter::Identity id;
+  std::string error;
+  assert(adapter.Probe(&id, &error));
+  assert(!id.pt1000);
+}
+
+void TestSensorTypeIgnoresHighNibbleWhenPt1000() {
   std::vector<std::uint8_t> image = BlankImage();
   image[sequent_rtd::kPt1000] = 0xF1;
 
@@ -161,6 +180,24 @@ void TestSensorTypeMasksLowNibble() {
   std::string error;
   assert(adapter.Probe(&id, &error));
   assert(id.pt1000);
+}
+
+void TestProbeReopensAfterIoFailure() {
+  FakeI2cBus bus;
+  bus.SetImage(BlankImage());
+  bus.FailNextReads(1);
+
+  SequentRtdAdapter adapter(&bus, SequentRtdAdapter::Options{});
+  SequentRtdAdapter::Identity id;
+  std::string error;
+
+  assert(!adapter.Probe(&id, &error));
+  const int opens_after_failure = bus.open_count();
+
+  // An I/O failure must leave the adapter ready to re-open, not stuck
+  // believing it still holds a good connection.
+  assert(adapter.Probe(&id, &error));
+  assert(bus.open_count() > opens_after_failure);
 }
 
 void TestProbeReportsUnverifiableSensorTypeOnOldHardware() {
@@ -189,6 +226,8 @@ int main() {
   TestProbeRejectsSensorTypeMismatch();
   TestProbeAcceptsMatchingPt1000();
   TestSensorTypeMasksLowNibble();
+  TestSensorTypeIgnoresHighNibbleWhenPt1000();
+  TestProbeReopensAfterIoFailure();
   TestProbeReportsUnverifiableSensorTypeOnOldHardware();
   return 0;
 }
