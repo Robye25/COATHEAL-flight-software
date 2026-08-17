@@ -115,3 +115,16 @@ target_link_libraries(coatheal_sensor_manager_rev_c_tests PRIVATE coatheal_onboa
 
 add_test(NAME coatheal_sensor_manager_rev_c_tests
   COMMAND coatheal_sensor_manager_rev_c_tests)
+
+# I2C transport seam contract tests.
+add_executable(coatheal_i2c_bus_tests
+  unit/test_i2c_bus.cpp
+)
+
+target_link_libraries(coatheal_i2c_bus_tests PRIVATE coatheal_onboard_core)
+
+target_include_directories(coatheal_i2c_bus_tests PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/unit
+)
+
+add_test(NAME coatheal_i2c_bus_tests COMMAND coatheal_i2c_bus_tests)
