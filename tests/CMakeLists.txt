@@ -128,3 +128,16 @@ target_include_directories(coatheal_i2c_bus_tests PRIVATE
 )
 
 add_test(NAME coatheal_i2c_bus_tests COMMAND coatheal_i2c_bus_tests)
+
+# Sequent RTD HAT register-conversation tests. No hardware required.
+add_executable(coatheal_sequent_rtd_tests
+  unit/test_sequent_rtd_adapter.cpp
+)
+
+target_link_libraries(coatheal_sequent_rtd_tests PRIVATE coatheal_onboard_core)
+
+target_include_directories(coatheal_sequent_rtd_tests PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/unit
+)
+
+add_test(NAME coatheal_sequent_rtd_tests COMMAND coatheal_sequent_rtd_tests)

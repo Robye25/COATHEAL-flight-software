@@ -27,6 +27,7 @@ add_library(coatheal_onboard_core
   src/thermal_controller.cpp
   src/hal/i2c_adapter.cpp
   src/hal/i2c_bus.cpp
+  src/hal/sequent_rtd_adapter.cpp
   src/hal/ina3221_adapter.cpp
   src/hal/pwm_controller.cpp
   src/hal/rtc_adapter.cpp
