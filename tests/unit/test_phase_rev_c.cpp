@@ -3,6 +3,7 @@
 // 6 of the 8 samples one-to-one; samples 6 and 7 are pulled but unheated).
 #include <cassert>
 #include <chrono>
+#include <cmath>
 #include <iostream>
 #include <vector>
 

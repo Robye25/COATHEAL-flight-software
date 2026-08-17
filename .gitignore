@@ -37,3 +37,6 @@ Thumbs.db
 
 .claude/
 memory/
+
+# superpowers SDD scratch workspace
+.superpowers/
