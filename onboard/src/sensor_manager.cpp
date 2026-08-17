@@ -15,6 +15,7 @@
 #include <thread>
 
 #include "coatheal/hal/gpio_output.hpp"
+#include "coatheal/hal/sequent_rtd_adapter.hpp"
 #include "coatheal/hal/spi_bus_lock.hpp"
 
 #if defined(__linux__) && __has_include(<linux/i2c-dev.h>)
@@ -45,19 +46,6 @@ constexpr double kInitialResistanceOhm = 100.0;
 constexpr double kResistanceDecayPerPull = 0.05;
 constexpr const char* kI2cDevice = "/dev/i2c-1";
 constexpr double kNoReading = std::numeric_limits<double>::quiet_NaN();
-constexpr double kPt100R0Ohm = 100.0;
-constexpr double kCvdA = 3.90830e-3;
-constexpr double kCvdB = -5.77500e-7;
-constexpr double kCvdC = -4.18301e-12;
-
-double Pt100ResistanceAt(double temp_c) {
-  if (temp_c >= 0.0) {
-    return kPt100R0Ohm * (1.0 + kCvdA * temp_c + kCvdB * temp_c * temp_c);
-  }
-  return kPt100R0Ohm *
-         (1.0 + kCvdA * temp_c + kCvdB * temp_c * temp_c +
-          kCvdC * (temp_c - 100.0) * temp_c * temp_c * temp_c);
-}
 
 std::int32_t SignExtend(std::uint32_t value, int bits) {
   const std::uint32_t sign = 1U << (bits - 1);
@@ -504,29 +492,7 @@ double SensorManager::Max31865CodeToResistance(std::uint16_t code,
 
 bool SensorManager::Pt100TemperatureFromResistance(double resistance_ohm,
                                                    double* temperature_c) {
-  if (temperature_c == nullptr || !std::isfinite(resistance_ohm) ||
-      resistance_ohm <= 0.0) {
-    return false;
-  }
-  constexpr double kMinTemp = -200.0;
-  constexpr double kMaxTemp = 850.0;
-  const double min_r = Pt100ResistanceAt(kMinTemp);
-  const double max_r = Pt100ResistanceAt(kMaxTemp);
-  if (resistance_ohm < min_r || resistance_ohm > max_r) {
-    return false;
-  }
-  double lo = kMinTemp;
-  double hi = kMaxTemp;
-  for (int i = 0; i < 64; ++i) {
-    const double mid = (lo + hi) * 0.5;
-    if (Pt100ResistanceAt(mid) < resistance_ohm) {
-      lo = mid;
-    } else {
-      hi = mid;
-    }
-  }
-  *temperature_c = (lo + hi) * 0.5;
-  return std::isfinite(*temperature_c);
+  return Pt100TemperatureFromOhms(resistance_ohm, temperature_c);
 }
 
 bool SensorManager::ReadRtdClickMax31865(double* temperature_c,

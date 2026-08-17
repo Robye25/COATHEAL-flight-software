@@ -18,7 +18,48 @@ double FloatAt(const std::uint8_t* bytes) {
   return static_cast<double>(value);
 }
 
+// Callendar-Van Dusen coefficients (IEC 60751) for a PT100 element.
+constexpr double kPt100R0Ohm = 100.0;
+constexpr double kCvdA = 3.90830e-3;
+constexpr double kCvdB = -5.77500e-7;
+constexpr double kCvdC = -4.18301e-12;
+
+double Pt100ResistanceAt(double temp_c) {
+  if (temp_c >= 0.0) {
+    return kPt100R0Ohm * (1.0 + kCvdA * temp_c + kCvdB * temp_c * temp_c);
+  }
+  return kPt100R0Ohm *
+         (1.0 + kCvdA * temp_c + kCvdB * temp_c * temp_c +
+          kCvdC * (temp_c - 100.0) * temp_c * temp_c * temp_c);
+}
+
 }  // namespace
+
+bool Pt100TemperatureFromOhms(double resistance_ohm, double* temperature_c) {
+  if (temperature_c == nullptr || !std::isfinite(resistance_ohm) ||
+      resistance_ohm <= 0.0) {
+    return false;
+  }
+  constexpr double kMinTemp = -200.0;
+  constexpr double kMaxTemp = 850.0;
+  const double min_r = Pt100ResistanceAt(kMinTemp);
+  const double max_r = Pt100ResistanceAt(kMaxTemp);
+  if (resistance_ohm < min_r || resistance_ohm > max_r) {
+    return false;
+  }
+  double lo = kMinTemp;
+  double hi = kMaxTemp;
+  for (int i = 0; i < 64; ++i) {
+    const double mid = (lo + hi) * 0.5;
+    if (Pt100ResistanceAt(mid) < resistance_ohm) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+  *temperature_c = (lo + hi) * 0.5;
+  return std::isfinite(*temperature_c);
+}
 
 SequentRtdAdapter::SequentRtdAdapter(I2cBus* bus, const Options& options)
     : bus_(bus), options_(options) {}
@@ -185,9 +226,39 @@ bool SequentRtdAdapter::ReadAll(Reading* out, std::string* error) {
                             (static_cast<std::uint32_t>(reinit[3]) << 24U);
   }
 
-  out->channel_valid.fill(true);  // narrowed in Task 4
+  ApplyValidation(out);
   SetError(error, "");
   return true;
+}
+
+// A channel is trusted only when its resistance is finite and inside the
+// physically-plausible probe range, AND the card-reported temperature
+// agrees with the temperature that resistance itself implies. The
+// cross-check is what catches a miswired or drifting probe: the card can
+// report a finite, in-range temperature that simply doesn't match its own
+// raw resistance, and that must not be allowed to drive a heater.
+void SequentRtdAdapter::ApplyValidation(Reading* out) const {
+  for (std::size_t i = 0; i < kChannelCount; ++i) {
+    const double temp = out->temperature_c[i];
+    const double ohms = out->resistance_ohm[i];
+
+    if (!std::isfinite(temp) || !std::isfinite(ohms)) {
+      out->channel_valid[i] = false;
+      continue;
+    }
+    if (ohms < options_.resistance_min_ohm ||
+        ohms > options_.resistance_max_ohm) {
+      out->channel_valid[i] = false;
+      continue;
+    }
+    double derived = 0.0;
+    if (!Pt100TemperatureFromOhms(ohms, &derived) ||
+        std::fabs(derived - temp) > options_.crosscheck_tol_c) {
+      out->channel_valid[i] = false;
+      continue;
+    }
+    out->channel_valid[i] = true;
+  }
 }
 
 }  // namespace coatheal

@@ -33,6 +33,12 @@ inline constexpr int kPt1000     = 133;                      // 133 uint8, 0x0f
 
 }  // namespace sequent_rtd
 
+// Callendar-Van Dusen inverse for PT100. Returns false outside the
+// supported resistance range. Extracted here so the HAL does not depend
+// on SensorManager; SensorManager::Pt100TemperatureFromResistance
+// forwards to this.
+bool Pt100TemperatureFromOhms(double resistance_ohm, double* temperature_c);
+
 // 8-channel PT100/PT1000 acquisition on a Sequent Microsystems stackable
 // RTD HAT. Byte-addressed I2C memory at 0x40 + stack.
 //
@@ -89,6 +95,7 @@ class SequentRtdAdapter {
  private:
   bool EnsureOpen(std::string* error);
   bool ReadFloatBlock(int base, std::array<double, kChannelCount>* out);
+  void ApplyValidation(Reading* out) const;
 
   I2cBus* bus_ = nullptr;
   Options options_;
