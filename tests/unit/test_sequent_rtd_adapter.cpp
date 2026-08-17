@@ -363,6 +363,12 @@ void TestReadAllFailsWhenBusFails() {
 }
 
 void TestNanAndInfChannelsMarkedInvalid() {
+  // The NaN-temperature case (channel 2) genuinely isolates the finite
+  // check: NaN is neither < min nor > max, so only !isfinite catches it.
+  // The Inf-resistance case (channel 5) does NOT isolate anything -
+  // inf > resistance_max_ohm is already true, so the range check would
+  // catch it even without the finite check. It is kept here as defence
+  // in depth, not as an isolation test.
   float temps[8] = {20, 20, 20, 20, 20, 20, 20, 20};
   float res[8] = {107.79f, 107.79f, 107.79f, 107.79f,
                   107.79f, 107.79f, 107.79f, 107.79f};
@@ -384,6 +390,13 @@ void TestNanAndInfChannelsMarkedInvalid() {
 
 void TestOpenAndShortSensorsMarkedInvalid() {
   // Channel 1 open (resistance far high), channel 4 shorted (near zero).
+  // These values are extreme enough that Pt100TemperatureFromOhms itself
+  // rejects them (its internal CVD bracket is ~18.5..390.5 ohm), so this
+  // test does not distinguish whether the configured resistance window or
+  // the CVD bracket is what rejects them - either alone would. That is
+  // fine operationally (a real open/short is caught regardless), but see
+  // TestResistanceWindowRejectsOutOfWindowChannels for a test that isolates
+  // the window specifically.
   float temps[8] = {20, 20, 20, 20, 20, 20, 20, 20};
   float res[8] = {107.79f, 5000.0f, 107.79f, 107.79f,
                   0.2f, 107.79f, 107.79f, 107.79f};
@@ -399,6 +412,32 @@ void TestOpenAndShortSensorsMarkedInvalid() {
   assert(reading.channel_valid[0]);
   assert(!reading.channel_valid[1]);
   assert(!reading.channel_valid[4]);
+}
+
+void TestResistanceWindowRejectsOutOfWindowChannels() {
+  // Every value here is CVD-valid and agrees with its own temperature, so
+  // the configured window is the only thing that can reject it. If the
+  // range check were deleted, channels 1 and 4 would come back VALID and
+  // this test would fail.
+  float temps[8] = {20, -50.0f, 20, 20, 100.0f, 20, 20, 20};
+  float res[8] = {107.79f, 80.31f, 107.79f, 107.79f,
+                  138.51f, 107.79f, 107.79f, 107.79f};
+
+  FakeI2cBus bus;
+  bus.SetImage(ImageWithChannels(temps, res));
+
+  SequentRtdAdapter::Options options;
+  options.resistance_min_ohm = 100.0;
+  options.resistance_max_ohm = 120.0;
+  SequentRtdAdapter adapter(&bus, options);
+
+  SequentRtdAdapter::Reading reading;
+  std::string error;
+  assert(adapter.ReadAll(&reading, &error));
+
+  assert(reading.channel_valid[0]);   // 107.79 is inside [100,120]
+  assert(!reading.channel_valid[1]);  // 80.31 is CVD-valid but below min
+  assert(!reading.channel_valid[4]);  // 138.51 is CVD-valid but above max
 }
 
 void TestCrosscheckMismatchMarkedInvalid() {
@@ -424,8 +463,11 @@ void TestCrosscheckMismatchMarkedInvalid() {
 }
 
 void TestCrosscheckToleranceIsRespected() {
-  // 107.79 ohm is ~20 degC; a 1.5 degC disagreement is inside a 2.0 tol.
-  float temps[8] = {21.5f, 20, 20, 20, 20, 20, 20, 20};
+  // 107.79 ohm derives to ~20 degC. With tol 2.0, a 1.5 degC disagreement
+  // must be accepted and a 2.5 degC disagreement must be rejected.
+  // Asserting only the accepting side would pass even with the cross-check
+  // deleted entirely.
+  float temps[8] = {21.5f, 22.5f, 20, 20, 20, 20, 20, 20};
   float res[8] = {107.79f, 107.79f, 107.79f, 107.79f,
                   107.79f, 107.79f, 107.79f, 107.79f};
 
@@ -439,7 +481,9 @@ void TestCrosscheckToleranceIsRespected() {
   SequentRtdAdapter::Reading reading;
   std::string error;
   assert(adapter.ReadAll(&reading, &error));
-  assert(reading.channel_valid[0]);
+
+  assert(reading.channel_valid[0]);   // 1.5 degC off: inside tolerance
+  assert(!reading.channel_valid[1]);  // 2.5 degC off: outside tolerance
 }
 
 void TestPt100ConversionMatchesLegacyBehaviour() {
@@ -476,6 +520,7 @@ int main() {
   TestReadAllFailsWhenBusFails();
   TestNanAndInfChannelsMarkedInvalid();
   TestOpenAndShortSensorsMarkedInvalid();
+  TestResistanceWindowRejectsOutOfWindowChannels();
   TestCrosscheckMismatchMarkedInvalid();
   TestCrosscheckToleranceIsRespected();
   TestPt100ConversionMatchesLegacyBehaviour();
