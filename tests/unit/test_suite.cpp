@@ -528,7 +528,9 @@ void TestConfigRejectsGpioCollisions() {
   coatheal::OnboardConfig cfg;
   std::string error;
   assert(!coatheal::LoadConfigFromIni(cfg_path.string(), &cfg, &error));
-  assert(error.find("BCM GPIO 12 assigned to both") != std::string::npos);
+  // Robust to the configured chip path (e.g. "/dev/gpiochip0") rather than
+  // asserting the old hardcoded "BCM GPIO" phrasing the message used to have.
+  assert(error.find("line 12 assigned to both") != std::string::npos);
 
   std::error_code ec;
   std::filesystem::remove(cfg_path, ec);
