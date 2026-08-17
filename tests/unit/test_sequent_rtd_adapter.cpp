@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -361,6 +362,97 @@ void TestReadAllFailsWhenBusFails() {
   assert(!error.empty());
 }
 
+void TestNanAndInfChannelsMarkedInvalid() {
+  float temps[8] = {20, 20, 20, 20, 20, 20, 20, 20};
+  float res[8] = {107.79f, 107.79f, 107.79f, 107.79f,
+                  107.79f, 107.79f, 107.79f, 107.79f};
+  temps[2] = std::numeric_limits<float>::quiet_NaN();
+  res[5] = std::numeric_limits<float>::infinity();
+
+  FakeI2cBus bus;
+  bus.SetImage(ImageWithChannels(temps, res));
+
+  SequentRtdAdapter adapter(&bus, SequentRtdAdapter::Options{});
+  SequentRtdAdapter::Reading reading;
+  std::string error;
+  assert(adapter.ReadAll(&reading, &error));
+
+  assert(reading.channel_valid[0]);
+  assert(!reading.channel_valid[2]);
+  assert(!reading.channel_valid[5]);
+}
+
+void TestOpenAndShortSensorsMarkedInvalid() {
+  // Channel 1 open (resistance far high), channel 4 shorted (near zero).
+  float temps[8] = {20, 20, 20, 20, 20, 20, 20, 20};
+  float res[8] = {107.79f, 5000.0f, 107.79f, 107.79f,
+                  0.2f, 107.79f, 107.79f, 107.79f};
+
+  FakeI2cBus bus;
+  bus.SetImage(ImageWithChannels(temps, res));
+
+  SequentRtdAdapter adapter(&bus, SequentRtdAdapter::Options{});
+  SequentRtdAdapter::Reading reading;
+  std::string error;
+  assert(adapter.ReadAll(&reading, &error));
+
+  assert(reading.channel_valid[0]);
+  assert(!reading.channel_valid[1]);
+  assert(!reading.channel_valid[4]);
+}
+
+void TestCrosscheckMismatchMarkedInvalid() {
+  // Channel 3's reported temperature disagrees with its own resistance:
+  // 107.79 ohm is ~20 degC, but the card claims 60 degC.
+  float temps[8] = {20, 20, 20, 60.0f, 20, 20, 20, 20};
+  float res[8] = {107.79f, 107.79f, 107.79f, 107.79f,
+                  107.79f, 107.79f, 107.79f, 107.79f};
+
+  FakeI2cBus bus;
+  bus.SetImage(ImageWithChannels(temps, res));
+
+  SequentRtdAdapter::Options options;
+  options.crosscheck_tol_c = 2.0;
+  SequentRtdAdapter adapter(&bus, options);
+
+  SequentRtdAdapter::Reading reading;
+  std::string error;
+  assert(adapter.ReadAll(&reading, &error));
+
+  assert(reading.channel_valid[0]);
+  assert(!reading.channel_valid[3]);
+}
+
+void TestCrosscheckToleranceIsRespected() {
+  // 107.79 ohm is ~20 degC; a 1.5 degC disagreement is inside a 2.0 tol.
+  float temps[8] = {21.5f, 20, 20, 20, 20, 20, 20, 20};
+  float res[8] = {107.79f, 107.79f, 107.79f, 107.79f,
+                  107.79f, 107.79f, 107.79f, 107.79f};
+
+  FakeI2cBus bus;
+  bus.SetImage(ImageWithChannels(temps, res));
+
+  SequentRtdAdapter::Options options;
+  options.crosscheck_tol_c = 2.0;
+  SequentRtdAdapter adapter(&bus, options);
+
+  SequentRtdAdapter::Reading reading;
+  std::string error;
+  assert(adapter.ReadAll(&reading, &error));
+  assert(reading.channel_valid[0]);
+}
+
+void TestPt100ConversionMatchesLegacyBehaviour() {
+  double temp = 0.0;
+  assert(Pt100TemperatureFromOhms(100.0, &temp));
+  assert(std::fabs(temp) < 0.05);
+  assert(Pt100TemperatureFromOhms(138.5055, &temp));
+  assert(std::fabs(temp - 100.0) < 0.1);
+  assert(Pt100TemperatureFromOhms(80.306, &temp));
+  assert(std::fabs(temp - (-50.0)) < 0.2);
+  assert(!Pt100TemperatureFromOhms(1000.0, &temp));
+}
+
 }  // namespace
 
 int main() {
@@ -382,5 +474,10 @@ int main() {
   TestFallbackLatchesOnce();
   TestReadAllDecodesDiagnostics();
   TestReadAllFailsWhenBusFails();
+  TestNanAndInfChannelsMarkedInvalid();
+  TestOpenAndShortSensorsMarkedInvalid();
+  TestCrosscheckMismatchMarkedInvalid();
+  TestCrosscheckToleranceIsRespected();
+  TestPt100ConversionMatchesLegacyBehaviour();
   return 0;
 }
