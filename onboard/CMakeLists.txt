@@ -49,6 +49,12 @@ endif()
 
 target_link_libraries(coatheal_onboard_core PUBLIC Threads::Threads)
 
+# The _WIN32 branches of command_server.cpp and telemetry_client.cpp call
+# Winsock; without this the Windows build links only on Linux-only paths.
+if(WIN32)
+  target_link_libraries(coatheal_onboard_core PUBLIC ws2_32)
+endif()
+
 if(LIBGPIOD_FOUND)
   target_compile_definitions(coatheal_onboard_core PUBLIC COATHEAL_HAS_LIBGPIOD=1)
   if(LIBGPIOD_VERSION VERSION_GREATER_EQUAL "2.0")
