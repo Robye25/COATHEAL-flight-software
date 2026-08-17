@@ -206,10 +206,13 @@ void TestParserLegacyDefault() {
   assert(r5.command.motor_id == 0);
 }
 
-// Regression: STEPPER_BEND's (1,2) legacy/new arity ranges overlap at
-// n == legacy_max + 1 (2 args). A 2-arg call must resolve to the legacy
-// <steps> <hold> reading, not <id> <steps>, or a bend command with a step
-// count >= 100 silently targets the wrong motor.
+// Regression: STEPPER_BEND/STEPPER_MOVETO's (1,2) legacy/new arity ranges
+// overlap at n == legacy_max + 1 (2 args) -- arity alone cannot tell
+// "<target> <hold>" from "<id> <target>" apart, since both are two bare
+// integers. Disambiguation is on plausibility: the leading token is only
+// treated as a motor id if it also parses into [0, motor_count). A step
+// count like 500 is never a plausible id (default motor_count == 2) and
+// falls through to the legacy reading; a real motor id does not.
 void TestBendArityDisambiguation() {
   CommandParser parser;
   // Legacy two-arg form: both tokens are payload, id defaults to 0.
@@ -220,7 +223,8 @@ void TestBendArityDisambiguation() {
   assert(legacy.command.args[0] == "500");
   assert(legacy.command.args[1] == "10");
 
-  // A two-digit leading token must still not be eaten in the legacy form.
+  // A two-digit leading token must still not be eaten in the legacy form
+  // when it isn't a plausible motor id.
   auto legacy_small = parser.ParseLine("STEPPER_BEND 50 10");
   assert(legacy_small.ok);
   assert(legacy_small.command.motor_id == 0);
@@ -233,6 +237,29 @@ void TestBendArityDisambiguation() {
   assert(indexed.command.args.size() == 2);
   assert(indexed.command.args[0] == "500");
   assert(indexed.command.args[1] == "10");
+
+  // Indexed two-arg form with no hold -- this is what the ground-station
+  // MOVETO button sends (panels_control.py:695) and what protocol.md
+  // documents. Regression guard: an arity-only rule silently read this as
+  // motor 0, 1 microstep, 800 s hold.
+  auto indexed_no_hold = parser.ParseLine("STEPPER_MOVETO 1 800");
+  assert(indexed_no_hold.ok);
+  assert(indexed_no_hold.command.motor_id == 1);
+  assert(indexed_no_hold.command.args.size() == 1);
+  assert(indexed_no_hold.command.args[0] == "800");
+
+  // Leading token outside the configured motor range is not an id, so the
+  // three-arg form fails the arity check loudly instead of driving motor 0.
+  auto out_of_range = parser.ParseLine("STEPPER_MOVETO 9 800 10");
+  assert(!out_of_range.ok);
+
+  // STEPPER_MOVE takes maybe_extract_id(1,1) -- verify the restored
+  // inclusive band did not regress the unambiguous indexed form.
+  auto move_indexed = parser.ParseLine("STEPPER_MOVE 1 400");
+  assert(move_indexed.ok);
+  assert(move_indexed.command.motor_id == 1);
+  assert(move_indexed.command.args.size() == 1);
+  assert(move_indexed.command.args[0] == "400");
 }
 
 // (d) max_step_hz ceiling — SetSpeed clamps (does not reject) and Snapshot

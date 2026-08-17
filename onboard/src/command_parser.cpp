@@ -276,30 +276,41 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
   // remaining tokens in `args` so the legacy dispatch surface ("args[0] is
   // the numeric payload") continues to work unchanged.
   //
-  // Detection is arity-based: if the arg count is one greater than the
-  // legacy count AND the first token is a small unsigned integer, we treat
-  // it as the motor id. Otherwise id defaults to 0.
-  auto is_small_int_token = [](const std::string& tok) {
-    if (tok.empty() || tok.size() > 2) return false;  // motor ids are 0..99
+  // Detection is arity-based first: the arg count must fall in the "could
+  // be new form" band [legacy_min+1, legacy_max+1]. For STEPPER_BEND /
+  // STEPPER_MOVETO (legacy_min=1, legacy_max=2) that band overlaps the
+  // legacy form's own 2-arg case ("<target> <hold_s>" vs "<id> <target>"),
+  // so arity alone cannot disambiguate — both are two bare integers. We
+  // resolve the overlap on plausibility instead: only extract the leading
+  // token as a motor id if it is also a value that could actually BE a
+  // configured motor id (see is_plausible_motor_id). A step count like
+  // "500" fails that check and falls through to the legacy reading; a real
+  // motor id does not. This is deliberately asymmetric with the protocol:
+  // legacy "<steps> <hold_s>" where steps happens to equal a valid motor
+  // id (e.g. "STEPPER_MOVETO 1 800") is indistinguishable from the indexed
+  // form and is read as indexed — protocol.md documents id as required for
+  // the indexed form, and a 1-microstep move with an 800 s hold is not a
+  // meaningful legacy command, so that reading is correct on real traffic.
+  auto is_plausible_motor_id = [&](const std::string& tok) {
+    if (tok.empty() || tok.size() > 9) return false;  // bound width before stoi
     for (char c : tok) {
       if (!std::isdigit(static_cast<unsigned char>(c))) return false;
     }
-    return true;
+    try {
+      const int value = std::stoi(tok);
+      return value >= 0 && static_cast<std::size_t>(value) < motor_count_;
+    } catch (...) {
+      return false;
+    }
   };
 
   auto maybe_extract_id = [&](std::size_t legacy_min, std::size_t legacy_max) {
-    (void)legacy_min;  // kept for call-site readability; not used in the arity test below
     const std::size_t n = command.args.size();
+    const std::size_t new_min = legacy_min + 1;
     const std::size_t new_max = legacy_max + 1;
-    // Only treat the leading token as a motor id when the arg count is
-    // unambiguously the new form (strictly above the legacy range). Ranges
-    // like (1,2) overlap the legacy and new forms at n == legacy_max + 1
-    // (e.g. STEPPER_BEND <steps> <hold> vs STEPPER_BEND <id> <steps>); on
-    // overlap we must favour the legacy reading, since misreading a step
-    // count as a motor id drives the wrong motor.
-    const bool matches_new = (n > legacy_max && n <= new_max);
+    const bool matches_new = (n >= new_min && n <= new_max);
     if (matches_new && !command.args.empty() &&
-        is_small_int_token(command.args[0])) {
+        is_plausible_motor_id(command.args[0])) {
       try {
         command.motor_id = std::stoi(command.args[0]);
       } catch (...) {
