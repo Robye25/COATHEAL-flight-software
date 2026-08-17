@@ -280,7 +280,7 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
   // legacy count AND the first token is a small unsigned integer, we treat
   // it as the motor id. Otherwise id defaults to 0.
   auto is_small_int_token = [](const std::string& tok) {
-    if (tok.empty() || tok.size() > 3) return false;  // motor ids are 0..99
+    if (tok.empty() || tok.size() > 2) return false;  // motor ids are 0..99
     for (char c : tok) {
       if (!std::isdigit(static_cast<unsigned char>(c))) return false;
     }
@@ -288,10 +288,16 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
   };
 
   auto maybe_extract_id = [&](std::size_t legacy_min, std::size_t legacy_max) {
+    (void)legacy_min;  // kept for call-site readability; not used in the arity test below
     const std::size_t n = command.args.size();
-    const std::size_t new_min = legacy_min + 1;
     const std::size_t new_max = legacy_max + 1;
-    const bool matches_new = (n >= new_min && n <= new_max);
+    // Only treat the leading token as a motor id when the arg count is
+    // unambiguously the new form (strictly above the legacy range). Ranges
+    // like (1,2) overlap the legacy and new forms at n == legacy_max + 1
+    // (e.g. STEPPER_BEND <steps> <hold> vs STEPPER_BEND <id> <steps>); on
+    // overlap we must favour the legacy reading, since misreading a step
+    // count as a motor id drives the wrong motor.
+    const bool matches_new = (n > legacy_max && n <= new_max);
     if (matches_new && !command.args.empty() &&
         is_small_int_token(command.args[0])) {
       try {

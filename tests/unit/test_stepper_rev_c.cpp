@@ -206,6 +206,35 @@ void TestParserLegacyDefault() {
   assert(r5.command.motor_id == 0);
 }
 
+// Regression: STEPPER_BEND's (1,2) legacy/new arity ranges overlap at
+// n == legacy_max + 1 (2 args). A 2-arg call must resolve to the legacy
+// <steps> <hold> reading, not <id> <steps>, or a bend command with a step
+// count >= 100 silently targets the wrong motor.
+void TestBendArityDisambiguation() {
+  CommandParser parser;
+  // Legacy two-arg form: both tokens are payload, id defaults to 0.
+  auto legacy = parser.ParseLine("STEPPER_BEND 500 10");
+  assert(legacy.ok);
+  assert(legacy.command.motor_id == 0);
+  assert(legacy.command.args.size() == 2);
+  assert(legacy.command.args[0] == "500");
+  assert(legacy.command.args[1] == "10");
+
+  // A two-digit leading token must still not be eaten in the legacy form.
+  auto legacy_small = parser.ParseLine("STEPPER_BEND 50 10");
+  assert(legacy_small.ok);
+  assert(legacy_small.command.motor_id == 0);
+  assert(legacy_small.command.args.size() == 2);
+
+  // Indexed three-arg form: leading token is the motor id.
+  auto indexed = parser.ParseLine("STEPPER_BEND 1 500 10");
+  assert(indexed.ok);
+  assert(indexed.command.motor_id == 1);
+  assert(indexed.command.args.size() == 2);
+  assert(indexed.command.args[0] == "500");
+  assert(indexed.command.args[1] == "10");
+}
+
 // (d) max_step_hz ceiling — SetSpeed clamps (does not reject) and Snapshot
 // reflects the clamped value.
 void TestMaxStepHzCeiling() {
@@ -336,6 +365,7 @@ int main() {
   TestTrapezoidalRamp();
   TestParserIdArgument();
   TestParserLegacyDefault();
+  TestBendArityDisambiguation();
   TestMaxStepHzCeiling();
   TestMotionLockExclusion();
   TestPullCycleAcquiresLock();
