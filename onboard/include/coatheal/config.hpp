@@ -148,6 +148,15 @@ struct SensorHardwareConfig {
   int rtd_click_filter_hz = 50;
   std::uint32_t rtd_click_spi_speed_hz = 500000;
 
+  // Sequent Microsystems 8-channel RTD HAT. Sole sample-temperature source.
+  int sequent_rtd_stack = 0;                     // 0..7 -> I2C 0x40..0x47
+  std::vector<std::size_t> sequent_rtd_channels; // card channel per sample
+  int sequent_rtd_poll_ms = 1000;
+  std::string sequent_rtd_expect_sensor_type = "pt100";
+  double sequent_rtd_resistance_min_ohm = 60.0;
+  double sequent_rtd_resistance_max_ohm = 390.0;
+  double sequent_rtd_crosscheck_tol_c = 2.0;
+
   std::string pressure_source = "dps310";
   int dps310_i2c_addr = 0x77;
 

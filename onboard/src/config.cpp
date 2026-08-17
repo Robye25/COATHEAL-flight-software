@@ -6,6 +6,7 @@
 #include <fstream>
 #include <iomanip>
 #include <map>
+#include <set>
 #include <sstream>
 #include <string>
 #include <type_traits>
@@ -76,6 +77,7 @@ OnboardConfig::OnboardConfig() {
   heaters.output_lines = {17, 18, 27, 5, 6, 13};
   heaters.temperature_channels = {0, 1, 2, 3, 4, 5};
   sensors.daq132m_enabled_channels = {0, 1, 2, 3, 4, 5, 6, 7};
+  sensors.sequent_rtd_channels = {1, 2, 3, 4, 5, 6, 7, 8};
 
   motors[0].driver = "tmc2240";
   motors[0].gpio_chip = runtime.gpio_chip;
@@ -376,6 +378,23 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
         if (error != nullptr) *error = "invalid sensor.daq132m_enabled_channels";
         return false;
       }
+    } else if (key == "sensor.sequent_rtd_stack") {
+      if (!parse_int(key, value, &config->sensors.sequent_rtd_stack, line_no)) return false;
+    } else if (key == "sensor.sequent_rtd_channels") {
+      if (!ParseSizeList(value, &config->sensors.sequent_rtd_channels)) {
+        if (error != nullptr) *error = "invalid sensor.sequent_rtd_channels";
+        return false;
+      }
+    } else if (key == "sensor.sequent_rtd_poll_ms") {
+      if (!parse_int(key, value, &config->sensors.sequent_rtd_poll_ms, line_no)) return false;
+    } else if (key == "sensor.sequent_rtd_expect_sensor_type") {
+      config->sensors.sequent_rtd_expect_sensor_type = value;
+    } else if (key == "sensor.sequent_rtd_resistance_min_ohm") {
+      if (!parse_double(key, value, &config->sensors.sequent_rtd_resistance_min_ohm, line_no)) return false;
+    } else if (key == "sensor.sequent_rtd_resistance_max_ohm") {
+      if (!parse_double(key, value, &config->sensors.sequent_rtd_resistance_max_ohm, line_no)) return false;
+    } else if (key == "sensor.sequent_rtd_crosscheck_tol_c") {
+      if (!parse_double(key, value, &config->sensors.sequent_rtd_crosscheck_tol_c, line_no)) return false;
     } else if (key == "sensor.rtd_click_enabled") {
       if (!parse_bool(key, value, &config->sensors.rtd_click_enabled, line_no)) return false;
     } else if (key == "sensor.rtd_click_spi_device") {
@@ -717,6 +736,53 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
       !config->sensors.daq132m_enabled) {
     if (error != nullptr) {
       *error = "sensor.daq132m_enabled must be true for daq132m_modbus";
+    }
+    return false;
+  }
+  if (config->sensors.sequent_rtd_stack < 0 ||
+      config->sensors.sequent_rtd_stack > 7) {
+    if (error != nullptr) {
+      *error = "sensor.sequent_rtd_stack must be 0..7 (I2C 0x40..0x47)";
+    }
+    return false;
+  }
+  if (config->sensors.sequent_rtd_channels.size() !=
+      config->hardware.sample_count) {
+    if (error != nullptr) {
+      *error = "sensor.sequent_rtd_channels must have hardware.sample_count "
+               "entries";
+    }
+    return false;
+  }
+  {
+    std::set<std::size_t> seen;
+    for (const std::size_t channel : config->sensors.sequent_rtd_channels) {
+      if (channel < 1 || channel > 8) {
+        if (error != nullptr) {
+          *error = "sensor.sequent_rtd_channels entries must be 1..8";
+        }
+        return false;
+      }
+      if (!seen.insert(channel).second) {
+        if (error != nullptr) {
+          *error = "sensor.sequent_rtd_channels contains duplicates";
+        }
+        return false;
+      }
+    }
+  }
+  if (config->sensors.sequent_rtd_expect_sensor_type != "pt100" &&
+      config->sensors.sequent_rtd_expect_sensor_type != "pt1000") {
+    if (error != nullptr) {
+      *error = "sensor.sequent_rtd_expect_sensor_type must be pt100 or pt1000";
+    }
+    return false;
+  }
+  if (config->sensors.sequent_rtd_resistance_min_ohm >=
+      config->sensors.sequent_rtd_resistance_max_ohm) {
+    if (error != nullptr) {
+      *error = "sensor.sequent_rtd_resistance_min_ohm must be below "
+               "sensor.sequent_rtd_resistance_max_ohm";
     }
     return false;
   }
