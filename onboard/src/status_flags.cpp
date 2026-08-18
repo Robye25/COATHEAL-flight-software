@@ -16,7 +16,6 @@ std::string ToStatusBitfield(const StatusFlags& flags) {
       << (flags.uniformity_ok ? "UNIFORMITY_OK" : "UNIFORMITY_FAIL") << '|'
       << (flags.overtemp_ok ? "OVERTEMP_OK" : "OVERTEMP_FAIL") << '|'
       << (flags.energy_ok ? "ENERGY_OK" : "ENERGY_FAIL") << '|'
-      << (flags.rs485_ok ? "RS485_OK" : "RS485_FAIL") << '|'
       << (flags.pwm_ok ? "PWM_OK" : "PWM_FAIL") << '|'
       << (flags.stepper_ok ? "STEPPER_OK" : "STEPPER_FAIL") << '|'
       << (flags.sample_temp_ok ? "SAMPLE_TEMP_OK" : "SAMPLE_TEMP_FAIL") << '|'

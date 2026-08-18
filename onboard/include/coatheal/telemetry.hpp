@@ -30,11 +30,10 @@ struct SensorSnapshot {
   std::vector<std::int64_t> sample_temp_age_ms;
   ComponentHealth dps310;
   ComponentHealth ads1115;
-  ComponentHealth daq132m;
-  ComponentHealth rtd_click;
+  ComponentHealth sequent_rtd;
   bool simulated = false;
-  // Compatibility field. The final Rev C BOM has no resistance instrument, so
-  // disabled readings are reported as 0.0 here and serialized as "-".
+  // Per-channel raw RTD resistance from the Sequent card, used for
+  // open/short detection and the temperature cross-check.
   std::vector<double> sample_resistance_ohm;
 };
 

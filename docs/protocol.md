@@ -2,10 +2,18 @@
 
 All messages are UTF-8 encoded, newline-terminated, and sent over TCP or UDP.
 Rev C keeps the existing wire shape for ground-station compatibility, but the
-hardware meaning is now the final BOM with the current bench temperature source:
-one PT100 through RTD Click/MAX31865, pressure from DPS310, UV from GUVA-S12SD
-through ADS1115, and two TMC2240 motor channels. DAQ132M support remains in the
-protocol but is disabled until replacement Modbus hardware is available.
+hardware meaning is now the final BOM: 8-channel PT100/PT1000 sample
+temperatures through a Sequent Microsystems 8-channel RTD HAT over I2C,
+pressure from DPS310, UV from GUVA-S12SD through ADS1115, and two TMC2240
+motor channels. The legacy MAX31865 (RTD Click) and DAQ-132M (RS485/Modbus)
+sample-temperature paths have been fully retired; the Sequent card is the only
+sample-temperature source.
+
+> **Breaking wire change.** The `COMPONENT_STATE` field and the `STATUS`
+> field both changed shape in this revision: `DAQ132M`/`RTD_CLICK` collapsed
+> into a single `SEQUENT_RTD` term, and `RS485_OK`/`RS485_FAIL` was removed
+> outright. There is no mixed-version compatibility window — onboard and
+> ground station must be deployed together.
 
 ## Telemetry DATA Frame
 
@@ -20,12 +28,12 @@ DATA,<session_id>,<seq>,<timestamp>,<rtc_valid>,<ambient_temp_c>,<ambient_pressu
 | `ambient_temp_c` | DPS310 ambient temperature value |
 | `ambient_pressure_mbar` | DPS310 pressure value |
 | `uv` | GUVA-S12SD analog output through ADS1115 |
-| `sample_0..sample_7` | PT100 sample values. Current bench publishes RTD Click on `S1` for heater 1; disabled or missing channels serialize as `nan` |
+| `sample_0..sample_7` | PT100/PT1000 sample values, one per Sequent RTD HAT channel; disabled or missing channels serialize as `nan` |
 | `HEATER_DUTY` | Six polyimide heater duty values, H0..H5 |
 | `RESISTANCE` | Retained compatibility field; final BOM has no resistance instrument, so values serialize as `-` unless `sensor.resistance_source=simulated` |
 | `SENSOR_VALID` | Current validity for ambient temperature (`AT`), pressure (`AP`), UV, and `S0..S7` |
 | `SENSOR_AGE_MS` | Monotonic age of each last successful reading; `-1` means never valid |
-| `COMPONENT_STATE` | Independent state for DPS310, ADS1115, DAQ132M, RTD_CLICK, both motors, and PWM |
+| `COMPONENT_STATE` | Independent state for DPS310, ADS1115, SEQUENT_RTD, both motors, and PWM |
 | `STEPPER0`, `STEPPER1` | TMC2240-driven NEMA 17 ball-screw motor snapshots |
 
 The parser locates `HEATER_DUTY=` by token name, so sample count is inferred
@@ -39,20 +47,20 @@ retained, its validity becomes `0`, and its age increases. Component states are
 ### Example
 
 ```text
-DATA,coatheal-1718000000-123456,42,2026-04-16T12:00:00Z,1,-10.23,140.12,0.00012,5.1,5.2,5.0,5.3,5.1,5.2,5.0,5.3,HEATER_DUTY=0.250|0.000|0.250|0.000|0.000|0.050,RESISTANCE=-|-|-|-|-|-|-|-,PHASE=FLOAT,MODE=RUN,STATUS=SD_OK|USB_OK|I2C_OK|SPI_OK|LINK_OK|T_AMBIENT_OK|P_AMBIENT_OK|UNIFORMITY_OK|OVERTEMP_OK|ENERGY_OK|RS485_OK|HEATER_ACTIVE|RESISTANCE_OK,STEPPER0=pos:100|tgt:200|hz:100.00|us:4|en:1|mv:1|hold:0|hold_s:0.00|pulses:100|src:cmd:MOVE,STEPPER1=pos:0|tgt:0|hz:0.00|us:4|en:1|mv:0|hold:0|hold_s:0.00|pulses:0|src:init
+DATA,coatheal-1718000000-123456,42,2026-04-16T12:00:00Z,1,-10.23,140.12,0.00012,5.1,5.2,5.0,5.3,5.1,5.2,5.0,5.3,HEATER_DUTY=0.250|0.000|0.250|0.000|0.000|0.050,RESISTANCE=-|-|-|-|-|-|-|-,PHASE=FLOAT,MODE=RUN,STATUS=SD_OK|USB_OK|I2C_OK|SPI_OK|LINK_OK|T_AMBIENT_OK|P_AMBIENT_OK|UNIFORMITY_OK|OVERTEMP_OK|ENERGY_OK|HEATER_ACTIVE|RESISTANCE_OK,STEPPER0=pos:100|tgt:200|hz:100.00|us:4|en:1|mv:1|hold:0|hold_s:0.00|pulses:100|src:cmd:MOVE,STEPPER1=pos:0|tgt:0|hz:0.00|us:4|en:1|mv:0|hold:0|hold_s:0.00|pulses:0|src:init
 ```
 
 ## Status Flags
 
 ```text
-STATUS=SD_OK|USB_OK|I2C_OK|SPI_OK|LINK_OK|T_AMBIENT_OK|P_AMBIENT_OK|UNIFORMITY_OK|OVERTEMP_OK|ENERGY_OK|RS485_OK|HEATER_ACTIVE|RESISTANCE_OK
+STATUS=SD_OK|USB_OK|I2C_OK|SPI_OK|LINK_OK|T_AMBIENT_OK|P_AMBIENT_OK|UNIFORMITY_OK|OVERTEMP_OK|ENERGY_OK|HEATER_ACTIVE|RESISTANCE_OK
 ```
 
 | Flag | Meaning |
 |---|---|
 | `SD_OK` / `SD_FAIL` | Primary SD-card CSV log health |
 | `USB_OK` / `USB_FAIL` | Secondary USB mirror log health |
-| `I2C_OK` / `I2C_FAIL` | Latest DPS310 and ADS1115 read health |
+| `I2C_OK` / `I2C_FAIL` | Latest DPS310 and ADS1115 read health, ANDed with Sequent RTD HAT bus health (did the last `Probe`/`ReadAll` conversation succeed). Bus-level only — a card that answers but has one open/short channel still reports `I2C_OK`; per-channel detail is in `sample_temp_valid` and `SEQUENT_RTD` |
 | `SPI_OK` / `SPI_FAIL` | TMC2240 SPI setup/check health |
 | `LINK_OK` / `LINK_FAIL` | Last telemetry drain/ACK status |
 | `T_AMBIENT_OK` / `T_AMBIENT_FAIL` | Ambient temperature in configured range |
@@ -60,7 +68,6 @@ STATUS=SD_OK|USB_OK|I2C_OK|SPI_OK|LINK_OK|T_AMBIENT_OK|P_AMBIENT_OK|UNIFORMITY_O
 | `UNIFORMITY_OK` / `UNIFORMITY_FAIL` | Heated sample spread within tolerance |
 | `OVERTEMP_OK` / `OVERTEMP_FAIL` | No sample over-temperature latch |
 | `ENERGY_OK` / `ENERGY_FAIL` | Heater energy budget not exhausted |
-| `RS485_OK` / `RS485_FAIL` | DAQ132M Modbus frame and CRC health. OK when DAQ132M is disabled for RTD Click bench mode |
 | `PWM_OK` / `PWM_FAIL` | Heater GPIO/PWM backend health |
 | `STEPPER_OK` / `STEPPER_FAIL` | Both motor backends healthy |
 | `SAMPLE_TEMP_OK` / `SAMPLE_TEMP_FAIL` | At least one sample temperature channel valid |
