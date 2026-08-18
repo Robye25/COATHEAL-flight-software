@@ -8,20 +8,13 @@ import glob
 import json
 import math
 import os
-import select
 import shutil
 import socket
-import struct
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
-
-try:
-    import termios
-except ImportError:  # Allows configuration helpers to be tested on Windows.
-    termios = None
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = ROOT / "config" / "onboard.local.ini"
@@ -46,17 +39,14 @@ FINAL_PIN_VALUES = {
     "motor1.enable_line": "21",
     "motor1.step_line": "24",
     "motor1.dir_line": "20",
-    "sensor.sample_temperature_source": "rtd_click_max31865",
-    "sensor.daq132m_enabled": "false",
-    "sensor.rtd_click_enabled": "true",
-    "sensor.rtd_click_spi_device": "/dev/spidev0.0",
-    "sensor.rtd_click_cs_line": "16",
-    "sensor.rtd_click_drdy_line": "25",
-    "sensor.rtd_click_wires": "3",
-    "sensor.rtd_click_sample_channel": "1",
-    "sensor.rtd_click_reference_ohm": "400.0",
-    "sensor.rtd_click_filter_hz": "50",
-    "sensor.rtd_click_spi_speed_hz": "500000",
+    "sensor.sequent_rtd_stack": "0",
+    "sensor.sequent_rtd_channels": "1,2,3,4,5,6,7,8",
+    "sensor.sequent_rtd_poll_ms": "1000",
+    "sensor.sequent_rtd_expect_sensor_type": "pt100",
+    "sensor.sequent_rtd_resistance_min_ohm": "60.0",
+    "sensor.sequent_rtd_resistance_max_ohm": "390.0",
+    "sensor.sequent_rtd_crosscheck_tol_c": "2.0",
+    "sensor.resistance_source": "sequent_rtd",
     "motor0.current_range_a_peak": "0",
     "motor1.current_range_a_peak": "0",
 }
@@ -74,6 +64,21 @@ OBSOLETE_CONFIG_KEYS = {
     "motor0.sense_resistance",
     "motor1.sense_resistance",
 }
+RETIRED_SENSOR_KEYS = frozenset({
+    "sensor.sample_temperature_source",
+    "sensor.daq132m_enabled", "sensor.daq132m_auto_discover",
+    "sensor.daq132m_poll_ms", "sensor.daq132m_device", "sensor.daq132m_baud",
+    "sensor.daq132m_parity", "sensor.daq132m_data_bits",
+    "sensor.daq132m_stop_bits", "sensor.daq132m_slave_id",
+    "sensor.daq132m_function_code", "sensor.daq132m_register_base",
+    "sensor.daq132m_register_count", "sensor.daq132m_c_per_count",
+    "sensor.daq132m_c_offset", "sensor.daq132m_enabled_channels",
+    "sensor.rtd_click_enabled", "sensor.rtd_click_spi_device",
+    "sensor.rtd_click_cs_line", "sensor.rtd_click_drdy_line",
+    "sensor.rtd_click_wires", "sensor.rtd_click_sample_channel",
+    "sensor.rtd_click_reference_ohm", "sensor.rtd_click_filter_hz",
+    "sensor.rtd_click_spi_speed_hz",
+})
 
 
 def serial_candidates() -> list[str]:
@@ -171,8 +176,6 @@ def validate_candidate(text: str) -> list[str]:
         heaters = int(values["hardware.heater_count"])
         output_lines = _number_list(values["heater.output_lines"])
         temperature_channels = _number_list(values["heater.temperature_channels"])
-        enabled_channels = _number_list(
-            values["sensor.daq132m_enabled_channels"])
     except (KeyError, ValueError) as exc:
         return [f"invalid required mapping: {exc}"]
     if len(output_lines) != heaters:
@@ -182,35 +185,31 @@ def validate_candidate(text: str) -> list[str]:
             "heater.temperature_channels count must match hardware.heater_count")
     if len(set(temperature_channels)) != len(temperature_channels):
         errors.append("heater temperature mappings must be unique")
-    if any(channel < 0 or channel >= samples
-           for channel in temperature_channels + enabled_channels):
+    if any(channel < 0 or channel >= samples for channel in temperature_channels):
         errors.append("sensor channel mapping is outside hardware.sample_count")
-    if len(set(enabled_channels)) != len(enabled_channels):
-        errors.append("DAQ enabled channels contain duplicates")
-    if values.get("sensor.sample_temperature_source") not in {
-            "daq132m_modbus", "rtd_click_max31865"}:
-        errors.append("unsupported sensor.sample_temperature_source")
-    if values.get("sensor.sample_temperature_source") == "rtd_click_max31865":
-        if values.get("sensor.rtd_click_enabled") != "true":
-            errors.append("sensor.rtd_click_enabled must be true for RTD Click")
-    if values.get("sensor.sample_temperature_source") == "daq132m_modbus":
-        if values.get("sensor.daq132m_enabled") != "true":
-            errors.append("sensor.daq132m_enabled must be true for DAQ source")
+
+    stack = values.get("sensor.sequent_rtd_stack")
     try:
-        rtd_channel = int(values["sensor.rtd_click_sample_channel"], 0)
-        rtd_ref = float(values["sensor.rtd_click_reference_ohm"])
-        rtd_filter = int(values["sensor.rtd_click_filter_hz"], 0)
-        rtd_speed = int(values["sensor.rtd_click_spi_speed_hz"], 0)
-        if not 0 <= rtd_channel < samples:
-            errors.append("sensor.rtd_click_sample_channel out of range")
-        if not math.isfinite(rtd_ref) or rtd_ref <= 0.0:
-            errors.append("sensor.rtd_click_reference_ohm must be > 0")
-        if rtd_filter not in (50, 60):
-            errors.append("sensor.rtd_click_filter_hz must be 50 or 60")
-        if not 0 < rtd_speed <= 5_000_000:
-            errors.append("sensor.rtd_click_spi_speed_hz must be in [1, 5000000]")
-    except (KeyError, ValueError):
-        errors.append("invalid or missing RTD Click setting")
+        stack_int = int(stack)
+    except (TypeError, ValueError):
+        errors.append("sensor.sequent_rtd_stack must be an integer 0..7")
+    else:
+        if not 0 <= stack_int <= 7:
+            errors.append("sensor.sequent_rtd_stack must be 0..7")
+
+    raw_channels = values.get("sensor.sequent_rtd_channels", "")
+    channels = [c.strip() for c in raw_channels.split(",") if c.strip()]
+    if len(channels) != 8:
+        errors.append("sensor.sequent_rtd_channels must list 8 channels")
+    elif len(set(channels)) != len(channels):
+        errors.append("sensor.sequent_rtd_channels contains duplicates")
+    elif any(not c.isdigit() or not 1 <= int(c) <= 8 for c in channels):
+        errors.append("sensor.sequent_rtd_channels entries must be 1..8")
+
+    if values.get("sensor.sequent_rtd_expect_sensor_type") not in {
+            "pt100", "pt1000"}:
+        errors.append("sensor.sequent_rtd_expect_sensor_type must be "
+                      "pt100 or pt1000")
 
     runtime_chip = values.get("runtime.gpio_chip", "/dev/gpiochip0")
     gpio_claims: dict[tuple[str, int], str] = {}
@@ -218,16 +217,6 @@ def validate_candidate(text: str) -> list[str]:
         (runtime_chip, f"heater.output_lines[{index}]", line)
         for index, line in enumerate(output_lines)
     ]
-    if values.get("sensor.rtd_click_enabled") == "true":
-        try:
-            gpio_keys.append((
-                runtime_chip, "sensor.rtd_click_cs_line",
-                int(values["sensor.rtd_click_cs_line"], 0)))
-            gpio_keys.append((
-                runtime_chip, "sensor.rtd_click_drdy_line",
-                int(values["sensor.rtd_click_drdy_line"], 0)))
-        except (KeyError, ValueError):
-            errors.append("invalid or missing RTD Click GPIO line")
     for motor in (0, 1):
         chip_key = f"motor{motor}.gpio_chip"
         chip = values.get(chip_key, "")
@@ -293,7 +282,8 @@ def _candidate_from_existing(existing: Path | None) -> str:
     updates: dict[str, str] = {}
     if existing is not None and existing.exists():
         for key, value in _ini_values(existing.read_text(encoding="utf-8")).items():
-            if key in template_keys and key not in OBSOLETE_CONFIG_KEYS:
+            if (key in template_keys and key not in OBSOLETE_CONFIG_KEYS
+                    and key not in RETIRED_SENSOR_KEYS):
                 updates[key] = value
     updates.update(FINAL_PIN_VALUES)
     return replace_ini(template, updates)
@@ -359,16 +349,14 @@ def pin_check(args: argparse.Namespace) -> int:
     errors = validate_candidate(text)
     for key, expected in FINAL_PIN_VALUES.items():
         if key.startswith("sensor.") and key not in {
-                "sensor.rtd_click_cs_line",
-                "sensor.rtd_click_drdy_line",
-                "sensor.rtd_click_spi_device",
-                "sensor.sample_temperature_source",
-                "sensor.daq132m_enabled",
-                "sensor.rtd_click_enabled",
-                "sensor.rtd_click_sample_channel",
-                "sensor.rtd_click_reference_ohm",
-                "sensor.rtd_click_filter_hz",
-                "sensor.rtd_click_spi_speed_hz"}:
+                "sensor.sequent_rtd_stack",
+                "sensor.sequent_rtd_channels",
+                "sensor.sequent_rtd_poll_ms",
+                "sensor.sequent_rtd_expect_sensor_type",
+                "sensor.sequent_rtd_resistance_min_ohm",
+                "sensor.sequent_rtd_resistance_max_ohm",
+                "sensor.sequent_rtd_crosscheck_tol_c",
+                "sensor.resistance_source"}:
             continue
         actual = values.get(key)
         if actual != expected:
@@ -378,8 +366,7 @@ def pin_check(args: argparse.Namespace) -> int:
             path = Path(values.get(path_key, ""))
             if path and not path.exists():
                 errors.append(f"{path_key} does not exist: {path}")
-        for path_key in ("motor0.spi_device", "motor1.spi_device",
-                         "sensor.rtd_click_spi_device"):
+        for path_key in ("motor0.spi_device", "motor1.spi_device"):
             path = Path(values.get(path_key, ""))
             if path and not path.exists():
                 errors.append(f"{path_key} does not exist: {path}")
@@ -394,13 +381,8 @@ def pin_check(args: argparse.Namespace) -> int:
 def wizard(args: argparse.Namespace) -> int:
     found = discover()
     print(json.dumps(found, indent=2))
-    channel = (
-        "0" if args.yes else
-        input("RTD Click sample channel, zero-based [1]: ").strip() or "1"
-    )
     updates = {
         **FINAL_PIN_VALUES,
-        "sensor.rtd_click_sample_channel": channel,
         "motor0.run_current_a_rms": "0.8",
         "motor1.run_current_a_rms": "0.8",
     }
@@ -436,119 +418,6 @@ def wizard(args: argparse.Namespace) -> int:
             candidate_path.unlink(missing_ok=True)
     atomic_write(args.config, text)
     print("Configuration validated and written.")
-    return 0
-
-
-def modbus_crc(data: bytes) -> int:
-    crc = 0xFFFF
-    for byte in data:
-        crc ^= byte
-        for _ in range(8):
-            crc = (crc >> 1) ^ (0xA001 if crc & 1 else 0)
-    return crc
-
-
-def configure_serial(fd: int, baud: int, parity: str) -> None:
-    if termios is None:
-        raise RuntimeError("serial configuration requires Linux")
-    baud_constants = {
-        1200: termios.B1200, 2400: termios.B2400, 4800: termios.B4800,
-        9600: termios.B9600, 19200: termios.B19200,
-        38400: termios.B38400, 57600: termios.B57600,
-        115200: termios.B115200,
-    }
-    if baud not in baud_constants:
-        raise ValueError(f"unsupported baud: {baud}")
-    attrs = termios.tcgetattr(fd)
-    attrs[0] = 0
-    attrs[1] = 0
-    attrs[2] = termios.CLOCAL | termios.CREAD | termios.CS8
-    attrs[3] = 0
-    if parity == "E":
-        attrs[2] |= termios.PARENB
-    elif parity == "O":
-        attrs[2] |= termios.PARENB | termios.PARODD
-    attrs[4] = baud_constants[baud]
-    attrs[5] = baud_constants[baud]
-    attrs[6][termios.VMIN] = 0
-    attrs[6][termios.VTIME] = 0
-    termios.tcsetattr(fd, termios.TCSANOW, attrs)
-    termios.tcflush(fd, termios.TCIOFLUSH)
-
-
-def read_registers(
-    device: str, baud: int, parity: str, slave: int,
-    function: int, base: int, count: int, timeout: float,
-) -> list[int] | None:
-    fd = os.open(device, os.O_RDWR | os.O_NOCTTY | os.O_SYNC)
-    try:
-        configure_serial(fd, baud, parity)
-        body = struct.pack(">BBHH", slave, function, base, count)
-        request = body + struct.pack("<H", modbus_crc(body))
-        os.write(fd, request)
-        termios.tcdrain(fd)
-        expected = 5 + count * 2
-        response = bytearray()
-        deadline = time.monotonic() + timeout
-        while len(response) < expected and time.monotonic() < deadline:
-            ready, _, _ = select.select([fd], [], [], deadline - time.monotonic())
-            if not ready:
-                break
-            response.extend(os.read(fd, expected - len(response)))
-            if len(response) >= 5 and response[1] & 0x80:
-                expected = 5
-        if len(response) != expected:
-            return None
-        if modbus_crc(response[:-2]) != int.from_bytes(response[-2:], "little"):
-            return None
-        if response[0] != slave or response[1] != function:
-            return None
-        if response[2] != count * 2:
-            return None
-        return [
-            int.from_bytes(response[3 + 2 * i:5 + 2 * i], "big", signed=True)
-            for i in range(count)
-        ]
-    finally:
-        os.close(fd)
-
-
-def daq_scan(args: argparse.Namespace) -> int:
-    if (args.slave_start < 1 or args.slave_end > 247 or
-            args.slave_end < args.slave_start or
-            args.slave_end - args.slave_start > 31 or
-            args.count < 1 or args.count > 8 or args.timeout <= 0 or
-            any(base < 0 or base > 65535 for base in args.base) or
-            len(args.base) > 16):
-        print("Scan bounds are invalid or too broad.", file=sys.stderr)
-        return 2
-    candidates = serial_candidates()
-    device = args.device
-    if device == "auto":
-        if len(candidates) != 1:
-            print(f"Expected one serial adapter, found: {candidates}", file=sys.stderr)
-            return 2
-        device = candidates[0]
-    hits = 0
-    for slave in range(args.slave_start, args.slave_end + 1):
-        for function in args.function:
-            for base in args.base:
-                values = read_registers(
-                    device, args.baud, args.parity, slave, function,
-                    base, args.count, args.timeout,
-                )
-                if values is None:
-                    continue
-                hits += 1
-                scaled = [value * args.scale + args.offset for value in values]
-                print(json.dumps({
-                    "device": device, "baud": args.baud, "parity": args.parity,
-                    "slave": slave, "function": function, "base": base,
-                    "raw": values, "scaled_c": scaled,
-                }))
-    if hits == 0:
-        print("No valid Modbus frame found.", file=sys.stderr)
-        return 1
     return 0
 
 
@@ -596,9 +465,13 @@ def motor_test(args: argparse.Namespace) -> int:
 
 
 def rtd_check(args: argparse.Namespace) -> int:
-    response = send_command("CHECK RTD_CLICK", args.host, args.port)
+    # SEQUENT_RTD is the current selector name; it is also what
+    # COMPONENT_STATE and this CHECK reply put on the wire (see
+    # system_controller.cpp / sensor_manager.cpp). RTD_CLICK/DAQ132M still
+    # work as request aliases but the reply never contains "rtd_click=OK".
+    response = send_command("CHECK SEQUENT_RTD", args.host, args.port)
     print(response)
-    return 0 if "overall=OK" in response and "rtd_click=OK" in response else 1
+    return 0 if "overall=OK" in response and "sequent_rtd=OK" in response else 1
 
 
 def heater_test(args: argparse.Namespace) -> int:
@@ -629,7 +502,7 @@ def doctor(args: argparse.Namespace) -> int:
     rc = pin_check(argparse.Namespace(config=args.config))
     print(json.dumps(discover(), indent=2))
     failures = rc != 0
-    for command in ("COMPONENTS", "CHECK RTD_CLICK", "CHECK PWM",
+    for command in ("COMPONENTS", "CHECK SEQUENT_RTD", "CHECK PWM",
                     "CHECK MOTOR0", "CHECK MOTOR1"):
         try:
             response = send_command(command, args.host, args.port)
@@ -718,20 +591,6 @@ def parser() -> argparse.ArgumentParser:
     rtd.add_argument("--host", default="127.0.0.1")
     rtd.add_argument("--port", type=int, default=5000)
     rtd.set_defaults(handler=rtd_check)
-
-    scan = commands.add_parser("daq-scan")
-    scan.add_argument("--device", default="auto")
-    scan.add_argument("--baud", type=int, default=9600)
-    scan.add_argument("--parity", choices=("N", "E", "O"), default="N")
-    scan.add_argument("--slave-start", type=int, default=1)
-    scan.add_argument("--slave-end", type=int, default=10)
-    scan.add_argument("--function", type=int, nargs="+", choices=(3, 4), default=[3, 4])
-    scan.add_argument("--base", type=int, nargs="+", default=[0, 1])
-    scan.add_argument("--count", type=int, default=8)
-    scan.add_argument("--timeout", type=float, default=0.25)
-    scan.add_argument("--scale", type=float, default=0.1)
-    scan.add_argument("--offset", type=float, default=0.0)
-    scan.set_defaults(handler=daq_scan)
 
     motor = commands.add_parser("motor-test")
     motor.add_argument("--motor", type=int, choices=(0, 1), required=True)
