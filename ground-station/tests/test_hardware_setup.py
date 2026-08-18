@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "hardware_setup.py"
@@ -62,6 +63,45 @@ class HardwareSetupTests(unittest.TestCase):
         errors = hardware_setup.validate_candidate(broken)
         self.assertIn(
             "sensor.sequent_rtd_channels contains duplicates", errors)
+
+    def test_validate_candidate_channel_count_tracks_sample_count(self) -> None:
+        # config.cpp compares sequent_rtd_channels.size() against the
+        # *variable* hardware.sample_count, not a literal 8. Shrink
+        # sample_count to 4 (heater.output_lines/temperature_channels must
+        # shrink to match hardware.heater_count too, or an unrelated
+        # required-mapping error fires first) and confirm the still-8-long
+        # channel list is now rejected against the new count of 4, not 8.
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        broken = hardware_setup.replace_ini(
+            source,
+            {
+                "hardware.sample_count": "4",
+                "hardware.heater_count": "4",
+                "heater.output_lines": "17,18,27,5",
+                "heater.temperature_channels": "0,1,2,3",
+            },
+        )
+        errors = hardware_setup.validate_candidate(broken)
+        self.assertIn(
+            "sensor.sequent_rtd_channels must list hardware.sample_count "
+            "entries", errors)
+
+    def test_validate_candidate_detects_sequent_rtd_channel_out_of_range(self) -> None:
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        broken = hardware_setup.replace_ini(
+            source, {"sensor.sequent_rtd_channels": "1,2,3,4,5,6,7,9"})
+        errors = hardware_setup.validate_candidate(broken)
+        self.assertIn(
+            "sensor.sequent_rtd_channels entries must be 1..8", errors)
+
+    def test_validate_candidate_detects_bad_sequent_rtd_sensor_type(self) -> None:
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        broken = hardware_setup.replace_ini(
+            source, {"sensor.sequent_rtd_expect_sensor_type": "pt500"})
+        errors = hardware_setup.validate_candidate(broken)
+        self.assertIn(
+            "sensor.sequent_rtd_expect_sensor_type must be pt100 or pt1000",
+            errors)
 
     def test_same_line_on_different_gpio_chips_is_valid(self) -> None:
         source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
@@ -143,6 +183,14 @@ class HardwareSetupTests(unittest.TestCase):
                 self.assertEqual(new_path.stat().st_mode & 0o777, 0o644)
 
     def test_migrate_config_drops_retired_sensor_keys(self) -> None:
+        # This confirms the behavioural property (retired keys never survive
+        # into a migrated config) through whichever mechanism produces it:
+        # today that is the union of the `key in template_keys` guard (none
+        # of these keys are in EXAMPLE_CONFIG any more) and the explicit
+        # RETIRED_SENSOR_KEYS blocklist. It does not isolate which
+        # mechanism did the work — see
+        # test_retired_keys_dropped_even_if_template_regresses below for a
+        # test that fails specifically when RETIRED_SENSOR_KEYS is removed.
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "old.ini"
             source.write_text(
@@ -165,6 +213,34 @@ class HardwareSetupTests(unittest.TestCase):
             self.assertEqual(values["sensor.sequent_rtd_stack"], "0")
             self.assertEqual(
                 values["sensor.sequent_rtd_channels"], "1,2,3,4,5,6,7,8")
+
+    def test_retired_keys_dropped_even_if_template_regresses(self) -> None:
+        # RETIRED_SENSOR_KEYS is deliberately redundant with the
+        # template-key guard today. This test disables the redundancy by
+        # patching a retired key into the template with one value, then
+        # feeding a *different* value for that same key through the
+        # existing/source config being migrated. `_candidate_from_existing`
+        # always starts from the template text and only overwrites keys
+        # that make it into `updates` (see replace_ini): with the
+        # RETIRED_SENSOR_KEYS filter removed, `key in template_keys` alone
+        # would let the source's stale value into `updates`, and it would
+        # overwrite the template's line. With the filter, the source's
+        # value never reaches `updates`, so the template's own value is
+        # what survives untouched. Deleting the RETIRED_SENSOR_KEYS clause
+        # makes this fail (asserts "false", gets "true").
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "old.ini"
+            source.write_text(
+                "sensor.rtd_click_enabled=true\n", encoding="utf-8")
+            template = hardware_setup.EXAMPLE_CONFIG.read_text(
+                encoding="utf-8")
+            patched = template + "\nsensor.rtd_click_enabled=false\n"
+            fake_template = Path(tmp) / "example.ini"
+            fake_template.write_text(patched, encoding="utf-8")
+            with mock.patch.object(
+                    hardware_setup, "EXAMPLE_CONFIG", fake_template):
+                values = migrated_values(source)
+            self.assertEqual(values["sensor.rtd_click_enabled"], "false")
 
 
 if __name__ == "__main__":

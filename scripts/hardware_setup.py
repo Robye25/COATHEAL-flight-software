@@ -199,8 +199,14 @@ def validate_candidate(text: str) -> list[str]:
 
     raw_channels = values.get("sensor.sequent_rtd_channels", "")
     channels = [c.strip() for c in raw_channels.split(",") if c.strip()]
-    if len(channels) != 8:
-        errors.append("sensor.sequent_rtd_channels must list 8 channels")
+    # Mirror config.cpp's check exactly: it compares against the *variable*
+    # hardware.sample_count, not a literal 8. `samples` is already parsed
+    # from that same key above (part of the required-mapping check at the
+    # top of this function), so it is guaranteed present here.
+    if len(channels) != samples:
+        errors.append(
+            "sensor.sequent_rtd_channels must list hardware.sample_count "
+            "entries")
     elif len(set(channels)) != len(channels):
         errors.append("sensor.sequent_rtd_channels contains duplicates")
     elif any(not c.isdigit() or not 1 <= int(c) <= 8 for c in channels):
@@ -282,6 +288,13 @@ def _candidate_from_existing(existing: Path | None) -> str:
     updates: dict[str, str] = {}
     if existing is not None and existing.exists():
         for key, value in _ini_values(existing.read_text(encoding="utf-8")).items():
+            # `key in template_keys` is the primary mechanism today: a
+            # retired key can only survive into `updates` if it is also
+            # present in EXAMPLE_CONFIG. RETIRED_SENSOR_KEYS is a backstop
+            # for the day someone re-adds a retired key to the example INI
+            # (e.g. during a merge) — without this explicit blocklist that
+            # regression would silently resurrect the key in every migrated
+            # field config, with no test catching it until then.
             if (key in template_keys and key not in OBSOLETE_CONFIG_KEYS
                     and key not in RETIRED_SENSOR_KEYS):
                 updates[key] = value
