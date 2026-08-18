@@ -25,6 +25,7 @@ add_library(coatheal_onboard_core
   src/telemetry_queue.cpp
   src/telemetry_client.cpp
   src/thermal_controller.cpp
+  src/tmc5160_driver.cpp
   src/hal/i2c_adapter.cpp
   src/hal/i2c_bus.cpp
   src/hal/sequent_rtd_adapter.cpp

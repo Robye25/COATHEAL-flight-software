@@ -142,6 +142,19 @@ target_include_directories(coatheal_spi_bus_tests PRIVATE
 
 add_test(NAME coatheal_spi_bus_tests COMMAND coatheal_spi_bus_tests)
 
+# TMC5160 SPI-motion stepper driver tests. No hardware required.
+add_executable(coatheal_tmc5160_tests
+  unit/test_tmc5160_driver.cpp
+)
+
+target_link_libraries(coatheal_tmc5160_tests PRIVATE coatheal_onboard_core)
+
+target_include_directories(coatheal_tmc5160_tests PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/unit
+)
+
+add_test(NAME coatheal_tmc5160_tests COMMAND coatheal_tmc5160_tests)
+
 # Sequent RTD HAT register-conversation tests. No hardware required.
 add_executable(coatheal_sequent_rtd_tests
   unit/test_sequent_rtd_adapter.cpp
