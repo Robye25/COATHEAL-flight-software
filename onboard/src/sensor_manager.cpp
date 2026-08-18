@@ -198,8 +198,11 @@ void SensorManager::NotePullCompleted(int motor_id) {
   if (config_.sensors.resistance_source != "simulated") return;
   const std::size_t start = motor_id == 0 ? 0U : 4U;
   if (motor_id != 0 && motor_id != 1) return;
-  // SequentRtdLoop also writes sample_resistance_ohm_, from the RTD worker
-  // thread, so this decay has to run under the same mutex.
+  // The early return above and the owns_resistance guard in SequentRtdLoop
+  // together mean only one of the two ever writes this vector, so the two
+  // cannot actually race. Take cache_mu_ anyway: it keeps the invariant that
+  // every access to sample_resistance_ohm_ is under cache_mu_, which is what
+  // makes the ownership split checkable locally instead of by argument.
   std::lock_guard<std::mutex> lock(cache_mu_);
   const std::size_t end = motor_id == 0 ? 4U : sample_resistance_ohm_.size();
   for (std::size_t i = start; i < end && i < sample_resistance_ohm_.size(); ++i) {
