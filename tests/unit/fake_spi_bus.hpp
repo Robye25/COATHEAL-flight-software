@@ -24,10 +24,13 @@ namespace coatheal {
 class FakeSpiBus : public SpiBus {
  public:
   // Queues one scripted exchange: the next Transfer must send exactly `tx`
-  // (same length, same bytes, in order). On match, `rx` is copied out (up
-  // to the shorter of `rx.size()`/`len`) and the expectation is popped. On
-  // mismatch, the expectation is still popped, mismatch_count() increments,
-  // and Transfer returns false.
+  // (same length, same bytes, in order). An expectation's rx must be
+  // exactly len bytes — full-duplex SPI always fills the whole buffer, so
+  // a short (or long) scripted rx is a mismatch, not a partial fill. On
+  // match, `rx` is copied out in full and the expectation is popped. On
+  // mismatch (tx content, tx length, or rx length), the expectation is
+  // still popped, mismatch_count() increments, nothing is copied, and
+  // Transfer returns false.
   void Expect(std::vector<std::uint8_t> tx, std::vector<std::uint8_t> rx) {
     expectations_.push_back({std::move(tx), std::move(rx)});
   }
@@ -68,15 +71,14 @@ class FakeSpiBus : public SpiBus {
     Exchange next = std::move(expectations_.front());
     expectations_.pop_front();
 
-    bool matches =
-        next.tx.size() == len && std::equal(next.tx.begin(), next.tx.end(), tx);
+    bool matches = next.tx.size() == len && next.rx.size() == len &&
+                   std::equal(next.tx.begin(), next.tx.end(), tx);
     if (!matches) {
       ++mismatch_count_;
       return false;
     }
 
-    std::size_t n = std::min(next.rx.size(), len);
-    std::copy(next.rx.begin(), next.rx.begin() + n, rx);
+    std::copy(next.rx.begin(), next.rx.end(), rx);
     return true;
   }
 
