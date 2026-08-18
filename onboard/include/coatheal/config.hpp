@@ -116,37 +116,11 @@ struct HardwareConfig {
 struct SensorHardwareConfig {
   bool dps310_enabled = true;
   bool ads1115_enabled = true;
-  bool daq132m_enabled = false;
   bool dps310_auto_discover = true;
   bool ads1115_auto_discover = true;
-  bool daq132m_auto_discover = true;
   int dps310_poll_ms = 1000;
   int ads1115_poll_ms = 1000;
-  int daq132m_poll_ms = 1000;
   int stale_after_ms = 3000;
-  std::string sample_temperature_source = "rtd_click_max31865";
-  std::string daq132m_device = "/dev/ttyUSB0";
-  int daq132m_baud = 9600;
-  std::string daq132m_parity = "N";
-  int daq132m_data_bits = 8;
-  int daq132m_stop_bits = 1;
-  int daq132m_slave_id = 1;
-  int daq132m_function_code = 3;
-  int daq132m_register_base = 0;
-  int daq132m_register_count = 8;
-  double daq132m_c_per_count = 0.1;
-  double daq132m_c_offset = 0.0;
-  std::vector<std::size_t> daq132m_enabled_channels;
-
-  bool rtd_click_enabled = true;
-  std::string rtd_click_spi_device = "/dev/spidev0.0";
-  std::size_t rtd_click_cs_line = 16;
-  std::size_t rtd_click_drdy_line = 25;
-  int rtd_click_wires = 3;
-  std::size_t rtd_click_sample_channel = 1;
-  double rtd_click_reference_ohm = 400.0;
-  int rtd_click_filter_hz = 50;
-  std::uint32_t rtd_click_spi_speed_hz = 500000;
 
   // Sequent Microsystems 8-channel RTD HAT. Sole sample-temperature source.
   int sequent_rtd_stack = 0;                     // 0..7 -> I2C 0x40..0x47
@@ -165,7 +139,7 @@ struct SensorHardwareConfig {
   int uv_ads1115_channel = 0;
   double uv_full_scale_v = 4.096;
 
-  std::string resistance_source = "disabled";
+  std::string resistance_source = "sequent_rtd";
 };
 
 struct HeaterOutputConfig {

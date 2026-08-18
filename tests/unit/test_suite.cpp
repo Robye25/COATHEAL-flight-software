@@ -385,30 +385,8 @@ std::string WriteTempConfig(const std::string& extra = "") {
   // Final BOM: 8 samples, 6 heaters, no box heater.
   out << "hardware.sample_count=8\n";
   out << "hardware.heater_count=6\n";
-  out << "sensor.sample_temperature_source=rtd_click_max31865\n";
-  out << "sensor.daq132m_enabled=false\n";
-  out << "sensor.daq132m_device=/dev/ttyUSB0\n";
-  out << "sensor.daq132m_baud=9600\n";
-  out << "sensor.daq132m_parity=N\n";
-  out << "sensor.daq132m_data_bits=8\n";
-  out << "sensor.daq132m_stop_bits=1\n";
-  out << "sensor.daq132m_slave_id=1\n";
-  out << "sensor.daq132m_function_code=4\n";
-  out << "sensor.daq132m_register_base=0\n";
-  out << "sensor.daq132m_register_count=8\n";
-  out << "sensor.daq132m_c_per_count=0.1\n";
-  out << "sensor.daq132m_c_offset=-5.0\n";
   out << "heater.target_min_c=0.0\n";
   out << "heater.target_max_c=80.0\n";
-  out << "sensor.rtd_click_enabled=true\n";
-  out << "sensor.rtd_click_spi_device=/dev/spidev0.0\n";
-  out << "sensor.rtd_click_cs_line=16\n";
-  out << "sensor.rtd_click_drdy_line=25\n";
-  out << "sensor.rtd_click_wires=3\n";
-  out << "sensor.rtd_click_sample_channel=1\n";
-  out << "sensor.rtd_click_reference_ohm=400.0\n";
-  out << "sensor.rtd_click_filter_hz=50\n";
-  out << "sensor.rtd_click_spi_speed_hz=500000\n";
   out << "sensor.pressure_source=dps310\n";
   out << "sensor.dps310_i2c_addr=0x77\n";
   out << "sensor.uv_source=guva_s12sd_ads1115\n";
@@ -484,17 +462,6 @@ void TestConfigParsesReliabilityFields() {
   assert(cfg.hardware.electronics_heater_index == static_cast<std::size_t>(-1));
   assert(std::fabs(cfg.power.heater_nominal_w - 5.0) < 1e-9);
   assert(std::fabs(cfg.power.max_thermal_w - 20.0) < 1e-9);
-  assert(cfg.sensors.sample_temperature_source == "rtd_click_max31865");
-  assert(!cfg.sensors.daq132m_enabled);
-  assert(cfg.sensors.daq132m_device == "/dev/ttyUSB0");
-  assert(cfg.sensors.daq132m_register_count == 8);
-  assert(cfg.sensors.daq132m_function_code == 4);
-  assert(std::fabs(cfg.sensors.daq132m_c_offset - (-5.0)) < 1e-9);
-  assert(cfg.sensors.rtd_click_enabled);
-  assert(cfg.sensors.rtd_click_sample_channel == 1U);
-  assert(std::fabs(cfg.sensors.rtd_click_reference_ohm - 400.0) < 1e-9);
-  assert(cfg.sensors.rtd_click_filter_hz == 50);
-  assert(cfg.sensors.rtd_click_spi_speed_hz == 500000U);
   assert(std::fabs(cfg.heater_safety.target_min_c - 0.0) < 1e-9);
   assert(std::fabs(cfg.heater_safety.target_max_c - 80.0) < 1e-9);
   assert(cfg.sensors.dps310_i2c_addr == 0x77);
@@ -557,6 +524,9 @@ void TestSequentRtdConfigDefaultsAndParsing() {
   assert(defaults.sensors.sequent_rtd_channels.size() == 8);
   assert(defaults.sensors.sequent_rtd_channels[0] == 1);
   assert(defaults.sensors.sequent_rtd_channels[7] == 8);
+  // The Sequent RTD HAT is now the sole sample-temperature source, so it is
+  // also the default resistance_source (see config.hpp), not "disabled".
+  assert(defaults.sensors.resistance_source == "sequent_rtd");
 
   const std::string path = WriteTempConfig(
       "sensor.sequent_rtd_stack=2\n"
@@ -565,7 +535,8 @@ void TestSequentRtdConfigDefaultsAndParsing() {
       "sensor.sequent_rtd_expect_sensor_type=pt1000\n"
       "sensor.sequent_rtd_resistance_min_ohm=70.0\n"
       "sensor.sequent_rtd_resistance_max_ohm=380.0\n"
-      "sensor.sequent_rtd_crosscheck_tol_c=1.5\n");
+      "sensor.sequent_rtd_crosscheck_tol_c=1.5\n"
+      "sensor.resistance_source=sequent_rtd\n");
 
   coatheal::OnboardConfig cfg;
   std::string error;
@@ -577,6 +548,9 @@ void TestSequentRtdConfigDefaultsAndParsing() {
   assert(std::fabs(cfg.sensors.sequent_rtd_crosscheck_tol_c - 1.5) < 1e-9);
   assert(std::fabs(cfg.sensors.sequent_rtd_resistance_min_ohm - 70.0) < 1e-9);
   assert(std::fabs(cfg.sensors.sequent_rtd_resistance_max_ohm - 380.0) < 1e-9);
+  // Widened validation must actually accept the new value, not just the
+  // default: this is the behavioural change, not a cosmetic one.
+  assert(cfg.sensors.resistance_source == "sequent_rtd");
 
   // Full order, not just the first entry: a reversed or mis-assigned list
   // would otherwise slip through.
@@ -604,6 +578,32 @@ void TestSequentRtdConfigRejectsBadValues() {
     std::string error;
     assert(!coatheal::LoadConfigFromIni(path, &cfg, &error));
     assert(error.find(c.fragment) != std::string::npos);
+
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+  }
+}
+
+void TestLegacySensorKeysAreRejected() {
+  const char* legacy[] = {
+    "sensor.sample_temperature_source=rtd_click_max31865\n",
+    "sensor.rtd_click_enabled=true\n",
+    "sensor.rtd_click_spi_device=/dev/spidev0.0\n",
+    "sensor.daq132m_enabled=true\n",
+    "sensor.daq132m_device=/dev/ttyUSB0\n",
+  };
+  for (const char* body : legacy) {
+    const std::string path = WriteTempConfig(body);
+    coatheal::OnboardConfig cfg;
+    std::string error;
+    // Unknown keys must be rejected loudly, not silently ignored, so a
+    // stale deployed INI cannot boot with the operator believing it applied.
+    // The load-bearing part is the error message: it must name the exact
+    // offending key, so this cannot pass because some unrelated validation
+    // (e.g. a coincidentally-invalid GPIO or range check) fired first.
+    assert(!coatheal::LoadConfigFromIni(path, &cfg, &error));
+    const std::string key = std::string(body).substr(0, std::string(body).find('='));
+    assert(error.find(key) != std::string::npos);
 
     std::error_code ec;
     std::filesystem::remove(path, ec);
@@ -714,6 +714,7 @@ int main() {
   TestConfigRejectsGpioCollisions();
   TestSequentRtdConfigDefaultsAndParsing();
   TestSequentRtdConfigRejectsBadValues();
+  TestLegacySensorKeysAreRejected();
   TestStateTransitions();
   TestManualHeaterOverrideWithoutFloorControl();
   TestVacuumRegime();
