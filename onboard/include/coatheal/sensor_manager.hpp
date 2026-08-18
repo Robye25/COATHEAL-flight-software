@@ -4,7 +4,6 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
-#include <iosfwd>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -14,8 +13,10 @@
 #include "coatheal/phase.hpp"
 #include "coatheal/telemetry.hpp"
 #include "coatheal/hal/i2c_adapter.hpp"
+#include "coatheal/hal/i2c_bus.hpp"
 #include "coatheal/hal/ina3221_adapter.hpp"
 #include "coatheal/hal/rtc_adapter.hpp"
+#include "coatheal/hal/sequent_rtd_adapter.hpp"
 #include "coatheal/hal/spi_adapter.hpp"
 
 namespace coatheal {
@@ -45,6 +46,8 @@ class SensorManager {
   bool p_ambient_ok() const { return p_ambient_ok_.load(); }
   bool resistance_ok() const { return resistance_ok_.load(); }
   bool i2c_ok() const { return i2c_ok_.load(); }
+  // Transitional: nothing drives the RS485 path any more, but the STATUS
+  // wire field still carries it. Task 7 removes both together.
   bool rs485_ok() const { return rs485_ok_.load(); }
   bool sample_temp_ok() const { return sample_temp_ok_.load(); }
   bool uv_ok() const { return uv_ok_.load(); }
@@ -54,29 +57,28 @@ class SensorManager {
 
   void NotePullCompleted(int motor_id);
 
-  static double Max31865CodeToResistance(std::uint16_t code,
-                                         double reference_ohm);
   static bool Pt100TemperatureFromResistance(double resistance_ohm,
                                              double* temperature_c);
+
+  // True only when every sample channel a heater actually controls is both
+  // valid and fresh. Static so the policy is testable without threads or
+  // hardware; see the definition for why it fails closed.
+  static bool HeatedChannelsValid(const OnboardConfig& config,
+                                  const std::vector<bool>& channel_valid);
 
  private:
   bool ReadDps310At(int address, double* temp_c, double* pressure_mbar);
   bool ReadAds1115At(int address, double* voltage);
-  bool ReadDaq132m(std::vector<double>* temperatures,
-                   std::vector<bool>* valid);
-  bool ReadRtdClickMax31865(double* temperature_c, std::string* error);
   SensorSnapshot ReadSimulatedSnapshot(MissionPhase phase,
                                        const std::vector<double>& heater_duty,
                                        double dt_seconds);
   void DpsLoop();
   void AdsLoop();
-  void DaqLoop();
-  void RtdClickLoop();
+  void SequentRtdLoop();
   bool WaitForPoll(int milliseconds);
   std::int64_t AgeMs(
       const std::chrono::steady_clock::time_point& value,
       bool has_value) const;
-  void AppendRtdClickDiagnostics(std::ostringstream* oss) const;
   ComponentState FailedState(bool has_success,
                              const std::chrono::steady_clock::time_point& last_success) const;
 
@@ -85,15 +87,6 @@ class SensorManager {
     bool has_value = false;
     bool valid = false;
     std::chrono::steady_clock::time_point last_success{};
-  };
-
-  struct RtdClickDiagnostics {
-    bool has_sample = false;
-    std::uint16_t raw_rtd_code = 0;
-    double resistance_ohm = 0.0;
-    std::uint8_t fault = 0;
-    double reference_ohm = 0.0;
-    int wires = 0;
   };
 
   OnboardConfig config_;
@@ -119,7 +112,6 @@ class SensorManager {
   std::atomic<bool> running_{false};
   std::thread dps_thread_;
   std::thread ads_thread_;
-  std::thread daq_thread_;
   std::thread rtd_thread_;
   ScalarCache ambient_temp_cache_;
   ScalarCache pressure_cache_;
@@ -127,16 +119,22 @@ class SensorManager {
   std::vector<ScalarCache> sample_cache_;
   ComponentHealth dps_health_;
   ComponentHealth ads_health_;
-  ComponentHealth daq_health_;
   ComponentHealth rtd_health_;
-  RtdClickDiagnostics rtd_diag_;
   int resolved_dps_address_ = -1;
   int resolved_ads_address_ = -1;
-  std::string resolved_daq_device_;
   mutable std::mutex dps_io_mu_;
   mutable std::mutex ads_io_mu_;
-  mutable std::mutex daq_io_mu_;
   mutable std::mutex rtd_io_mu_;
+
+  // Declared last so the constructor initialiser list can stay in
+  // declaration order; rtd_ holds a pointer to rtd_bus_, so rtd_bus_ must
+  // precede it here.
+  LinuxI2cBus rtd_bus_;
+  SequentRtdAdapter rtd_;
+  SequentRtdAdapter::Identity rtd_identity_;
+  bool rtd_probed_ = false;
+  SequentRtdAdapter::Reading rtd_last_reading_;
+  bool rtd_has_reading_ = false;
 };
 
 }  // namespace coatheal
