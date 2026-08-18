@@ -1048,10 +1048,17 @@ std::string SystemController::HandleCommandLine(const std::string& line,
           command.args.empty() ? "ALL" : command.args[0];
       std::string storage_details;
       const bool check_storage = selected == "ALL" || selected == "STORAGE";
+      // DAQ132M and RTD_CLICK survive as request aliases: sensor_manager_'s
+      // ActiveCheck (sensor_manager.cpp) already routes all three names to
+      // the one Sequent RTD card, with the alias rationale written there.
+      // SEQUENT_RTD is the name that actually appears on the wire in
+      // COMPONENT_STATE, so it belongs in this whitelist too — otherwise an
+      // operator reading SEQUENT_RTD:DEGRADED and typing the obvious
+      // `CHECK SEQUENT_RTD` gets rejected while the two retired names work.
       const bool check_sensors =
           selected == "ALL" || selected == "DPS310" ||
-          selected == "ADS1115" || selected == "DAQ132M" ||
-          selected == "RTD_CLICK";
+          selected == "ADS1115" || selected == "SEQUENT_RTD" ||
+          selected == "DAQ132M" || selected == "RTD_CLICK";
       const bool check_pwm = selected == "ALL" || selected == "PWM";
       const bool check_motor0 = selected == "ALL" || selected == "MOTOR0";
       const bool check_motor1 = selected == "ALL" || selected == "MOTOR1";

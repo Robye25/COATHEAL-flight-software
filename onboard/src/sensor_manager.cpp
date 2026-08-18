@@ -112,7 +112,8 @@ SensorManager::SensorManager(const OnboardConfig& config,
                              SpiAdapter* spi,
                              I2cAdapter* i2c,
                              RtcAdapter* rtc,
-                             Ina3221Adapter* ina)
+                             Ina3221Adapter* ina,
+                             I2cBus* rtd_bus_override)
     : config_(config),
       spi_(spi),
       i2c_(i2c),
@@ -123,7 +124,10 @@ SensorManager::SensorManager(const OnboardConfig& config,
       simulated_(config.runtime.use_simulated_sensors),
       sample_cache_(config.hardware.sample_count),
       rtd_bus_(),
-      rtd_(&rtd_bus_, MakeSequentOptions(config)) {
+      rtd_bus_active_(rtd_bus_override != nullptr
+                          ? rtd_bus_override
+                          : static_cast<I2cBus*>(&rtd_bus_)),
+      rtd_(rtd_bus_active_, MakeSequentOptions(config)) {
   if (config_.sensors.resistance_source != "simulated") {
     std::fill(sample_resistance_ohm_.begin(), sample_resistance_ohm_.end(), 0.0);
   }
@@ -138,9 +142,9 @@ SensorManager::SensorManager(const OnboardConfig& config,
   // What it can be is unreachable, on a build host with no Linux I2C at
   // all, and the transport seam reports that as DISABLED rather than
   // FAILED so a desktop build is not mistaken for broken flight hardware.
-  rtd_health_.state = rtd_bus_.available() ? ComponentState::kDiscovering
-                                           : ComponentState::kDisabled;
-  if (!rtd_bus_.available()) rtd_health_.error = "I2C_UNAVAILABLE";
+  rtd_health_.state = rtd_bus_active_->available() ? ComponentState::kDiscovering
+                                                   : ComponentState::kDisabled;
+  if (!rtd_bus_active_->available()) rtd_health_.error = "I2C_UNAVAILABLE";
 }
 
 SensorManager::~SensorManager() { Stop(); }
@@ -153,7 +157,7 @@ void SensorManager::Start() {
   if (config_.sensors.ads1115_enabled) {
     ads_thread_ = std::thread(&SensorManager::AdsLoop, this);
   }
-  if (rtd_bus_.available()) {
+  if (rtd_bus_active_->available()) {
     rtd_thread_ = std::thread(&SensorManager::SequentRtdLoop, this);
   }
 }
@@ -822,7 +826,7 @@ bool SensorManager::ActiveCheck(const std::string& component,
     std::lock_guard<std::mutex> lock(rtd_io_mu_);
     rtd_address = rtd_.address();
     rtd_burst = rtd_.burst_mode();
-    if (!rtd_bus_.available()) {
+    if (!rtd_bus_active_->available()) {
       rtd_error = "I2C_UNAVAILABLE";
       return false;
     }
@@ -848,12 +852,15 @@ bool SensorManager::ActiveCheck(const std::string& component,
 
   const bool dps_requested = component == "ALL" || component == "DPS310";
   const bool ads_requested = component == "ALL" || component == "ADS1115";
-  // DAQ132M and RTD_CLICK survive as request aliases only. Both legacy
-  // acquisition paths were replaced by the one Sequent card, and these are
-  // still the names system_controller's CHECK whitelist accepts, so routing
-  // them here keeps CHECK DAQ132M from silently succeeding against nothing.
-  // Task 7 renames the command surface.
-  const bool rtd_requested = component == "ALL" || component == "RTD_CLICK" ||
+  // SEQUENT_RTD is the current name (it is what COMPONENT_STATE puts on the
+  // wire); DAQ132M and RTD_CLICK survive as request aliases only. Both
+  // legacy acquisition paths were replaced by the one Sequent card, and
+  // system_controller's CHECK whitelist still accepts all three names, so
+  // routing them here keeps CHECK DAQ132M from silently succeeding against
+  // nothing.
+  const bool rtd_requested = component == "ALL" ||
+                             component == "SEQUENT_RTD" ||
+                             component == "RTD_CLICK" ||
                              component == "DAQ132M";
   const bool dps_ok = !dps_requested || check_dps();
   const bool ads_ok = !ads_requested || check_ads();
