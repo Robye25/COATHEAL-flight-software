@@ -15,7 +15,6 @@ struct StatusFlags {
   bool uniformity_ok = true;
   bool overtemp_ok = true;
   bool energy_ok = true;
-  bool rs485_ok = true;              // DAQ132M Modbus RTU path healthy
   bool pwm_ok = true;                // GPIO/PWM output backend healthy
   bool stepper_ok = true;            // motor driver backends healthy
   bool sample_temp_ok = true;        // DAQ/PT100 sample-temperature path healthy

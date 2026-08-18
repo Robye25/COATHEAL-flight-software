@@ -112,15 +112,11 @@ void TestMissingSensorsReturnImmediatelyWithInvalidNanValues() {
   }
   assert(snap.dps310.state == ComponentState::kDisabled);
   assert(snap.ads1115.state == ComponentState::kDisabled);
-  // Transitional (Task 6): the DAQ132M acquisition path no longer exists, so
-  // its still-present wire slot must report DISABLED rather than be left at
-  // the ComponentHealth default of DISCOVERING. Task 7 deletes the field.
-  assert(snap.daq132m.state == ComponentState::kDisabled);
   // The Sequent card is polled unconditionally, so this slot now reports the
   // real card. On a host with no Linux I2C bus that is DISABLED; on Linux
   // with no card wired it is DISCOVERING then FAILED. What holds everywhere
   // is that a card which never answered is never reported OK.
-  assert(snap.rtd_click.state != ComponentState::kOk);
+  assert(snap.sequent_rtd.state != ComponentState::kOk);
   // Smoke check only: every sample is invalid in this fixture, so this
   // assertion holds under both the old any_of policy and the new
   // heated-channels policy. The policy itself is covered by the

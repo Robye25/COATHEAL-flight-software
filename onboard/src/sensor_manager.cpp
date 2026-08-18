@@ -141,9 +141,6 @@ SensorManager::SensorManager(const OnboardConfig& config,
   rtd_health_.state = rtd_bus_.available() ? ComponentState::kDiscovering
                                            : ComponentState::kDisabled;
   if (!rtd_bus_.available()) rtd_health_.error = "I2C_UNAVAILABLE";
-  // Transitional: no RS485 device remains. Pinned false until Task 7
-  // removes the flag and its STATUS wire field together.
-  rs485_ok_ = false;
 }
 
 SensorManager::~SensorManager() { Stop(); }
@@ -494,6 +491,12 @@ void SensorManager::SequentRtdLoop() {
       }
     }
 
+    // Bus-level health: did the I2C conversation itself succeed, independent
+    // of whether every channel it returned is plausible. ReadSnapshot ANDs
+    // this into i2c_ok_ so I2C_FAIL reflects a dead RTD card even though the
+    // card contributes nothing to dps310/ads1115 validity.
+    rtd_bus_ok_ = ok;
+
     const auto now = std::chrono::steady_clock::now();
     {
       std::lock_guard<std::mutex> lock(cache_mu_);
@@ -615,14 +618,10 @@ SensorSnapshot SensorManager::ReadSimulatedSnapshot(
   snapshot.uv_age_ms = 0;
   snapshot.dps310 = {ComponentState::kOk, "SIMULATED", 0};
   snapshot.ads1115 = {ComponentState::kOk, "SIMULATED", 0};
-  // Transitional (Task 7 collapses these two into one sequent_rtd field):
-  // rtd_click now carries the Sequent card, and daq132m has no acquisition
-  // path behind it at all, so it reports DISABLED rather than a plausible
-  // OK for a device that is gone.
-  snapshot.daq132m = {ComponentState::kDisabled, "REMOVED", -1};
-  snapshot.rtd_click = {ComponentState::kOk, "SIMULATED", 0};
+  snapshot.sequent_rtd = {ComponentState::kOk, "SIMULATED", 0};
   snapshot.simulated = true;
-  i2c_ok_ = rs485_ok_ = sample_temp_ok_ = uv_ok_ = true;
+  i2c_ok_ = sample_temp_ok_ = uv_ok_ = true;
+  rtd_bus_ok_ = true;
   return snapshot;
 }
 
@@ -683,13 +682,7 @@ SensorSnapshot SensorManager::ReadSnapshot(
                     [](bool valid) { return valid; });
     snapshot.dps310 = dps_health_;
     snapshot.ads1115 = ads_health_;
-    // Transitional (Task 7 collapses these two into one sequent_rtd field):
-    // rtd_click carries the Sequent card's health verbatim, and daq132m has
-    // no acquisition path behind it, so it is pinned DISABLED rather than
-    // left at the ComponentHealth default of DISCOVERING/NOT_POLLED, which
-    // would put a misleading state on the wire.
-    snapshot.daq132m = {ComponentState::kDisabled, "REMOVED", -1};
-    snapshot.rtd_click = rtd_health_;
+    snapshot.sequent_rtd = rtd_health_;
     snapshot.dps310.last_success_age_ms =
         snapshot.ambient_temp_age_ms;
     snapshot.ads1115.last_success_age_ms = snapshot.uv_age_ms;
@@ -713,10 +706,18 @@ SensorSnapshot SensorManager::ReadSnapshot(
     // rtd_health_, so the health it published is the health we report. The
     // single-channel rtd_click block and the per-channel DAQ block that used
     // to sit here both existed to recompute what the worker did not.
+    //
+    // rtd_bus_ok_ is AND-ed in alongside the DPS310/ADS1115 contribution so
+    // I2C_FAIL asserts on a dead RTD card even when DPS310/ADS1115 are
+    // disabled and would otherwise report the bus healthy by omission. It is
+    // bus-level ("did Probe/ReadAll succeed"), not per-channel plausibility,
+    // so a card that answers but has one open sensor still reports I2C_OK;
+    // per-channel detail stays on sample_temp_valid and SEQUENT_RTD.
     i2c_ok_ =
         (!config_.sensors.dps310_enabled ||
          (snapshot.ambient_temp_valid && snapshot.ambient_pressure_valid)) &&
-        (!config_.sensors.ads1115_enabled || snapshot.uv_valid);
+        (!config_.sensors.ads1115_enabled || snapshot.uv_valid) &&
+        rtd_bus_ok_.load();
     uv_ok_ = snapshot.uv_valid;
     // The thermal-path flag follows only the channels a heater controls.
     // snapshot.sample_temp_valid is exactly the valid-and-fresh vector the

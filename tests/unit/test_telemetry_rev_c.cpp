@@ -7,8 +7,9 @@
 //   * no humidity column, no box_temp column;
 //   * RESISTANCE= carries 8 pipe-separated values; unmeasured samples "-";
 //   * dual STEPPER0=/STEPPER1= path when `record.steppers` is populated;
-//   * STATUS bitfield includes RS485, HEATER_{INHIBITED,ACTIVE}, and the
-//     new RESISTANCE_{OK,FAIL} suffix;
+//   * STATUS bitfield has no RS485 term (removed with the DAQ132M path),
+//     includes HEATER_{INHIBITED,ACTIVE}, and the RESISTANCE_{OK,FAIL} suffix;
+//   * COMPONENT_STATE carries a single SEQUENT_RTD term, not DAQ132M/RTD_CLICK;
 //   * EVT,PULL frame round-trips with both populated and empty samples.
 
 #include <cassert>
@@ -39,7 +40,6 @@ TelemetryRecord MakeBaseRecord() {
   r.heater_duty = {0.25, 0.0, 0.25, 0.0, 0.0, 0.0};
   // Default flags are already mostly `true`; make sure the compatibility
   // additions are at their default so the wire bit count is exercised.
-  r.status.rs485_ok = true;
   r.status.heater_inhibited = false;
   r.status.resistance_ok = true;
   return r;
@@ -101,8 +101,8 @@ void TestDualStepperEmitsIndexedSegments() {
   assert(Contains(line, "HEATER_INHIBITED"));
   // Heater-duty count should be 6 in the wire form.
   assert(Contains(line, "HEATER_DUTY=0.250|0.000|0.250|0.000|0.000|0.000"));
-  assert(Contains(line, "RS485_OK"));
   assert(Contains(line, "RESISTANCE_OK"));
+  assert(!Contains(line, "RS485"));
 }
 
 void TestResistanceFailStatus() {
@@ -126,8 +126,7 @@ void TestHealthMetadataSerialization() {
       {-1, 125, -1, -1, -1, -1, -1, -1};
   r.sensors.dps310.state = ComponentState::kFailed;
   r.sensors.ads1115.state = ComponentState::kOk;
-  r.sensors.daq132m.state = ComponentState::kDegraded;
-  r.sensors.rtd_click.state = ComponentState::kOk;
+  r.sensors.sequent_rtd.state = ComponentState::kDegraded;
   r.pwm_state = ComponentState::kDegraded;
   StepperStatus m0;
   m0.healthy = true;
@@ -137,9 +136,11 @@ void TestHealthMetadataSerialization() {
   const std::string line = SerializeTelemetryDataFrame(r, "sess-health");
   assert(Contains(line, "SENSOR_VALID=AT:0|AP:1|UV:1|S0:0|S1:1"));
   assert(Contains(line, "SENSOR_AGE_MS=AT:-1|AP:-1|UV:-1|S0:-1|S1:125"));
-  assert(Contains(line, "COMPONENT_STATE=DPS310:FAILED|ADS1115:OK|DAQ132M:DEGRADED|RTD_CLICK:OK"));
+  assert(Contains(line, "COMPONENT_STATE=DPS310:FAILED|ADS1115:OK|SEQUENT_RTD:DEGRADED"));
   assert(Contains(line, "|MOTOR0:OK|MOTOR1:FAILED|PWM:DEGRADED"));
   assert(Contains(line, "|missed:3|"));
+  assert(!Contains(line, "DAQ132M"));
+  assert(!Contains(line, "RTD_CLICK"));
 }
 
 void TestPullEventFrameSerialization() {
@@ -166,6 +167,36 @@ void TestPullEventEmptySamplesRendersDash() {
   assert(Contains(line, "EVT,PULL,sess-b,4,0,2026-04-16T10:22:00Z,-1200,0.00,-"));
 }
 
+void TestComponentStateUsesSequentRtdToken() {
+  TelemetryRecord record;
+  record.sensors.sample_temps_c.assign(8, 20.0);
+  record.sensors.sample_temp_valid.assign(8, true);
+  record.sensors.sample_temp_age_ms.assign(8, 0);
+  record.sensors.sample_resistance_ohm.assign(8, 107.79);
+  record.sensors.dps310.state = ComponentState::kOk;
+  record.sensors.ads1115.state = ComponentState::kOk;
+  record.sensors.sequent_rtd.state = ComponentState::kDegraded;
+  record.heater_duty.assign(6, 0.0);
+  record.steppers.resize(2);
+
+  const std::string frame = SerializeTelemetryDataFrame(record, "sess-1");
+  assert(frame.find("SEQUENT_RTD:DEGRADED") != std::string::npos);
+  assert(frame.find("RTD_CLICK") == std::string::npos);
+  assert(frame.find("DAQ132M") == std::string::npos);
+}
+
+void TestStatusFlagsDropRs485() {
+  // RS485 hardware leaves with the DAQ-132M. A flag that can only ever read
+  // OK is worse than no flag, so it must be gone from the wire, and its
+  // removal must not leave a broken separator between its neighbours (the
+  // real regression this migration risks: a dangling or doubled '|').
+  StatusFlags flags;
+  const std::string encoded = ToStatusBitfield(flags);
+  assert(encoded.find("RS485") == std::string::npos);
+  assert(Contains(encoded, "ENERGY_OK|PWM_OK"));
+  assert(!Contains(encoded, "||"));
+}
+
 }  // namespace
 
 int main() {
@@ -176,5 +207,7 @@ int main() {
   TestHealthMetadataSerialization();
   TestPullEventFrameSerialization();
   TestPullEventEmptySamplesRendersDash();
+  TestComponentStateUsesSequentRtdToken();
+  TestStatusFlagsDropRs485();
   return 0;
 }

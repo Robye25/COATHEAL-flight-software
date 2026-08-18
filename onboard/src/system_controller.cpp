@@ -636,7 +636,6 @@ int SystemController::Run() {
     record.status.overtemp_ok = !thermal_controller_.overtemp_latched();
     record.status.uniformity_ok = thermal_controller_.uniformity_ok();
     record.status.energy_ok = !scheduler_.is_budget_exhausted();
-    record.status.rs485_ok = sensor_manager_.rs485_ok();
     record.status.pwm_ok = pwm_ != nullptr && pwm_->healthy();
     if (pwm_ != nullptr && pwm_->channel_count() > 0) {
       const std::size_t healthy_channels = pwm_->healthy_channel_count();
@@ -1002,7 +1001,6 @@ std::string SystemController::HandleCommandLine(const std::string& line,
              << ";tick_hz=" << live_tick_hz_.load()
              << ";simulated=" << (sensor_manager_.simulated() ? "1" : "0")
              << ";i2c_ok=" << (sensor_manager_.i2c_ok() ? "1" : "0")
-             << ";rs485_ok=" << (sensor_manager_.rs485_ok() ? "1" : "0")
              << ";sample_temp_ok=" << (sensor_manager_.sample_temp_ok() ? "1" : "0")
              << ";pwm_ok=" << (pwm_ && pwm_->healthy() ? "1" : "0")
              << ";stepper_ok=" << (stepper_ && stepper_->AllHealthy() ? "1" : "0")

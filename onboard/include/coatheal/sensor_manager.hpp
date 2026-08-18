@@ -46,9 +46,6 @@ class SensorManager {
   bool p_ambient_ok() const { return p_ambient_ok_.load(); }
   bool resistance_ok() const { return resistance_ok_.load(); }
   bool i2c_ok() const { return i2c_ok_.load(); }
-  // Transitional: nothing drives the RS485 path any more, but the STATUS
-  // wire field still carries it. Task 7 removes both together.
-  bool rs485_ok() const { return rs485_ok_.load(); }
   bool sample_temp_ok() const { return sample_temp_ok_.load(); }
   bool uv_ok() const { return uv_ok_.load(); }
   bool simulated() const { return simulated_; }
@@ -102,7 +99,13 @@ class SensorManager {
   std::atomic<bool> p_ambient_ok_{true};
   std::atomic<bool> resistance_ok_{true};
   std::atomic<bool> i2c_ok_{false};
-  std::atomic<bool> rs485_ok_{false};
+  // Bus-level health of the Sequent RTD card: true only when the last
+  // Probe/ReadAll conversation with the card actually succeeded. This is
+  // distinct from rtd_health_, which also factors in per-channel plausibility
+  // (open/short detection) that a bus-healthy card can still fail on one
+  // sensor. AND-ed into i2c_ok_ in ReadSnapshot so I2C_FAIL asserts on an RTD
+  // bus fault instead of staying silent once DPS310/ADS1115 are disabled.
+  std::atomic<bool> rtd_bus_ok_{false};
   std::atomic<bool> sample_temp_ok_{false};
   std::atomic<bool> uv_ok_{false};
   bool simulated_ = false;

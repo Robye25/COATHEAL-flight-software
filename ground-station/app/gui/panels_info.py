@@ -116,7 +116,6 @@ class ValuesPanel(QScrollArea):
         self._row("status", "flags")
         # Individual status flags broken out so operators can watch them
         # without scanning the whole bitfield string.
-        self._row("rs485", "RS-485")
         self._row("heater_inhibit", "heater inhibit")
         self._row("resistance_ok", "resistance")
         for component in (
@@ -192,14 +191,7 @@ class ValuesPanel(QScrollArea):
                     f[f"m{m}_{k}"].setText("—")
         f["status"].setText(pkt.status)
         # Status bits surfaced as boolean-ish indicators.
-        rs_ok = "RS485_OK" in pkt.status
-        hi    = "HEATER_INHIBITED" in pkt.status
-        f["rs485"].setText("OK" if rs_ok else ("FAIL" if "RS485_FAIL" in pkt.status else "—"))
-        f["rs485"].setStyleSheet(
-            "font-family: monospace; font-size: 11px; color: "
-            + ("#2ecc71" if rs_ok else "#e74c3c" if "RS485_FAIL" in pkt.status else "#888")
-            + ";"
-        )
+        hi = "HEATER_INHIBITED" in pkt.status
         f["heater_inhibit"].setText("INHIBITED" if hi else "active")
         f["heater_inhibit"].setStyleSheet(
             "font-family: monospace; font-size: 11px; color: "
