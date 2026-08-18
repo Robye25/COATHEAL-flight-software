@@ -144,8 +144,9 @@ class PlotTabs(QTabWidget):
         for i, label in enumerate(HEATER_LABELS):
             self._heaters.add_curve(label, HEATER_COLORS[i % len(HEATER_COLORS)])
 
-        # Compatibility resistance plot. Final-BOM frames normally contain
-        # None values, which are skipped.
+        # Per-channel PT100 element resistance from the Sequent RTD card.
+        # Channels with no reading arrive as None and are skipped, as does
+        # every channel when the payload runs sensor.resistance_source=disabled.
         self._resistance = LivePlotWidget("Sample Resistance", "resistance", "Ω")
         for i, label in enumerate(RESISTANCE_LABELS):
             self._resistance.add_curve(label, RESISTANCE_COLORS[i % len(RESISTANCE_COLORS)])

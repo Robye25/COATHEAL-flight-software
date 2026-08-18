@@ -670,10 +670,18 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
       }
     }
   }
-  if (config->sensors.sequent_rtd_expect_sensor_type != "pt100" &&
-      config->sensors.sequent_rtd_expect_sensor_type != "pt1000") {
+  // pt100 only, deliberately. The card and SequentRtdAdapter::Probe() both
+  // handle pt1000 fine, but everything downstream of the probe is PT100-only:
+  // ApplyValidation hardcodes the PT100 Callendar-Van Dusen curve for the
+  // card-temperature cross-check and the 60-390 ohm plausibility window is a
+  // PT100 window. A pt1000 config would therefore load, probe, and then mark
+  // every channel invalid forever - all heaters clamped, no diagnostic. Fail
+  // at load instead, where the operator can see why.
+  if (config->sensors.sequent_rtd_expect_sensor_type != "pt100") {
     if (error != nullptr) {
-      *error = "sensor.sequent_rtd_expect_sensor_type must be pt100 or pt1000";
+      *error = "sensor.sequent_rtd_expect_sensor_type must be pt100 "
+               "(pt1000 is recognised but not implemented: the CVD "
+               "cross-check and resistance window are PT100-only)";
     }
     return false;
   }

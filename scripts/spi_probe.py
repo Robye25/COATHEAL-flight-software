@@ -15,18 +15,38 @@ import time
 from dataclasses import dataclass
 from typing import Iterable, List, Sequence
 
+# spidev/gpiod are needed only by the SPI half of this script. The Sequent RTD
+# check below is pure I2C through /dev/i2c-1 and needs neither, so a missing
+# SPI stack must not abort the whole probe at import time - that is exactly the
+# bench situation this script has to survive (a host with I2C brought up and
+# the SPI packages not installed yet). Record why the import failed and let
+# main() decide, per section, whether that is fatal.
+#
+# `from __future__ import annotations` above keeps the `spidev.SpiDev`
+# annotations on transfer()/read_tmc2240() from being evaluated, so leaving
+# these names as None is safe until something actually calls into them.
 try:
     import spidev  # type: ignore
 except ImportError as exc:  # pragma: no cover - platform diagnostic
-    raise SystemExit("python3-spidev is required to run this probe") from exc
+    spidev = None  # type: ignore[assignment]
+    SPI_IMPORT_ERROR = f"python3-spidev is not installed ({exc})"
+else:
+    SPI_IMPORT_ERROR = ""
 
 try:
     import gpiod  # type: ignore
     from gpiod.line import Direction, Value  # type: ignore
 except ImportError as exc:  # pragma: no cover - platform diagnostic
-    raise SystemExit("python3-libgpiod/gpiod is required to run this probe") from exc
+    gpiod = None  # type: ignore[assignment]
+    Direction = Value = None  # type: ignore[assignment]
+    GPIOD_IMPORT_ERROR = f"python3-libgpiod/gpiod is not installed ({exc})"
+else:
+    GPIOD_IMPORT_ERROR = ""
 
 I2C_SLAVE = 0x0703
+RTD_STACK_MIN = 0
+RTD_STACK_MAX = 7
+RTD_ADDRESS_BASE = 0x40
 
 
 @dataclass(frozen=True)
@@ -83,9 +103,23 @@ def transfer(spi: spidev.SpiDev, cs: CsLine, tx: Sequence[int]) -> List[int]:
     return [int(value) & 0xff for value in rx]
 
 
+def spi_support_error() -> str:
+    """Empty string when the SPI half of this script can run, else why not."""
+    return SPI_IMPORT_ERROR or GPIOD_IMPORT_ERROR
+
+
 def probe_sequent_rtd(stack: int = 0) -> int:
     """Read firmware revision from the Sequent RTD card, as doBoardInit does."""
-    address = 0x40 + stack
+    # Validate before deriving the address: the card only decodes stack 0..7
+    # (SequentRtdAdapter::kStackMin/kStackMax), so anything else would either
+    # compute an address the card cannot answer at or, for a negative stack,
+    # walk *below* 0x40 onto some other device's address.
+    if not RTD_STACK_MIN <= stack <= RTD_STACK_MAX:
+        raise SystemExit(
+            f"--rtd-stack must be {RTD_STACK_MIN}..{RTD_STACK_MAX} "
+            f"(I2C 0x{RTD_ADDRESS_BASE:02x}.."
+            f"0x{RTD_ADDRESS_BASE + RTD_STACK_MAX:02x}), got {stack}")
+    address = RTD_ADDRESS_BASE + stack
     try:
         with open("/dev/i2c-1", "r+b", buffering=0) as bus:
             fcntl.ioctl(bus, I2C_SLAVE, address)
@@ -161,9 +195,21 @@ def main() -> int:
 
     print("This is read-only: no register writes, no motor movement, no heater commands.")
 
+    rtd_rc = 0
     if not args.skip_rtd:
         print("\n=== Sequent RTD HAT (I2C, /dev/i2c-1) ===")
-        probe_sequent_rtd(args.rtd_stack)
+        rtd_rc = probe_sequent_rtd(args.rtd_stack)
+
+    spi_error = spi_support_error()
+    if spi_error:
+        # Naming --device is an explicit request for the SPI half, so not
+        # being able to run it is a failure rather than a skip.
+        if args.device:
+            raise SystemExit(f"--device requires the SPI stack: {spi_error}")
+        print(f"\n=== SPI (TMC2240) SKIPPED: {spi_error} ===")
+        print("Install python3-spidev and python3-libgpiod to probe the "
+              "motor drivers; the I2C section above ran regardless.")
+        return rtd_rc
 
     spi = spidev.SpiDev()
     spi.open(args.spi_bus, args.spi_device)
@@ -194,7 +240,7 @@ def main() -> int:
     finally:
         spi.close()
 
-    return 0
+    return rtd_rc
 
 
 if __name__ == "__main__":

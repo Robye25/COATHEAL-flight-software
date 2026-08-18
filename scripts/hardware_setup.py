@@ -8,6 +8,7 @@ import glob
 import json
 import math
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -212,10 +213,34 @@ def validate_candidate(text: str) -> list[str]:
     elif any(not c.isdigit() or not 1 <= int(c) <= 8 for c in channels):
         errors.append("sensor.sequent_rtd_channels entries must be 1..8")
 
-    if values.get("sensor.sequent_rtd_expect_sensor_type") not in {
-            "pt100", "pt1000"}:
-        errors.append("sensor.sequent_rtd_expect_sensor_type must be "
-                      "pt100 or pt1000")
+    # pt100 only, mirroring config.cpp. The card and the adapter's Probe()
+    # both handle pt1000, but ApplyValidation's card-temperature cross-check
+    # hardcodes the PT100 Callendar-Van Dusen curve and the 60-390 ohm window
+    # is a PT100 window, so a pt1000 config would mark every channel invalid
+    # forever with no diagnostic. Reject at load instead.
+    if values.get("sensor.sequent_rtd_expect_sensor_type") != "pt100":
+        errors.append("sensor.sequent_rtd_expect_sensor_type must be pt100 "
+                      "(pt1000 is recognised but not implemented: the CVD "
+                      "cross-check and resistance window are PT100-only)")
+
+    # config.cpp:680-687 - the plausibility window must be a real interval.
+    try:
+        resistance_min = float(values["sensor.sequent_rtd_resistance_min_ohm"])
+        resistance_max = float(values["sensor.sequent_rtd_resistance_max_ohm"])
+    except (KeyError, ValueError):
+        errors.append("sensor.sequent_rtd_resistance_min_ohm and _max_ohm "
+                      "must be numbers")
+    else:
+        if resistance_min >= resistance_max:
+            errors.append("sensor.sequent_rtd_resistance_min_ohm must be "
+                          "below sensor.sequent_rtd_resistance_max_ohm")
+
+    # config.cpp:619-626 - "disabled" and "simulated" stay accepted alongside
+    # the HAT-backed default so a fielded INI still loads.
+    if values.get("sensor.resistance_source") not in {
+            "sequent_rtd", "disabled", "simulated"}:
+        errors.append("sensor.resistance_source must be disabled, simulated, "
+                      "or sequent_rtd")
 
     runtime_chip = values.get("runtime.gpio_chip", "/dev/gpiochip0")
     gpio_claims: dict[tuple[str, int], str] = {}
@@ -477,6 +502,28 @@ def motor_test(args: argparse.Namespace) -> int:
     return 0
 
 
+# The RTD token's case is not stable across builds. On real hardware
+# SensorManager::ActiveCheck formats the reply itself and emits lowercase
+# `sequent_rtd=OK`; on a simulated build it short-circuits and echoes the
+# requested component name verbatim, producing `SEQUENT_RTD=OK;simulated=1`.
+# Match either, and only as a whole token so `sequent_rtd_error=...` and
+# `sequent_rtd_burst=...` cannot satisfy it.
+_SEQUENT_RTD_OK_RE = re.compile(
+    r"(?<![A-Za-z0-9_])sequent_rtd=OK(?![A-Za-z0-9_])", re.IGNORECASE)
+
+
+def sequent_rtd_reply_ok(response: str) -> bool:
+    """True when a `CHECK SEQUENT_RTD` reply reports the card healthy.
+
+    `overall=OK` alone is not enough: it also covers storage, PWM, motors,
+    SPI and comms, so a reply can carry `overall=FAIL` for an unrelated
+    reason while the card is fine, or - more importantly - the RTD token must
+    be checked explicitly for this command to mean anything.
+    """
+    return "overall=OK" in response and _SEQUENT_RTD_OK_RE.search(
+        response) is not None
+
+
 def rtd_check(args: argparse.Namespace) -> int:
     # SEQUENT_RTD is the current selector name; it is also what
     # COMPONENT_STATE and this CHECK reply put on the wire (see
@@ -484,7 +531,7 @@ def rtd_check(args: argparse.Namespace) -> int:
     # work as request aliases but the reply never contains "rtd_click=OK".
     response = send_command("CHECK SEQUENT_RTD", args.host, args.port)
     print(response)
-    return 0 if "overall=OK" in response and "sequent_rtd=OK" in response else 1
+    return 0 if sequent_rtd_reply_ok(response) else 1
 
 
 def heater_test(args: argparse.Namespace) -> int:
@@ -525,7 +572,12 @@ def doctor(args: argparse.Namespace) -> int:
             failures = True
             continue
         print(response)
-        if command.startswith("CHECK") and "overall=OK" not in response:
+        # Same acceptance rule as `rtd-check` for the RTD command, so the two
+        # entry points cannot disagree about whether the card is healthy.
+        if command == "CHECK SEQUENT_RTD":
+            if not sequent_rtd_reply_ok(response):
+                failures = True
+        elif command.startswith("CHECK") and "overall=OK" not in response:
             failures = True
     return 1 if failures else 0
 

@@ -30,7 +30,7 @@ DATA,<session_id>,<seq>,<timestamp>,<rtc_valid>,<ambient_temp_c>,<ambient_pressu
 | `uv` | GUVA-S12SD analog output through ADS1115 |
 | `sample_0..sample_7` | PT100/PT1000 sample values, one per Sequent RTD HAT channel; disabled or missing channels serialize as `nan` |
 | `HEATER_DUTY` | Six polyimide heater duty values, H0..H5 |
-| `RESISTANCE` | Retained compatibility field; final BOM has no resistance instrument, so values serialize as `-` unless `sensor.resistance_source=simulated` |
+| `RESISTANCE` | Per-channel PT100 **element** resistance in Ω, read from the Sequent RTD card, under the default `sensor.resistance_source=sequent_rtd`. `simulated` substitutes the decaying bench model (sample *material* resistance, a different physical quantity on the same field). `disabled` is the only setting that serializes `-` in every slot; a `-` also appears for any individual channel with no positive value yet |
 | `SENSOR_VALID` | Current validity for ambient temperature (`AT`), pressure (`AP`), UV, and `S0..S7` |
 | `SENSOR_AGE_MS` | Monotonic age of each last successful reading; `-1` means never valid |
 | `COMPONENT_STATE` | Independent state for DPS310, ADS1115, SEQUENT_RTD, both motors, and PWM |
@@ -70,11 +70,11 @@ STATUS=SD_OK|USB_OK|I2C_OK|SPI_OK|LINK_OK|T_AMBIENT_OK|P_AMBIENT_OK|UNIFORMITY_O
 | `ENERGY_OK` / `ENERGY_FAIL` | Heater energy budget not exhausted |
 | `PWM_OK` / `PWM_FAIL` | Heater GPIO/PWM backend health |
 | `STEPPER_OK` / `STEPPER_FAIL` | Both motor backends healthy |
-| `SAMPLE_TEMP_OK` / `SAMPLE_TEMP_FAIL` | At least one sample temperature channel valid |
+| `SAMPLE_TEMP_OK` / `SAMPLE_TEMP_FAIL` | Every sample channel a heater controls (`heater.temperature_channels`) is valid and fresh; unheated channels are ignored, and an empty or out-of-range mapping fails closed |
 | `SIMULATED` / `REAL_SENSORS` | Explicit sensor mode |
 | `SEQ_PAUSED` / `SEQ_READY` | At least one bend sequence is paused/faulted, or no sequence fault is active |
 | `HEATER_ACTIVE` / `HEATER_INHIBITED` | Heaters are inhibited while a motor holds `MotionLock` |
-| `RESISTANCE_OK` / `RESISTANCE_FAIL` | Compatibility bit; OK when resistance is disabled or simulated path is healthy |
+| `RESISTANCE_OK` / `RESISTANCE_FAIL` | Under the default `sensor.resistance_source=sequent_rtd`, tracks RTD-card bus health — OK while the card conversation succeeds, FAIL when it does not. Always OK under `disabled` and `simulated`. Bus-level, not per-channel: a card answering with one open probe still reports OK here, and the affected channel shows up on `SENSOR_VALID` and `COMPONENT_STATE` instead |
 
 ## Pull-Cycle Event Frame
 

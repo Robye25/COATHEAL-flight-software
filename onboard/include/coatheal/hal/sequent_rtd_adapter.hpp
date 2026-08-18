@@ -47,6 +47,12 @@ bool Pt100TemperatureFromOhms(double resistance_ohm, double* temperature_c);
 class SequentRtdAdapter {
  public:
   static constexpr std::size_t kChannelCount = 8;
+  // ADDRESS COLLISION: this card owns 0x40..0x47, which covers the retired
+  // INA3221's kDefaultAddrA/kDefaultAddrB (0x40/0x41) in ina3221_adapter.hpp.
+  // Harmless today because Ina3221Adapter is a stub that never touches the
+  // bus, but the two cannot coexist at these addresses. Re-addressing one of
+  // them is a prerequisite for ever re-enabling INA3221 acquisition; keep the
+  // note there in sync with this one.
   static constexpr int kAddressBase = 0x40;
   static constexpr int kStackMin = 0;
   static constexpr int kStackMax = 7;

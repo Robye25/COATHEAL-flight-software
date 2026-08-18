@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <thread>
 #include <vector>
@@ -309,6 +310,140 @@ void TestI2cOkRecoversOnHealthyRtdBus() {
   assert(became_ok);
 }
 
+// ---------------------------------------------------------------------------
+// resistance_source=sequent_rtd (the shipped default) coverage.
+//
+// The two tests below are a pair, and only one of them is discriminating on
+// its own. Without an explicit "sequent_rtd" branch in ReadSnapshot the value
+// falls through to `ina_ != nullptr && ina_->healthy()` — the retired INA3221
+// stub, whose healthy_ defaults to true and is never written by anything. That
+// fallback therefore reports resistance_ok() == true unconditionally, so it
+// happens to agree with the correct branch on a healthy card and disagrees
+// only on a dead one. TestSequentRtdResistanceFailsOnUnreachableBus is the
+// half that fails if the branch is removed; the healthy half is what proves
+// the failing half is not passing for a trivial reason (e.g. a fixture where
+// the bus never comes up at all).
+
+// A register image with a distinctive, in-window resistance on every channel:
+// 138.5055 Ω is the PT100 CVD resistance at exactly 100 °C, so the matching
+// 100.0 °C temperature block passes the card-vs-CVD cross-check (default
+// tolerance 2 °C) and every channel comes back valid. It is deliberately not
+// the 100.0 Ω that SensorManager seeds sample_resistance_ohm_ with, so a
+// snapshot carrying 138.5055 proves the card's own numbers reached the wire
+// rather than the constructor's placeholder.
+constexpr double kBenchResistanceOhm = 138.5055;
+constexpr double kBenchTemperatureC = 100.0;
+
+std::vector<std::uint8_t> LiveRtdImage() {
+  std::vector<std::uint8_t> image = BlankRtdImage();
+  for (int channel = 0; channel < sequent_rtd::kChannels; ++channel) {
+    const float temperature = static_cast<float>(kBenchTemperatureC);
+    const float resistance = static_cast<float>(kBenchResistanceOhm);
+    std::memcpy(image.data() + sequent_rtd::kRtdVal1 + channel * 4,
+                &temperature, sizeof(float));
+    std::memcpy(image.data() + sequent_rtd::kRtdRes1 + channel * 4,
+                &resistance, sizeof(float));
+  }
+  return image;
+}
+
+OnboardConfig MakeSequentRtdResistanceConfig() {
+  OnboardConfig config = MakeRtdBusTestConfig();
+  config.sensors.resistance_source = "sequent_rtd";
+  return config;
+}
+
+void TestSequentRtdResistanceFollowsHealthyBus() {
+  const OnboardConfig config = MakeSequentRtdResistanceConfig();
+
+  FakeI2cBus good_bus;
+  good_bus.SetImage(LiveRtdImage());
+
+  Ina3221Adapter ina;
+  SpiAdapter spi;
+  I2cAdapter i2c;
+  RtcAdapter rtc;
+  SensorManager sm(config, &spi, &i2c, &rtc, &ina, &good_bus);
+  sm.Start();
+
+  // Wait on the card's data reaching the snapshot, not on resistance_ok():
+  // the flag is set on the very first ReadSnapshot() and would let the loop
+  // exit before SequentRtdLoop's first pass had published anything, leaving
+  // the assertions looking at the constructor's placeholder ohms.
+  const std::vector<double> heater_duty(6, 0.0);
+  SensorSnapshot snap;
+  bool published = false;
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (std::chrono::steady_clock::now() < deadline) {
+    snap = sm.ReadSnapshot(MissionPhase::kAscent, heater_duty, 0.1);
+    if (!snap.sample_resistance_ohm.empty() &&
+        std::fabs(snap.sample_resistance_ohm[0] - kBenchResistanceOhm) < 0.01) {
+      published = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  const bool resistance_ok = sm.resistance_ok();
+  sm.Stop();
+
+  assert(published);
+  assert(resistance_ok);
+  assert(snap.sample_resistance_ohm.size() == 8);
+  for (double ohms : snap.sample_resistance_ohm) {
+    assert(std::fabs(ohms - kBenchResistanceOhm) < 0.01);
+  }
+
+  // Same values seen through the wire format: RESISTANCE= must carry real
+  // numbers, not the "-" placeholder the disabled source emits.
+  TelemetryRecord rec;
+  rec.seq = 0;
+  rec.sensors = snap;
+  rec.phase = MissionPhase::kAscent;
+  rec.mode = SystemMode::kStandby;
+  rec.heater_duty = heater_duty;
+  rec.steppers.resize(2);
+  const std::string line = SerializeTelemetryDataFrame(rec, "sess-rtd");
+  const auto pos = line.find("RESISTANCE=");
+  assert(pos != std::string::npos);
+  const std::string rest = line.substr(pos, line.find(',', pos) - pos);
+  assert(rest.find('-') == std::string::npos);
+  assert(rest.find("138.5") != std::string::npos);
+}
+
+void TestSequentRtdResistanceFailsOnUnreachableBus() {
+  const OnboardConfig config = MakeSequentRtdResistanceConfig();
+
+  FakeI2cBus bad_bus;
+  bad_bus.SetImage(LiveRtdImage());
+  bad_bus.SetOpenFails(true);  // card configured, unreachable on the wire
+
+  Ina3221Adapter ina;
+  SpiAdapter spi;
+  I2cAdapter i2c;
+  RtcAdapter rtc;
+  SensorManager sm(config, &spi, &i2c, &rtc, &ina, &bad_bus);
+  sm.Start();
+
+  const std::vector<double> heater_duty(6, 0.0);
+  bool ever_ok = false;
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(750);
+  while (std::chrono::steady_clock::now() < deadline) {
+    sm.ReadSnapshot(MissionPhase::kAscent, heater_duty, 0.1);
+    if (sm.resistance_ok()) {
+      ever_ok = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  sm.Stop();
+  // A card that never answers must never report its resistance data healthy.
+  // Deleting the sequent_rtd branch drops this case onto the INA3221 stub's
+  // always-true healthy(), which fails here and only here.
+  assert(!ever_ok);
+}
+
 }  // namespace
 
 int main() {
@@ -321,5 +456,7 @@ int main() {
   TestHeatedChannelPolicyFailsClosedOnEmptyMapping();
   TestI2cOkStaysFailedOnUnreachableRtdBus();
   TestI2cOkRecoversOnHealthyRtdBus();
+  TestSequentRtdResistanceFollowsHealthyBus();
+  TestSequentRtdResistanceFailsOnUnreachableBus();
   return 0;
 }

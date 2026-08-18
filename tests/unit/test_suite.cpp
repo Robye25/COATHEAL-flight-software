@@ -532,7 +532,7 @@ void TestSequentRtdConfigDefaultsAndParsing() {
       "sensor.sequent_rtd_stack=2\n"
       "sensor.sequent_rtd_channels=3,2,1,4,5,6,7,8\n"
       "sensor.sequent_rtd_poll_ms=500\n"
-      "sensor.sequent_rtd_expect_sensor_type=pt1000\n"
+      "sensor.sequent_rtd_expect_sensor_type=pt100\n"
       "sensor.sequent_rtd_resistance_min_ohm=70.0\n"
       "sensor.sequent_rtd_resistance_max_ohm=380.0\n"
       "sensor.sequent_rtd_crosscheck_tol_c=1.5\n"
@@ -544,7 +544,11 @@ void TestSequentRtdConfigDefaultsAndParsing() {
   assert(cfg.sensors.sequent_rtd_stack == 2);
   assert(cfg.sensors.sequent_rtd_channels[0] == 3);
   assert(cfg.sensors.sequent_rtd_poll_ms == 500);
-  assert(cfg.sensors.sequent_rtd_expect_sensor_type == "pt1000");
+  // pt100 is also the default, so this line only proves the key is known and
+  // parsed, not that a non-default value round-trips: pt100 is now the *only*
+  // accepted value (see TestSequentRtdConfigRejectsBadValues for the pt1000
+  // rejection and why it exists).
+  assert(cfg.sensors.sequent_rtd_expect_sensor_type == "pt100");
   assert(std::fabs(cfg.sensors.sequent_rtd_crosscheck_tol_c - 1.5) < 1e-9);
   assert(std::fabs(cfg.sensors.sequent_rtd_resistance_min_ohm - 70.0) < 1e-9);
   assert(std::fabs(cfg.sensors.sequent_rtd_resistance_max_ohm - 380.0) < 1e-9);
@@ -570,6 +574,16 @@ void TestSequentRtdConfigRejectsBadValues() {
     {"sensor.sequent_rtd_channels=0,2,3,4,5,6,7,8\n", "entries must be 1..8"},
     {"sensor.sequent_rtd_channels=9,2,3,4,5,6,7,8\n", "entries must be 1..8"},
     {"sensor.sequent_rtd_expect_sensor_type=pt500\n", "expect_sensor_type"},
+    // Recorded spec deviation: pt1000 is advertised on the card and handled
+    // by SequentRtdAdapter::Probe(), but ApplyValidation's card-vs-CVD
+    // cross-check hardcodes the PT100 curve and the plausibility window is a
+    // PT100 window, so a pt1000 config would load and then mark every channel
+    // invalid forever - every heater clamped, no diagnostic. Rejecting at
+    // load is the recorded ruling; the exact wording is asserted because the
+    // operator-facing explanation is the point of the rejection.
+    {"sensor.sequent_rtd_expect_sensor_type=pt1000\n",
+     "must be pt100 (pt1000 is recognised but not implemented: the CVD "
+     "cross-check and resistance window are PT100-only)"},
     {"sensor.sequent_rtd_resistance_min_ohm=400.0\n", "sequent_rtd_resistance_min_ohm"},
   };
   for (const Case& c : cases) {
