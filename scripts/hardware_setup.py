@@ -22,24 +22,24 @@ DEFAULT_CONFIG = ROOT / "config" / "onboard.local.ini"
 EXAMPLE_CONFIG = ROOT / "config" / "onboard.example.ini"
 LEGACY_CONFIG = ROOT / "config" / "onboard.ini"
 FINAL_PIN_VALUES = {
-    "heater.output_lines": "17,18,27,5,6,13",
+    # v3 GPIO map (BCM), single source of truth: heaters H1..H6.
+    "heater.output_lines": "19,13,6,5,24,23",
     "heater.temperature_channels": "0,1,2,3,4,5",
     "hal.status_led_enabled": "false",
     "hal.mode_led_enabled": "false",
-    "motor0.driver": "tmc2240",
+    # v3: TMC5160, SPI-only motion - no STEP/DIR lines exist.
+    "motor0.driver": "tmc5160",
     "motor0.gpio_chip": "/dev/gpiochip0",
     "motor0.spi_device": "/dev/spidev0.0",
     "motor0.cs_line": "22",
-    "motor0.enable_line": "12",
-    "motor0.step_line": "19",
-    "motor0.dir_line": "26",
-    "motor1.driver": "tmc2240",
+    "motor0.enable_line": "20",
+    "motor0.sense_resistor_ohm": "0.075",
+    "motor1.driver": "tmc5160",
     "motor1.gpio_chip": "/dev/gpiochip0",
     "motor1.spi_device": "/dev/spidev0.0",
-    "motor1.cs_line": "23",
+    "motor1.cs_line": "27",
     "motor1.enable_line": "21",
-    "motor1.step_line": "24",
-    "motor1.dir_line": "20",
+    "motor1.sense_resistor_ohm": "0.075",
     "sensor.sequent_rtd_stack": "0",
     "sensor.sequent_rtd_channels": "1,2,3,4,5,6,7,8",
     "sensor.sequent_rtd_poll_ms": "1000",
@@ -64,7 +64,27 @@ OBSOLETE_CONFIG_KEYS = {
     "motor1.sense_resistor",
     "motor0.sense_resistance",
     "motor1.sense_resistance",
+    # v3: no STEP/DIR lines exist (TMC5160 SPI-only motion); pulse_high_us
+    # was only ever meaningful for GPIO-pulse (STEP/DIR) motion.
+    "motor0.step_line",
+    "motor0.dir_line",
+    "motor0.pulse_high_us",
+    "motor1.step_line",
+    "motor1.dir_line",
+    "motor1.pulse_high_us",
 }
+# v3 reserved GPIO lines (BCM), mirroring config.cpp's kReservedGpioLines:
+# Sequent RTD HAT lines plus the hardware SPI0 chip-selects, which are wired
+# to the MAX31865 sample-resistance clicks and are not available for
+# heater/motor use.
+RESERVED_GPIO_LINES = (
+    (14, "reserved: sequent_hat uart_tx"),
+    (15, "reserved: sequent_hat uart_rx"),
+    (17, "reserved: sequent_hat rs485_dir"),
+    (26, "reserved: sequent_hat intn"),
+    (7, "reserved: spi0_ce1 (max31865 sample1)"),
+    (8, "reserved: spi0_ce0 (max31865 sample2)"),
+)
 RETIRED_SENSOR_KEYS = frozenset({
     "sensor.sample_temperature_source",
     "sensor.daq132m_enabled", "sensor.daq132m_auto_discover",
@@ -244,7 +264,12 @@ def validate_candidate(text: str) -> list[str]:
 
     runtime_chip = values.get("runtime.gpio_chip", "/dev/gpiochip0")
     gpio_claims: dict[tuple[str, int], str] = {}
+    # Reserved lines are claimed first, mirroring config.cpp's claim order,
+    # so a heater or motor line colliding with one fails with the reserved
+    # owner named in the error.
     gpio_keys = [
+        (runtime_chip, owner, line) for line, owner in RESERVED_GPIO_LINES
+    ] + [
         (runtime_chip, f"heater.output_lines[{index}]", line)
         for index, line in enumerate(output_lines)
     ]
@@ -253,20 +278,25 @@ def validate_candidate(text: str) -> list[str]:
         chip = values.get(chip_key, "")
         if not chip:
             errors.append(f"invalid or missing {chip_key}")
-        for suffix in ("cs_line", "step_line", "dir_line", "enable_line"):
+        # v3: no STEP/DIR lines exist (TMC5160 SPI-only motion).
+        for suffix in ("cs_line", "enable_line"):
             key = f"motor{motor}.{suffix}"
             try:
                 gpio_keys.append((chip, key, int(values[key], 0)))
             except (KeyError, ValueError):
                 errors.append(f"invalid or missing {key}")
-        if values.get(f"motor{motor}.driver") != "tmc2240":
-            errors.append(f"motor{motor}.driver must be tmc2240")
+        driver = values.get(f"motor{motor}.driver")
+        if driver == "tmc2240":
+            errors.append(f"motor{motor}.driver=tmc2240 is retired; use tmc5160")
+        elif driver not in ("tmc5160", "simulated"):
+            errors.append(f"motor{motor}.driver must be tmc5160 or simulated")
         try:
             run_current = float(values[f"motor{motor}.run_current_a_rms"])
             current_range = float(
                 values[f"motor{motor}.current_range_a_peak"])
             spi_speed = int(values[f"motor{motor}.spi_speed_hz"], 0)
-            pulse_high = int(values[f"motor{motor}.pulse_high_us"], 0)
+            sense_resistor_ohm = float(
+                values[f"motor{motor}.sense_resistor_ohm"])
             if not math.isfinite(run_current) or not 0.0 < run_current <= 2.1:
                 errors.append(
                     f"motor{motor}.run_current_a_rms must be in (0, 2.1]")
@@ -288,9 +318,10 @@ def validate_candidate(text: str) -> list[str]:
             if not 0 < spi_speed <= 10_000_000:
                 errors.append(
                     f"motor{motor}.spi_speed_hz must be in [1, 10000000]")
-            if pulse_high < 1:
+            if not math.isfinite(sense_resistor_ohm) or not (
+                    0.0 < sense_resistor_ohm < 1.0):
                 errors.append(
-                    f"motor{motor}.pulse_high_us must be at least 1")
+                    f"motor{motor}.sense_resistor_ohm must be in (0, 1)")
         except (KeyError, ValueError):
             errors.append(f"invalid or missing motor{motor} electrical setting")
     for chip, owner, line in gpio_keys:
