@@ -35,7 +35,7 @@ docs/            Architecture, protocol, configuration, and hardware docs
 | Document | Description |
 |---|---|
 | [docs/rev-c-installation-and-hardware-setup.md](docs/rev-c-installation-and-hardware-setup.md) | Installation, plug-and-play Ethernet, final component setup, pins, and commands |
-| [docs/rev-c-rtd-click-plug-and-play.md](docs/rev-c-rtd-click-plug-and-play.md) | Current bench setup: RTD Click/MAX31865 PT100, config migration, heater and motor checks |
+| [docs/sequent-rtd-bring-up.md](docs/sequent-rtd-bring-up.md) | Sequent RTD HAT bench bring-up: register-map verification gate, burst-read confirmation, calibration |
 | [docs/hardware.md](docs/hardware.md) | Final Rev C hardware reference and HAL status |
 | [docs/configuration.md](docs/configuration.md) | Full INI configuration reference |
 | [docs/component-configuration-and-bring-up.md](docs/component-configuration-and-bring-up.md) | Authoritative Rev C wiring, discovery, and commissioning guide |
@@ -72,8 +72,7 @@ cmake --build build --parallel
 ./build/onboard/coatheal_onboard --config config/onboard.debug.ini
 ```
 
-On the Pi, migrate stale config and install the service with the current bench
-RTD Click settings:
+On the Pi, migrate stale config and install the service:
 
 ```bash
 python3 scripts/hardware_setup.py plug-and-play \
@@ -109,8 +108,7 @@ python -m unittest discover -s ground-station/tests -p "test_*.py"
 |---|---|---|
 | Stepper driver | TMC2240 carrier | SPI mode 3 + STEP/DIR/EN |
 | Linear actuator | NEMA 17 external ball-screw linear stepper, 2.5 A, 48 mm | Through TMC2240 |
-| Current bench PT100 | XF-931-FAR PT100 Class B probe | RTD Click MIKROE-2815 / MAX31865 |
-| Future multi-channel PT100 | DAQ132M 8-channel PT100 card | USB-RS485 Modbus RTU, currently disabled |
+| Sample PT100 | 8x XF-931-FAR PT100 Class B probes | Sequent Microsystems 8-channel RTD HAT, I2C `0x40 + stack` |
 | Pressure / ambient T | Adafruit DPS310 | I2C / STEMMA QT |
 | UV ADC | Adafruit ADS1115 | I2C / STEMMA QT |
 | UV sensor | GUVA-S12SD | Analog into ADS1115 |
@@ -142,12 +140,14 @@ See [docs/protocol.md](docs/protocol.md) for the complete command list.
 ## Hardware Status
 
 The real hardware paths are implemented for libgpiod heater PWM, TMC2240
-configuration with GPIO chip-select, STEP/DIR/EN pulses, DPS310, ADS1115,
-RTD Click/MAX31865, and configurable DAQ132M Modbus RTU. The current bench
-default uses RTD Click and disables DAQ132M. `runtime.use_simulated_sensors=true`
-and `runtime.use_simulated_pwm=true` are explicit debug-only switches. Bench
-validation, motor current calibration, and dummy-load heater tests are still
-required before powered flight hardware operation.
+configuration with GPIO chip-select, STEP/DIR/EN pulses, DPS310, ADS1115, and
+the Sequent Microsystems 8-channel RTD HAT over I2C.
+`runtime.use_simulated_sensors=true` and `runtime.use_simulated_pwm=true` are
+explicit debug-only switches. The RTD HAT's register map is derived from
+vendor source and gated on bench verification (see
+[docs/sequent-rtd-bring-up.md](docs/sequent-rtd-bring-up.md)); motor current
+calibration and dummy-load heater tests are also still required before
+powered flight hardware operation.
 
 ## Security
 

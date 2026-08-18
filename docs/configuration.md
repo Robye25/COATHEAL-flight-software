@@ -54,7 +54,7 @@ at load time.
 
 | Key | Default | Description |
 |---|---:|---|
-| `hardware.sample_count` | `8` | Software sample channels. Current bench uses RTD Click on `S1` for heater 1; DAQ132M can later fill all eight. |
+| `hardware.sample_count` | `8` | Software sample channels, one per Sequent RTD HAT card channel. |
 | `hardware.heater_count` | `6` | Polyimide heater channels, samples 0-5. |
 | `hardware.electronics_heater_index` | `SIZE_MAX` | Optional box heater; omitted for final BOM. |
 
@@ -62,37 +62,24 @@ at load time.
 
 | Key | Default | Description |
 |---|---:|---|
-| `sensor.sample_temperature_source` | `rtd_click_max31865` | Current PT100 acquisition path. `daq132m_modbus` remains available later. |
-| `sensor.dps310_enabled`, `ads1115_enabled`, `daq132m_enabled` | `true`, `true`, `false` | Enable each independent polling worker. |
-| `sensor.dps310_auto_discover`, `ads1115_auto_discover`, `daq132m_auto_discover` | `true` | Try only the safe address/path alternatives documented in the bring-up guide. |
-| `sensor.dps310_poll_ms`, `ads1115_poll_ms`, `daq132m_poll_ms` | `1000` | Independent worker polling intervals. |
+| `sensor.dps310_enabled`, `ads1115_enabled` | `true`, `true` | Enable each independent polling worker. |
+| `sensor.dps310_auto_discover`, `ads1115_auto_discover` | `true` | Try only the safe address/path alternatives documented in the bring-up guide. |
+| `sensor.dps310_poll_ms`, `ads1115_poll_ms` | `1000` | Independent worker polling intervals. |
 | `sensor.stale_after_ms` | `3000` | Age after which a last-good failed reading is `STALE`. |
-| `sensor.daq132m_device` | `/dev/ttyUSB0` | USB-RS485 converter path. |
-| `sensor.daq132m_baud` | `9600` | Modbus RTU baud rate. |
-| `sensor.daq132m_parity` | `N` | Modbus parity. |
-| `sensor.daq132m_data_bits` / `stop_bits` | `8` / `1` | Serial framing. |
-| `sensor.daq132m_slave_id` | `1` | DAQ132M Modbus slave ID. |
-| `sensor.daq132m_function_code` | `3` | Modbus register-read function, `3` or `4`. |
-| `sensor.daq132m_register_base` | `0` | First temperature register. |
-| `sensor.daq132m_register_count` | `8` | Number of PT100 registers. Must cover `sample_count`. |
-| `sensor.daq132m_c_per_count` | `0.1` | Temperature scale; verify against DAQ132M manual. |
-| `sensor.daq132m_c_offset` | `0.0` | Temperature offset applied after scaling. |
-| `sensor.daq132m_enabled_channels` | `0..7` | Zero-based channels expected to be connected. Physical channel 2 is software `S1`. |
-| `sensor.rtd_click_enabled` | `true` | Current MIKROE-2815/MAX31865 bench path. |
-| `sensor.rtd_click_spi_device` | `/dev/spidev0.0` | RTD Click SPI path if enabled. |
-| `sensor.rtd_click_cs_line` / `drdy_line` | `16` / `25` | RTD Click CS and DRDY GPIO. |
-| `sensor.rtd_click_wires` | `3` | PT100 wire mode; must be 2, 3, or 4. |
-| `sensor.rtd_click_sample_channel` | `1` | Software sample channel populated by RTD Click. |
-| `sensor.rtd_click_reference_ohm` | `400.0` | MAX31865 reference resistor value used for PT100 conversion. |
-| `sensor.rtd_click_filter_hz` | `50` | MAX31865 mains filter, `50` or `60`. |
-| `sensor.rtd_click_spi_speed_hz` | `500000` | RTD Click SPI speed. |
+| `sensor.sequent_rtd_stack` | `0` | Sequent RTD HAT DIP-switch stack level, `0..7` -> I2C `0x40..0x47`. |
+| `sensor.sequent_rtd_channels` | `1,2,3,4,5,6,7,8` | Card channel (1-indexed) supplying each logical sample; must have exactly `hardware.sample_count` entries, each `1..8`, no duplicates. |
+| `sensor.sequent_rtd_poll_ms` | `1000` | RTD worker polling interval. |
+| `sensor.sequent_rtd_expect_sensor_type` | `pt100` | Expected card-configured sensor type, `pt100` or `pt1000`; `Probe()` refuses on mismatch. |
+| `sensor.sequent_rtd_resistance_min_ohm` | `60.0` | Lower plausibility bound for per-channel resistance; must be below `_max_ohm`. |
+| `sensor.sequent_rtd_resistance_max_ohm` | `390.0` | Upper plausibility bound for per-channel resistance. |
+| `sensor.sequent_rtd_crosscheck_tol_c` | `2.0` | Max allowed disagreement between the card's reported temperature and the temperature derived from its own resistance reading before a channel is marked invalid. |
 | `sensor.pressure_source` | `dps310` | Final pressure/ambient-T source. |
 | `sensor.dps310_i2c_addr` | `0x77` | DPS310 I2C address. |
 | `sensor.uv_source` | `guva_s12sd_ads1115` | Final UV path. |
 | `sensor.ads1115_i2c_addr` | `0x48` | ADS1115 I2C address. |
 | `sensor.uv_ads1115_channel` | `0` | ADS1115 channel for GUVA-S12SD output. |
 | `sensor.uv_full_scale_v` | `4.096` | ADC full-scale used for normalization. |
-| `sensor.resistance_source` | `disabled` | Final BOM has no resistance instrument; telemetry emits `-`. |
+| `sensor.resistance_source` | `sequent_rtd` | Source for the compatibility `RESISTANCE=` field: `sequent_rtd` serializes the card's per-channel PT100 element resistance; `disabled` emits `-`; `simulated` uses the decaying bench model. |
 
 ## Heater Control
 
@@ -192,7 +179,8 @@ lines in the kernel and conflict with the software-controlled chip selects.
 | `hal.mode_led_line` | `27` | Mode LED GPIO. |
 
 Disabled LED line values are not claimed. Configuration validation rejects any
-duplicate active BCM assignment across heaters, motors, RTD Click, and LEDs.
+duplicate active BCM assignment across heaters, motors, and LEDs. The Sequent
+RTD HAT is I2C-only and claims no GPIO line.
 
 Rev C requires `manual.manual_first=true`. Legacy `fatigue.*` and `bend.*`
 configuration keys are rejected; runtime `BENDSEQ_*` commands are the only

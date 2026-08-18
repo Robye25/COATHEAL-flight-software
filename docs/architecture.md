@@ -16,10 +16,9 @@ Raspberry Pi 4
       TelemetryQueue + StorageManager
       SensorManager
         independent bounded polling workers + thread-safe cache
-        DAQ132M over USB-RS485 Modbus: PT100 samples 0..7
+        Sequent RTD HAT over I2C: PT100 samples 0..7
         DPS310 over I2C: pressure + ambient temperature
         ADS1115 over I2C: GUVA-S12SD UV analog input
-        optional RTD Click over SPI for bench PT100 validation
       ThermalController
         6 manual target PIDs; fallback floor for untargeted channels
       HeaterScheduler
@@ -91,11 +90,10 @@ where telemetry should be returned.
 | TMC2240 SPI setup | Yes | GPIO-CS SPI mode 3 register writes implemented; bench validation required |
 | STEP/DIR/EN GPIO | Yes | libgpiod pulse backend implemented; bench timing validation required |
 | Heater MOSFET outputs | Yes | zero-safe software PWM implemented; dummy-load validation required |
-| DAQ132M Modbus | Yes | RTU/CRC/scaling implemented; disabled until replacement hardware is available |
+| Sequent RTD HAT I2C | Yes | 8-channel PT100/PT1000 read path implemented; register map derived from vendor source and gated on bench verification, see [sequent-rtd-bring-up.md](sequent-rtd-bring-up.md) |
 | DPS310 I2C | Yes | compensated `i2c-dev` reads implemented |
 | ADS1115 I2C | Yes | single-ended `i2c-dev` reads implemented |
-| RTD Click | Yes | active MAX31865 SPI/libgpiod read path implemented; current bench PT100 source |
-| Resistance instrument | Disabled | Compatibility telemetry field only |
+| PT100 element resistance | Yes | Read alongside temperature by the Sequent RTD HAT; drives per-channel plausibility/cross-check and the compatibility `RESISTANCE=` field |
 
 ## Telemetry Shape
 
@@ -103,5 +101,6 @@ where telemetry should be returned.
 DATA,<session>,<seq>,<timestamp>,<rtc_valid>,<ambient_temp_c>,<ambient_pressure_mbar>,<uv>,<sample_0>..<sample_7>,HEATER_DUTY=..,RESISTANCE=..,PHASE=..,MODE=..,STATUS=..,SENSOR_VALID=..,SENSOR_AGE_MS=..,COMPONENT_STATE=..,STEPPER0=..,STEPPER1=..
 ```
 
-The ground station accepts the compatibility `RESISTANCE=` field, but the final
-BOM has no resistance instrument, so normal final-BOM frames emit `-` values.
+The ground station accepts the compatibility `RESISTANCE=` field. By default
+(`sensor.resistance_source=sequent_rtd`) it carries the Sequent RTD HAT's
+per-channel PT100 element resistance; `disabled` emits `-` values instead.

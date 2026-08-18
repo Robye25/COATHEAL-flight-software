@@ -8,11 +8,13 @@ For a complete start-to-finish operator procedure, including safe GPIO changes,
 service installation, normal operation, and fault recovery, use
 [COATHEAL Rev C Instruction Manual](rev-c-instruction-manual.md).
 
-Current bench note: the DAQ132M/Modbus path is disabled until replacement
-hardware is available. Use
-[Rev C RTD Click Plug-And-Play Bring-Up](rev-c-rtd-click-plug-and-play.md) for
-the active one-PT100 RTD Click/MAX31865 setup, config migration, and automated
-Pi checks.
+Sample temperature is acquired by one Sequent Microsystems 8-channel RTD HAT
+over I2C, replacing the retired RTD Click (MAX31865/SPI) and DAQ-132M
+(RS485/Modbus) paths. Use
+[Sequent RTD Bench Bring-Up](sequent-rtd-bring-up.md) for register-map
+verification, calibration, and other RTD-specific bench procedures. Config
+migration and automated Pi checks remain in
+[hardware_setup.py](../scripts/hardware_setup.py).
 
 ## 1. Operating Model
 
@@ -34,7 +36,7 @@ Pi checks.
    the Pi or any sensor.
 3. Power the Pi from one 5 V source only. Do not simultaneously back-power its
    5 V header and USB-C input.
-4. Join Pi, DAQ, USB-RS485, ADS1115, DPS310, MOSFET boards, TMC2240 VIO, and
+4. Join Pi, Sequent RTD HAT, ADS1115, DPS310, MOSFET boards, TMC2240 VIO, and
    regulator signal grounds.
 5. Route motor and heater return currents separately from sensor ground wiring.
 6. Fit an external pull-down on every active-high `HEAT_EN` line and an
@@ -69,10 +71,10 @@ Configuration uses BCM GPIO numbers, not physical header numbers.
 | Motor 1 STEP | 18 | 24 | `motor1.step_line` |
 | Motor 1 DIR | 38 | 20 | `motor1.dir_line` |
 | Motor 1 EN | 40 | 21 | `motor1.enable_line` |
-| RTD Click DRDY | 22 | 25 | `sensor.rtd_click_drdy_line` |
-| RTD Click CS | 36 | 16 | `sensor.rtd_click_cs_line` |
 
-The DAQ132M uses USB and consumes no Pi header GPIO when it is re-enabled.
+The Sequent RTD HAT is I2C-only and consumes no Pi header GPIO. BCM 16 and 25
+(formerly RTD Click CS and DRDY) are freed and deliberately unassigned; see
+[Sequent RTD Bench Bring-Up](sequent-rtd-bring-up.md#7-freed-pins).
 Status LEDs are disabled because BCM 17 and 27 are heater outputs.
 
 ## 4. Pi Interface Setup
@@ -90,12 +92,14 @@ After reboot:
 cd /bexus/code/coatheal
 python3 scripts/hardware_setup.py discover
 i2cdetect -y 1
-ls -l /dev/spidev* /dev/serial/by-id/* /dev/ttyUSB* 2>/dev/null
+ls -l /dev/spidev*
 gpioinfo gpiochip0
 ```
 
-Expected I2C addresses are DPS310 `0x77` or `0x76` and ADS1115 `0x48` through
-`0x4B`. Both boards must use 3.3 V so their I2C pull-ups remain Pi-safe.
+Expected I2C addresses are DPS310 `0x77` or `0x76`, ADS1115 `0x48` through
+`0x4B`, and the Sequent RTD HAT at `0x40 + stack` (`0x40` by default). The
+DPS310 and ADS1115 boards must use 3.3 V so their I2C pull-ups remain
+Pi-safe.
 
 Do not install `dtoverlay=spi0-2cs`. Both TMC2240 carriers share
 `/dev/spidev0.0`; the software drives CS on BCM 22 and BCM 23.
@@ -109,14 +113,11 @@ python3 scripts/hardware_setup.py wizard \
   --config config/onboard.local.ini
 ```
 
-For the current bench setup, where one RTD Click populates software sample
-channel `S1` for heater 1, enter:
-
-```text
-0
-```
-
-Software indices are zero-based, so RTD sample channel `1` appears as `S1`.
+The wizard writes `config/onboard.example.ini` with the final pin map and
+commissioning motor current applied, then validates it with
+`--check-config` before writing. Edit `sensor.sequent_rtd_*` keys afterward
+if the DIP-switch stack or channel wiring differs from the defaults (stack
+`0`, card channels `1..8` mapped 1:1 to software samples `S0..S7`).
 
 Validate without touching hardware:
 
@@ -133,26 +134,25 @@ sudo ./scripts/install_onboard_service.sh \
   /bexus/code/coatheal/config/onboard.local.ini
 ```
 
-## 6. Current PT100 Through RTD Click
+## 6. PT100 Through the Sequent RTD HAT
 
-For the current bench, connect one XF-931-FAR PT100 to RTD Click
-MIKROE-2815/MAX31865. Wire RTD Click to Pi SPI0, CS BCM 16, and DRDY BCM 25.
-Power the board from 3.3 V.
+Connect up to eight XF-931-FAR PT100 probes (3-wire) to the Sequent
+Microsystems RTD HAT's card channels 1-8. Set the ID0/ID1/ID2 DIP switches to
+the desired stack level (`0` unless stacking with another card) and seat the
+HAT on the Pi's 40-pin header; it draws 5 V and communicates over I2C-1, no
+SPI or GPIO wiring involved.
 
 Relevant configuration:
 
 ```ini
-sensor.sample_temperature_source=rtd_click_max31865
-sensor.daq132m_enabled=false
-sensor.rtd_click_enabled=true
-sensor.rtd_click_spi_device=/dev/spidev0.0
-sensor.rtd_click_cs_line=16
-sensor.rtd_click_drdy_line=25
-sensor.rtd_click_wires=3
-sensor.rtd_click_sample_channel=1
-sensor.rtd_click_reference_ohm=400.0
-sensor.rtd_click_filter_hz=50
-sensor.rtd_click_spi_speed_hz=500000
+sensor.sequent_rtd_stack=0
+sensor.sequent_rtd_channels=1,2,3,4,5,6,7,8
+sensor.sequent_rtd_poll_ms=1000
+sensor.sequent_rtd_expect_sensor_type=pt100
+sensor.sequent_rtd_resistance_min_ohm=60.0
+sensor.sequent_rtd_resistance_max_ohm=390.0
+sensor.sequent_rtd_crosscheck_tol_c=2.0
+sensor.resistance_source=sequent_rtd
 ```
 
 Check it:
@@ -161,62 +161,17 @@ Check it:
 python3 scripts/hardware_setup.py rtd-check
 ```
 
-Expected result: `CHECK RTD_CLICK` reports `overall=OK` and telemetry shows
-`S1` valid. Other sample channels remain invalid until more temperature
-hardware is connected.
+Expected result: `CHECK SEQUENT_RTD` reports `overall=OK` and
+`sequent_rtd=OK`, and telemetry shows every wired channel valid. A channel
+with no probe connected reads outside the plausibility window and is marked
+invalid; that channel's mapped heater stays off.
 
-## 6B. Future PT100 Through DAQ132M
-
-Connect each XF-931-FAR PT100 to the matching DAQ input using the DAQ
-manufacturer's two-wire or three-wire terminal arrangement. Do not infer the
-terminal order from wire color alone. Configure each used DAQ channel as
-PT100, not thermocouple or PT1000.
-
-Connect the powered DAQ RS485 `A/+` and `B/-` terminals to the USB-RS485
-adapter. Join signal ground if required by the adapter/DAQ manual. If every
-request times out, power down and verify A/B polarity; naming conventions
-differ between manufacturers.
-
-Relevant configuration:
-
-```ini
-sensor.sample_temperature_source=daq132m_modbus
-sensor.daq132m_enabled=true
-sensor.daq132m_device=/dev/serial/by-id/<adapter>
-sensor.daq132m_auto_discover=true
-sensor.daq132m_baud=9600
-sensor.daq132m_parity=N
-sensor.daq132m_data_bits=8
-sensor.daq132m_stop_bits=1
-sensor.daq132m_slave_id=1
-sensor.daq132m_function_code=3
-sensor.daq132m_register_base=0
-sensor.daq132m_register_count=8
-sensor.daq132m_c_per_count=0.1
-sensor.daq132m_c_offset=0.0
-sensor.daq132m_enabled_channels=0,1,2,3,4,5,6,7
-```
-
-The DAQ register map is not confirmed. Stop the service before scanning:
-
-```bash
-sudo systemctl stop coatheal-onboard
-python3 scripts/hardware_setup.py daq-scan \
-  --device auto --baud 9600 --parity N \
-  --slave-start 1 --slave-end 10 \
-  --function 3 4 --base 0 1 --count 8
-sudo systemctl start coatheal-onboard
-```
-
-The scanner only sends Modbus read functions 03/04. It never writes DAQ
-configuration. Copy the successful slave, function, base, count, scale, and
-offset into `onboard.local.ini`.
-
-`RS485_OK` means a frame with matching address/function/length and CRC was
-received. `SAMPLE_TEMP_OK` means at least one enabled channel is valid.
-An enabled channel is invalid only when the returned value is non-finite or
-outside the configured PT100 safety range. Confirm the DAQ's documented
-open-probe sentinel before relying on automatic disconnected-probe detection.
+**Before trusting any reading from this card**, complete the register-map
+verification gate in [Sequent RTD Bench Bring-Up](sequent-rtd-bring-up.md#2-register-map-verification-blocking-gate).
+The register offsets are derived from vendor source, not measured, and that
+document is the authoritative bench procedure for confirming them, along with
+burst-read behavior, diagnostic byte interpretation, sensor-type
+verification, and bench-only calibration.
 
 ## 7. DPS310, ADS1115, and GUVA-S12SD
 
@@ -333,8 +288,8 @@ component states are `DISABLED`, `DISCOVERING`, `OK`, `DEGRADED`, `STALE`, or
 | Symptom | Check |
 |---|---|
 | Service exit status 126 | Script mode and parent-directory permissions |
-| `DAQ132M FAILED` | DAQ power, serial path, `dialout`, A/B, baud, slave, function, registers |
-| `DAQ132M DEGRADED` | No enabled channel is valid, or only some enabled channels return in-range values |
+| `SEQUENT_RTD FAILED` | I2C enabled, card address (`0x40 + stack`), 5 V power, DIP switch stack level, ribbon/HAT seating, `sequent_rtd_expect_sensor_type` matches the card, `card_type >= 1` |
+| `SEQUENT_RTD DEGRADED` | Some channels outside the resistance plausibility window or failing the temperature/resistance cross-check; check wiring on the affected card channels |
 | `DPS310 FAILED` | I2C enabled, address `0x76/0x77`, 3.3 V, SDA/SCL |
 | `ADS1115 FAILED` | Address `0x48–0x4B`, 3.3 V, SDA/SCL |
 | `MOTORn FAILED` | SPI mode, MISO, CS, CLK, VIO, sense resistor, IOIN version |
