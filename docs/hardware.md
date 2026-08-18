@@ -1,11 +1,11 @@
 # Hardware Reference (Rev C Final BOM)
 
 This document is the active hardware reference for the final component list.
-Use it with [rev-c-rtd-click-plug-and-play.md](rev-c-rtd-click-plug-and-play.md)
-and `config/onboard.local.ini`.
+Use it with [sequent-rtd-bring-up.md](sequent-rtd-bring-up.md) and
+`config/onboard.local.ini`.
 
-The current bench commissioning procedure is
-[rev-c-rtd-click-plug-and-play.md](rev-c-rtd-click-plug-and-play.md).
+The bench commissioning procedure for the RTD HAT is
+[sequent-rtd-bring-up.md](sequent-rtd-bring-up.md).
 
 The software is manual-first. Hardware outputs are commanded by the operator
 while the ground link is healthy; pressure/thermal fallback is only used after
@@ -17,8 +17,7 @@ link loss.
 |---|---|---|---|
 | Stepper drivers | TMC2240 carriers | SPI mode 3 + STEP/DIR/EN GPIO | `motor0.*`, `motor1.*`, `pull.*` |
 | Linear actuators | NEMA 17 external ball-screw linear stepper, 2.5 A, 48 mm | STEP/DIR/EN through TMC2240 | `stepper.*`, `motor*.samples` |
-| Current bench temperature | XF-931-FAR PT100 probe | PT100 into RTD Click/MAX31865 | `sensor.rtd_click_*` |
-| Future multi-channel PT100 acquisition | DAQ132M 8-channel thermocouple/PT100 RS485 Modbus card | USB-RS485, Modbus RTU, currently disabled | `sensor.daq132m_*` |
+| Sample temperature | XF-931-FAR PT100 probes | Sequent Microsystems 8-channel RTD HAT, I2C `0x40 + stack` | `sensor.sequent_rtd_*` |
 | UV | GUVA-S12SD analog UV sensor | Analog into ADS1115 | `sensor.uv_*` |
 | ADC | Adafruit ADS1115 16-bit 4-channel PGA | I2C, STEMMA QT/Qwiic | `sensor.ads1115_i2c_addr` |
 | Pressure / ambient T | Adafruit DPS310 precision pressure/altitude sensor | I2C, STEMMA QT/Qwiic | `sensor.dps310_i2c_addr` |
@@ -26,12 +25,14 @@ link loss.
 | Heaters | Polyimide film heaters | MOSFET-switched heater rail | `hardware.heater_count=6` |
 | Logic rail | Pololu D24V50F5 5 V / 5 A regulator | 5 V DC | `power.logic_regulator_v=5.0` |
 | Stepper rail | Pololu D42V110F12 12 V / 9 A regulator | 12 V DC | `power.stepper_regulator_v=12.0` |
-| RS485 adapter | USB-to-RS485 converter | `/dev/ttyUSB0` default | `sensor.daq132m_device` |
 | Wiring breakout | Pi-EzConnect Terminal Block Breakout HAT | Pass-through GPIO | BCM numbering |
 
-There is no separate resistance instrument in the final BOM. The telemetry
-`RESISTANCE=` field remains for protocol compatibility and emits `-` values
-when `sensor.resistance_source=disabled`.
+There is no separate resistance instrument in the final BOM. The Sequent RTD
+card reads PT100 element resistance alongside temperature on every channel,
+and by default (`sensor.resistance_source=sequent_rtd`) that per-channel
+resistance is what serializes on the telemetry `RESISTANCE=` field.
+`disabled` and `simulated` remain available for compatibility testing;
+`disabled` emits `-` placeholders.
 
 ## Final Pin Map
 
@@ -54,11 +55,12 @@ numbers are included to prevent BCM/physical-number confusion.
 | Motor 1 / STEP2 STEP | 18 | 24 | `motor1.step_line` |
 | Motor 1 / STEP2 DIR | 38 | 20 | `motor1.dir_line` |
 | Motor 1 / STEP2 EN | 40 | 21 | `motor1.enable_line` |
-| RTD Click CS | 36 | 16 | `sensor.rtd_click_cs_line` |
-| RTD Click DRDY | 22 | 25 | `sensor.rtd_click_drdy_line` |
 | I2C SDA / SCL | 3 / 5 | 2 / 3 | Fixed Pi I2C-1 |
 | SPI0 MOSI / MISO / SCLK | 19 / 21 / 23 | 10 / 9 / 11 | Shared SPI0 bus |
-| DAQ132M RS485 | USB | n/a | `sensor.daq132m_device` |
+| Sequent RTD HAT | n/a | I2C `0x40 + stack` | `sensor.sequent_rtd_stack` |
+
+BCM 16 and BCM 25 (formerly RTD Click CS and DRDY) are freed and deliberately
+unassigned; see [sequent-rtd-bring-up.md](sequent-rtd-bring-up.md#7-freed-pins).
 
 The diagram has no status LEDs, so `hal.status_led_enabled` and
 `hal.mode_led_enabled` are both `false`.
@@ -83,75 +85,47 @@ Do not energize heaters or motors until these points are verified:
 7. The final diagram provides no limit switches. Software position is unknown
    after reboot, so travel must remain mechanically constrained and low-speed
    commissioning must establish safe step limits before any full pull.
-8. SPI0 has three current targets. The TMC2240 backend uses `/dev/spidev0.0`
-   with software-controlled CS on BCM 22/23. RTD Click uses the same SPI0 bus
-   with software-controlled CS on BCM 16 and DRDY on BCM 25. `pin-check` must
-   pass before the service is started.
+8. SPI0 now serves only the TMC2240 backend, on `/dev/spidev0.0` with
+   software-controlled CS on BCM 22/23. `pin-check` must pass before the
+   service is started.
 
-The ADS1115 and DPS310 may share I2C-1 at default addresses `0x48` and `0x77`.
-Power both STEMMA QT boards from 3.3 V so their I2C pull-ups cannot raise SDA or
-SCL above the Pi's 3.3 V GPIO domain. RTD Click MIKROE-2815 is also a 3.3 V
-board.
+The ADS1115, DPS310, and Sequent RTD HAT share I2C-1 at addresses `0x48`,
+`0x77`, and `0x40 + stack` respectively. Power the ADS1115 and DPS310 STEMMA
+QT boards from 3.3 V so their I2C pull-ups cannot raise SDA or SCL above the
+Pi's 3.3 V GPIO domain. The Sequent RTD HAT is a 5 V board powered from the
+Pi's 5 V rail; its I2C signaling remains 3.3 V-safe.
 
 ## Sensors
 
-### Current XF-931-FAR PT100 + RTD Click/MAX31865
+### Sample Temperature: Sequent RTD HAT
 
-The current bench temperature source is one XF-931-FAR PT100 probe connected to
-RTD Click MIKROE-2815 / MAX31865. The RTD Click publishes one software sample
-channel, `S1` by default for the heater 1 bench probe. Other sample channels remain invalid until additional
-temperature hardware is available.
+All eight sample channels are populated by one Sequent Microsystems 8-channel
+RTD HAT: eight XF-931-FAR PT100 probes wired into card channels 1-8, read over
+I2C at `0x40 + stack`. See
+[Sequent RTD Bench Bring-Up](sequent-rtd-bring-up.md) for wiring, register-map
+verification, and calibration.
 
 Relevant config:
 
 ```ini
 hardware.sample_count=8
-sensor.sample_temperature_source=rtd_click_max31865
-sensor.daq132m_enabled=false
-sensor.rtd_click_enabled=true
-sensor.rtd_click_spi_device=/dev/spidev0.0
-sensor.rtd_click_cs_line=16
-sensor.rtd_click_drdy_line=25
-sensor.rtd_click_wires=3
-sensor.rtd_click_sample_channel=1
-sensor.rtd_click_reference_ohm=400.0
-sensor.rtd_click_filter_hz=50
-sensor.rtd_click_spi_speed_hz=500000
+sensor.sequent_rtd_stack=0
+sensor.sequent_rtd_channels=1,2,3,4,5,6,7,8
+sensor.sequent_rtd_poll_ms=1000
+sensor.sequent_rtd_expect_sensor_type=pt100
+sensor.sequent_rtd_resistance_min_ohm=60.0
+sensor.sequent_rtd_resistance_max_ohm=390.0
+sensor.sequent_rtd_crosscheck_tol_c=2.0
+sensor.resistance_source=sequent_rtd
 ```
 
-`CHECK RTD_CLICK` actively performs a MAX31865 conversion. Normal heater control
-is allowed only for heaters whose mapped sample channel is valid and fresh.
-
-### Future XF-931-FAR PT100 + DAQ132M
-
-The DAQ132M path remains implemented but is disabled for the current bench
-because the Modbus hardware is unavailable. Re-enable it only after read-only
-`daq-scan` confirms the replacement card's register map and scaling.
-
-```ini
-sensor.sample_temperature_source=daq132m_modbus
-sensor.daq132m_enabled=true
-sensor.daq132m_device=/dev/ttyUSB0
-sensor.daq132m_baud=9600
-sensor.daq132m_parity=N
-sensor.daq132m_data_bits=8
-sensor.daq132m_stop_bits=1
-sensor.daq132m_slave_id=1
-sensor.daq132m_function_code=3
-sensor.daq132m_register_base=0
-sensor.daq132m_register_count=8
-sensor.daq132m_c_per_count=0.1
-sensor.daq132m_c_offset=0.0
-```
-
-`RS485_OK` indicates that a valid Modbus frame and CRC were received.
-Disconnected DAQ inputs do not fail the bus; `SAMPLE_TEMP_OK` requires at
-least one valid channel, and thermal control inhibits each invalid channel
-independently.
-
-The Modbus RTU read, CRC validation, range checks, function code, register base,
-scale, and offset are implemented. The exact register map and engineering-unit
-conversion must still be verified against the supplied DAQ132M manual.
+`CHECK SEQUENT_RTD` actively reads the card's identity and temperature/
+resistance registers (`DAQ132M`/`RTD_CLICK` are still accepted as legacy
+aliases on the wire). Normal heater control is allowed only for heaters whose
+mapped sample channel is valid and fresh. A channel is valid only when its
+temperature and resistance are both finite, resistance falls inside the
+configured plausibility window, and the card's reported temperature agrees
+with the resistance-derived temperature within `sequent_rtd_crosscheck_tol_c`.
 
 ### DPS310
 
@@ -223,9 +197,8 @@ connecting flight heaters.
 | TMC2240 SPI setup | GPIO chip-select and register writes implemented; integrated current scaling must be bench-verified |
 | STEP/DIR/EN GPIO pulse backend | Implemented with libgpiod; waveform timing needs Pi bench validation |
 | Heater PWM | Implemented as a zero-safe libgpiod software PWM thread; validate with dummy loads |
-| DAQ132M Modbus | RTU read/CRC/range handling implemented; disabled until replacement hardware is available |
 | DPS310 / ADS1115 I2C | Linux `i2c-dev` reads implemented; validate addresses and calibration on the assembled bus |
-| RTD Click MAX31865 | Active SPI/libgpiod read backend implemented; current bench PT100 source |
+| Sequent RTD HAT I2C | Active read backend implemented; register map derived from vendor source and gated on bench verification, see [sequent-rtd-bring-up.md](sequent-rtd-bring-up.md) |
 
 ## Bring-Up Commands
 
@@ -236,7 +209,6 @@ sudo reboot
 
 i2cdetect -y 1
 ls -l /dev/spidev*
-ls -l /dev/ttyUSB*
 gpioinfo gpiochip0
 python3 scripts/hardware_setup.py plug-and-play \
   --config config/onboard.local.ini \
@@ -247,6 +219,7 @@ python3 scripts/hardware_setup.py plug-and-play \
 Expected I2C devices:
 
 ```text
+0x40  Sequent RTD HAT, stack 0 (0x40 + stack)
 0x48  ADS1115
 0x77  DPS310, unless address jumper changes it
 ```
@@ -254,7 +227,7 @@ Expected I2C devices:
 Expected SPI device:
 
 ```text
-/dev/spidev0.0  shared bus for both TMC2240 drivers and RTD Click
+/dev/spidev0.0  shared bus for both TMC2240 drivers
 ```
 
 After the onboard command server starts, run active checks:
@@ -267,6 +240,5 @@ python3 scripts/hardware_setup.py rtd-check
 Expected current temperature state:
 
 ```text
-RTD_CLICK: OK with PT100 connected
-DAQ132M: DISABLED
+SEQUENT_RTD: OK with PT100 probes connected
 ```

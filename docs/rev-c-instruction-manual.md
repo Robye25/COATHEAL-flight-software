@@ -3,11 +3,10 @@
 This manual describes how to install, configure, wire, validate, operate, and
 troubleshoot the COATHEAL Rev C onboard software and ground station.
 
-Current bench update: use
-[Rev C RTD Click Plug-And-Play Bring-Up](rev-c-rtd-click-plug-and-play.md) for
-the active one-PT100 RTD Click/MAX31865 temperature source, config migration,
-and automated Pi checks. DAQ132M/Modbus is currently disabled until replacement
-hardware is available.
+Sample temperature is acquired by one Sequent Microsystems 8-channel RTD HAT
+over I2C. Use
+[Sequent RTD Bench Bring-Up](sequent-rtd-bring-up.md) for register-map
+verification, calibration, and other RTD-specific bench procedures.
 
 The software is manual-first. It does not start motor movements or heater
 profiles automatically while the ground station is connected. If an established
@@ -23,7 +22,7 @@ ground link is lost, the onboard software:
 
 1. Disconnect motor and heater power before changing wiring or GPIO
    configuration.
-2. Keep the Raspberry Pi, sensor, DAQ, motor-driver logic, and MOSFET-driver
+2. Keep the Raspberry Pi, sensor, motor-driver logic, and MOSFET-driver
    signal grounds connected.
 3. Do not power motors or heaters from the Raspberry Pi.
 4. Do not connect or disconnect a stepper motor while TMC2240 motor voltage is
@@ -46,8 +45,7 @@ ground link is lost, the onboard software:
 | Onboard controller | Raspberry Pi 4B | Linux, GPIO, I2C, SPI, USB, Ethernet |
 | Motor driver 0/1 | TMC2240 carrier | SPI mode 3 plus STEP/DIR/EN |
 | Linear actuator 0/1 | NEMA 17 external ball-screw stepper, 2.5 A | TMC2240 |
-| Current sample temperature | One XF-931-FAR PT100 probe | RTD Click MIKROE-2815 / MAX31865 |
-| Future multi-channel temperature | DAQ132M eight-channel card | USB-RS485 Modbus RTU, currently disabled |
+| Sample temperature | 8x XF-931-FAR PT100 probes | Sequent Microsystems 8-channel RTD HAT, I2C `0x40 + stack` |
 | UV conversion | Adafruit ADS1115 | I2C |
 | UV measurement | GUVA-S12SD breakout | ADS1115 analog input |
 | Pressure/ambient T | Adafruit DPS310 | I2C |
@@ -55,7 +53,6 @@ ground link is lost, the onboard software:
 | Heater load | Polyimide film heaters | External fused heater rail |
 | Logic supply | Pololu D24V50F5 | Regulated 5 V |
 | Motor supply | Pololu D42V110F12 | Regulated 12 V |
-| DAQ adapter | USB-to-RS485 converter | Stable Linux serial path |
 | Pi breakout | Pi-EzConnect terminal HAT | Header terminal access |
 
 ## 3. Software Locations
@@ -88,7 +85,7 @@ Install build and diagnostic packages:
 sudo apt update
 sudo apt install -y \
   git cmake g++ pkg-config libgpiod-dev gpiod \
-  i2c-tools python3 python3-serial netcat-openbsd
+  i2c-tools python3 netcat-openbsd
 ```
 
 Enable I2C and SPI:
@@ -198,10 +195,10 @@ not reassigned in the INI file.
 | Motor 1 STEP | 18 | 24 | `motor1.step_line` |
 | Motor 1 DIR | 38 | 20 | `motor1.dir_line` |
 | Motor 1 EN | 40 | 21 | `motor1.enable_line` |
-| RTD Click DRDY | 22 | 25 | `sensor.rtd_click_drdy_line` |
-| RTD Click CS | 36 | 16 | `sensor.rtd_click_cs_line` |
 
-The DAQ132M is connected through USB-RS485 and has no configurable Pi GPIO.
+BCM 16 and 25 (formerly RTD Click CS and DRDY) are freed and deliberately
+unassigned. The Sequent RTD HAT is I2C-only and has no configurable Pi GPIO;
+see [Sequent RTD Bench Bring-Up](sequent-rtd-bring-up.md#7-freed-pins).
 
 ## 8. Creating a Local Configuration
 
@@ -407,12 +404,12 @@ journalctl -u coatheal-onboard.service -n 100 --no-pager
 journalctl -fu coatheal-onboard.service
 ```
 
-## 14. DAQ132M and PT100 Configuration
+## 14. Sequent RTD HAT and PT100 Configuration
 
-Physical DAQ channel labels are commonly one-based, while software samples are
+Physical card channel labels are one-based, while software samples are
 zero-based:
 
-| Physical DAQ channel | Software sample |
+| Physical card channel | Software sample |
 |---:|---|
 | 1 | `S0` |
 | 2 | `S1` |
@@ -423,62 +420,49 @@ zero-based:
 | 7 | `S6` |
 | 8 | `S7` |
 
-For one PT100 connected to physical channel 2:
+`sensor.sequent_rtd_channels` maps card channel to software sample, in
+software-sample order. The default is an identity mapping:
 
 ```ini
-sensor.daq132m_enabled_channels=1
+sensor.sequent_rtd_channels=1,2,3,4,5,6,7,8
 ```
 
-For all channels:
+To remap, for example, a dead card channel 3 (so it no longer feeds software
+sample `S2`) by swapping it with channel 8 (previously feeding `S7`):
 
 ```ini
-sensor.daq132m_enabled_channels=0,1,2,3,4,5,6,7
+sensor.sequent_rtd_channels=1,2,8,4,5,6,7,3
 ```
 
-Use a stable adapter path:
-
-```bash
-ls -l /dev/serial/by-id/
-```
+Every entry must be `1..8`, there must be exactly `hardware.sample_count`
+entries, and entries must not repeat.
 
 Configure:
 
 ```ini
-sensor.daq132m_enabled=true
-sensor.daq132m_device=/dev/serial/by-id/<adapter-name>
-sensor.daq132m_auto_discover=true
-sensor.daq132m_baud=9600
-sensor.daq132m_parity=N
-sensor.daq132m_data_bits=8
-sensor.daq132m_stop_bits=1
-sensor.daq132m_slave_id=1
-sensor.daq132m_function_code=3
-sensor.daq132m_register_base=0
-sensor.daq132m_register_count=8
-sensor.daq132m_c_per_count=0.1
-sensor.daq132m_c_offset=0.0
+sensor.sequent_rtd_stack=0
+sensor.sequent_rtd_channels=1,2,3,4,5,6,7,8
+sensor.sequent_rtd_poll_ms=1000
+sensor.sequent_rtd_expect_sensor_type=pt100
+sensor.sequent_rtd_resistance_min_ohm=60.0
+sensor.sequent_rtd_resistance_max_ohm=390.0
+sensor.sequent_rtd_crosscheck_tol_c=2.0
 ```
 
-Stop the service before scanning:
+Before trusting any reading, complete the register-map verification gate in
+[Sequent RTD Bench Bring-Up](sequent-rtd-bring-up.md#2-register-map-verification-blocking-gate) —
+the register offsets are derived from vendor source, not measured.
 
 ```bash
-sudo systemctl stop coatheal-onboard.service
-python3 scripts/hardware_setup.py daq-scan \
-  --device auto \
-  --baud 9600 \
-  --parity N \
-  --slave-start 1 \
-  --slave-end 10 \
-  --function 3 4 \
-  --base 0 1 \
-  --count 8
+python3 scripts/spi_probe.py --rtd-stack 0
+python3 scripts/hardware_setup.py rtd-check
 ```
 
-The scan utility performs only Modbus function 03/04 reads. It does not write
-DAQ registers.
-
-`RS485_OK` proves that a correctly addressed frame with a valid CRC was
-received. It does not prove that every PT100 channel is connected.
+`sequent_rtd=OK` in the `CHECK SEQUENT_RTD` reply proves the card answered and
+every configured channel passed validation (finite, in-range resistance,
+temperature/resistance cross-check). It does not prove every PT100 probe is
+physically the one intended for that channel — verify the physical wiring
+against `sensor.sequent_rtd_channels` directly.
 
 ## 15. I2C Sensor Configuration
 
@@ -607,8 +591,7 @@ Targeted checks:
 ```bash
 printf 'CHECK DPS310\n' | nc 127.0.0.1 5000
 printf 'CHECK ADS1115\n' | nc 127.0.0.1 5000
-printf 'CHECK RTD_CLICK\n' | nc 127.0.0.1 5000
-printf 'CHECK DAQ132M\n' | nc 127.0.0.1 5000
+printf 'CHECK SEQUENT_RTD\n' | nc 127.0.0.1 5000
 printf 'CHECK PWM\n' | nc 127.0.0.1 5000
 printf 'CHECK MOTOR0\n' | nc 127.0.0.1 5000
 printf 'CHECK MOTOR1\n' | nc 127.0.0.1 5000
@@ -746,18 +729,22 @@ sudo systemctl daemon-reload
 sudo systemctl restart coatheal-onboard.service
 ```
 
-### RS485 failure
+### Sequent RTD HAT failure
 
 Check:
 
 ```bash
-ls -l /dev/serial/by-id/ /dev/ttyUSB* 2>/dev/null
-groups
-printf 'CHECK DAQ132M\n' | nc 127.0.0.1 5000
+i2cdetect -y 1
+python3 scripts/spi_probe.py --rtd-stack 0
+printf 'CHECK SEQUENT_RTD\n' | nc 127.0.0.1 5000
 ```
 
-Then verify DAQ power, A/B polarity, ground/reference, baud, parity, slave ID,
-function code, register base, register count, scale, and PT100 channel mode.
+Then verify: card power (5 V), DIP-switch stack level matches
+`sensor.sequent_rtd_stack`, HAT seating on the 40-pin header, and that
+`sensor.sequent_rtd_expect_sensor_type` matches the card's configured sensor
+type. `SEQUENT_RTD DEGRADED` instead points at individual channel wiring —
+check the resistance plausibility window and probe connections on the
+affected channels.
 
 ### I2C sensor failure
 
@@ -846,8 +833,8 @@ Before every powered run:
 - [ ] `/etc/coatheal/env` selects `onboard.local.ini`.
 - [ ] BCM numbers match physical wiring.
 - [ ] No duplicate GPIO assignments.
-- [ ] I2C devices appear at expected addresses.
-- [ ] Stable USB-RS485 path is configured.
+- [ ] I2C devices appear at expected addresses, including the Sequent RTD HAT at `0x40 + stack`.
+- [ ] The Sequent RTD HAT register-map verification gate has passed on this card (see [sequent-rtd-bring-up.md](sequent-rtd-bring-up.md)).
 - [ ] PT100 physical channels match software sample indices.
 - [ ] Heater-to-PT100 mappings are verified.
 - [ ] TMC2240 carrier IREF/full-scale configuration and commissioning current are verified.
@@ -861,6 +848,7 @@ Before every powered run:
 Related references:
 
 - [Component Configuration and Bring-Up](component-configuration-and-bring-up.md)
+- [Sequent RTD Bench Bring-Up](sequent-rtd-bring-up.md)
 - [TMC2240 Pin Configuration and Commissioning](tmc2240-pin-configuration-and-commissioning.md)
 - [Configuration Reference](configuration.md)
 - [Wire Protocol](protocol.md)

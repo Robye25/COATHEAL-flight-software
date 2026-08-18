@@ -58,10 +58,10 @@ does not duplicate CSV rows.
 | Heater control | Six duties, six PID targets, global/per-channel target controls, PID tuning, and local JSON profiles |
 | Motor dock | Explicit M0/M1 selector, jog/absolute controls, software zero, and runtime sequence editor |
 | Pull events | `EVT,PULL` rows with motor id, steps, hold time, sample group |
-| Temperature plot | PT100 sample temperatures S0..S7. Current bench uses RTD Click on S1 for heater 1; invalid channels show as unavailable |
+| Temperature plot | PT100 sample temperatures S0..S7 from the Sequent RTD HAT; invalid channels show as unavailable |
 | Pressure plot | DPS310 pressure |
 | Environment / UV plot | GUVA-S12SD value through ADS1115 |
-| Resistance plot | Compatibility field; normally empty/`-` for final BOM |
+| Resistance plot | Sequent RTD HAT per-channel PT100 element resistance by default; `-`/simulated per `sensor.resistance_source` |
 | Values panel | Latest parsed telemetry fields and status tokens |
 | Status bar | Phase, sequence, pressure, sample mean, link state, packet rate |
 
@@ -113,9 +113,10 @@ Bench-only commands require `runtime.bench_mode=true` and `ARM_DEBUG`. After deb
 | ACK | `build_ack` |
 | Command line | `build_command` |
 
-The parser keeps compatibility with the `RESISTANCE=` field. In final-BOM Rev C
-operation, no resistance instrument is carried, so that field normally contains
-`-` placeholders.
+The parser keeps compatibility with the `RESISTANCE=` field. By default it
+carries the Sequent RTD HAT's per-channel PT100 element resistance;
+`sensor.resistance_source=disabled` on the onboard side is what makes that
+field serialize as `-` placeholders.
 
 Invalid samples are not added to plots. Before a sensor has ever succeeded the
 readout is `N/A`; after a failure it shows the last good value and stale age.

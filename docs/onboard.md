@@ -48,19 +48,19 @@ start motor motion. Operators use explicit jog, pull, or `BENDSEQ_*` commands.
 
 | Subsystem | Software model |
 |---|---|
-| Sample temperatures | Current bench: one PT100 through RTD Click/MAX31865 on `S1` for heater 1; future DAQ132M path can fill 8 channels |
+| Sample temperatures | 8 PT100 probes through a Sequent Microsystems RTD HAT over I2C, one per channel |
 | Ambient pressure / temperature | DPS310 over I2C |
 | UV | GUVA-S12SD analog output through ADS1115 over I2C |
 | Heaters | 6 polyimide heaters through EKM014/UCC27524 MOSFET inputs |
 | Motors | 2 NEMA 17 ball-screw actuators through TMC2240 carriers |
-| Resistance | Disabled in final BOM; telemetry field retained for compatibility |
+| Resistance | PT100 element resistance read by the Sequent RTD HAT alongside temperature; drives the compatibility `RESISTANCE=` field by default |
 
 Real backends are implemented for libgpiod heater PWM and STEP/DIR/EN,
-software-CS TMC2240 SPI setup, RTD Click/MAX31865 through Linux `spidev`,
-DPS310 and ADS1115 through Linux `i2c-dev`, and DAQ132M Modbus RTU. They still
-require bench validation against the exact boards, wiring, current limits, and
-powered loads. DAQ132M remains disabled until replacement Modbus hardware is
-available.
+software-CS TMC2240 SPI setup, the Sequent RTD HAT through Linux `i2c-dev`,
+and DPS310/ADS1115 through Linux `i2c-dev`. They still require bench
+validation against the exact boards, wiring, current limits, and powered
+loads. The RTD HAT's register map is derived from vendor source and gated on
+bench verification; see [Sequent RTD Bench Bring-Up](sequent-rtd-bring-up.md).
 
 ## Thermal Control
 
@@ -97,10 +97,10 @@ telemetry reports `HEATER_INHIBITED`.
 
 ## SensorManager
 
-`SensorManager` runs DPS310, ADS1115, RTD Click, and DAQ132M when enabled in
-separate bounded polling threads. The 1 Hz main loop only copies the
-thread-safe cache, so missing or timed-out sensors cannot delay commands,
-logging, or telemetry.
+`SensorManager` runs DPS310, ADS1115, and the Sequent RTD HAT in separate
+bounded polling threads. The 1 Hz main loop only copies the thread-safe
+cache, so missing or timed-out sensors cannot delay commands, logging, or
+telemetry.
 
 `SensorManager` returns `SensorSnapshot`:
 
@@ -109,8 +109,8 @@ logging, or telemetry.
 | `ambient_temp_c` | DPS310 |
 | `ambient_pressure_mbar` | DPS310 |
 | `uv` | GUVA-S12SD through ADS1115 |
-| `sample_temps_c` | RTD Click sample plus any enabled DAQ132M PT100 channels |
-| `sample_resistance_ohm` | Disabled final-BOM compatibility vector |
+| `sample_temps_c` | Sequent RTD HAT, one card channel per logical sample |
+| `sample_resistance_ohm` | Sequent RTD HAT per-channel PT100 element resistance (or `-`/simulated per `sensor.resistance_source`) |
 
 Simulation is used only when `runtime.use_simulated_sensors=true`. Real mode
 does not replace failed reads with synthetic data and reports `SIMULATED` or
@@ -143,8 +143,10 @@ software zero established by `SET_POSITION_ZERO`; there are no limit switches.
 DATA,<session>,<seq>,<ts>,<rtc_valid>,<ambient_temp_c>,<ambient_pressure_mbar>,<uv>,<sample_0>..<sample_7>,HEATER_DUTY=..,RESISTANCE=..,PHASE=..,MODE=..,STATUS=..,SENSOR_VALID=..,SENSOR_AGE_MS=..,COMPONENT_STATE=..,STEPPER0=..,STEPPER1=..
 ```
 
-`RESISTANCE=` remains on the wire for parser compatibility. With
-`sensor.resistance_source=disabled`, every slot serializes as `-`.
+`RESISTANCE=` remains on the wire for parser compatibility. By default
+(`sensor.resistance_source=sequent_rtd`) each slot carries the Sequent RTD
+HAT's per-channel PT100 element resistance; with `sensor.resistance_source=disabled`,
+every slot serializes as `-`.
 
 `SerializeTelemetryPullEventFrame` emits:
 
@@ -190,10 +192,10 @@ See `docs/protocol.md` for the complete command list.
 | `Tmc2240Driver` | SPI register writes and GPIO CS/STEP/DIR/EN implemented; bench validation required |
 | `GpioStepDirStepperDriver` | Real libgpiod STEP/DIR/EN pulses implemented |
 | `LibgpiodPwmController` | Real 10 Hz software PWM thread with zero-on-start/stop |
-| `I2cAdapter` | DPS310 and ADS1115 reads implemented |
-| `SpiAdapter` | Health boundary; shared with TMC2240 and optional RTD Click |
+| `I2cAdapter` | DPS310, ADS1115, and Sequent RTD HAT reads implemented |
+| `SpiAdapter` | Health boundary; shared by both TMC2240 drivers only |
 | `RtcAdapter` | System-clock fallback |
-| `Ina3221Adapter` | Historical compatibility stub; final BOM disables resistance |
+| `Ina3221Adapter` | Retired stub; I2C addresses `0x40`/`0x41` are now the Sequent RTD card's stack-0/1 addresses and the INA3221 must not be re-enabled without re-addressing |
 
 See `docs/hardware.md` and `docs/configuration.md` for the pin and bus
 configuration.

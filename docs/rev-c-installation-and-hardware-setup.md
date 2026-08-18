@@ -5,9 +5,9 @@ This is the operator-facing setup guide for the Rev C final-BOM software.
 The authoritative component wiring, configuration, discovery, and
 commissioning procedure is
 [Component Configuration and Bring-Up](component-configuration-and-bring-up.md).
-For the current bench setup with one PT100 through RTD Click/MAX31865 and
-DAQ132M disabled, use
-[Rev C RTD Click Plug-And-Play Bring-Up](rev-c-rtd-click-plug-and-play.md).
+For the Sequent RTD HAT register-map verification gate, burst-read
+confirmation, and bench-only calibration, use
+[Sequent RTD Bench Bring-Up](sequent-rtd-bring-up.md).
 
 Rev C is manual-first. While the ground-station link is healthy, the onboard
 software does not start autonomous phase-entry motion, fatigue pulls, or
@@ -45,8 +45,7 @@ Default GPIO values are BCM GPIO line numbers on `/dev/gpiochip0`, not physical
 |---|---|---|
 | Stepper driver | TMC2240 carrier | SPI mode 3 + STEP/DIR/EN GPIO |
 | Linear actuator | NEMA 17 external ball-screw linear stepper, 2.5 A, 48 mm | Controlled through TMC2240 |
-| Current bench temperature | XF-931-FAR PT100 Class B probe | RTD Click MIKROE-2815 / MAX31865 |
-| Future multi-channel temperature | DAQ132M 8-channel thermocouple/PT100 card | USB-RS485 Modbus RTU, currently disabled |
+| Sample temperature | 8x XF-931-FAR PT100 Class B probes | Sequent Microsystems 8-channel RTD HAT, I2C `0x40 + stack` |
 | ADC for UV | Adafruit ADS1115 16-bit 4-channel ADC | I2C, STEMMA QT/Qwiic |
 | Pressure / ambient T | Adafruit DPS310 | I2C, STEMMA QT/Qwiic |
 | UV sensor | GUVA-S12SD analog UV breakout | Analog into ADS1115 |
@@ -54,7 +53,6 @@ Default GPIO values are BCM GPIO line numbers on `/dev/gpiochip0`, not physical
 | Heaters | Polyimide film heaters | Driven by MOSFET outputs |
 | 5 V rail | Pololu D24V50F5 5 V / 5 A regulator | Power only |
 | 12 V rail | Pololu D42V110F12 12 V / 9 A regulator | Stepper power |
-| RS485 bridge | USB-RS485 converter | `/dev/ttyUSB0` |
 | Pi wiring | Pi-EzConnect Terminal Block Breakout HAT | Terminal breakout only |
 
 ## Software Support Status
@@ -69,14 +67,13 @@ Default GPIO values are BCM GPIO line numbers on `/dev/gpiochip0`, not physical
 | TMC2240 config path | Implemented | Bench-verify integrated current/chopper setup and motor polarity |
 | STEP/DIR/EN pulses | Implemented with libgpiod | Bench-verify waveform timing, direction, and travel |
 | Heater PWM mapping | Implemented with zero-safe software PWM | Validate with current-limited dummy loads |
-| DAQ132M Modbus | RTU read, CRC, scaling, and range checks implemented | Disabled until replacement hardware is available |
 | DPS310 / ADS1115 reads | Linux `i2c-dev` reads implemented | Verify addresses and values on the assembled bus |
-| RTD Click bench path | Active MAX31865 SPI read backend implemented | Validate `CHECK RTD_CLICK` with the connected PT100 |
-| Sample resistance | Disabled in final BOM | Telemetry keeps the field for parser compatibility and emits `-` |
+| Sequent RTD HAT | I2C read backend implemented; register map derived from vendor source | Complete the bench register-map verification gate in [sequent-rtd-bring-up.md](sequent-rtd-bring-up.md) before trusting readings |
+| Sample resistance | PT100 element resistance read by the RTD HAT | Telemetry `RESISTANCE=` carries real values by default (`sensor.resistance_source=sequent_rtd`); `disabled` emits `-` |
 
 The remaining work before powered hardware operation is physical validation on
-the assembled Pi: bus addressing, RTD conversion, GPIO waveforms, motor
-current/polarity, and heater dummy-load behavior.
+the assembled Pi: bus addressing, RTD register-map verification, GPIO
+waveforms, motor current/polarity, and heater dummy-load behavior.
 
 ## Ground Station Installation
 
@@ -331,27 +328,25 @@ This map matches the final pinout diagram. GPIO values are BCM numbers.
 | Motor 0 SPI | `/dev/spidev0.0`, CS BCM 22 | `motor0.spi_device`, `motor0.cs_line` |
 | Motor 1 STEP/DIR/EN | BCM 24 / 20 / 21 | `motor1.step_line`, `motor1.dir_line`, `motor1.enable_line` |
 | Motor 1 SPI | `/dev/spidev0.0`, CS BCM 23 | `motor1.spi_device`, `motor1.cs_line` |
-| RTD Click CS/DRDY | BCM 16 / 25 | `sensor.rtd_click_cs_line`, `sensor.rtd_click_drdy_line` |
+| Freed pins (unassigned) | BCM 16 / 25, formerly RTD Click CS/DRDY | none |
 | I2C bus | Pi I2C-1, SDA BCM 2, SCL BCM 3 | fixed by Pi |
 | DPS310 address | `0x77` | `sensor.dps310_i2c_addr` |
 | ADS1115 address | `0x48` | `sensor.ads1115_i2c_addr` |
 | GUVA-S12SD ADC input | ADS1115 A0 | `sensor.uv_ads1115_channel` |
-| Future DAQ132M serial device | `/dev/ttyUSB0` | `sensor.daq132m_device` |
-| Future DAQ132M Modbus slave | `1` | `sensor.daq132m_slave_id` |
+| Sequent RTD HAT address | `0x40 + stack` | `sensor.sequent_rtd_stack` |
 
 Check interfaces on the Pi:
 
 ```bash
 i2cdetect -y 1
 ls -l /dev/spidev*
-ls -l /dev/ttyUSB*
 gpioinfo gpiochip0
 ```
 
 The software uses `SPI_NO_CS` and drives BCM 22/23 through libgpiod. Remove the
 old `dtoverlay=spi0-2cs,cs0_pin=22,cs1_pin=23` line if it is present, then
-reboot. `/dev/spidev0.0` is shared by both TMC2240 drivers and the RTD Click
-MAX31865 backend; each device uses its configured software CS line.
+reboot. `/dev/spidev0.0` is shared by both TMC2240 drivers; the Sequent RTD
+HAT is I2C-only and does not use SPI0.
 
 Expected I2C devices:
 
@@ -359,6 +354,7 @@ Expected I2C devices:
 |---|---|
 | DPS310 | `0x77` unless changed by solder jumper |
 | ADS1115 | `0x48` unless address jumper changed |
+| Sequent RTD HAT | `0x40 + stack`, `0x40` by default |
 
 Do not connect two I2C devices with the same address unless one address is
 changed or the bus is split through a mux.
@@ -381,23 +377,19 @@ comms.discovery_port=4100
 hardware.sample_count=8
 hardware.heater_count=6
 
-sensor.sample_temperature_source=rtd_click_max31865
-sensor.daq132m_enabled=false
-sensor.rtd_click_enabled=true
-sensor.rtd_click_spi_device=/dev/spidev0.0
-sensor.rtd_click_cs_line=16
-sensor.rtd_click_drdy_line=25
-sensor.rtd_click_wires=3
-sensor.rtd_click_sample_channel=1
-sensor.rtd_click_reference_ohm=400.0
-sensor.rtd_click_filter_hz=50
-sensor.rtd_click_spi_speed_hz=500000
+sensor.sequent_rtd_stack=0
+sensor.sequent_rtd_channels=1,2,3,4,5,6,7,8
+sensor.sequent_rtd_poll_ms=1000
+sensor.sequent_rtd_expect_sensor_type=pt100
+sensor.sequent_rtd_resistance_min_ohm=60.0
+sensor.sequent_rtd_resistance_max_ohm=390.0
+sensor.sequent_rtd_crosscheck_tol_c=2.0
 sensor.pressure_source=dps310
 sensor.dps310_i2c_addr=0x77
 sensor.uv_source=guva_s12sd_ads1115
 sensor.ads1115_i2c_addr=0x48
 sensor.uv_ads1115_channel=0
-sensor.resistance_source=disabled
+sensor.resistance_source=sequent_rtd
 
 hal.status_led_enabled=false
 hal.mode_led_enabled=false
@@ -457,14 +449,6 @@ sudo reboot
 ls -l /dev/spidev*
 ```
 
-RS485:
-
-```bash
-ls -l /dev/ttyUSB*
-dmesg | tail -50
-groups coatheal
-```
-
 Service:
 
 ```bash
@@ -499,7 +483,7 @@ Before connecting heater or motor power:
 
 1. Build and run tests on the Pi.
 2. Verify Ethernet command and telemetry with no loads connected.
-3. Verify I2C, SPI, and `/dev/ttyUSB0` enumeration.
+3. Verify I2C (including the Sequent RTD HAT at `0x40 + stack`) and SPI enumeration.
 4. Run `CHECK`; do not continue until required real devices report `OK`.
 5. Confirm `HEATERS_OFF` is ACKed and all configured heater outputs are off.
 6. Test each MOSFET output with a current-limited dummy load.
@@ -539,7 +523,6 @@ Hardware bus missing:
 ```bash
 ls -l /dev/i2c-1
 ls -l /dev/spidev*
-ls -l /dev/ttyUSB*
 gpioinfo gpiochip0
 ```
 
