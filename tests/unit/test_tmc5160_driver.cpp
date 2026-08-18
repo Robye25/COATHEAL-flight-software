@@ -143,6 +143,14 @@ std::unique_ptr<Tmc5160Driver> MakeHealthyDriver(FakeSpiBus* bus,
   assert(driver->healthy());
   assert(bus->mismatch_count() == 0);
   assert(bus->remaining_expectations() == 0);
+  // Load-bearing: on real hardware, opening with the wrong mode/no_cs
+  // corrupts every datagram and lets the kernel drive a native chip-select
+  // into a MAX31865 click mid-motor-traffic. FakeSpiBus's Transfer() never
+  // checks these against Open() -- only these explicit assertions do.
+  assert(bus->open_device() == cfg.spi_device);
+  assert(bus->open_mode() == 3);  // SPI mode 3
+  assert(bus->open_speed_hz() == cfg.spi_speed_hz);
+  assert(bus->open_no_cs() == true);  // soft CS: CE0/CE1 belong to the clicks
   return driver;
 }
 
@@ -228,7 +236,7 @@ void TestCalculateCurrentHighRegimeReducesIrun() {
   // a_rms=2.0, R=0.075 -> I_peak=2.82843 A, I_peak_max=4.33333 A,
   // fraction=0.65296 (>0.5) -> GLOBALSCALER pins at 256, IRUN=round(32*
   // 0.65296)-1 = round(20.8948)-1 = 20 (reduced from the max of 31).
-  // IHOLD=round(20*0.30)=6.
+  // IHOLD=round((IRUN+1)*hold_frac)-1=round(21*0.30)-1=round(6.3)-1=5.
   std::uint32_t globalscaler = 0;
   std::uint8_t irun = 0;
   std::uint8_t ihold = 0;
@@ -238,7 +246,7 @@ void TestCalculateCurrentHighRegimeReducesIrun() {
   assert(ok);
   assert(globalscaler == 256U);
   assert(irun == 20);  // < 31: forced IRUN reduction
-  assert(ihold == 6);
+  assert(ihold == 5);
   assert(globalscaler >= 32U && globalscaler <= 256U);
 
   // Reconstructed current: (256/256)*(21/32)*(0.325/0.075) = 2.84375 A,
@@ -273,6 +281,96 @@ void TestCalculateCurrentRejectsInvalidInputs() {
                                           &irun, &ihold));
   assert(!Tmc5160Driver::CalculateCurrent(0.8, 0.075, -0.1, &globalscaler,
                                           &irun, &ihold));
+}
+
+void TestCalculateCurrentLowCurrentFloorReducesIrun() {
+  // a_rms=0.1, R=0.075 -> I_peak=0.14142 A, I_peak_max=4.33333 A,
+  // fraction=0.032636 -> at IRUN=31 GLOBALSCALER would be round(256*
+  // 0.032636)=8, under the 32 floor. GLOBALSCALER floor branch: pin
+  // GLOBALSCALER=32, IRUN=round(256*0.14142*0.075/0.325)-1 =
+  // round(8.3548)-1 = 8-1 = 7 (reduced from the max of 31).
+  // IHOLD=round((7+1)*0.30)-1=round(2.4)-1=1.
+  std::uint32_t globalscaler = 0;
+  std::uint8_t irun = 0;
+  std::uint8_t ihold = 0;
+  const bool ok = Tmc5160Driver::CalculateCurrent(
+      /*a_rms=*/0.1, /*sense_ohm=*/0.075, /*hold_frac=*/0.30, &globalscaler,
+      &irun, &ihold);
+  assert(ok);
+  assert(globalscaler == 32U);
+  assert(irun == 7);  // < 31: forced IRUN reduction (low-current mirror)
+  assert(ihold == 1);
+
+  // Reconstructed current: (32/256)*(8/32)*(0.325/0.075) = 0.135417 A_peak
+  // = 0.095766 A_rms, about -4.3% vs. the 0.1 A_rms target -- an
+  // acceptable undershoot, not the +283% overcurrent the pre-fix code
+  // would have delivered by clamping GLOBALSCALER to 32 while leaving
+  // IRUN at 31 ((32/256)*(32/32)*4.33333 = 0.54167 A_peak = 0.38314 A_rms).
+  const double reconstructed_peak =
+      (static_cast<double>(globalscaler) / 256.0) *
+      ((static_cast<double>(irun) + 1.0) / 32.0) * (0.325 / 0.075);
+  const double target_peak = 0.1 * 1.4142135623730951;
+  const double rel_err =
+      std::abs(reconstructed_peak - target_peak) / target_peak;
+  assert(rel_err < 0.10);
+}
+
+void TestCalculateCurrentRejectsUltraLowCurrent() {
+  // a_rms=0.02, R=0.075 -> I_peak=0.028284 A. GLOBALSCALER-floor solve
+  // gives IRUN=round(256*0.028284*0.075/0.325)-1=round(1.67095)-1=2-1=1.
+  // Delivered at GS=32,IRUN=1: (32/256)*(2/32)*4.33333 = 0.033854 A_peak,
+  // a ~19.7% overshoot vs. the 0.028284 A_peak target -- past the 10%
+  // tolerance, so this must be rejected outright rather than silently
+  // overcurrenting by nearly 20%.
+  std::uint32_t globalscaler = 0;
+  std::uint8_t irun = 0;
+  std::uint8_t ihold = 0;
+  assert(!Tmc5160Driver::CalculateCurrent(0.02, 0.075, 0.30, &globalscaler,
+                                          &irun, &ihold));
+}
+
+void TestCalculateCurrentIholdEndpoints() {
+  // hold_frac=0 must give IHOLD=0 (no standstill current) regardless of
+  // IRUN; hold_frac=1 must give IHOLD==IRUN (full run current held).
+  std::uint32_t globalscaler = 0;
+  std::uint8_t irun = 0;
+  std::uint8_t ihold = 0;
+  assert(Tmc5160Driver::CalculateCurrent(0.8, 0.075, /*hold_frac=*/0.0,
+                                         &globalscaler, &irun, &ihold));
+  assert(irun == 31);
+  assert(ihold == 0);
+
+  assert(Tmc5160Driver::CalculateCurrent(0.8, 0.075, /*hold_frac=*/1.0,
+                                         &globalscaler, &irun, &ihold));
+  assert(irun == 31);
+  assert(ihold == irun);
+}
+
+void TestCalculateCurrentLowCurrentSweepReconstructsWithinTolerance() {
+  // Property check across the GLOBALSCALER-floor branch's operating range
+  // (all below the 12.5%-of-max threshold that triggers it at R=0.075):
+  // whatever GLOBALSCALER/IRUN the driver picks, the delivered current
+  // must reconstruct within +-10% of what was asked for. Independent of
+  // any specific IRUN/GLOBALSCALER pinned value -- a property the fixed
+  // algorithm must hold, not a re-derivation of it.
+  const double sense_ohm = 0.075;
+  const double a_rms_values[] = {0.05, 0.1, 0.2, 0.3};
+  for (double a_rms : a_rms_values) {
+    std::uint32_t globalscaler = 0;
+    std::uint8_t irun = 0;
+    std::uint8_t ihold = 0;
+    const bool ok = Tmc5160Driver::CalculateCurrent(
+        a_rms, sense_ohm, 0.30, &globalscaler, &irun, &ihold);
+    assert(ok);
+    assert(globalscaler >= 32U && globalscaler <= 256U);
+    const double reconstructed_peak =
+        (static_cast<double>(globalscaler) / 256.0) *
+        ((static_cast<double>(irun) + 1.0) / 32.0) * (0.325 / sense_ohm);
+    const double target_peak = a_rms * 1.4142135623730951;
+    const double rel_err =
+        std::abs(reconstructed_peak - target_peak) / target_peak;
+    assert(rel_err < 0.10);
+  }
 }
 
 // ---------------------------------------------------------------------
@@ -427,8 +525,25 @@ void TestSetMicrostepRejectsInvalidDivisor() {
   Tmc5160Config cfg;
   auto driver = MakeHealthyDriver(&bus, cfg);
 
+  // Script exactly what an UNGUARDED SetMicrostep(3) would emit: EncodeMres
+  // falls back to safe_mres=6 for any invalid divisor, so the write+
+  // readback it would send is indistinguishable from a genuine divisor=4
+  // CHOPCONF write (driver isn't enabled_ yet, so TOFF=0). Without this
+  // script, an unguarded call fails anyway (empty queue) and lands on the
+  // same !healthy() outcome for the wrong reason, so the guard's absence
+  // goes undetected -- scripting it is what makes this load-bearing.
+  ExpectWrite(&bus, kRegCHOPCONF, Chopconf(/*microstep=*/4, /*toff=*/0));
+  ExpectRead(&bus, kRegCHOPCONF, Chopconf(/*microstep=*/4, /*toff=*/0));
+  const std::size_t before = bus.remaining_expectations();
+
   driver->SetMicrostep(3);  // not a supported power-of-two divisor
+
   assert(!driver->healthy());
+  assert(driver->microstep() == 4);  // unchanged from cfg's default
+  // The correctly-guarded call must reject before touching the bus at
+  // all: nothing scripted above should have been consumed.
+  assert(bus.remaining_expectations() == before);
+  assert(bus.mismatch_count() == 0);
 }
 
 }  // namespace
@@ -442,6 +557,10 @@ int main() {
   TestCalculateCurrentHighRegimeReducesIrun();
   TestCalculateCurrentRejectsUnreachableTarget();
   TestCalculateCurrentRejectsInvalidInputs();
+  TestCalculateCurrentLowCurrentFloorReducesIrun();
+  TestCalculateCurrentRejectsUltraLowCurrent();
+  TestCalculateCurrentIholdEndpoints();
+  TestCalculateCurrentLowCurrentSweepReconstructsWithinTolerance();
   TestVersionGateAcceptsTmc5160Version();
   TestVersionGateRejectsTmc2240Version();
   TestStepForwardThenReverseAtDivisor4();

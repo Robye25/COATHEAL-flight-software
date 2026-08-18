@@ -39,8 +39,11 @@ constexpr std::uint32_t kGconf = 0x00000004U;
 // TMC5160 datasheet fixed full-scale sense voltage.
 constexpr double kVfs = 0.325;
 
-// CHOPCONF bits 15:14 (TBL, blank time) = 2 and bits 7:4 (HSTRT) = 4:
-// datasheet-recommended spreadCycle defaults, unrelated to microstep/TOFF.
+// CHOPCONF bits 16:15 (TBL, blank time, 2-bit field) = 2 and bits 6:4
+// (HSTRT, hysteresis start, 3-bit field) = 4: datasheet-recommended
+// spreadCycle defaults, unrelated to microstep/TOFF. HEND (bits 10:7,
+// hysteresis end) is left at its reset value of 0 -- a bench-tunable
+// default, not something this task's tests need to pin.
 constexpr std::uint32_t kChopconfTbl = 0x2U << 15;
 constexpr std::uint32_t kChopconfHstrt = 0x4U << 4;
 
@@ -48,16 +51,23 @@ constexpr std::uint32_t kChopconfHstrt = 0x4U << 4;
 // delay; not exposed in Tmc5160Config, not load-bearing for this task.
 constexpr std::uint32_t kIholdDelay = 6U;
 
-// Fixed short stand-still power-down delay (TPOWERDOWN units are ~2.1ms
-// each per the datasheet); not exposed in Tmc5160Config.
+// Fixed short stand-still power-down delay. TPOWERDOWN's LSB is 2^18/f_clk
+// (~21.8 ms at the default 12 MHz internal clock), so 10 is roughly 218 ms
+// -- not the ~2.1 ms this comment previously (incorrectly) claimed. Not
+// exposed in Tmc5160Config.
 constexpr std::uint32_t kTpowerdown = 10U;
 
 // VMAX: the pacing thread above this seam drives Step() at up to 100 Hz
 // (MotorConfig.max_step_hz); XTARGET moves in the ramp generator's fixed
 // 256 internal-microsteps/fullstep units regardless of MRES, so a 100 Hz
-// dribble corresponds to 100*256 internal-microsteps/s. 4x margin keeps
-// VMAX comfortably above anything the pacing thread can actually demand,
-// so the ramp generator never becomes the limiting factor.
+// dribble corresponds to a worst-case demand of 100*256 = 25600 internal-
+// microsteps/s. The VMAX register's unit is f_clk/2^24 internal-
+// microsteps/s (~0.715 usteps/s per LSB at the default 12 MHz internal
+// clock), so VMAX=102400 corresponds to roughly 73000 usteps/s -- a ~2.9x
+// margin over the worst-case demand (not the 4x the raw
+// 4*100*256 arithmetic below might suggest), comfortably keeping the ramp
+// generator from ever becoming the limiting factor at any configured
+// microstep divisor.
 constexpr std::uint32_t kVmax = 4U * 100U * 256U;
 
 bool IsSupportedMicrostep(int divisor) {
@@ -153,6 +163,33 @@ bool Tmc5160Driver::CalculateCurrent(double a_rms, double sense_ohm,
   if (fraction <= 0.5) {
     chosen_irun = 31;
     gs_raw = 256.0 * fraction;
+    if (gs_raw < 32.0) {
+      // GLOBALSCALER floor: 32 is the lowest sane register value (below it
+      // the current DAC's resolution degrades badly). Below 12.5% of the
+      // max deliverable current, GLOBALSCALER alone can't represent the
+      // target without dropping under that floor. Naively clamping
+      // GLOBALSCALER up to 32 while leaving IRUN at 31 would silently
+      // *overcurrent* the motor (a 0.1 A_rms request would deliver
+      // ~0.38 A_rms, +283%) -- so instead pin GLOBALSCALER=32 and let IRUN
+      // carry the (very small) remainder, the low-current mirror of the
+      // >50% high-regime branch below: at GS=32,
+      //   I_peak = ((IRUN+1)/256) * (Vfs/R_sense)
+      //   => IRUN = round(256 * I_peak * R_sense / Vfs) - 1
+      gs_raw = 32.0;
+      chosen_irun = static_cast<int>(
+          std::lround(256.0 * i_peak * sense_ohm / kVfs)) - 1;
+      chosen_irun = std::clamp(chosen_irun, 0, 31);
+      // Even IRUN=0 at the GS floor has a nonzero minimum deliverable
+      // current (I_peak_max/256): a request small enough to sit well below
+      // that floor can't be honoured without materially overcurrenting the
+      // motor. Reject loudly rather than silently deliver >10% more than
+      // asked for -- same convention as the unreachable-ceiling rejection
+      // above.
+      const double delivered = (32.0 / 256.0) *
+                               ((chosen_irun + 1) / 32.0) *
+                               (kVfs / sense_ohm);
+      if (delivered > i_peak * 1.10) return false;
+    }
   } else {
     gs_raw = 256.0;
     chosen_irun = static_cast<int>(std::lround(32.0 * fraction)) - 1;
@@ -164,8 +201,13 @@ bool Tmc5160Driver::CalculateCurrent(double a_rms, double sense_ohm,
 
   *irun = static_cast<std::uint8_t>(chosen_irun);
   *globalscaler = gs;
+  // IHOLD scales relative to the *chosen* IRUN (not a fixed 0..31 range):
+  // hold_frac=0 must give IHOLD=0 and hold_frac=1 must give IHOLD==IRUN
+  // (full run current held). round((IRUN+1)*frac)-1 hits both endpoints
+  // exactly; clamped to [0, IRUN] as a belt-and-suspenders bound.
   *ihold = static_cast<std::uint8_t>(std::clamp(
-      static_cast<int>(std::lround(chosen_irun * hold_frac)), 0, 31));
+      static_cast<int>(std::lround((chosen_irun + 1) * hold_frac)) - 1, 0,
+      chosen_irun));
   return true;
 }
 
@@ -231,6 +273,12 @@ bool Tmc5160Driver::Transfer(const std::uint8_t tx[5], std::uint8_t rx[5]) {
   if (bus_ == nullptr || !spi_open_) return false;
   if (use_gpio_ && (!gpio_healthy_ || cs_handle_ == nullptr)) return false;
 
+  // Process-wide per-device SPI0 mutex (spi_bus_lock.hpp), shared with the
+  // MAX31865 clicks that sit on the same physical bus. Known test gap: no
+  // test here observes this lock being taken/released -- doing so would
+  // need a lock-spy seam (e.g. an instrumented mutex or a concurrent-access
+  // race test) that isn't worth building for this task; parked as a known
+  // limitation rather than attempted.
   std::lock_guard<std::mutex> bus_lock(SpiBusMutex(cfg_.spi_device));
   if (use_gpio_) {
     if (!SetGpioOutput(cs_handle_, false)) {
