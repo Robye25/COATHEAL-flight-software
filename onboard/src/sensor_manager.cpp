@@ -12,8 +12,6 @@
 #include <sstream>
 #include <thread>
 
-#include "coatheal/hal/sequent_rtd_adapter.hpp"
-
 #if defined(__linux__) && __has_include(<linux/i2c-dev.h>)
 #define COATHEAL_HAS_LINUX_SENSOR_IO 1
 #include <fcntl.h>
@@ -498,6 +496,16 @@ void SensorManager::SequentRtdLoop() {
       std::lock_guard<std::mutex> lock(cache_mu_);
       std::vector<bool> channel_valid(sample_cache_.size(), false);
       std::size_t valid_count = 0;
+      // sample_resistance_ohm_ has two possible owners and they mean
+      // different physical quantities on the same telemetry field. What the
+      // card reports is the PT100 *element* resistance; what
+      // NotePullCompleted decays is a model of the sample *material*
+      // resistance, and that model owns the vector whenever
+      // sensor.resistance_source is "simulated". Writing it from here in that
+      // mode would clobber the decay every poll and put element ohms on the
+      // RESISTANCE= wire field, where ground software expects material ohms.
+      const bool owns_resistance =
+          config_.sensors.resistance_source != "simulated";
 
       if (ok) {
         rtd_last_reading_ = reading;
@@ -508,7 +516,9 @@ void SensorManager::SequentRtdLoop() {
              ++i) {
           if (reading.channel_valid[i]) {
             sample_cache_[i] = {reading.temperature_c[i], true, true, now};
-            sample_resistance_ohm_[i] = reading.resistance_ohm[i];
+            if (owns_resistance) {
+              sample_resistance_ohm_[i] = reading.resistance_ohm[i];
+            }
             channel_valid[i] = true;
             ++valid_count;
           } else {
@@ -551,11 +561,10 @@ void SensorManager::SequentRtdLoop() {
         }
       }
 
-      // These three are the between-snapshot values. ReadSnapshot recomputes
-      // i2c_ok_ and resistance_ok_ from their own inputs on every control
-      // tick, and recomputes sample_temp_ok_ through this same helper.
-      i2c_ok_ = ok;
-      resistance_ok_ = ok;
+      // Only sample_temp_ok_ is published from here. ReadSnapshot recomputes
+      // i2c_ok_ from the DPS310/ADS1115 validity and resistance_ok_ from
+      // sensor.resistance_source on every control tick, so writing them here
+      // as well would be a dead store that reads like a second opinion.
       sample_temp_ok_ = HeatedChannelsValid(config_, channel_valid);
     }
     if (WaitForPoll(config_.sensors.sequent_rtd_poll_ms)) break;
@@ -796,13 +805,24 @@ bool SensorManager::ActiveCheck(const std::string& component,
   std::string rtd_error = "SKIPPED";
   SequentRtdAdapter::Identity identity;
   SequentRtdAdapter::Reading reading;
+  int rtd_address = 0;
+  bool rtd_burst = false;
   auto check_rtd = [&]() {
+    // Nothing below this lambda may touch rtd_ directly. SequentRtdLoop
+    // writes the adapter's burst_mode_ from the worker thread, inside
+    // ReadAll, under this same mutex; reading it from the reply-formatting
+    // code afterwards would be a race on a plain bool. So everything the
+    // reply needs is captured into locals here, under the lock, and only the
+    // locals are used later. address() reads immutable options_ and would be
+    // safe unlocked, but it is captured the same way to keep the rule simple.
+    std::lock_guard<std::mutex> lock(rtd_io_mu_);
+    rtd_address = rtd_.address();
+    rtd_burst = rtd_.burst_mode();
     if (!rtd_bus_.available()) {
       rtd_error = "I2C_UNAVAILABLE";
       return false;
     }
     rtd_error.clear();
-    std::lock_guard<std::mutex> lock(rtd_io_mu_);
     // A CHECK is an on-demand full conversation: probe first so the reply
     // carries a freshly-read identity, then read every channel.
     bool ok = rtd_.Probe(&identity, &rtd_error);
@@ -810,6 +830,10 @@ bool SensorManager::ActiveCheck(const std::string& component,
       ok = rtd_.ReadAll(&reading, &rtd_error);
       if (ok) rtd_identity_ = identity;
     }
+    // ReadAll latches burst_mode_ off permanently if the firmware refuses a
+    // 32-byte read, so re-capture it after the conversation rather than
+    // reporting the value from before it.
+    rtd_burst = rtd_.burst_mode();
     // Keep the worker's probe state consistent with what we just observed,
     // so a CHECK never leaves the loop trusting a card that just failed.
     rtd_probed_ = ok;
@@ -840,8 +864,8 @@ bool SensorManager::ActiveCheck(const std::string& component,
                                               : (rtd_ok ? "OK" : "FAIL"))
         << ";sequent_rtd_error=" << (!rtd_requested ? "SKIPPED" : rtd_error);
     if (rtd_requested) {
-      oss << ";sequent_rtd_addr=0x" << std::hex << rtd_.address() << std::dec
-          << ";sequent_rtd_burst=" << (rtd_.burst_mode() ? "1" : "0");
+      oss << ";sequent_rtd_addr=0x" << std::hex << rtd_address << std::dec
+          << ";sequent_rtd_burst=" << (rtd_burst ? "1" : "0");
       if (rtd_ok) {
         AppendSequentIdentity(&oss, identity);
         AppendSequentDiagnostics(&oss, reading);
