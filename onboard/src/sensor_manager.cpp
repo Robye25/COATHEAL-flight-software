@@ -820,11 +820,12 @@ bool SensorManager::ActiveCheck(const std::string& component,
 
   const bool dps_requested = component == "ALL" || component == "DPS310";
   const bool ads_requested = component == "ALL" || component == "ADS1115";
-  // DAQ132M and RTD_CLICK are retained as request aliases only: both legacy
-  // acquisition paths were replaced by the one Sequent card, and the CHECK
-  // command surface still speaks the old names. Task 7 renames them.
-  const bool rtd_requested = component == "ALL" || component == "SEQUENT_RTD" ||
-                             component == "RTD_CLICK" ||
+  // DAQ132M and RTD_CLICK survive as request aliases only. Both legacy
+  // acquisition paths were replaced by the one Sequent card, and these are
+  // still the names system_controller's CHECK whitelist accepts, so routing
+  // them here keeps CHECK DAQ132M from silently succeeding against nothing.
+  // Task 7 renames the command surface.
+  const bool rtd_requested = component == "ALL" || component == "RTD_CLICK" ||
                              component == "DAQ132M";
   const bool dps_ok = !dps_requested || check_dps();
   const bool ads_ok = !ads_requested || check_ads();
@@ -858,9 +859,9 @@ std::string SensorManager::ComponentSummary() const {
            ";heated_channels_ok=1;simulated=1";
   }
   // rtd_identity_ and the adapter's own state live under rtd_io_mu_, the
-  // sample cache under cache_mu_. SequentRtdLoop takes them one after the
-  // other in this order and never holds both, so taking them in the same
-  // order here cannot deadlock against it.
+  // sample cache under cache_mu_. Snapshot the first and release it before
+  // taking the second, exactly as SequentRtdLoop does, so no code path ever
+  // holds both at once.
   SequentRtdAdapter::Identity identity;
   bool probed = false;
   int address = 0;
