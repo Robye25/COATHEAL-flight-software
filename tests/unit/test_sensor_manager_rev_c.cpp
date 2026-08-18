@@ -121,6 +121,14 @@ void TestMissingSensorsReturnImmediatelyWithInvalidNanValues() {
   // with no card wired it is DISCOVERING then FAILED. What holds everywhere
   // is that a card which never answered is never reported OK.
   assert(snap.rtd_click.state != ComponentState::kOk);
+  // Smoke check only: every sample is invalid in this fixture, so this
+  // assertion holds under both the old any_of policy and the new
+  // heated-channels policy. The policy itself is covered by the
+  // HeatedChannelsValid tests below, which were verified to fail when the
+  // policy is mutated. Differentiating coverage at the ReadSnapshot level
+  // needs an I2cBus injection seam that SensorManager does not yet have:
+  // sample_cache_ entries only become valid inside SequentRtdLoop, off a
+  // real card, and no public API can mark one valid from a test.
   assert(!sm.sample_temp_ok());
   sm.Stop();
 }
