@@ -32,6 +32,7 @@ add_library(coatheal_onboard_core
   src/hal/pwm_controller.cpp
   src/hal/rtc_adapter.cpp
   src/hal/spi_adapter.cpp
+  src/hal/spi_bus.cpp
   src/hal/spi_bus_lock.cpp
   src/hal/gpio_output.cpp
   src/hal/gpio_status_led.cpp
