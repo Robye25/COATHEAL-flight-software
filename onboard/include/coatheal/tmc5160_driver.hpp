@@ -77,6 +77,7 @@ class Tmc5160Driver : public StepperDriver {
   const Tmc5160Config& config() const { return cfg_; }
   std::int32_t target() const { return target_; }
   bool enabled() const { return enabled_; }
+  int microstep() const { return microstep_; }
 
   // TMC5160 MRES (CHOPCONF bits 27:24): selects how many of the ramp
   // generator's fixed 256 internal microsteps/fullstep constitute one
