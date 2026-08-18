@@ -56,7 +56,7 @@ class GuiSmoke(unittest.TestCase):
             self.assertIn("COMPONENTS", labels)
             self.assertIn("Target", labels)
             label_texts = {label.text() for label in win.findChildren(QLabel)}
-            self.assertIn("RTD_CLICK", label_texts)
+            self.assertIn("SEQUENT_RTD", label_texts)
             self.assertNotIn("BEND ASCENT", labels)
             self.assertNotIn("BEND FLOAT", labels)
             self.assertNotIn("BEND DESCENT", labels)
