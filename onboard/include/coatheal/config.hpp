@@ -85,10 +85,11 @@ struct SensorRangeConfig {
 };
 
 struct PowerConfig {
-  // Final BOM: 5 W polyimide film heaters; at most 4 energized at once,
-  // yielding the default 20 W combined thermal draw ceiling.
-  std::size_t max_active_heaters = 4;
-  double max_thermal_w = 20.0;
+  // Final BOM: 5 W polyimide film heaters. Owner power-budget rule: never
+  // more than 3 energized at once, yielding the default 15 W combined
+  // thermal draw ceiling.
+  std::size_t max_active_heaters = 3;
+  double max_thermal_w = 15.0;
   double max_system_w = 48.23;
   double heater_nominal_w = 5.0;
   // BEXUS User Manual §5.2: each team is allocated 150 Wh for the full flight.
@@ -145,7 +146,9 @@ struct SensorHardwareConfig {
 struct HeaterOutputConfig {
   std::vector<std::size_t> output_lines;
   std::vector<std::size_t> temperature_channels;
-  double pwm_frequency_hz = 10.0;
+  // v3: film heaters have high thermal inertia, so a 1 Hz software PWM loop
+  // (no hardware PWM channel is wired) is the owner-confirmed rate.
+  double pwm_frequency_hz = 1.0;
   bool active_high = true;
   double debug_max_duty = 0.25;
   double debug_max_seconds = 10.0;
@@ -171,13 +174,15 @@ struct PullConfig {
 };
 
 struct MotorConfig {
-  std::string driver = "tmc2240";
+  // v3 schematic: TMC5160 SPI-only motion (position dribble via XTARGET).
+  // No STEP/DIR lines exist. CS is a software chip-select GPIO because the
+  // SPI0 native chip-selects (CE0/CE1) are wired to the MAX31865
+  // sample-resistance clicks instead.
+  std::string driver = "tmc5160";
   std::string gpio_chip = "/dev/gpiochip0";
   std::string spi_device = "/dev/spidev0.0";
   std::size_t cs_line = 22;
-  std::size_t step_line = 19;
-  std::size_t dir_line = 26;
-  std::size_t enable_line = 12;
+  std::size_t enable_line = 20;
   bool invert_direction = false;
   bool enable_active_low = true;
   double run_current_a_rms = 0.8;
@@ -185,7 +190,9 @@ struct MotorConfig {
   double hold_current_frac = 0.30;
   bool stealth_chop = true;
   std::uint32_t spi_speed_hz = 1000000;
-  int pulse_high_us = 3;
+  // TMC5160 current-sense resistor value (ohms); feeds the
+  // GLOBALSCALER/IHOLD_IRUN current calculation.
+  double sense_resistor_ohm = 0.075;
   int retry_ms = 2000;
   std::vector<std::size_t> samples;
 };

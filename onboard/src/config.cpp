@@ -74,25 +74,22 @@ bool ParseSizeList(const std::string& value, std::vector<std::size_t>* out) {
 }  // namespace
 
 OnboardConfig::OnboardConfig() {
-  heaters.output_lines = {17, 18, 27, 5, 6, 13};
+  // v3 GPIO map (BCM), single source of truth: heaters H1..H6.
+  heaters.output_lines = {19, 13, 6, 5, 24, 23};
   heaters.temperature_channels = {0, 1, 2, 3, 4, 5};
   sensors.sequent_rtd_channels = {1, 2, 3, 4, 5, 6, 7, 8};
 
-  motors[0].driver = "tmc2240";
+  motors[0].driver = "tmc5160";
   motors[0].gpio_chip = runtime.gpio_chip;
   motors[0].spi_device = "/dev/spidev0.0";
   motors[0].cs_line = 22;
-  motors[0].step_line = 19;
-  motors[0].dir_line = 26;
-  motors[0].enable_line = 12;
+  motors[0].enable_line = 20;
   motors[0].samples = {0, 1, 2, 3};
 
-  motors[1].driver = "tmc2240";
+  motors[1].driver = "tmc5160";
   motors[1].gpio_chip = runtime.gpio_chip;
   motors[1].spi_device = "/dev/spidev0.0";
-  motors[1].cs_line = 23;
-  motors[1].step_line = 24;
-  motors[1].dir_line = 20;
+  motors[1].cs_line = 27;
   motors[1].enable_line = 21;
   motors[1].samples = {4, 5, 6, 7};
 }
@@ -437,10 +434,6 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
         motor.spi_device = value;
       } else if (suffix == "cs_line") {
         if (!parse_size_t(key, value, &motor.cs_line, line_no)) return false;
-      } else if (suffix == "step_line") {
-        if (!parse_size_t(key, value, &motor.step_line, line_no)) return false;
-      } else if (suffix == "dir_line") {
-        if (!parse_size_t(key, value, &motor.dir_line, line_no)) return false;
       } else if (suffix == "enable_line") {
         if (!parse_size_t(key, value, &motor.enable_line, line_no)) return false;
       } else if (suffix == "invert_direction") {
@@ -459,8 +452,8 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
         int speed = 0;
         if (!parse_int(key, value, &speed, line_no)) return false;
         motor.spi_speed_hz = static_cast<std::uint32_t>(speed);
-      } else if (suffix == "pulse_high_us") {
-        if (!parse_int(key, value, &motor.pulse_high_us, line_no)) return false;
+      } else if (suffix == "sense_resistor_ohm") {
+        if (!parse_double(key, value, &motor.sense_resistor_ohm, line_no)) return false;
       } else if (suffix == "retry_ms") {
         if (!parse_int(key, value, &motor.retry_ms, line_no)) return false;
       } else if (suffix == "samples") {
@@ -728,9 +721,19 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
 
   for (std::size_t i = 0; i < config->motors.size(); ++i) {
     const MotorConfig& motor = config->motors[i];
-    if (motor.driver != "tmc2240") {
+    // v3: TMC2240/GPIO-pulse motion is retired in favor of TMC5160 SPI-only
+    // motion. Name the retirement explicitly so a stale field INI fails
+    // loudly with an actionable message instead of a generic rejection.
+    if (motor.driver == "tmc2240") {
       if (error != nullptr) {
-        *error = "motor" + std::to_string(i) + ".driver must be tmc2240";
+        *error = "motor" + std::to_string(i) +
+                 ".driver=tmc2240 is retired; use tmc5160";
+      }
+      return false;
+    }
+    if (motor.driver != "tmc5160" && motor.driver != "simulated") {
+      if (error != nullptr) {
+        *error = "motor" + std::to_string(i) + ".driver must be tmc5160 or simulated";
       }
       return false;
     }
@@ -761,7 +764,8 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
         global_scaler < 32 || global_scaler > 256 ||
         motor.hold_current_frac < 0.0 || motor.hold_current_frac > 1.0 ||
         motor.spi_speed_hz == 0U || motor.spi_speed_hz > 10000000U ||
-        motor.pulse_high_us < 1 ||
+        !std::isfinite(motor.sense_resistor_ohm) ||
+        motor.sense_resistor_ohm <= 0.0 || motor.sense_resistor_ohm >= 1.0 ||
         motor.retry_ms < 100 || motor.samples.empty()) {
       if (error != nullptr) {
         *error = "invalid motor" + std::to_string(i) + " configuration";
@@ -793,6 +797,25 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
     return true;
   };
 
+  // v3 schematic: GPIO lines fixed-owned by the Sequent RTD HAT and by the
+  // hardware SPI0 chip-selects (physically wired to the MAX31865 sample-
+  // resistance clicks, not available for heater/motor use). Claim these
+  // first so any heater or motor line colliding with one fails config load
+  // with the reserved owner named in the error.
+  static const std::pair<std::size_t, const char*> kReservedGpioLines[] = {
+      {14, "reserved: sequent_hat uart_tx"},
+      {15, "reserved: sequent_hat uart_rx"},
+      {17, "reserved: sequent_hat rs485_dir"},
+      {26, "reserved: sequent_hat intn"},
+      {7, "reserved: spi0_ce1 (max31865 sample1)"},
+      {8, "reserved: spi0_ce0 (max31865 sample2)"},
+  };
+  for (const auto& [line, owner] : kReservedGpioLines) {
+    if (!claim_gpio(config->runtime.gpio_chip, line, owner)) {
+      return false;
+    }
+  }
+
   for (std::size_t i = 0; i < config->heaters.output_lines.size(); ++i) {
     if (!claim_gpio(config->runtime.gpio_chip, config->heaters.output_lines[i],
                     "heater.output_lines[" + std::to_string(i) + "]")) {
@@ -803,8 +826,6 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
     const std::string prefix = "motor" + std::to_string(i);
     const std::string& chip = config->motors[i].gpio_chip;
     if (!claim_gpio(chip, config->motors[i].cs_line, prefix + ".cs_line") ||
-        !claim_gpio(chip, config->motors[i].step_line, prefix + ".step_line") ||
-        !claim_gpio(chip, config->motors[i].dir_line, prefix + ".dir_line") ||
         !claim_gpio(chip, config->motors[i].enable_line,
                     prefix + ".enable_line")) {
       return false;

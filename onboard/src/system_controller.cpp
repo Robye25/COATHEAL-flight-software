@@ -180,12 +180,16 @@ bool SystemController::Initialize(std::string* error) {
     auto build_tmc =
         [&](const char* motor_label, const MotorConfig& motor)
             -> std::unique_ptr<StepperDriver> {
+      // v3: MotorConfig no longer carries step_line/dir_line/pulse_high_us
+      // (schematic v3 has no STEP/DIR lines; motion is TMC5160 SPI-only).
+      // This TMC2240/GPIO-pulse bring-up path is fully retired in Task 5
+      // (factory swap to Tmc5160Driver); until then it keeps building on
+      // Tmc2240Config's own struct defaults, which this code path never
+      // reaches in any test (all tests run with use_simulated_pwm=true).
       Tmc2240Config tcfg;
       tcfg.gpio_chip = motor.gpio_chip;
       tcfg.spi_device = motor.spi_device;
       tcfg.cs_line = motor.cs_line;
-      tcfg.step_line = motor.step_line;
-      tcfg.dir_line = motor.dir_line;
       tcfg.enable_line = motor.enable_line;
       tcfg.invert_direction = motor.invert_direction;
       tcfg.enable_active_low = motor.enable_active_low;
@@ -195,7 +199,6 @@ bool SystemController::Initialize(std::string* error) {
       tcfg.hold_current_frac = motor.hold_current_frac;
       tcfg.stealth_chop = motor.stealth_chop;
       tcfg.spi_speed_hz = motor.spi_speed_hz;
-      tcfg.pulse_high_us = motor.pulse_high_us;
       auto tmc = std::make_unique<Tmc2240Driver>(tcfg);
       if (!tmc->healthy()) {
         tmc_spi_ok_ = false;

@@ -372,8 +372,8 @@ std::string WriteTempConfig(const std::string& extra = "") {
   out << "transition.ascent_to_float_mbar=100\n";
   out << "transition.float_to_descent_mbar=300\n";
   out << "transition.descent_to_landed_mbar=800\n";
-  out << "power.max_active_heaters=4\n";
-  out << "power.max_thermal_w=20\n";
+  out << "power.max_active_heaters=3\n";
+  out << "power.max_thermal_w=15\n";
   out << "power.max_system_w=48.23\n";
   out << "power.heater_nominal_w=5\n";
   out << "power.energy_budget_wh=130.0\n";
@@ -394,8 +394,8 @@ std::string WriteTempConfig(const std::string& extra = "") {
   out << "sensor.uv_ads1115_channel=0\n";
   out << "sensor.uv_full_scale_v=4.096\n";
   out << "sensor.resistance_source=disabled\n";
-  out << "heater.output_lines=17,18,27,5,6,13\n";
-  out << "heater.pwm_frequency_hz=10.0\n";
+  out << "heater.output_lines=19,13,6,5,24,23\n";
+  out << "heater.pwm_frequency_hz=1.0\n";
   out << "heater.active_high=true\n";
   out << "heater.debug_max_duty=0.25\n";
   out << "heater.debug_max_seconds=10.0\n";
@@ -406,31 +406,29 @@ std::string WriteTempConfig(const std::string& extra = "") {
   out << "pull.microstep=4\n";
   out << "pull.travel_full_steps=200\n";
   out << "pull.hold_s=5.0\n";
-  out << "motor0.driver=tmc2240\n";
+  out << "motor0.driver=tmc5160\n";
   out << "motor0.gpio_chip=/dev/gpiochip0\n";
   out << "motor0.spi_device=/dev/spidev0.0\n";
   out << "motor0.cs_line=22\n";
-  out << "motor0.step_line=19\n";
-  out << "motor0.dir_line=26\n";
-  out << "motor0.enable_line=12\n";
+  out << "motor0.enable_line=20\n";
   out << "motor0.run_current_a_rms=2.0\n";
   out << "motor0.current_range_a_peak=0\n";
   out << "motor0.hold_current_frac=0.30\n";
   out << "motor0.stealth_chop=true\n";
   out << "motor0.spi_speed_hz=1000000\n";
+  out << "motor0.sense_resistor_ohm=0.075\n";
   out << "motor0.samples=0,1,2,3\n";
-  out << "motor1.driver=tmc2240\n";
+  out << "motor1.driver=tmc5160\n";
   out << "motor1.gpio_chip=/dev/gpiochip0\n";
   out << "motor1.spi_device=/dev/spidev0.0\n";
-  out << "motor1.cs_line=23\n";
-  out << "motor1.step_line=24\n";
-  out << "motor1.dir_line=20\n";
+  out << "motor1.cs_line=27\n";
   out << "motor1.enable_line=21\n";
   out << "motor1.run_current_a_rms=2.0\n";
   out << "motor1.current_range_a_peak=0\n";
   out << "motor1.hold_current_frac=0.30\n";
   out << "motor1.stealth_chop=true\n";
   out << "motor1.spi_speed_hz=1000000\n";
+  out << "motor1.sense_resistor_ohm=0.075\n";
   out << "motor1.samples=4,5,6,7\n";
   out << extra;
   out.close();
@@ -461,7 +459,8 @@ void TestConfigParsesReliabilityFields() {
   assert(cfg.hardware.heater_count == 6U);
   assert(cfg.hardware.electronics_heater_index == static_cast<std::size_t>(-1));
   assert(std::fabs(cfg.power.heater_nominal_w - 5.0) < 1e-9);
-  assert(std::fabs(cfg.power.max_thermal_w - 20.0) < 1e-9);
+  assert(std::fabs(cfg.power.max_thermal_w - 15.0) < 1e-9);
+  assert(cfg.power.max_active_heaters == 3U);
   assert(std::fabs(cfg.heater_safety.target_min_c - 0.0) < 1e-9);
   assert(std::fabs(cfg.heater_safety.target_max_c - 80.0) < 1e-9);
   assert(cfg.sensors.dps310_i2c_addr == 0x77);
@@ -469,29 +468,27 @@ void TestConfigParsesReliabilityFields() {
   assert(cfg.sensors.uv_ads1115_channel == 0);
   assert(cfg.sensors.resistance_source == "disabled");
   assert(cfg.heaters.output_lines.size() == 6U);
-  assert(cfg.heaters.output_lines[0] == 17U);
-  assert(cfg.heaters.output_lines[5] == 13U);
-  assert(std::fabs(cfg.heaters.pwm_frequency_hz - 10.0) < 1e-9);
+  assert(cfg.heaters.output_lines[0] == 19U);
+  assert(cfg.heaters.output_lines[5] == 23U);
+  assert(std::fabs(cfg.heaters.pwm_frequency_hz - 1.0) < 1e-9);
   assert(cfg.heaters.active_high);
   assert(std::fabs(cfg.heaters.debug_max_duty - 0.25) < 1e-9);
   assert(std::fabs(cfg.heaters.debug_max_seconds - 10.0) < 1e-9);
   assert(cfg.pull.microstep == 4);
   assert(cfg.pull.travel_full_steps == 200);
-  assert(cfg.motors[0].driver == "tmc2240");
+  assert(cfg.motors[0].driver == "tmc5160");
   assert(cfg.motors[0].gpio_chip == "/dev/gpiochip0");
   assert(cfg.motors[0].spi_device == "/dev/spidev0.0");
   assert(cfg.motors[0].cs_line == 22U);
-  assert(cfg.motors[0].step_line == 19U);
-  assert(cfg.motors[0].dir_line == 26U);
-  assert(cfg.motors[0].enable_line == 12U);
+  assert(cfg.motors[0].enable_line == 20U);
+  assert(std::fabs(cfg.motors[0].sense_resistor_ohm - 0.075) < 1e-9);
   assert(cfg.motors[0].samples == std::vector<std::size_t>({0, 1, 2, 3}));
-  assert(cfg.motors[1].driver == "tmc2240");
+  assert(cfg.motors[1].driver == "tmc5160");
   assert(cfg.motors[1].gpio_chip == "/dev/gpiochip0");
   assert(cfg.motors[1].spi_device == "/dev/spidev0.0");
-  assert(cfg.motors[1].cs_line == 23U);
-  assert(cfg.motors[1].step_line == 24U);
-  assert(cfg.motors[1].dir_line == 20U);
+  assert(cfg.motors[1].cs_line == 27U);
   assert(cfg.motors[1].enable_line == 21U);
+  assert(std::fabs(cfg.motors[1].sense_resistor_ohm - 0.075) < 1e-9);
   assert(cfg.motors[1].samples == std::vector<std::size_t>({4, 5, 6, 7}));
 
   std::error_code ec;
@@ -502,7 +499,10 @@ void TestConfigRejectsGpioCollisions() {
   const std::filesystem::path cfg_path =
       std::filesystem::temp_directory_path() / "coatheal_gpio_collision.ini";
   std::ofstream out(cfg_path);
-  out << "heater.output_lines=17,18,27,5,6,12\n";
+  // Last entry (20) deliberately collides with the default motor0.enable_line
+  // (BCM 20, see OnboardConfig()); the other five are the real v3 heater
+  // lines and must not themselves collide with anything reserved.
+  out << "heater.output_lines=19,13,6,5,24,20\n";
   out.close();
 
   coatheal::OnboardConfig cfg;
@@ -510,10 +510,69 @@ void TestConfigRejectsGpioCollisions() {
   assert(!coatheal::LoadConfigFromIni(cfg_path.string(), &cfg, &error));
   // Robust to the configured chip path (e.g. "/dev/gpiochip0") rather than
   // asserting the old hardcoded "BCM GPIO" phrasing the message used to have.
-  assert(error.find("line 12 assigned to both") != std::string::npos);
+  assert(error.find("line 20 assigned to both") != std::string::npos);
+  assert(error.find("motor0.enable_line") != std::string::npos);
 
   std::error_code ec;
   std::filesystem::remove(cfg_path, ec);
+}
+
+void TestConfigRejectsReservedGpioCollisions() {
+  // v3 reserved lines (Sequent RTD HAT + hardware SPI0 chip-selects) must
+  // never be claimable by a heater or motor. Six-entry list (matches the
+  // default hardware.heater_count=6) so the count-vs-heater_count check
+  // passes and the GPIO claim check is actually reached.
+  const std::filesystem::path cfg_path =
+      std::filesystem::temp_directory_path() / "coatheal_reserved_gpio_collision.ini";
+  std::ofstream out(cfg_path);
+  out << "heater.output_lines=17,13,6,5,24,23\n";
+  out.close();
+
+  coatheal::OnboardConfig cfg;
+  std::string error;
+  assert(!coatheal::LoadConfigFromIni(cfg_path.string(), &cfg, &error));
+  assert(error.find("sequent_hat") != std::string::npos);
+
+  std::error_code ec;
+  std::filesystem::remove(cfg_path, ec);
+}
+
+void TestConfigRejectsRetiredMotorKeys() {
+  // tmc2240 is a retired driver identity: the error must name the
+  // retirement, not just reject the value generically (a config still on
+  // the old driver should tell the operator what to change it to).
+  {
+    const std::string path = WriteTempConfig("motor0.driver=tmc2240\n");
+    coatheal::OnboardConfig cfg;
+    std::string error;
+    assert(!coatheal::LoadConfigFromIni(path, &cfg, &error));
+    assert(error.find("retired") != std::string::npos);
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+  }
+  // step_line/dir_line/pulse_high_us no longer have parse branches, so a
+  // stale INI carrying one must fall into the "unknown motor config key"
+  // path (not the generic top-level "unknown config key" path), guarding
+  // any field deployment still on a pre-v3 INI.
+  {
+    const std::string path = WriteTempConfig("motor0.step_line=19\n");
+    coatheal::OnboardConfig cfg;
+    std::string error;
+    assert(!coatheal::LoadConfigFromIni(path, &cfg, &error));
+    assert(error.find("unknown motor config key") != std::string::npos);
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+  }
+  // sense_resistor_ohm must be validated (0, 1) exclusive; 0 is invalid.
+  {
+    const std::string path = WriteTempConfig("motor0.sense_resistor_ohm=0\n");
+    coatheal::OnboardConfig cfg;
+    std::string error;
+    assert(!coatheal::LoadConfigFromIni(path, &cfg, &error));
+    assert(error.find("invalid motor0 configuration") != std::string::npos);
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+  }
 }
 
 void TestSequentRtdConfigDefaultsAndParsing() {
@@ -726,6 +785,8 @@ int main() {
   TestTelemetryQueuePersistenceAndAck();
   TestConfigParsesReliabilityFields();
   TestConfigRejectsGpioCollisions();
+  TestConfigRejectsReservedGpioCollisions();
+  TestConfigRejectsRetiredMotorKeys();
   TestSequentRtdConfigDefaultsAndParsing();
   TestSequentRtdConfigRejectsBadValues();
   TestLegacySensorKeysAreRejected();
