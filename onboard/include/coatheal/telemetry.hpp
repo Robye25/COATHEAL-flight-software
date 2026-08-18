@@ -22,7 +22,6 @@ struct SensorSnapshot {
   bool ambient_temp_valid = true;
   bool ambient_pressure_valid = true;
   bool uv_valid = true;
-  bool sample_temps_valid = true;
   std::vector<bool> sample_temp_valid;
   std::int64_t ambient_temp_age_ms = -1;
   std::int64_t ambient_pressure_age_ms = -1;

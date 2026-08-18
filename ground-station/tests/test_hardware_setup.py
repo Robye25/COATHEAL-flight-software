@@ -94,14 +94,82 @@ class HardwareSetupTests(unittest.TestCase):
         self.assertIn(
             "sensor.sequent_rtd_channels entries must be 1..8", errors)
 
+    SENSOR_TYPE_ERROR = (
+        "sensor.sequent_rtd_expect_sensor_type must be pt100 "
+        "(pt1000 is recognised but not implemented: the CVD "
+        "cross-check and resistance window are PT100-only)")
+
     def test_validate_candidate_detects_bad_sequent_rtd_sensor_type(self) -> None:
         source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
         broken = hardware_setup.replace_ini(
             source, {"sensor.sequent_rtd_expect_sensor_type": "pt500"})
         errors = hardware_setup.validate_candidate(broken)
+        self.assertIn(self.SENSOR_TYPE_ERROR, errors)
+
+    def test_validate_candidate_rejects_pt1000_sensor_type(self) -> None:
+        # Recorded spec deviation: pt1000 is advertised on the card and
+        # handled by Probe(), but ApplyValidation's cross-check is PT100-only
+        # (hardcoded CVD curve, 60-390 ohm window), so a pt1000 config would
+        # invalidate every channel forever. config.cpp rejects it at load and
+        # this validator must agree, or `hardware_setup` would bless a config
+        # the onboard service then refuses to start on.
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        broken = hardware_setup.replace_ini(
+            source, {"sensor.sequent_rtd_expect_sensor_type": "pt1000"})
+        errors = hardware_setup.validate_candidate(broken)
+        self.assertIn(self.SENSOR_TYPE_ERROR, errors)
+
+    def test_validate_candidate_detects_inverted_resistance_window(self) -> None:
+        # Mirrors config.cpp:680-687. Exact-string assertion: the fragment is
+        # unique across every error this validator can emit, so deleting the
+        # rule fails this test rather than passing on a neighbouring message.
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        broken = hardware_setup.replace_ini(
+            source,
+            {
+                "sensor.sequent_rtd_resistance_min_ohm": "390.0",
+                "sensor.sequent_rtd_resistance_max_ohm": "60.0",
+            },
+        )
+        errors = hardware_setup.validate_candidate(broken)
         self.assertIn(
-            "sensor.sequent_rtd_expect_sensor_type must be pt100 or pt1000",
-            errors)
+            "sensor.sequent_rtd_resistance_min_ohm must be below "
+            "sensor.sequent_rtd_resistance_max_ohm", errors)
+
+    def test_validate_candidate_rejects_equal_resistance_bounds(self) -> None:
+        # config.cpp uses >=, not >: an empty window is as unusable as an
+        # inverted one, and this is the case that separates the two operators.
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        broken = hardware_setup.replace_ini(
+            source,
+            {
+                "sensor.sequent_rtd_resistance_min_ohm": "100.0",
+                "sensor.sequent_rtd_resistance_max_ohm": "100.0",
+            },
+        )
+        errors = hardware_setup.validate_candidate(broken)
+        self.assertIn(
+            "sensor.sequent_rtd_resistance_min_ohm must be below "
+            "sensor.sequent_rtd_resistance_max_ohm", errors)
+
+    def test_validate_candidate_detects_bad_resistance_source(self) -> None:
+        # Mirrors config.cpp:619-626, including the two legacy labels that
+        # stay accepted so a fielded INI still loads.
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        broken = hardware_setup.replace_ini(
+            source, {"sensor.resistance_source": "ina3221"})
+        errors = hardware_setup.validate_candidate(broken)
+        self.assertIn(
+            "sensor.resistance_source must be disabled, simulated, "
+            "or sequent_rtd", errors)
+
+    def test_validate_candidate_accepts_every_resistance_source(self) -> None:
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        for value in ("sequent_rtd", "disabled", "simulated"):
+            candidate = hardware_setup.replace_ini(
+                source, {"sensor.resistance_source": value})
+            self.assertEqual(
+                hardware_setup.validate_candidate(candidate), [], value)
 
     def test_same_line_on_different_gpio_chips_is_valid(self) -> None:
         source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
@@ -241,6 +309,29 @@ class HardwareSetupTests(unittest.TestCase):
                     hardware_setup, "EXAMPLE_CONFIG", fake_template):
                 values = migrated_values(source)
             self.assertEqual(values["sensor.rtd_click_enabled"], "false")
+
+    def test_sequent_rtd_reply_ok_accepts_both_token_casings(self) -> None:
+        # Real hardware: SensorManager::ActiveCheck formats the reply and
+        # emits lowercase `sequent_rtd=OK`.
+        self.assertTrue(hardware_setup.sequent_rtd_reply_ok(
+            "overall=OK;selected=SEQUENT_RTD;storage=SKIPPED;dps310=SKIPPED;"
+            "ads1115=SKIPPED;sequent_rtd=OK;sequent_rtd_error=NONE;"
+            "sequent_rtd_addr=0x40;sequent_rtd_burst=1;pwm=OK"))
+        # Simulated build: ActiveCheck short-circuits and echoes the
+        # requested component name verbatim, so the token is uppercase.
+        self.assertTrue(hardware_setup.sequent_rtd_reply_ok(
+            "overall=OK;selected=SEQUENT_RTD;SEQUENT_RTD=OK;simulated=1"))
+
+    def test_sequent_rtd_reply_ok_rejects_failures(self) -> None:
+        self.assertFalse(hardware_setup.sequent_rtd_reply_ok(
+            "overall=FAIL;sequent_rtd=FAIL;sequent_rtd_error=NO_RESPONSE"))
+        # overall=OK alone must not pass: the card token has to be present.
+        self.assertFalse(hardware_setup.sequent_rtd_reply_ok(
+            "overall=OK;selected=PWM;pwm=OK"))
+        # Neighbouring keys that merely start with the same prefix must not
+        # satisfy the whole-token match.
+        self.assertFalse(hardware_setup.sequent_rtd_reply_ok(
+            "overall=OK;sequent_rtd=FAIL;sequent_rtd_error=OK"))
 
 
 if __name__ == "__main__":

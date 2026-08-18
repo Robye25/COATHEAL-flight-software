@@ -680,10 +680,6 @@ SensorSnapshot SensorManager::ReadSnapshot(
           snapshot.sample_temp_age_ms[i] >= 0 &&
           snapshot.sample_temp_age_ms[i] < config_.sensors.stale_after_ms;
     }
-    snapshot.sample_temps_valid =
-        std::any_of(snapshot.sample_temp_valid.begin(),
-                    snapshot.sample_temp_valid.end(),
-                    [](bool valid) { return valid; });
     snapshot.dps310 = dps_health_;
     snapshot.ads1115 = ads_health_;
     snapshot.sequent_rtd = rtd_health_;
@@ -741,7 +737,21 @@ SensorSnapshot SensorManager::ReadSnapshot(
     } else if (config_.sensors.resistance_source == "simulated") {
       resistance_ok_ = true;
       snapshot.sample_resistance_ohm = sample_resistance_ohm_;
+    } else if (config_.sensors.resistance_source == "sequent_rtd") {
+      // The shipped default. SequentRtdLoop is the writer of
+      // sample_resistance_ohm_ here, so health is bus-level: the numbers are
+      // real element resistances exactly when the card conversation works.
+      // Per-channel plausibility (open sensor, out-of-window resistance,
+      // CVD cross-check) already flows out on sample_temp_valid and
+      // SEQUENT_RTD, so folding it in here would only make one broken
+      // channel blank the other seven.
+      resistance_ok_ = rtd_bus_ok_.load();
+      snapshot.sample_resistance_ohm = sample_resistance_ohm_;
     } else if (ina_ != nullptr && ina_->healthy()) {
+      // Unreachable for any value config.cpp accepts today. It survives
+      // because `sensor.resistance_source` still takes legacy labels from
+      // fielded INIs, and Ina3221Adapter is still a compiled stub: if a
+      // future value routes back through it, this is the branch that answers.
       resistance_ok_ = true;
       snapshot.sample_resistance_ohm = sample_resistance_ohm_;
     } else {

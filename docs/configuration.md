@@ -69,7 +69,7 @@ at load time.
 | `sensor.sequent_rtd_stack` | `0` | Sequent RTD HAT DIP-switch stack level, `0..7` -> I2C `0x40..0x47`. |
 | `sensor.sequent_rtd_channels` | `1,2,3,4,5,6,7,8` | Card channel (1-indexed) supplying each logical sample; must have exactly `hardware.sample_count` entries, each `1..8`, no duplicates. |
 | `sensor.sequent_rtd_poll_ms` | `1000` | RTD worker polling interval. |
-| `sensor.sequent_rtd_expect_sensor_type` | `pt100` | Expected card-configured sensor type, `pt100` or `pt1000`; `Probe()` refuses on mismatch. |
+| `sensor.sequent_rtd_expect_sensor_type` | `pt100` | Expected card-configured sensor type. **`pt100` is the only accepted value**; `Probe()` refuses on mismatch with the card. `pt1000` is recognised and rejected at config load: the card and `Probe()` handle it, but the card-vs-CVD cross-check hardcodes the PT100 Callendar-Van Dusen curve and the resistance window below is a PT100 window, so a `pt1000` config would load and then mark every channel invalid forever — every heater clamped, no diagnostic. |
 | `sensor.sequent_rtd_resistance_min_ohm` | `60.0` | Lower plausibility bound for per-channel resistance; must be below `_max_ohm`. |
 | `sensor.sequent_rtd_resistance_max_ohm` | `390.0` | Upper plausibility bound for per-channel resistance. |
 | `sensor.sequent_rtd_crosscheck_tol_c` | `2.0` | Max allowed disagreement between the card's reported temperature and the temperature derived from its own resistance reading before a channel is marked invalid. |
@@ -80,6 +80,15 @@ at load time.
 | `sensor.uv_ads1115_channel` | `0` | ADS1115 channel for GUVA-S12SD output. |
 | `sensor.uv_full_scale_v` | `4.096` | ADC full-scale used for normalization. |
 | `sensor.resistance_source` | `sequent_rtd` | Source for the compatibility `RESISTANCE=` field: `sequent_rtd` serializes the card's per-channel PT100 element resistance; `disabled` emits `-`; `simulated` uses the decaying bench model. |
+
+The default `60.0 .. 390.0` Ω resistance window is a PT100 *sensor-range*
+sanity check, not a mission-envelope check: through the PT100 CVD curve it
+spans roughly −102 °C to +845 °C, far wider than anything this payload should
+ever see. It catches an open, shorted, or miswired probe and nothing subtler —
+the actual thermal guard is the `heater.max_sample_temp_c` over-temp latch at
+85 °C. The bench survey in section 8 of
+[Sequent RTD Bench Bring-Up](sequent-rtd-bring-up.md) is expected to replace
+these defaults with a narrower mission-envelope window.
 
 ## Heater Control
 

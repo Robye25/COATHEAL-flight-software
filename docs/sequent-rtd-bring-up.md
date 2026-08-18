@@ -147,6 +147,21 @@ blocks are. Confirm at the bench:
    not a wild value like `-128` or `127`.
 2. Read offsets 33-34 as a little-endian `uint16`; it should be close to
    `5000` (5.000 V), not near `0` or overflowing `65535`.
+3. Read offset 91 as a little-endian `uint32` (`kRtdReinit`, the card's ADC
+   re-initialisation counter). Expect a small, stable number on a card that
+   has just powered up. Read it a second time after a minute of steady
+   polling: a counter that climbs while nothing is being disturbed means the
+   card's ADC keeps resetting itself, which is a hardware/power complaint
+   worth chasing before flight even though nothing in flight software reads
+   this value.
+
+Sanity criteria, all three diagnostics-only by design:
+
+| Offset | Interpretation | Sane | Suspicious |
+|---|---|---|---|
+| 32 | `int8` °C (`card_temp_c`) | room temperature plus a few °C of self-heating | `-128`, `127`, or a value that swings tens of degrees between reads |
+| 33-34 | `uint16` LE mV (`rail_5v`) | ≈ `4750`..`5250` | near `0`, near `65535`, or drifting under heater load |
+| 91 | `uint32` LE (`adc_reinit_count`) | small and unchanging while idle | monotonically climbing during steady polling |
 
 If either interpretation is wrong, the consequence is bounded by design: a
 wrong guess here degrades a diagnostic log line (`card_temp_c`, `rail_5v` in
@@ -156,8 +171,44 @@ in step 2.
 
 **Record the observed values here:**
 
-- Offset 32 (die temp, °C): `____` *(fill in at bench)*
-- Offsets 33-34 (rail mV): `____` *(fill in at bench)*
+- Offset 32 (die temp, °C) — `card_temp_c`: `____` *(fill in at bench)*
+- Offsets 33-34 (rail mV) — `rail_5v`: `____` *(fill in at bench)*
+- Offset 91 (`adc_reinit_count`) at power-up: `____` *(fill in at bench)*
+- Offset 91 after ~1 min of steady polling: `____` *(fill in at bench)*
+- Interpretations confirmed / rejected: `____` *(fill in at bench)*
+
+If any interpretation turns out to be wrong, fix the decode in
+`SequentRtdAdapter::ReadAll` and this table together — but do not treat it as
+a flight blocker: these three fields feed log lines only, never a control or
+safety decision.
+
+## 4b. Address Collision Check (0x41)
+
+`0x40 + stack` overlaps the retired INA3221's default addresses: `0x40` is its
+`kDefaultAddrA` and `0x41` its `kDefaultAddrB`
+(`onboard/include/coatheal/hal/ina3221_adapter.hpp`). With the RTD card at
+stack 0 it occupies `0x40`, and nothing on the flight stack should be
+answering at `0x41` at all.
+
+**Procedure** (card at stack 0, onboard service stopped):
+
+```bash
+i2cdetect -y 1
+```
+
+Confirm all of the following:
+
+1. `0x40` answers — that is the RTD card.
+2. **`0x41` does not answer.** Anything replying there is either a second RTD
+   card someone set to stack 1, or a real INA3221 that was never removed. Both
+   are a wiring problem to resolve before flight: the address space is shared
+   and the software has no way to tell the two devices apart.
+3. The only other expected addresses are `0x77` (DPS310) and `0x48` (ADS1115).
+
+**Record here:**
+
+- Devices seen on `i2cdetect -y 1`: `____` *(fill in at bench)*
+- `0x41` silent? YES / NO *(fill in at bench)*
 
 ## 5. Sensor Type Check
 
@@ -166,11 +217,23 @@ Offset 133 encodes the card's configured sensor type, masked with `0x0f`:
 - `0` = PT100
 - `1` (nonzero) = PT1000
 
-`Probe()` reads this and compares it against `sensor.sequent_rtd_expect_sensor_type`
-(`pt100` or `pt1000`). **The probe refuses to come up on a mismatch** — this
-catches a card configured for PT1000 with PT100 probes wired to it, which
-would otherwise read plausibly wrong (finite, in-range, just incorrect)
-rather than obviously wrong.
+`Probe()` reads this and compares it against `sensor.sequent_rtd_expect_sensor_type`.
+**The probe refuses to come up on a mismatch** — this catches a card
+configured for PT1000 with PT100 probes wired to it, which would otherwise
+read plausibly wrong (finite, in-range, just incorrect) rather than obviously
+wrong.
+
+**`pt100` is the only value the config accepts.** `Probe()` handles both, and
+the card supports both, but nothing downstream of the probe does: the
+card-vs-derived-temperature cross-check in `ApplyValidation` hardcodes the
+PT100 Callendar-Van Dusen curve, and the
+`sensor.sequent_rtd_resistance_min_ohm`/`_max_ohm` window is a PT100 window
+(a PT1000 element sits near 1000 Ω at 0 °C, an order of magnitude outside it).
+A `pt1000` config would therefore load, probe successfully, and then mark
+every channel invalid on every poll — every heater clamped, no diagnostic
+pointing at the cause. `config.cpp` and `scripts/hardware_setup.py` both
+reject `pt1000` at load with a message saying exactly that. Wiring PT1000
+probes is a code change (CVD curve plus window), not a config change.
 
 The sensor type is also unverifiable, and the probe refuses for that reason
 too, whenever `card_type < 1` (hardware older than version 5.0) — offset 133
@@ -222,6 +285,44 @@ of scope for this migration. SPI0 now serves only the two TMC2240 stepper
 drivers (`/dev/spidev0.0`, software CS on BCM 22/23); the Sequent RTD card is
 I2C-only and does not touch SPI0 at all.
 
+## 8. Mission-Envelope Resistance Survey
+
+The shipped plausibility window is `60.0 .. 390.0` Ω. Through the PT100 CVD
+curve that spans roughly **−102 °C to +845 °C** — far wider than anything this
+payload should ever see, and wider than the sensor range the mission actually
+cares about. It is a broken-probe check (open, shorted, miswired), not a
+thermal guard; the thermal guard is the `heater.max_sample_temp_c` over-temp
+latch at 85 °C. Nothing is wrong with shipping the wide window, but a window
+derived from real hardware across the real flight band would catch a drifting
+or partially-shorted probe that the wide one waves through.
+
+**Procedure** (per channel, with the probes that will actually fly):
+
+1. Bring the channel to each set point below and let it settle.
+2. Record the card's reported resistance (offset 59 block) and its reported
+   temperature (offset 0 block) together.
+3. Repeat for every channel — probe-to-probe spread is part of what the
+   window has to cover.
+
+| Set point | Expected R (PT100 nominal) | Observed R, ch1..ch8 |
+|---|---:|---|
+| −60 °C (flight-band cold end) | ≈ 76.3 Ω | `____` *(fill in at bench)* |
+| −20 °C | ≈ 92.2 Ω | `____` *(fill in at bench)* |
+| 0 °C (ice point) | 100.0 Ω | `____` *(fill in at bench)* |
+| +25 °C (room) | ≈ 109.7 Ω | `____` *(fill in at bench)* |
+| +80 °C (flight-band hot end) | ≈ 130.9 Ω | `____` *(fill in at bench)* |
+
+**Derive and record the replacement window:**
+
+- Lowest observed resistance across all channels: `____ Ω` *(fill in at bench)*
+- Highest observed resistance across all channels: `____ Ω` *(fill in at bench)*
+- Proposed `sensor.sequent_rtd_resistance_min_ohm`: `____` *(fill in at bench)*
+- Proposed `sensor.sequent_rtd_resistance_max_ohm`: `____` *(fill in at bench)*
+
+Leave headroom on both ends for probe tolerance and lead resistance — the
+window's job is to reject broken hardware, not to second-guess a cold sample.
+Until this survey is done, the `60.0 .. 390.0` defaults stand.
+
 ## Useful Operator Commands
 
 Read-only I2C presence probe (reads the firmware revision byte at offset 57,
@@ -241,8 +342,12 @@ python3 scripts/hardware_setup.py doctor --config config/onboard.local.ini
 python3 scripts/hardware_setup.py rtd-check
 ```
 
-`rtd-check` sends `CHECK SEQUENT_RTD` and requires both `overall=OK` and
-`sequent_rtd=OK` in the response. `doctor` runs this alongside `COMPONENTS`,
+`rtd-check` sends `CHECK SEQUENT_RTD` and requires both `overall=OK` and a
+`sequent_rtd=OK` token in the response. The token's case is not stable — a
+real card produces lowercase `sequent_rtd=OK`, a simulated build echoes the
+requested selector and produces `SEQUENT_RTD=OK;simulated=1` — so the match is
+case-insensitive, and `doctor` applies the same rule. `doctor` runs this
+alongside `COMPONENTS`,
 `CHECK PWM`, `CHECK MOTOR0`, and `CHECK MOTOR1`.
 
 Direct command-link check:
@@ -268,6 +373,14 @@ sensor.sequent_rtd_crosscheck_tol_c=2.0
 sensor.resistance_source=sequent_rtd
 ```
 
+`sensor.sequent_rtd_expect_sensor_type` accepts `pt100` only — see section 5
+for why `pt1000` is rejected at load rather than accepted and silently broken.
+
+The `60.0 .. 390.0` Ω window above maps through the PT100 CVD curve to roughly
+−102 °C to +845 °C, far wider than the mission envelope; the real thermal
+guard is the `heater.max_sample_temp_c` over-temp latch at 85 °C. Section 8's
+bench survey is expected to narrow it.
+
 See [Configuration Reference](configuration.md) for the full key list and
 validation rules.
 
@@ -279,6 +392,12 @@ sections 3-5) is filled in with a bench observation, not an assumption.
 
 - [ ] Section 2 (register map) gate passed and values recorded.
 - [ ] Section 3 (burst mode) observed and recorded.
-- [ ] Section 4 (diagnostic bytes) observed and recorded.
+- [ ] Section 4 (diagnostic bytes, including `adc_reinit_count`) observed and
+      recorded.
+- [ ] Section 4b (address collision) confirmed: `0x40` answers, `0x41` silent.
 - [ ] Section 5 (sensor type) confirmed against physical wiring.
 - [ ] Section 6 (calibration) performed if the card ships uncalibrated.
+- [ ] Section 8 (resistance survey) completed and a mission-envelope window
+      proposed. Not a flight blocker on its own — the shipped `60.0 .. 390.0`
+      window is safe, just loose — but the survey is the only thing that can
+      tighten it.

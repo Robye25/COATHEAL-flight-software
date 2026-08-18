@@ -36,8 +36,9 @@ void AppendStepperSegment(std::ostringstream& oss, const StepperStatus& st,
 //        RESISTANCE=r0|r1|...   (- for unmeasured samples),
 //        PHASE=...,MODE=...,STATUS=...,
 //        STEPPER0=...,STEPPER1=...
-// Humidity and box_temp are not emitted. RESISTANCE is retained for ground-side
-// compatibility; the final BOM normally serializes "-" in every slot.
+// Humidity and box_temp are not emitted. RESISTANCE carries the Sequent RTD
+// card's per-channel PT100 element resistance under the default
+// sensor.resistance_source=sequent_rtd; only "disabled" makes every slot "-".
 std::string SerializeTelemetryDataFrame(const TelemetryRecord& record,
                                         const std::string& session_id) {
   std::ostringstream oss;

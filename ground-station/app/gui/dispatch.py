@@ -45,9 +45,10 @@ class TelemetryReceiver(QThread):
     connection_changed = pyqtSignal(bool, str)
     status_changed     = pyqtSignal(str)  # "listening" | "connected" | "stale" | "searching"
 
-    # CSV v4: no humidity or box_temp_c; keep r0..r7 compatibility columns for
-    # optional/simulated resistance data. This is a breaking
-    # change; older CSVs cannot be appended to a v4 file.
+    # CSV v4: no humidity or box_temp_c; r0..r7 carry the Sequent RTD card's
+    # per-channel PT100 element resistance, and are empty for channels the
+    # payload reported as "-". This is a breaking change; older CSVs cannot be
+    # appended to a v4 file.
     CSV_FIELDS = [
         "session_id", "seq", "timestamp", "rtc_valid",
         "ambient_temp_c", "ambient_pressure_mbar",
