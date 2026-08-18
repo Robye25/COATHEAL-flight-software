@@ -28,11 +28,16 @@ class SensorManager {
  public:
   static constexpr std::size_t kSampleCount = 8;
 
+  // rtd_bus_override lets a test substitute the RTD card's I2C transport
+  // (e.g. FakeI2cBus) without touching the owned LinuxI2cBus. nullptr (the
+  // default, and every production call site) means "use the owned bus" —
+  // this parameter is purely additive.
   SensorManager(const OnboardConfig& config,
                 SpiAdapter* spi,
                 I2cAdapter* i2c,
                 RtcAdapter* rtc,
-                Ina3221Adapter* ina = nullptr);
+                Ina3221Adapter* ina = nullptr,
+                I2cBus* rtd_bus_override = nullptr);
   ~SensorManager();
 
   void Start();
@@ -130,9 +135,15 @@ class SensorManager {
   mutable std::mutex rtd_io_mu_;
 
   // Declared last so the constructor initialiser list can stay in
-  // declaration order; rtd_ holds a pointer to rtd_bus_, so rtd_bus_ must
-  // precede it here.
+  // declaration order; rtd_ holds a pointer to rtd_bus_active_, so both
+  // must precede it here.
   LinuxI2cBus rtd_bus_;
+  // The bus rtd_ and every rtd_bus_.available() check actually use: the
+  // constructor sets this to rtd_bus_override when a test supplies one,
+  // otherwise &rtd_bus_. Everything downstream reads through this pointer
+  // rather than rtd_bus_ directly, so an injected fake really does control
+  // whether the RTD worker thread starts and what it sees as available.
+  I2cBus* rtd_bus_active_ = nullptr;
   SequentRtdAdapter rtd_;
   SequentRtdAdapter::Identity rtd_identity_;
   bool rtd_probed_ = false;

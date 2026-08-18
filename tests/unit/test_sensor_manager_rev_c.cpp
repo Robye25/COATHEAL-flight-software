@@ -3,20 +3,38 @@
 #include <cassert>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "coatheal/config.hpp"
 #include "coatheal/hal/i2c_adapter.hpp"
 #include "coatheal/hal/ina3221_adapter.hpp"
 #include "coatheal/hal/rtc_adapter.hpp"
+#include "coatheal/hal/sequent_rtd_adapter.hpp"
 #include "coatheal/hal/spi_adapter.hpp"
 #include "coatheal/sensor_manager.hpp"
 #include "coatheal/telemetry.hpp"
+#include "fake_i2c_bus.hpp"
 
 using namespace coatheal;
 
 namespace {
+
+// Mirrors BlankImage() in test_sequent_rtd_adapter.cpp: the minimum register
+// image for Probe()/ReadAll() to succeed structurally against a
+// default-configured SequentRtdAdapter (PT100, stack 0, channel_map 1..8).
+std::vector<std::uint8_t> BlankRtdImage() {
+  std::vector<std::uint8_t> image(140, 0);
+  image[sequent_rtd::kCardType] = 7;   // hardware >= 5.0
+  image[sequent_rtd::kRevMajor] = 1;
+  image[sequent_rtd::kRevMinor] = 5;
+  image[sequent_rtd::kRevHwMajor] = 7;
+  image[sequent_rtd::kRevHwMinor] = 0;
+  image[sequent_rtd::kPt1000] = 0;     // PT100, matches OnboardConfig default
+  return image;
+}
 
 SensorManager MakeSensorManager(Ina3221Adapter* ina,
                                 SpiAdapter* spi,
@@ -199,6 +217,98 @@ void TestHeatedChannelPolicyFailsClosedOnEmptyMapping() {
   assert(!SensorManager::HeatedChannelsValid(config, all_valid));
 }
 
+// Shared setup for the two i2c_ok()/RTD-bus-health tests below. DPS310 and
+// ADS1115 are disabled so the `!enabled || valid` terms in ReadSnapshot's
+// i2c_ok_ formula both collapse to `true`, leaving i2c_ok() driven entirely
+// by rtd_bus_ok_ — exactly the scenario the controller ruling calls out
+// ("with DPS310 and ADS1115 disabled, I2C_OK reports healthy while the RTD
+// card is dead"). sequent_rtd_poll_ms is set small so the bounded waits
+// below stay short without racing the worker thread's first pass.
+OnboardConfig MakeRtdBusTestConfig() {
+  OnboardConfig config;
+  config.hardware.sample_count = 8;
+  config.hardware.heater_count = 6;
+  config.runtime.use_simulated_sensors = false;
+  config.sensors.dps310_enabled = false;
+  config.sensors.ads1115_enabled = false;
+  config.sensors.sequent_rtd_poll_ms = 5;
+  return config;
+}
+
+// i2c_ok's RTD contribution is bus-level (Probe/ReadAll succeeding), not
+// per-channel plausibility, so a card that never lets the bus open is the
+// right fixture: it never has to touch resistance/temperature plausibility
+// to prove the point.
+void TestI2cOkStaysFailedOnUnreachableRtdBus() {
+  const OnboardConfig config = MakeRtdBusTestConfig();
+
+  // A dedicated FakeI2cBus per test, mutated only before Start() and never
+  // touched again from the test thread — SequentRtdLoop is the only thread
+  // that reads it afterwards, so there is no cross-thread data race to
+  // reason about, and the outcome does not depend on precise timing.
+  FakeI2cBus bad_bus;
+  bad_bus.SetImage(BlankRtdImage());
+  bad_bus.SetOpenFails(true);  // card present in config, unreachable on wire
+
+  Ina3221Adapter ina;
+  SpiAdapter spi;
+  I2cAdapter i2c;
+  RtcAdapter rtc;
+  SensorManager sm(config, &spi, &i2c, &rtc, &ina, &bad_bus);
+  sm.Start();
+
+  const std::vector<double> heater_duty(6, 0.0);
+  bool ever_ok = false;
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(750);
+  while (std::chrono::steady_clock::now() < deadline) {
+    sm.ReadSnapshot(MissionPhase::kAscent, heater_duty, 0.1);
+    if (sm.i2c_ok()) {
+      ever_ok = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  sm.Stop();
+  // A bus that never opens must never be reported OK. This is the half that
+  // catches a regression where the rtd_bus_ok_ AND is dropped from i2c_ok_'s
+  // formula (with dps/ads disabled that bug makes i2c_ok() true on the very
+  // first ReadSnapshot() call, regardless of the RTD card).
+  assert(!ever_ok);
+}
+
+void TestI2cOkRecoversOnHealthyRtdBus() {
+  const OnboardConfig config = MakeRtdBusTestConfig();
+
+  FakeI2cBus good_bus;
+  good_bus.SetImage(BlankRtdImage());
+
+  Ina3221Adapter ina;
+  SpiAdapter spi;
+  I2cAdapter i2c;
+  RtcAdapter rtc;
+  SensorManager sm(config, &spi, &i2c, &rtc, &ina, &good_bus);
+  sm.Start();
+
+  const std::vector<double> heater_duty(6, 0.0);
+  bool became_ok = false;
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (std::chrono::steady_clock::now() < deadline) {
+    sm.ReadSnapshot(MissionPhase::kAscent, heater_duty, 0.1);
+    if (sm.i2c_ok()) {
+      became_ok = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  sm.Stop();
+  // A card that answers cleanly must bring i2c_ok() up. This is the half
+  // that catches rtd_bus_ok_ being wired dead (e.g. never set, or the AND
+  // term inverted/stuck false) — that bug would time out here instead.
+  assert(became_ok);
+}
+
 }  // namespace
 
 int main() {
@@ -209,5 +319,7 @@ int main() {
   TestHeatedChannelPolicyIgnoresUnheatedSamples();
   TestHeatedChannelPolicyRejectsOutOfRangeMapping();
   TestHeatedChannelPolicyFailsClosedOnEmptyMapping();
+  TestI2cOkStaysFailedOnUnreachableRtdBus();
+  TestI2cOkRecoversOnHealthyRtdBus();
   return 0;
 }
