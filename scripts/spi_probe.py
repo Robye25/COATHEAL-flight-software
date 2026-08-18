@@ -9,6 +9,7 @@ software chip-select lines directly.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import sys
 import time
 from dataclasses import dataclass
@@ -25,6 +26,8 @@ try:
 except ImportError as exc:  # pragma: no cover - platform diagnostic
     raise SystemExit("python3-libgpiod/gpiod is required to run this probe") from exc
 
+I2C_SLAVE = 0x0703
+
 
 @dataclass(frozen=True)
 class Device:
@@ -34,7 +37,6 @@ class Device:
 
 
 DEVICES = (
-    Device("RTD_CLICK_MAX31865", 16, "max31865"),
     Device("MOTOR0_TMC2240", 22, "tmc2240"),
     Device("MOTOR1_TMC2240", 23, "tmc2240"),
 )
@@ -81,20 +83,20 @@ def transfer(spi: spidev.SpiDev, cs: CsLine, tx: Sequence[int]) -> List[int]:
     return [int(value) & 0xff for value in rx]
 
 
-def read_max31865(spi: spidev.SpiDev, cs: CsLine) -> None:
-    tx = [0x00] + [0x00] * 8
-    rx = transfer(spi, cs, tx)
-    regs = rx[1:]
-    print(f"    max31865 regs 0x00..0x07 tx={hex_bytes(tx)} rx={hex_bytes(rx)}")
-    if len(regs) == 8:
-        raw16 = ((regs[1] << 8) | regs[2]) & 0xffff
-        code = raw16 >> 1
-        fault_bit = raw16 & 0x0001
-        print(
-            "    max31865 decoded "
-            f"config=0x{regs[0]:02x} raw_rtd=0x{raw16:04x} "
-            f"code={code} fault_bit={fault_bit} fault=0x{regs[7]:02x}"
-        )
+def probe_sequent_rtd(stack: int = 0) -> int:
+    """Read firmware revision from the Sequent RTD card, as doBoardInit does."""
+    address = 0x40 + stack
+    try:
+        with open("/dev/i2c-1", "r+b", buffering=0) as bus:
+            fcntl.ioctl(bus, I2C_SLAVE, address)
+            bus.write(bytes([57]))          # REVISION_MAJOR_MEM_ADD
+            data = bus.read(2)
+    except OSError as exc:
+        print(f"    sequent rtd stack={stack} addr=0x{address:02x}: {exc}")
+        return 1
+    print(f"    sequent rtd stack={stack} addr=0x{address:02x} "
+          f"fw={data[0]}.{data[1]}")
+    return 0
 
 
 def read_tmc2240(spi: spidev.SpiDev, cs: CsLine, reg: int, label: str) -> int:
@@ -147,10 +149,21 @@ def main() -> int:
     parser.add_argument("--speeds", default="100000,500000,1000000")
     parser.add_argument("--device", action="append", default=[],
                         help="Device name to probe, or ALL. May be repeated.")
+    parser.add_argument("--rtd-stack", type=int, default=0,
+                        help="Sequent RTD HAT stack address offset, 0..7 "
+                             "(I2C address 0x40 + stack).")
+    parser.add_argument("--skip-rtd", action="store_true",
+                        help="Skip the Sequent RTD I2C presence check.")
     args = parser.parse_args()
 
     speeds = parse_speeds(args.speeds)
     devices = selected_devices(args.device)
+
+    print("This is read-only: no register writes, no motor movement, no heater commands.")
+
+    if not args.skip_rtd:
+        print("\n=== Sequent RTD HAT (I2C, /dev/i2c-1) ===")
+        probe_sequent_rtd(args.rtd_stack)
 
     spi = spidev.SpiDev()
     spi.open(args.spi_bus, args.spi_device)
@@ -160,10 +173,9 @@ def main() -> int:
         spi.no_cs = True
 
     print(
-        f"spi_probe bus={args.spi_bus}.{args.spi_device} mode=3 "
+        f"\nspi_probe bus={args.spi_bus}.{args.spi_device} mode=3 "
         f"no_cs={getattr(spi, 'no_cs', 'unknown')} gpio_chip={args.gpio_chip}"
     )
-    print("This is read-only: no register writes, no motor movement, no heater commands.")
 
     try:
         for speed in speeds:
@@ -173,9 +185,7 @@ def main() -> int:
                 print(f"  [{device.name}] cs=BCM{device.cs_line}")
                 cs = CsLine(args.gpio_chip, device.cs_line)
                 try:
-                    if device.kind == "max31865":
-                        read_max31865(spi, cs)
-                    elif device.kind == "tmc2240":
+                    if device.kind == "tmc2240":
                         read_tmc2240_set(spi, cs)
                     else:
                         raise AssertionError(device.kind)

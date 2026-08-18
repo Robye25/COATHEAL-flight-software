@@ -17,11 +17,22 @@ sys.modules[SPEC.name] = hardware_setup
 SPEC.loader.exec_module(hardware_setup)
 
 
-class HardwareSetupTests(unittest.TestCase):
-    def test_modbus_crc_known_request(self) -> None:
-        body = bytes.fromhex("010300000008")
-        self.assertEqual(hardware_setup.modbus_crc(body), 0x0C44)
+def migrated_values(source: Path) -> dict[str, str]:
+    """Return the ini key/value mapping migrate_config would write for
+    `source`, without touching disk.
 
+    `_candidate_from_existing` already applies the RETIRED_SENSOR_KEYS /
+    OBSOLETE_CONFIG_KEYS filtering and FINAL_PIN_VALUES overrides and
+    returns the merged config as text; `_ini_values` (the same parser
+    `_load_config` wraps around a file read) turns that text into a dict.
+    `_load_config` itself is not reusable here since it takes a Path and
+    reads from disk, and this helper is deliberately disk-free.
+    """
+    text = hardware_setup._candidate_from_existing(source)
+    return hardware_setup._ini_values(text)
+
+
+class HardwareSetupTests(unittest.TestCase):
     def test_replace_ini_replaces_and_appends(self) -> None:
         result = hardware_setup.replace_ini(
             "a=1\n# retained\n", {"a": "2", "b": "3"})
@@ -37,13 +48,20 @@ class HardwareSetupTests(unittest.TestCase):
         self.assertTrue(
             any("/dev/gpiochip0 line 17" in error for error in errors))
 
-    def test_validate_candidate_detects_rtd_drdy_conflict(self) -> None:
+    def test_validate_candidate_detects_sequent_rtd_stack_out_of_range(self) -> None:
         source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
         broken = hardware_setup.replace_ini(
-            source, {"sensor.rtd_click_drdy_line": "17"})
+            source, {"sensor.sequent_rtd_stack": "8"})
         errors = hardware_setup.validate_candidate(broken)
-        self.assertTrue(
-            any("sensor.rtd_click_drdy_line" in error for error in errors))
+        self.assertIn("sensor.sequent_rtd_stack must be 0..7", errors)
+
+    def test_validate_candidate_detects_duplicate_sequent_rtd_channel(self) -> None:
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        broken = hardware_setup.replace_ini(
+            source, {"sensor.sequent_rtd_channels": "1,2,3,4,5,6,7,7"})
+        errors = hardware_setup.validate_candidate(broken)
+        self.assertIn(
+            "sensor.sequent_rtd_channels contains duplicates", errors)
 
     def test_same_line_on_different_gpio_chips_is_valid(self) -> None:
         source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
@@ -109,17 +127,44 @@ class HardwareSetupTests(unittest.TestCase):
             values = hardware_setup._ini_values(migrated)
             self.assertEqual(values["motor0.driver"], "tmc2240")
             self.assertEqual(values["motor1.driver"], "tmc2240")
+            for retired in (
+                "sensor.sample_temperature_source",
+                "sensor.daq132m_enabled",
+                "sensor.rtd_click_enabled",
+            ):
+                self.assertNotIn(retired, values)
+            self.assertEqual(values["sensor.sequent_rtd_stack"], "0")
             self.assertEqual(
-                values["sensor.sample_temperature_source"],
-                "rtd_click_max31865",
-            )
-            self.assertEqual(values["sensor.daq132m_enabled"], "false")
-            self.assertEqual(values["sensor.rtd_click_enabled"], "true")
+                values["sensor.sequent_rtd_channels"], "1,2,3,4,5,6,7,8")
             self.assertNotIn("stepper.microstep=", migrated)
             self.assertNotIn("motor0.sense_resistor=", migrated)
             self.assertTrue(list(root.glob("onboard.ini.bak.*")))
             if os.name != "nt":
                 self.assertEqual(new_path.stat().st_mode & 0o777, 0o644)
+
+    def test_migrate_config_drops_retired_sensor_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "old.ini"
+            source.write_text(
+                "sensor.sample_temperature_source=rtd_click_max31865\n"
+                "sensor.rtd_click_enabled=true\n"
+                "sensor.rtd_click_drdy_line=25\n"
+                "sensor.daq132m_enabled=false\n"
+                "sensor.daq132m_device=/dev/ttyUSB0\n",
+                encoding="utf-8",
+            )
+            values = migrated_values(source)
+            for retired in (
+                "sensor.sample_temperature_source",
+                "sensor.rtd_click_enabled",
+                "sensor.rtd_click_drdy_line",
+                "sensor.daq132m_enabled",
+                "sensor.daq132m_device",
+            ):
+                self.assertNotIn(retired, values)
+            self.assertEqual(values["sensor.sequent_rtd_stack"], "0")
+            self.assertEqual(
+                values["sensor.sequent_rtd_channels"], "1,2,3,4,5,6,7,8")
 
 
 if __name__ == "__main__":
