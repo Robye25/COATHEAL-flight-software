@@ -103,6 +103,25 @@ void TestFakeDetectsLengthMismatch() {
   assert(bus.mismatch_count() == 1);
 }
 
+void TestFakeRejectsShortScriptedRx() {
+  // Real SPI is full-duplex: every Transfer clocks exactly `len` bytes into
+  // rx, no exceptions — the fake must not permit a bus state hardware can't
+  // produce. A scripted rx shorter than len (e.g. an author dropping the
+  // TMC5160 datagram's leading status byte) must be a mismatch, not a
+  // partial fill that leaves the rest of rx holding stale/uninitialized
+  // bytes. The sentinel fill is what makes this load-bearing: it proves no
+  // partial copy happened, not just that the call returned false.
+  FakeSpiBus bus;
+  assert(bus.Open("/dev/spidev0.0", 3, 1000000, false));
+  bus.Expect({0x01, 0x02}, {0xAA});  // rx one byte short of len=2
+
+  std::uint8_t tx[2] = {0x01, 0x02};
+  std::uint8_t rx[2] = {0x5A, 0x5A};  // sentinel: must stay untouched
+  assert(!bus.Transfer(tx, rx, 2));
+  assert(bus.mismatch_count() == 1);
+  assert(rx[0] == 0x5A && rx[1] == 0x5A);
+}
+
 void TestFakeInjectsTransferFailures() {
   FakeSpiBus bus;
   assert(bus.Open("/dev/spidev0.0", 3, 1000000, false));
@@ -168,6 +187,7 @@ int main() {
   TestFakeServesScriptedExchange();
   TestFakeDetectsTxContentMismatch();
   TestFakeDetectsLengthMismatch();
+  TestFakeRejectsShortScriptedRx();
   TestFakeInjectsTransferFailures();
   TestFakeExhaustedQueueTransferFails();
   TestFakeRecordsOpenParameters();
