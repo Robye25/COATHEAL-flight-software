@@ -76,7 +76,6 @@ bool ParseSizeList(const std::string& value, std::vector<std::size_t>* out) {
 OnboardConfig::OnboardConfig() {
   heaters.output_lines = {17, 18, 27, 5, 6, 13};
   heaters.temperature_channels = {0, 1, 2, 3, 4, 5};
-  sensors.daq132m_enabled_channels = {0, 1, 2, 3, 4, 5, 6, 7};
   sensors.sequent_rtd_channels = {1, 2, 3, 4, 5, 6, 7, 8};
 
   motors[0].driver = "tmc2240";
@@ -333,51 +332,16 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
       if (!parse_bool(key, value, &config->sensors.dps310_enabled, line_no)) return false;
     } else if (key == "sensor.ads1115_enabled") {
       if (!parse_bool(key, value, &config->sensors.ads1115_enabled, line_no)) return false;
-    } else if (key == "sensor.daq132m_enabled") {
-      if (!parse_bool(key, value, &config->sensors.daq132m_enabled, line_no)) return false;
     } else if (key == "sensor.dps310_auto_discover") {
       if (!parse_bool(key, value, &config->sensors.dps310_auto_discover, line_no)) return false;
     } else if (key == "sensor.ads1115_auto_discover") {
       if (!parse_bool(key, value, &config->sensors.ads1115_auto_discover, line_no)) return false;
-    } else if (key == "sensor.daq132m_auto_discover") {
-      if (!parse_bool(key, value, &config->sensors.daq132m_auto_discover, line_no)) return false;
     } else if (key == "sensor.dps310_poll_ms") {
       if (!parse_int(key, value, &config->sensors.dps310_poll_ms, line_no)) return false;
     } else if (key == "sensor.ads1115_poll_ms") {
       if (!parse_int(key, value, &config->sensors.ads1115_poll_ms, line_no)) return false;
-    } else if (key == "sensor.daq132m_poll_ms") {
-      if (!parse_int(key, value, &config->sensors.daq132m_poll_ms, line_no)) return false;
     } else if (key == "sensor.stale_after_ms") {
       if (!parse_int(key, value, &config->sensors.stale_after_ms, line_no)) return false;
-    } else if (key == "sensor.sample_temperature_source") {
-      config->sensors.sample_temperature_source = value;
-    } else if (key == "sensor.daq132m_device") {
-      config->sensors.daq132m_device = value;
-    } else if (key == "sensor.daq132m_baud") {
-      if (!parse_int(key, value, &config->sensors.daq132m_baud, line_no)) return false;
-    } else if (key == "sensor.daq132m_parity") {
-      config->sensors.daq132m_parity = value;
-    } else if (key == "sensor.daq132m_data_bits") {
-      if (!parse_int(key, value, &config->sensors.daq132m_data_bits, line_no)) return false;
-    } else if (key == "sensor.daq132m_stop_bits") {
-      if (!parse_int(key, value, &config->sensors.daq132m_stop_bits, line_no)) return false;
-    } else if (key == "sensor.daq132m_slave_id") {
-      if (!parse_int(key, value, &config->sensors.daq132m_slave_id, line_no)) return false;
-    } else if (key == "sensor.daq132m_function_code") {
-      if (!parse_int(key, value, &config->sensors.daq132m_function_code, line_no)) return false;
-    } else if (key == "sensor.daq132m_register_base") {
-      if (!parse_int(key, value, &config->sensors.daq132m_register_base, line_no)) return false;
-    } else if (key == "sensor.daq132m_register_count") {
-      if (!parse_int(key, value, &config->sensors.daq132m_register_count, line_no)) return false;
-    } else if (key == "sensor.daq132m_c_per_count") {
-      if (!parse_double(key, value, &config->sensors.daq132m_c_per_count, line_no)) return false;
-    } else if (key == "sensor.daq132m_c_offset") {
-      if (!parse_double(key, value, &config->sensors.daq132m_c_offset, line_no)) return false;
-    } else if (key == "sensor.daq132m_enabled_channels") {
-      if (!ParseSizeList(value, &config->sensors.daq132m_enabled_channels)) {
-        if (error != nullptr) *error = "invalid sensor.daq132m_enabled_channels";
-        return false;
-      }
     } else if (key == "sensor.sequent_rtd_stack") {
       if (!parse_int(key, value, &config->sensors.sequent_rtd_stack, line_no)) return false;
     } else if (key == "sensor.sequent_rtd_channels") {
@@ -395,26 +359,6 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
       if (!parse_double(key, value, &config->sensors.sequent_rtd_resistance_max_ohm, line_no)) return false;
     } else if (key == "sensor.sequent_rtd_crosscheck_tol_c") {
       if (!parse_double(key, value, &config->sensors.sequent_rtd_crosscheck_tol_c, line_no)) return false;
-    } else if (key == "sensor.rtd_click_enabled") {
-      if (!parse_bool(key, value, &config->sensors.rtd_click_enabled, line_no)) return false;
-    } else if (key == "sensor.rtd_click_spi_device") {
-      config->sensors.rtd_click_spi_device = value;
-    } else if (key == "sensor.rtd_click_cs_line") {
-      if (!parse_size_t(key, value, &config->sensors.rtd_click_cs_line, line_no)) return false;
-    } else if (key == "sensor.rtd_click_drdy_line") {
-      if (!parse_size_t(key, value, &config->sensors.rtd_click_drdy_line, line_no)) return false;
-    } else if (key == "sensor.rtd_click_wires") {
-      if (!parse_int(key, value, &config->sensors.rtd_click_wires, line_no)) return false;
-    } else if (key == "sensor.rtd_click_sample_channel") {
-      if (!parse_size_t(key, value, &config->sensors.rtd_click_sample_channel, line_no)) return false;
-    } else if (key == "sensor.rtd_click_reference_ohm") {
-      if (!parse_double(key, value, &config->sensors.rtd_click_reference_ohm, line_no)) return false;
-    } else if (key == "sensor.rtd_click_filter_hz") {
-      if (!parse_int(key, value, &config->sensors.rtd_click_filter_hz, line_no)) return false;
-    } else if (key == "sensor.rtd_click_spi_speed_hz") {
-      int speed = 0;
-      if (!parse_int(key, value, &speed, line_no)) return false;
-      config->sensors.rtd_click_spi_speed_hz = static_cast<std::uint32_t>(speed);
     } else if (key == "sensor.pressure_source") {
       config->sensors.pressure_source = value;
     } else if (key == "sensor.dps310_i2c_addr") {
@@ -660,26 +604,7 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
     return false;
   }
 
-  if (config->sensors.daq132m_baud <= 0 ||
-      config->sensors.daq132m_data_bits <= 0 ||
-      config->sensors.daq132m_stop_bits <= 0 ||
-      config->sensors.daq132m_slave_id <= 0 ||
-      (config->sensors.daq132m_function_code != 3 &&
-       config->sensors.daq132m_function_code != 4) ||
-      config->sensors.daq132m_register_count <
-          static_cast<int>(config->hardware.sample_count) ||
-      config->sensors.daq132m_c_per_count == 0.0) {
-    if (error != nullptr) {
-      *error = "invalid DAQ132M Modbus configuration";
-    }
-    return false;
-  }
-
-  const bool sample_source_ok =
-      config->sensors.sample_temperature_source == "daq132m_modbus" ||
-      config->sensors.sample_temperature_source == "rtd_click_max31865";
-  if (!sample_source_ok ||
-      config->sensors.pressure_source != "dps310" ||
+  if (config->sensors.pressure_source != "dps310" ||
       config->sensors.uv_source != "guva_s12sd_ads1115") {
     if (error != nullptr) {
       *error = "sensor sources must match Rev C supported hardware";
@@ -687,10 +612,15 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
     return false;
   }
 
+  // "disabled" and "simulated" remain accepted alongside the HAT-backed
+  // "sequent_rtd" source: fielded configs may still say "disabled", and
+  // Ina3221Adapter (the only consumer) is still a compiled stub, so refusing
+  // to load an otherwise-valid config over this label would be a poor trade.
   if (config->sensors.resistance_source != "disabled" &&
-      config->sensors.resistance_source != "simulated") {
+      config->sensors.resistance_source != "simulated" &&
+      config->sensors.resistance_source != "sequent_rtd") {
     if (error != nullptr) {
-      *error = "sensor.resistance_source must be disabled or simulated";
+      *error = "sensor.resistance_source must be disabled, simulated, or sequent_rtd";
     }
     return false;
   }
@@ -708,37 +638,6 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
     return false;
   }
 
-  if (config->sensors.rtd_click_wires < 2 || config->sensors.rtd_click_wires > 4) {
-    if (error != nullptr) {
-      *error = "sensor.rtd_click_wires must be 2, 3, or 4";
-    }
-    return false;
-  }
-  if (config->sensors.rtd_click_sample_channel >= config->hardware.sample_count ||
-      config->sensors.rtd_click_reference_ohm <= 0.0 ||
-      (config->sensors.rtd_click_filter_hz != 50 &&
-       config->sensors.rtd_click_filter_hz != 60) ||
-      config->sensors.rtd_click_spi_speed_hz == 0U ||
-      config->sensors.rtd_click_spi_speed_hz > 5000000U) {
-    if (error != nullptr) {
-      *error = "invalid RTD Click configuration";
-    }
-    return false;
-  }
-  if (config->sensors.sample_temperature_source == "rtd_click_max31865" &&
-      !config->sensors.rtd_click_enabled) {
-    if (error != nullptr) {
-      *error = "sensor.rtd_click_enabled must be true for rtd_click_max31865";
-    }
-    return false;
-  }
-  if (config->sensors.sample_temperature_source == "daq132m_modbus" &&
-      !config->sensors.daq132m_enabled) {
-    if (error != nullptr) {
-      *error = "sensor.daq132m_enabled must be true for daq132m_modbus";
-    }
-    return false;
-  }
   if (config->sensors.sequent_rtd_stack < 0 ||
       config->sensors.sequent_rtd_stack > 7) {
     if (error != nullptr) {
@@ -903,28 +802,11 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
       return false;
     }
   }
-  if (config->sensors.rtd_click_enabled &&
-      (!claim_gpio(config->runtime.gpio_chip,
-                   config->sensors.rtd_click_cs_line,
-                   "sensor.rtd_click_cs_line") ||
-       !claim_gpio(config->runtime.gpio_chip,
-                   config->sensors.rtd_click_drdy_line,
-                   "sensor.rtd_click_drdy_line"))) {
-    return false;
-  }
   if (config->sensors.dps310_poll_ms <= 0 ||
       config->sensors.ads1115_poll_ms <= 0 ||
-      config->sensors.daq132m_poll_ms <= 0 ||
       config->sensors.stale_after_ms <= 0) {
     if (error != nullptr) *error = "sensor poll/stale intervals must be > 0";
     return false;
-  }
-  for (const std::size_t channel :
-       config->sensors.daq132m_enabled_channels) {
-    if (channel >= config->hardware.sample_count) {
-      if (error != nullptr) *error = "DAQ132M enabled channel out of range";
-      return false;
-    }
   }
   if (config->hal.status_led_enabled &&
       !claim_gpio(config->runtime.gpio_chip, config->hal.status_led_line,
