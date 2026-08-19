@@ -80,7 +80,6 @@ docs/            Architecture, protocol, configuration, and hardware docs
 ## Quick Start: Ground Station
 
 ```powershell
-cd D:\COATHEAL-flight-software\COATHEAL-flight-software
 cd ground-station
 py -3 -m venv .venv
 .\.venv\Scripts\Activate.ps1
@@ -103,9 +102,9 @@ cmake --build build --parallel
 On the Pi, migrate stale config and install the service:
 
 ```bash
-python3 scripts/hardware_setup.py plug-and-play \
+python3 scripts/hardware_setup.py migrate-config \
   --config config/onboard.local.ini \
-  --migrate-from config/onboard.ini \
+  --migrate-from config/onboard.local.ini \
   --yes
 ```
 
