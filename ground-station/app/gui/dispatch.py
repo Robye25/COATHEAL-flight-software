@@ -43,7 +43,7 @@ class TelemetryReceiver(QThread):
     pull_event         = pyqtSignal(object)  # PullEvent
     log_message        = pyqtSignal(str)
     connection_changed = pyqtSignal(bool, str)
-    status_changed     = pyqtSignal(str)  # "listening" | "connected" | "stale" | "searching"
+    status_changed     = pyqtSignal(str)  # "listening" | "connected" | "stale" | "searching" | "failed"
 
     # CSV v4: no humidity or box_temp_c; r0..r7 carry the Sequent RTD card's
     # per-channel PT100 element resistance, and are empty for channels the
@@ -140,6 +140,10 @@ class TelemetryReceiver(QThread):
                         self.log_message.emit("[telemetry] onboard disconnected")
         except Exception as exc:
             self.log_message.emit(f"[error] receiver fatal: {exc}")
+            # Distinct from "searching"/"stale" — the socket never bound
+            # (e.g. port already in use), so there is no receiver to find.
+            # MainWindow uses this to unstick the Start Telemetry button.
+            self.status_changed.emit("failed")
         finally:
             self._stop_flag.set()
 

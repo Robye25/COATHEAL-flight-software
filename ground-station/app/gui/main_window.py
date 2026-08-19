@@ -169,10 +169,10 @@ class MainWindow(QMainWindow):
         # Connection panel's button remains a user-visible trigger for the
         # case where auto-start failed (e.g. port already in use).
         self._on_start_telemetry(bind, tel_port, cmd_port, cmd_host)
-        # `_on_start_telemetry` above either found a receiver already
-        # running or just started one — either way the button should stop
-        # inviting a redundant click and read what actually happened.
-        self._connection.set_receiver_running(True)
+        # No special-casing needed here: `_on_receiver_status` below flips
+        # the Connection panel's button once the receiver actually reports
+        # "listening" (bind succeeded) or "failed" (it didn't) — the
+        # button reflects reality, not the mere act of calling .start().
 
         # ── restore geometry ──
         # ── firewall / network-profile auto-configure (Windows only) ──
@@ -226,8 +226,20 @@ class MainWindow(QMainWindow):
     def _on_receiver_status(self, state: str) -> None:
         self._connection.set_status(state)
         colors = {"listening": "#3498db", "connected": "#2ecc71",
-                  "stale": "#f39c12", "searching": "#f39c12"}
+                  "stale": "#f39c12", "searching": "#f39c12",
+                  "failed": "#e74c3c"}
         self._top.set_discovery(f"tel: {state}", colors.get(state, "#888"))
+        if state in ("listening", "connected"):
+            # Bind succeeded (or a peer is already talking to it) — the
+            # button's "running" claim is now backed by reality.
+            self._connection.set_receiver_running(True)
+        elif state == "failed":
+            # Bind never happened (e.g. port in use). Undo any optimistic
+            # "running" claim and drop the dead receiver so a retry (button
+            # click or another auto-start) isn't blocked by the
+            # already-running guard in `_on_start_telemetry`.
+            self._connection.set_receiver_running(False)
+            self._receiver = None
 
     def _on_priority_changed(self, p: int) -> None:
         if hasattr(self, "_beacon") and self._beacon is not None:
