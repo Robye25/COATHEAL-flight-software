@@ -11,7 +11,7 @@ from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QAbstractItemView, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
-    QListWidget, QListWidgetItem, QPushButton, QScrollArea, QSizePolicy, QTableWidget,
+    QListWidget, QListWidgetItem, QPushButton, QScrollArea, QTableWidget,
     QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
 )
 
@@ -44,14 +44,29 @@ class TopStatusStrip(QWidget):
         self._sess = QLabel("sess: —");    self._sess.setStyleSheet("font-family: monospace; font-size: 10pt; color: #888;")
         self._seq  = QLabel("seq: —");     self._seq.setStyleSheet("font-family: monospace; font-size: 10pt; color: #888;")
 
-        # sess/seq/link/disc are secondary/debug info (already dimmed,
-        # placed after the stretch) -- Ignored lets the layout shrink them
-        # below their natural text width instead of letting a long IP:port
-        # discovery string force the whole window wider than 1280px.
-        # MODE/PHASE/HEALTH (left of the stretch, safety-relevant) keep
-        # their normal size policy and are never clipped.
-        for _lbl in (self._link, self._sess, self._seq):
-            _lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        # `_link` is the live link-staleness readout ("LINK: STALE Δs") --
+        # safety-relevant, same protected tier as MODE/PHASE/HEALTH below.
+        # It gets NO shrink treatment: default size policy, natural
+        # minimumSizeHint, never clipped or hidden.
+        #
+        # `_sess`/`_seq`/`_disc` are genuinely secondary/debug info
+        # (already dimmed). They keep the default Preferred size policy
+        # (NOT Ignored -- an Ignored widget sharing a QHBoxLayout with a
+        # competing addStretch() gets driven to width 0 UNCONDITIONALLY,
+        # not just under pressure, which made them invisible at every
+        # window size, verified empirically). `setMinimumWidth(1)`
+        # overrides QLabel's minimumSizeHint floor (normally = full text
+        # width) with a 1px floor -- NOT 0: `QWidget.minimumSize()`
+        # defaults to QSize(0, 0), so `setMinimumWidth(0)` is
+        # indistinguishable from never having called it at all and the
+        # layout silently falls back to the full-text-width floor again
+        # (verified empirically -- 0 is a no-op, 1 is not, and visually
+        # identical). With a real (if tiny) explicit minimum, the layout
+        # gives these labels their full natural width whenever there's
+        # room and only compresses them under genuine pressure (e.g. a
+        # long IP:port discovery string at a narrow window width).
+        for _lbl in (self._sess, self._seq):
+            _lbl.setMinimumWidth(1)
 
         # Aggregate health dot: green only when every OK/FAIL flag present
         # in the current packet is OK; red if any is FAIL; gray before the
@@ -73,7 +88,7 @@ class TopStatusStrip(QWidget):
 
         self._disc = QLabel("disc: —"); self._disc.setStyleSheet(
             "font-family: monospace; font-size: 10pt; color: #888;")
-        self._disc.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self._disc.setMinimumWidth(1)
         lay.addWidget(self._disc)
 
     def set_discovery(self, text: str, color: str = "#888") -> None:

@@ -294,20 +294,85 @@ class GuiUiUxTests(unittest.TestCase):
         finally:
             win.close()
 
-    # MUTATION: verified two ways.
-    # (a) Reverting just the two dock `setMinimumWidth()` calls in
-    #     main_window.py (300->360, 280->320) does NOT fail this test on
-    #     its own -- the content-level fixes below (b) already leave
-    #     enough margin under 1280px. This is expected: relaxing the
-    #     dock minimums alone was insufficient (the docks' *content*
-    #     already had a wider natural minimum than either the old or new
-    #     explicit dock minimum), which is exactly why (b) exists.
-    # (b) In panels_info.py's TopStatusStrip, changing
-    #     `for _lbl in (self._link, self._sess, self._seq):` to
-    #     `for _lbl in ():` (dropping the Ignored size policy that lets
-    #     the secondary link/sess/seq labels shrink below their natural
-    #     text width) reliably fails this test at the 1280x720 iteration
-    #     with minimumSizeHint width 1317 > 1280.
+    # MUTATION: re-verified after the fix-round-1 rework (Ignored ->
+    # setMinimumWidth(1) on _sess/_seq/_disc; _link left unprotected by
+    # any shrink treatment). Two prior candidate mutations were tried and
+    # found NOT strong enough on their own (both honestly re-measured,
+    # not assumed): (a) reverting the two dock `setMinimumWidth()` calls
+    # (300->360, 280->320) alone -- min size stays under 1280 (headroom
+    # from the content-level fixes). (b) reverting PreflightPanel's
+    # `setWordWrap(True)` alone -- min size hint 1259 < 1280, still
+    # passes. The real discriminator: in panels_info.py's
+    # TopStatusStrip, changing `for _lbl in (self._sess, self._seq):` to
+    # `for _lbl in ():` (dropping the `setMinimumWidth(1)` override, so
+    # _sess/_seq fall back to their full-text-width floor and can never
+    # compress) reliably fails this test at the 1280x720 iteration --
+    # window resizes to 1318x720 instead (minimumSizeHint width 1318 >
+    # 1280).
+
+    # ── 9. LINK staleness readout stays visible under pressure ──
+    def test_top_status_link_stays_visible_at_1280x720(self) -> None:
+        """`_link` is safety-relevant (same tier as MODE/PHASE/HEALTH) and
+        must never be clipped to zero width, even at the tightest
+        supported window size. Regression test for a fix-round-1 bug
+        where an `Ignored` size policy shared with a competing
+        `addStretch()` drove `_link` to width 0 UNCONDITIONALLY, at every
+        window size -- not just under pressure."""
+        win = self._make_window(44210, 45210, "linkvisible")
+        try:
+            win.show()
+            self._app.processEvents()
+            win.resize(1280, 720)
+            self._app.processEvents()
+            top = win._top
+            top._refresh_link()  # force a real staleness readout, not the ctor placeholder
+            self.assertGreater(
+                top._link.width(), 0,
+                "the LINK staleness readout must stay visible (nonzero width) at 1280x720",
+            )
+            self.assertEqual(
+                top._link.text(), "LINK: waiting",
+                "no packet has been fed -- must show the real staleness readout, "
+                "not the constructor's 'LINK: —' placeholder",
+            )
+            win.hide()
+        finally:
+            win.close()
+
+    # MUTATION: re-apply the reverted `Ignored` policy to `_link`
+    # (`self._link.setSizePolicy(QSizePolicy.Policy.Ignored, ...)`
+    # alongside the others) and confirm test_top_status_link_stays_visible_at_1280x720
+    # fails naming the "must stay visible (nonzero width)" assertion
+    # (width becomes 0).
+
+    # ── 10. sess/seq/disc are visible (not just non-clipped) when roomy ──
+    def test_top_status_secondary_labels_visible_when_roomy(self) -> None:
+        """_sess/_seq/_disc must render at their full natural width when
+        there's plenty of room (1920x1080) -- they should only compress
+        under genuine pressure, not be squashed unconditionally the way
+        `Ignored` squashed them in fix-round-1."""
+        win = self._make_window(44211, 45211, "secondaryvisible")
+        try:
+            win.show()
+            self._app.processEvents()
+            win.resize(1920, 1080)
+            self._app.processEvents()
+            top = win._top
+            for lbl, name in ((top._sess, "sess"), (top._seq, "seq"), (top._disc, "disc")):
+                self.assertGreater(
+                    lbl.width(), 0, f"{name} label should be visible (nonzero width) at 1920x1080"
+                )
+            win.hide()
+        finally:
+            win.close()
+
+    # MUTATION: change `for _lbl in (self._sess, self._seq):` to
+    # `for _lbl in ():` in panels_info.py (drop the setMinimumWidth(1)
+    # override) and confirm test_top_status_secondary_labels_visible_when_roomy
+    # still passes for sess/seq (Preferred policy alone still renders
+    # full width when roomy) -- then separately reapply `Ignored` to
+    # `self._disc` and confirm the disc assertion fails naming "disc"
+    # (width becomes 0 even at 1920x1080).
 
 
 if __name__ == "__main__":
