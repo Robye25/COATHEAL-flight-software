@@ -1,8 +1,8 @@
 # COATHEAL Rev C Component Configuration and Bring-Up
 
 This is the authoritative wiring, configuration, and commissioning procedure
-for the Rev C flight stack. Do not energize heaters or motor power until the
-logic-only checks in this document pass.
+for the schematic v3 flight stack. Do not energize heaters or motor power
+until the logic-only checks in this document pass.
 
 For a complete start-to-finish operator procedure, including safe GPIO changes,
 service installation, normal operation, and fault recovery, use
@@ -10,10 +10,14 @@ service installation, normal operation, and fault recovery, use
 
 Sample temperature is acquired by one Sequent Microsystems 8-channel RTD HAT
 over I2C, replacing the retired RTD Click (MAX31865/SPI) and DAQ-132M
-(RS485/Modbus) paths. Use
+(RS485/Modbus) paths **for temperature**. Use
 [Sequent RTD Bench Bring-Up](sequent-rtd-bring-up.md) for register-map
-verification, calibration, and other RTD-specific bench procedures. Config
-migration and automated Pi checks remain in
+verification, calibration, and other RTD-specific bench procedures — that
+same document also carries the bring-up gates for the v3 MAX31865 dual-click
+**sample-resistance** instrument (section 9), an unrelated device from the
+retired RTD Click. Stepper bring-up (TMC5160, SPI-only) is
+[TMC5160 Commissioning](tmc5160-commissioning.md). Config migration and
+automated Pi checks remain in
 [hardware_setup.py](../scripts/hardware_setup.py).
 
 ## 1. Operating Model
@@ -23,7 +27,7 @@ migration and automated Pi checks remain in
 - Sensor polling runs independently from the 1 Hz telemetry/control loop.
 - A failed sensor retains its last good value with `valid=0` and an age.
 - A heater is always off when its mapped PT100 is invalid or stale.
-- Motors remain disabled until TMC2240 SPI readback succeeds.
+- Motors remain disabled until TMC5160 SPI readback succeeds.
 - With no limit switches, relative jog is allowed before zeroing. Absolute
   moves and bend sequences require `SET_POSITION_ZERO`.
 - Simulation is only enabled by `config/onboard.debug.ini`.
@@ -36,46 +40,53 @@ migration and automated Pi checks remain in
    the Pi or any sensor.
 3. Power the Pi from one 5 V source only. Do not simultaneously back-power its
    5 V header and USB-C input.
-4. Join Pi, Sequent RTD HAT, ADS1115, DPS310, MOSFET boards, TMC2240 VIO, and
+4. Join Pi, Sequent RTD HAT, ADS1115, DPS310, MOSFET boards, TMC5160 VIO, and
    regulator signal grounds.
 5. Route motor and heater return currents separately from sensor ground wiring.
 6. Fit an external pull-down on every active-high `HEAT_EN` line and an
-   external pull-up on every active-low TMC2240 `EN` line.
-7. Fit heatsinks to both TMC2240 carriers before motor power is applied.
+   external pull-up on every active-low TMC5160 `EN` line.
+7. Fit heatsinks to both TMC5160 carriers before motor power is applied.
 8. Power each polyimide heater from a fused, current-limited rail matching its
    rated voltage. The component list does not define a universal heater
-   voltage; do not assume 12 V without checking the heater label/datasheet.
+   voltage; do not assume 14.4 V without checking the heater label/datasheet.
 
 ## 3. Raspberry Pi Pin Map
 
-Configuration uses BCM GPIO numbers, not physical header numbers.
+Configuration uses BCM GPIO numbers, not physical header numbers. This is
+the v3 GPIO map — see [hardware.md](hardware.md#final-pin-map) for the
+authoritative table including reserved lines.
 
-| Function | Physical pin | BCM | Configuration |
-|---|---:|---:|---|
-| I2C SDA | 3 | 2 | fixed I2C-1 |
-| I2C SCL | 5 | 3 | fixed I2C-1 |
-| Heater H0 | 11 | 17 | `heater.output_lines[0]` |
-| Heater H1 | 12 | 18 | `heater.output_lines[1]` |
-| Heater H2 | 13 | 27 | `heater.output_lines[2]` |
-| Heater H3 | 29 | 5 | `heater.output_lines[3]` |
-| Heater H4 | 31 | 6 | `heater.output_lines[4]` |
-| Heater H5 | 33 | 13 | `heater.output_lines[5]` |
-| SPI MOSI | 19 | 10 | SPI0 |
-| SPI MISO | 21 | 9 | SPI0 |
-| SPI SCLK | 23 | 11 | SPI0 |
-| Motor 0 CS | 15 | 22 | `motor0.cs_line` |
-| Motor 0 EN | 32 | 12 | `motor0.enable_line` |
-| Motor 0 STEP | 35 | 19 | `motor0.step_line` |
-| Motor 0 DIR | 37 | 26 | `motor0.dir_line` |
-| Motor 1 CS | 16 | 23 | `motor1.cs_line` |
-| Motor 1 STEP | 18 | 24 | `motor1.step_line` |
-| Motor 1 DIR | 38 | 20 | `motor1.dir_line` |
-| Motor 1 EN | 40 | 21 | `motor1.enable_line` |
+| Function | BCM | Configuration |
+|---|---:|---|
+| I2C SDA | 2 | fixed I2C-1 |
+| I2C SCL | 3 | fixed I2C-1 |
+| Heater H1 | 19 | `heater.output_lines[0]` |
+| Heater H2 | 13 | `heater.output_lines[1]` |
+| Heater H3 | 6 | `heater.output_lines[2]` |
+| Heater H4 | 5 | `heater.output_lines[3]` |
+| Heater H5 | 24 | `heater.output_lines[4]` |
+| Heater H6 | 23 | `heater.output_lines[5]` |
+| SPI MOSI | 10 | fixed SPI0 |
+| SPI MISO | 9 | fixed SPI0 |
+| SPI SCLK | 11 | fixed SPI0 |
+| SPI0 CE1 (hard CS) | 7 | MAX31865 click 1/SAMPLE1, `/dev/spidev0.1`, reserved |
+| SPI0 CE0 (hard CS) | 8 | MAX31865 click 2/SAMPLE2, `/dev/spidev0.0`, reserved |
+| Motor 0 CS (soft) | 22 | `motor0.cs_line` |
+| Motor 0 EN | 20 | `motor0.enable_line` |
+| Motor 1 CS (soft) | 27 | `motor1.cs_line` |
+| Motor 1 EN | 21 | `motor1.enable_line` |
+| Sequent HAT UART TX / RX | 14 / 15 | reserved, unused by flight software |
+| Sequent HAT RS485 DIR | 17 | reserved, unused by flight software |
+| Sequent HAT INTN | 26 | reserved, unused by flight software |
 
-The Sequent RTD HAT is I2C-only and consumes no Pi header GPIO. BCM 16 and 25
-(formerly RTD Click CS and DRDY) are freed and deliberately unassigned; see
+**There is no STEP or DIR GPIO — the TMC5160 motors are SPI-only.** The
+Sequent RTD HAT itself is I2C-only and consumes no Pi header GPIO beyond the
+four reserved lines above (present on the stacked HAT, unused by flight
+software). BCM 16 and 25 (formerly RTD Click CS and DRDY, from the retired
+pre-v3 temperature path) are freed and deliberately unassigned; see
 [Sequent RTD Bench Bring-Up](sequent-rtd-bring-up.md#7-freed-pins).
-Status LEDs are disabled because BCM 17 and 27 are heater outputs.
+Status LEDs are disabled; their default line numbers (17, 27) now belong to
+the Sequent HAT's RS485_DIR and motor 1's chip-select respectively.
 
 ## 4. Pi Interface Setup
 
@@ -101,8 +112,12 @@ Expected I2C addresses are DPS310 `0x77` or `0x76`, ADS1115 `0x48` through
 DPS310 and ADS1115 boards must use 3.3 V so their I2C pull-ups remain
 Pi-safe.
 
-Do not install `dtoverlay=spi0-2cs`. Both TMC2240 carriers share
-`/dev/spidev0.0`; the software drives CS on BCM 22 and BCM 23.
+Do not install `dtoverlay=spi0-2cs`. Both TMC5160 carriers share
+`/dev/spidev0.0` with software CS on BCM 22 and BCM 27 (`SPI_NO_CS` —
+mandatory because SPI0's native CE0/CE1 are wired to the MAX31865
+sample-resistance clicks, not the motors). See
+[TMC5160 Commissioning §4](tmc5160-commissioning.md#4-spi-topology--four-devices-one-bus)
+for the full four-device SPI0 topology.
 
 ## 5. Guided Configuration
 
@@ -152,7 +167,6 @@ sensor.sequent_rtd_expect_sensor_type=pt100
 sensor.sequent_rtd_resistance_min_ohm=60.0
 sensor.sequent_rtd_resistance_max_ohm=390.0
 sensor.sequent_rtd_crosscheck_tol_c=2.0
-sensor.resistance_source=sequent_rtd
 ```
 
 Check it:
@@ -172,6 +186,45 @@ The register offsets are derived from vendor source, not measured, and that
 document is the authoritative bench procedure for confirming them, along with
 burst-read behavior, diagnostic byte interpretation, sensor-type
 verification, and bench-only calibration.
+
+## 6b. MAX31865 Sample-Resistance Clicks
+
+Schematic v3 also wires two MikroE RTD Click boards (MAX31865), each 4-wire
+Kelvin to one coating specimen — a physically separate instrument from the
+RTD HAT above, measuring specimen resistance directly rather than PT100
+element resistance. They sit on SPI0's **native hardware** chip-selects, not
+GPIO: CE1 (BCM 07) is click 1/SAMPLE1 on `/dev/spidev0.1`; CE0 (BCM 08) is
+click 2/SAMPLE2 on `/dev/spidev0.0`. Do not cross the wiring — the CE
+numbering and the SAMPLE numbering intentionally do not match (CE1->SAMPLE1
+but CE0->SAMPLE2, `spidev0.0`).
+
+```ini
+sensor.max31865_reference_ohm=470.0
+sensor.max31865_poll_ms=1000
+sensor.max31865_sample_indices=0,4
+sensor.resistance_source=max31865_click
+```
+
+Check it:
+
+```bash
+printf 'CHECK MAX31865\n' | nc 127.0.0.1 5000
+```
+
+Expect `max31865_1=OK` and `max31865_2=OK` in the reply. A saturated
+(out-of-range) specimen still reports OK here — saturation is a valid
+measurement of an out-of-range specimen, not a bus failure; the affected
+sample's `RESISTANCE=` slot simply does not advance.
+
+**Before trusting the reference-resistor default or any reading, complete
+gates 4-5** in
+[Sequent RTD Bench Bring-Up §9](sequent-rtd-bring-up.md#9-max31865-sample-resistance-click-bring-up-blocking-gates) —
+the populated reference resistor (470 vs 400 Ω) must be confirmed against
+the actual board, and the coating resistance range is unknown by design
+until characterised at the bench. `sensor.max31865_sample_indices` (which two
+of the eight sample slots the clicks feed) also defaults to an
+owner-flagged placeholder (`0,4`) pending the real specimen mapping — see
+the same document, section 10.
 
 ## 7. DPS310, ADS1115, and GUVA-S12SD
 
@@ -194,55 +247,71 @@ connect the GUVA analog output directly to a digital Pi GPIO.
 
 ## 8. Heater Outputs
 
-Two four-channel EKM014 boards provide six used channels. Connect H0..H5 in
-the pin-table order. The final mapping is:
+Two four-channel EKM014 boards provide six used channels. Connect H1..H6 in
+the pin-table order. The final v3 mapping is:
 
 ```ini
-heater.output_lines=17,18,27,5,6,13
+heater.output_lines=19,13,6,5,24,23
 heater.temperature_channels=0,1,2,3,4,5
 heater.active_high=true
-heater.pwm_frequency_hz=10.0
+heater.pwm_frequency_hz=1.0
+power.max_active_heaters=3
+power.max_thermal_w=15.0
 ```
 
 Test each output with an LED or meter before attaching heaters. A missing GPIO
 disables only that heater channel. Any invalid mapped PT100 forces duty to
-zero, including manual-duty commands.
+zero, including manual-duty commands. `power.max_active_heaters=3` is an
+owner power-budget rule — the scheduler never energises a fourth heater
+regardless of demand; see
+[TMC5160 Commissioning §8, gate 7](tmc5160-commissioning.md#gate-7--max-3-heaters-ceiling-under-load)
+for the bench observation of this ceiling under load, and
+[TMC5160 Commissioning §8, gate 6](tmc5160-commissioning.md#gate-6--heater-map-walk-blocking)
+for the GPIO↔heater↔sample walk.
 
-## 9. TMC2240 and Motors
+## 9. TMC5160 and Motors
 
-For each TMC2240 carrier:
+**Motion is SPI-only. There is no STEP/DIR wiring on this schematic.** For
+each TMC5160 (QHV5160 v2) carrier:
 
-1. Select SPI plus STEP/DIR mode according to the exact carrier revision.
-2. Connect VIO to 3.3 V and VM to the fused 12 V motor rail.
-3. Follow the carrier documentation for CLK and IREF; do not infer jumper
-   positions from a different driver family.
-4. Connect shared MOSI, MISO, and SCLK; use separate CS lines.
-5. Verify motor coil pairs with an ohmmeter. Connect one coil to A1/A2 and the
+1. Connect VIO to 3.3 V and VM to the fused 12 V motor rail.
+2. Follow the carrier documentation for any mode straps; do not infer jumper
+   positions from the retired TMC2240 carrier family.
+3. Connect shared MOSI, MISO, and SCLK; use separate software CS lines
+   (BCM 22 for motor 0, BCM 27 for motor 1).
+4. Verify motor coil pairs with an ohmmeter. Connect one coil to A1/A2 and the
    other to B1/B2. Never connect/disconnect a motor while VM is powered.
-6. Confirm the carrier's IREF/full-scale-current hardware before enabling.
-   TMC2240 uses integrated current sensing, not phase sense resistors.
+5. **Read the actual sense-resistor value off each board before trusting the
+   current model** — `motor*.sense_resistor_ohm=0.075` is an assumed typical
+   value, not a measured one. The TMC5160 derives current continuously from
+   GLOBALSCALER/IRUN and this resistor value; it has no TMC2240-style fixed
+   peak-current range.
 
 Commissioning configuration:
 
 ```ini
 motor0.run_current_a_rms=0.8
 motor1.run_current_a_rms=0.8
-motor0.current_range_a_peak=0
-motor1.current_range_a_peak=0
-motor0.pulse_high_us=3
-motor1.pulse_high_us=3
+motor0.sense_resistor_ohm=0.075
+motor1.sense_resistor_ohm=0.075
 motor0.retry_ms=2000
 motor1.retry_ms=2000
 stepper.enable_on_boot=false
 pull.microstep=4
 ```
 
-The onboard software performs pipelined IOIN readback, requires TMC2240
-version `0x40`, verifies configured registers, and reads GSTAT/DRV_STATUS. EN remains
-inactive if verification fails.
+The onboard software performs pipelined IOIN readback, requires TMC5160
+`VERSION=0x30`, and verifies the registers it configures (GCONF and CHOPCONF
+are read back and compared after every `Reinitialize()`). EN remains inactive
+if verification fails. GSTAT (`0x01`) and DRV_STATUS (`0x6F`) are **not** read
+by the flight software — they are diagnostics-only registers, read by
+`scripts/spi_probe.py` (`read_tmc5160_set`) when you run the bench probe.
+`motor*.current_range_a_peak` and `motor*.pulse_high_us` no longer exist as
+keys.
 
-See [TMC2240 pin configuration and commissioning](tmc2240-pin-configuration-and-commissioning.md)
-before applying motor power.
+See [TMC5160 Commissioning](tmc5160-commissioning.md) before applying motor
+power — it also covers the four-device SPI0 topology shared with the
+MAX31865 clicks (section 6b above) and the `SPI_NO_CS` requirement.
 
 With the mechanism unloaded and clear:
 

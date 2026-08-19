@@ -48,10 +48,11 @@ void TestRevCDefaults() {
   assert(cfg.transition.float_to_descent_mbar == 300.0);
   assert(cfg.transition.descent_to_landed_mbar == 800.0);
   assert(cfg.transition.debounce_samples == 5);
-  // Rev C power defaults: 5 W heaters, 20 W combined ceiling, 4 active.
+  // v3 power defaults: 5 W heaters, 15 W combined ceiling, owner rule caps
+  // simultaneous energization at 3.
   assert(cfg.power.heater_nominal_w == 5.0);
-  assert(cfg.power.max_thermal_w == 20.0);
-  assert(cfg.power.max_active_heaters == 4);
+  assert(cfg.power.max_thermal_w == 15.0);
+  assert(cfg.power.max_active_heaters == 3);
 }
 
 void TestDutyVectorSizeIsSix() {

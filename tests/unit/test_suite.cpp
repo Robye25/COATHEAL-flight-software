@@ -17,7 +17,6 @@
 #include "coatheal/telemetry_client.hpp"
 #include "coatheal/telemetry_queue.hpp"
 #include "coatheal/thermal_controller.hpp"
-#include "coatheal/tmc2240_driver.hpp"
 
 namespace {
 
@@ -33,25 +32,6 @@ void TestPidBoundsAndAntiWindup() {
   pid.Reset();
   const double settle = pid.Update(0.0, 0.0, 0.1);
   assert(std::fabs(settle) < 1e-6);
-}
-
-void TestTmc2240CurrentConfiguration() {
-  coatheal::Tmc2240CurrentSettings settings;
-  assert(coatheal::Tmc2240Driver::CalculateCurrentSettings(
-      0.8, 0.30, 0.0, &settings));
-  assert(settings.range_code == 1U);
-  assert(std::fabs(settings.range_a_peak - 2.0) < 1e-9);
-  assert(settings.global_scaler == 145U);
-  assert(((settings.ihold_irun >> 8U) & 0x1FU) == 31U);
-  assert((settings.ihold_irun & 0x1FU) == 9U);
-
-  assert(!coatheal::Tmc2240Driver::CalculateCurrentSettings(
-      0.8, 0.30, 1.0, &settings));
-  assert(!coatheal::Tmc2240Driver::CalculateCurrentSettings(
-      2.2, 0.30, 0.0, &settings));
-  assert(coatheal::Tmc2240Driver::CalculateCurrentSettings(
-      1.0 / std::sqrt(2.0), 0.30, 1.0, &settings));
-  assert(settings.global_scaler == 0U);
 }
 
 void TestHeaterSchedulerCap() {
@@ -372,8 +352,8 @@ std::string WriteTempConfig(const std::string& extra = "") {
   out << "transition.ascent_to_float_mbar=100\n";
   out << "transition.float_to_descent_mbar=300\n";
   out << "transition.descent_to_landed_mbar=800\n";
-  out << "power.max_active_heaters=4\n";
-  out << "power.max_thermal_w=20\n";
+  out << "power.max_active_heaters=3\n";
+  out << "power.max_thermal_w=15\n";
   out << "power.max_system_w=48.23\n";
   out << "power.heater_nominal_w=5\n";
   out << "power.energy_budget_wh=130.0\n";
@@ -394,8 +374,11 @@ std::string WriteTempConfig(const std::string& extra = "") {
   out << "sensor.uv_ads1115_channel=0\n";
   out << "sensor.uv_full_scale_v=4.096\n";
   out << "sensor.resistance_source=disabled\n";
-  out << "heater.output_lines=17,18,27,5,6,13\n";
-  out << "heater.pwm_frequency_hz=10.0\n";
+  out << "sensor.max31865_reference_ohm=470.0\n";
+  out << "sensor.max31865_poll_ms=1000\n";
+  out << "sensor.max31865_sample_indices=0,4\n";
+  out << "heater.output_lines=19,13,6,5,24,23\n";
+  out << "heater.pwm_frequency_hz=1.0\n";
   out << "heater.active_high=true\n";
   out << "heater.debug_max_duty=0.25\n";
   out << "heater.debug_max_seconds=10.0\n";
@@ -406,31 +389,27 @@ std::string WriteTempConfig(const std::string& extra = "") {
   out << "pull.microstep=4\n";
   out << "pull.travel_full_steps=200\n";
   out << "pull.hold_s=5.0\n";
-  out << "motor0.driver=tmc2240\n";
+  out << "motor0.driver=tmc5160\n";
   out << "motor0.gpio_chip=/dev/gpiochip0\n";
   out << "motor0.spi_device=/dev/spidev0.0\n";
   out << "motor0.cs_line=22\n";
-  out << "motor0.step_line=19\n";
-  out << "motor0.dir_line=26\n";
-  out << "motor0.enable_line=12\n";
+  out << "motor0.enable_line=20\n";
   out << "motor0.run_current_a_rms=2.0\n";
-  out << "motor0.current_range_a_peak=0\n";
   out << "motor0.hold_current_frac=0.30\n";
   out << "motor0.stealth_chop=true\n";
   out << "motor0.spi_speed_hz=1000000\n";
+  out << "motor0.sense_resistor_ohm=0.075\n";
   out << "motor0.samples=0,1,2,3\n";
-  out << "motor1.driver=tmc2240\n";
+  out << "motor1.driver=tmc5160\n";
   out << "motor1.gpio_chip=/dev/gpiochip0\n";
   out << "motor1.spi_device=/dev/spidev0.0\n";
-  out << "motor1.cs_line=23\n";
-  out << "motor1.step_line=24\n";
-  out << "motor1.dir_line=20\n";
+  out << "motor1.cs_line=27\n";
   out << "motor1.enable_line=21\n";
   out << "motor1.run_current_a_rms=2.0\n";
-  out << "motor1.current_range_a_peak=0\n";
   out << "motor1.hold_current_frac=0.30\n";
   out << "motor1.stealth_chop=true\n";
   out << "motor1.spi_speed_hz=1000000\n";
+  out << "motor1.sense_resistor_ohm=0.075\n";
   out << "motor1.samples=4,5,6,7\n";
   out << extra;
   out.close();
@@ -461,37 +440,40 @@ void TestConfigParsesReliabilityFields() {
   assert(cfg.hardware.heater_count == 6U);
   assert(cfg.hardware.electronics_heater_index == static_cast<std::size_t>(-1));
   assert(std::fabs(cfg.power.heater_nominal_w - 5.0) < 1e-9);
-  assert(std::fabs(cfg.power.max_thermal_w - 20.0) < 1e-9);
+  assert(std::fabs(cfg.power.max_thermal_w - 15.0) < 1e-9);
+  assert(cfg.power.max_active_heaters == 3U);
   assert(std::fabs(cfg.heater_safety.target_min_c - 0.0) < 1e-9);
   assert(std::fabs(cfg.heater_safety.target_max_c - 80.0) < 1e-9);
   assert(cfg.sensors.dps310_i2c_addr == 0x77);
   assert(cfg.sensors.ads1115_i2c_addr == 0x48);
   assert(cfg.sensors.uv_ads1115_channel == 0);
   assert(cfg.sensors.resistance_source == "disabled");
+  assert(std::fabs(cfg.sensors.max31865_reference_ohm - 470.0) < 1e-9);
+  assert(cfg.sensors.max31865_poll_ms == 1000);
+  assert(cfg.sensors.max31865_sample_indices ==
+        std::vector<std::size_t>({0, 4}));
   assert(cfg.heaters.output_lines.size() == 6U);
-  assert(cfg.heaters.output_lines[0] == 17U);
-  assert(cfg.heaters.output_lines[5] == 13U);
-  assert(std::fabs(cfg.heaters.pwm_frequency_hz - 10.0) < 1e-9);
+  assert(cfg.heaters.output_lines[0] == 19U);
+  assert(cfg.heaters.output_lines[5] == 23U);
+  assert(std::fabs(cfg.heaters.pwm_frequency_hz - 1.0) < 1e-9);
   assert(cfg.heaters.active_high);
   assert(std::fabs(cfg.heaters.debug_max_duty - 0.25) < 1e-9);
   assert(std::fabs(cfg.heaters.debug_max_seconds - 10.0) < 1e-9);
   assert(cfg.pull.microstep == 4);
   assert(cfg.pull.travel_full_steps == 200);
-  assert(cfg.motors[0].driver == "tmc2240");
+  assert(cfg.motors[0].driver == "tmc5160");
   assert(cfg.motors[0].gpio_chip == "/dev/gpiochip0");
   assert(cfg.motors[0].spi_device == "/dev/spidev0.0");
   assert(cfg.motors[0].cs_line == 22U);
-  assert(cfg.motors[0].step_line == 19U);
-  assert(cfg.motors[0].dir_line == 26U);
-  assert(cfg.motors[0].enable_line == 12U);
+  assert(cfg.motors[0].enable_line == 20U);
+  assert(std::fabs(cfg.motors[0].sense_resistor_ohm - 0.075) < 1e-9);
   assert(cfg.motors[0].samples == std::vector<std::size_t>({0, 1, 2, 3}));
-  assert(cfg.motors[1].driver == "tmc2240");
+  assert(cfg.motors[1].driver == "tmc5160");
   assert(cfg.motors[1].gpio_chip == "/dev/gpiochip0");
   assert(cfg.motors[1].spi_device == "/dev/spidev0.0");
-  assert(cfg.motors[1].cs_line == 23U);
-  assert(cfg.motors[1].step_line == 24U);
-  assert(cfg.motors[1].dir_line == 20U);
+  assert(cfg.motors[1].cs_line == 27U);
   assert(cfg.motors[1].enable_line == 21U);
+  assert(std::fabs(cfg.motors[1].sense_resistor_ohm - 0.075) < 1e-9);
   assert(cfg.motors[1].samples == std::vector<std::size_t>({4, 5, 6, 7}));
 
   std::error_code ec;
@@ -502,7 +484,10 @@ void TestConfigRejectsGpioCollisions() {
   const std::filesystem::path cfg_path =
       std::filesystem::temp_directory_path() / "coatheal_gpio_collision.ini";
   std::ofstream out(cfg_path);
-  out << "heater.output_lines=17,18,27,5,6,12\n";
+  // Last entry (20) deliberately collides with the default motor0.enable_line
+  // (BCM 20, see OnboardConfig()); the other five are the real v3 heater
+  // lines and must not themselves collide with anything reserved.
+  out << "heater.output_lines=19,13,6,5,24,20\n";
   out.close();
 
   coatheal::OnboardConfig cfg;
@@ -510,10 +495,146 @@ void TestConfigRejectsGpioCollisions() {
   assert(!coatheal::LoadConfigFromIni(cfg_path.string(), &cfg, &error));
   // Robust to the configured chip path (e.g. "/dev/gpiochip0") rather than
   // asserting the old hardcoded "BCM GPIO" phrasing the message used to have.
-  assert(error.find("line 12 assigned to both") != std::string::npos);
+  assert(error.find("line 20 assigned to both") != std::string::npos);
+  assert(error.find("motor0.enable_line") != std::string::npos);
 
   std::error_code ec;
   std::filesystem::remove(cfg_path, ec);
+}
+
+void TestConfigRejectsReservedGpioCollisions() {
+  // v3 reserved lines (Sequent RTD HAT + hardware SPI0 chip-selects) must
+  // never be claimable by a heater or motor. Six-entry list (matches the
+  // default hardware.heater_count=6) so the count-vs-heater_count check
+  // passes and the GPIO claim check is actually reached.
+  const std::filesystem::path cfg_path =
+      std::filesystem::temp_directory_path() / "coatheal_reserved_gpio_collision.ini";
+  std::ofstream out(cfg_path);
+  out << "heater.output_lines=17,13,6,5,24,23\n";
+  out.close();
+
+  coatheal::OnboardConfig cfg;
+  std::string error;
+  assert(!coatheal::LoadConfigFromIni(cfg_path.string(), &cfg, &error));
+  assert(error.find("sequent_hat") != std::string::npos);
+
+  std::error_code ec;
+  std::filesystem::remove(cfg_path, ec);
+}
+
+void TestConfigRejectsRetiredMotorKeys() {
+  // tmc2240 is a retired driver identity: the error must name the
+  // retirement, not just reject the value generically (a config still on
+  // the old driver should tell the operator what to change it to).
+  {
+    const std::string path = WriteTempConfig("motor0.driver=tmc2240\n");
+    coatheal::OnboardConfig cfg;
+    std::string error;
+    assert(!coatheal::LoadConfigFromIni(path, &cfg, &error));
+    assert(error.find("retired") != std::string::npos);
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+  }
+  // step_line/dir_line/pulse_high_us no longer have parse branches, so a
+  // stale INI carrying one must fall into the "unknown motor config key"
+  // path (not the generic top-level "unknown config key" path), guarding
+  // any field deployment still on a pre-v3 INI.
+  {
+    const std::string path = WriteTempConfig("motor0.step_line=19\n");
+    coatheal::OnboardConfig cfg;
+    std::string error;
+    assert(!coatheal::LoadConfigFromIni(path, &cfg, &error));
+    assert(error.find("unknown motor config key") != std::string::npos);
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+  }
+  // sense_resistor_ohm must be validated (0, 1) exclusive; 0 is invalid.
+  {
+    const std::string path = WriteTempConfig("motor0.sense_resistor_ohm=0\n");
+    coatheal::OnboardConfig cfg;
+    std::string error;
+    assert(!coatheal::LoadConfigFromIni(path, &cfg, &error));
+    assert(error.find("invalid motor0 configuration") != std::string::npos);
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+  }
+  // current_range_a_peak (the retired TMC2240 range-select model) no
+  // longer has a parse branch either, same treatment as step_line above.
+  {
+    const std::string path =
+        WriteTempConfig("motor0.current_range_a_peak=0\n");
+    coatheal::OnboardConfig cfg;
+    std::string error;
+    assert(!coatheal::LoadConfigFromIni(path, &cfg, &error));
+    assert(error.find("unknown motor config key") != std::string::npos);
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+  }
+}
+
+void TestConfigRejectsOvercurrentCeiling() {
+  // TMC5160 hardware ceiling: at the default sense_resistor_ohm=0.075, the
+  // sense resistor's maximum deliverable current is 0.325/0.075 = 4.3333
+  // A_peak, i.e. 4.3333/sqrt(2) = 3.0641 A_rms. 3.08 A_rms sits just above
+  // that (3.08*sqrt(2) = 4.3558 A_peak > 4.3333) while staying under the
+  // *separate* flat (0, 3.1] ceiling -- deliberately chosen so this test
+  // isolates the sense-resistor-derived rule: deleting only that rule
+  // (leaving the flat bound in place) must make this assertion fail, since
+  // 3.08 alone would then load successfully.
+  const std::string path = WriteTempConfig("motor0.run_current_a_rms=3.08\n");
+  coatheal::OnboardConfig cfg;
+  std::string error;
+  assert(!coatheal::LoadConfigFromIni(path, &cfg, &error));
+  assert(error.find(
+             "exceeds the sense resistor's deliverable current ceiling") !=
+         std::string::npos);
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+}
+
+void TestConfigRejectsFlatCurrentBound() {
+  // Isolates the flat (0, 3.1] absolute ceiling from the sense-resistor
+  // ceiling above: with sense_resistor_ohm=0.05 the sense-resistor ceiling
+  // is 0.325/0.05 = 6.5 A_peak, i.e. 6.5/sqrt(2) = 4.5962 A_rms.
+  // run_current_a_rms=3.5 is well under that (3.5*sqrt(2) = 4.9497 <
+  // 6.5 A_peak, so the sense-resistor rule does NOT fire) but exceeds the
+  // flat 3.1 bound -- so this test can only pass because the flat-bound
+  // rule specifically fired. Deleting only that rule (leaving the
+  // sense-resistor ceiling in place) must make this assertion fail, since
+  // 3.5/0.05 alone would then load successfully.
+  const std::string path = WriteTempConfig(
+      "motor0.run_current_a_rms=3.5\n"
+      "motor0.sense_resistor_ohm=0.05\n");
+  coatheal::OnboardConfig cfg;
+  std::string error;
+  assert(!coatheal::LoadConfigFromIni(path, &cfg, &error));
+  assert(error.find("motor0.run_current_a_rms must be in (0, 3.1]") !=
+         std::string::npos);
+  // Distinct from the sense-resistor ceiling's fragment: this case must
+  // NOT be rejected via that other mechanism.
+  assert(error.find("exceeds the sense resistor's deliverable current "
+                     "ceiling") == std::string::npos);
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+}
+
+void TestConfigAcceptsFlatCurrentBoundary() {
+  // Both-directions companion to TestConfigRejectsFlatCurrentBound: the
+  // flat bound is inclusive, "(0, 3.1]", so exactly 3.1 A_rms must load
+  // successfully. sense_resistor_ohm=0.05 keeps the sense-resistor ceiling
+  // (6.5 A_peak, i.e. 4.5962 A_rms) well clear of 3.1 so only the flat
+  // bound's own edge is exercised. Catches a `>` -> `>=` mutation on the
+  // flat-bound comparison that TestConfigRejectsFlatCurrentBound's 3.5
+  // A_rms case cannot: 3.5 is rejected either way.
+  const std::string path = WriteTempConfig(
+      "motor0.run_current_a_rms=3.1\n"
+      "motor0.sense_resistor_ohm=0.05\n");
+  coatheal::OnboardConfig cfg;
+  std::string error;
+  assert(coatheal::LoadConfigFromIni(path, &cfg, &error));
+  assert(std::fabs(cfg.motors[0].run_current_a_rms - 3.1) < 1e-9);
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
 }
 
 void TestSequentRtdConfigDefaultsAndParsing() {
@@ -524,9 +645,11 @@ void TestSequentRtdConfigDefaultsAndParsing() {
   assert(defaults.sensors.sequent_rtd_channels.size() == 8);
   assert(defaults.sensors.sequent_rtd_channels[0] == 1);
   assert(defaults.sensors.sequent_rtd_channels[7] == 8);
-  // The Sequent RTD HAT is now the sole sample-temperature source, so it is
-  // also the default resistance_source (see config.hpp), not "disabled".
-  assert(defaults.sensors.resistance_source == "sequent_rtd");
+  // v3: the MAX31865 dual-click sample-resistance instrument is the shipped
+  // default resistance_source (see config.hpp), not "disabled". The Sequent
+  // RTD HAT remains the sole sample-*temperature* source regardless of which
+  // resistance_source is selected -- that is a separate config axis.
+  assert(defaults.sensors.resistance_source == "max31865_click");
 
   const std::string path = WriteTempConfig(
       "sensor.sequent_rtd_stack=2\n"
@@ -585,6 +708,121 @@ void TestSequentRtdConfigRejectsBadValues() {
      "must be pt100 (pt1000 is recognised but not implemented: the CVD "
      "cross-check and resistance window are PT100-only)"},
     {"sensor.sequent_rtd_resistance_min_ohm=400.0\n", "sequent_rtd_resistance_min_ohm"},
+  };
+  for (const Case& c : cases) {
+    const std::string path = WriteTempConfig(c.body);
+    coatheal::OnboardConfig cfg;
+    std::string error;
+    assert(!coatheal::LoadConfigFromIni(path, &cfg, &error));
+    assert(error.find(c.fragment) != std::string::npos);
+
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+  }
+}
+
+// Owner hard rule: <= 3 active heaters, <= 15.0 W thermal. The rule was
+// enforced only by HeaterScheduler at runtime; nothing stopped an INI from
+// raising the ceiling the scheduler enforces. Each case is isolated -- the
+// baseline WriteTempConfig body is otherwise valid, so exactly one mechanism
+// can reject each of these.
+void TestPowerCapRejectsValuesAboveTheOwnerRule() {
+  struct Case { const char* body; const char* fragment; };
+  const Case cases[] = {
+    // Above the ceiling.
+    {"power.max_active_heaters=4\n", "owner power rule: never more than 3"},
+    {"power.max_active_heaters=6\n", "owner power rule: never more than 3"},
+    // Zero-sanity, same mechanism, opposite end.
+    {"power.max_active_heaters=0\n", "must be 1..3"},
+    // Above the thermal ceiling. The inclusive edge (exactly 15.0 loads) is
+    // pinned by TestPowerCapAcceptsTheOwnerValues below.
+    {"power.max_thermal_w=15.5\n", "must be > 0 and <= 15.0"},
+    {"power.max_thermal_w=20.0\n", "must be > 0 and <= 15.0"},
+    {"power.max_thermal_w=0\n", "must be > 0 and <= 15.0"},
+    {"power.max_thermal_w=-1.0\n", "must be > 0 and <= 15.0"},
+  };
+  for (const Case& c : cases) {
+    const std::string path = WriteTempConfig(c.body);
+    coatheal::OnboardConfig cfg;
+    std::string error;
+    assert(!coatheal::LoadConfigFromIni(path, &cfg, &error));
+    assert(error.find(c.fragment) != std::string::npos);
+
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+  }
+}
+
+// Both directions: the owner's own values must still LOAD. Without this, a
+// validator that rejected everything would pass the negative cases above.
+void TestPowerCapAcceptsTheOwnerValues() {
+  struct Case { const char* body; };
+  const Case cases[] = {
+    {"power.max_active_heaters=3\npower.max_thermal_w=15.0\n"},
+    {"power.max_active_heaters=1\npower.max_thermal_w=0.1\n"},
+  };
+  for (const Case& c : cases) {
+    const std::string path = WriteTempConfig(c.body);
+    coatheal::OnboardConfig cfg;
+    std::string error;
+    assert(coatheal::LoadConfigFromIni(path, &cfg, &error));
+    assert(error.empty());
+
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+  }
+}
+
+void TestMax31865ConfigDefaultsAndParsing() {
+  coatheal::OnboardConfig defaults;
+  assert(std::fabs(defaults.sensors.max31865_reference_ohm - 470.0) < 1e-9);
+  assert(defaults.sensors.max31865_poll_ms == 1000);
+  // Owner-flagged placeholder: first specimen of each motor group
+  // (motor0.samples starts at 0, motor1.samples starts at 4).
+  assert(defaults.sensors.max31865_sample_indices ==
+        std::vector<std::size_t>({0, 4}));
+  assert(defaults.sensors.resistance_source == "max31865_click");
+
+  const std::string path = WriteTempConfig(
+      "sensor.max31865_reference_ohm=430.0\n"
+      "sensor.max31865_poll_ms=250\n"
+      "sensor.max31865_sample_indices=2,6\n"
+      "sensor.resistance_source=max31865_click\n");
+
+  coatheal::OnboardConfig cfg;
+  std::string error;
+  assert(coatheal::LoadConfigFromIni(path, &cfg, &error));
+  assert(std::fabs(cfg.sensors.max31865_reference_ohm - 430.0) < 1e-9);
+  assert(cfg.sensors.max31865_poll_ms == 250);
+  assert(cfg.sensors.max31865_sample_indices ==
+        std::vector<std::size_t>({2, 6}));
+  assert(cfg.sensors.resistance_source == "max31865_click");
+
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+}
+
+void TestMax31865ConfigRejectsBadValues() {
+  struct Case { const char* body; const char* fragment; };
+  const Case cases[] = {
+    {"sensor.max31865_reference_ohm=0\n",
+     "sensor.max31865_reference_ohm must be > 0"},
+    {"sensor.max31865_reference_ohm=-5\n",
+     "sensor.max31865_reference_ohm must be > 0"},
+    {"sensor.max31865_poll_ms=0\n",
+     "sensor.max31865_poll_ms must be > 0"},
+    {"sensor.max31865_sample_indices=0\n",
+     "sensor.max31865_sample_indices must have exactly two entries"},
+    {"sensor.max31865_sample_indices=0,1,2\n",
+     "sensor.max31865_sample_indices must have exactly two entries"},
+    // Isolates the distinctness rule from the two rules above/below: the
+    // count is exactly two and every entry is in range, so only a
+    // duplicate-entries check can fire here.
+    {"sensor.max31865_sample_indices=3,3\n",
+     "sensor.max31865_sample_indices entries must be distinct"},
+    {"sensor.max31865_sample_indices=0,8\n",
+     "sensor.max31865_sample_indices entries must be less than "
+     "hardware.sample_count"},
   };
   for (const Case& c : cases) {
     const std::string path = WriteTempConfig(c.body);
@@ -718,7 +956,6 @@ void TestCommandPeerCanSeedTelemetryTarget() {
 
 int main() {
   TestPidBoundsAndAntiWindup();
-  TestTmc2240CurrentConfiguration();
   TestHeaterSchedulerCap();
   TestHeaterSchedulerEnergyBudget();
   TestCommandParser();
@@ -726,8 +963,17 @@ int main() {
   TestTelemetryQueuePersistenceAndAck();
   TestConfigParsesReliabilityFields();
   TestConfigRejectsGpioCollisions();
+  TestConfigRejectsReservedGpioCollisions();
+  TestConfigRejectsRetiredMotorKeys();
+  TestConfigRejectsOvercurrentCeiling();
+  TestConfigRejectsFlatCurrentBound();
+  TestConfigAcceptsFlatCurrentBoundary();
   TestSequentRtdConfigDefaultsAndParsing();
   TestSequentRtdConfigRejectsBadValues();
+  TestPowerCapRejectsValuesAboveTheOwnerRule();
+  TestPowerCapAcceptsTheOwnerValues();
+  TestMax31865ConfigDefaultsAndParsing();
+  TestMax31865ConfigRejectsBadValues();
   TestLegacySensorKeysAreRejected();
   TestStateTransitions();
   TestManualHeaterOverrideWithoutFloorControl();

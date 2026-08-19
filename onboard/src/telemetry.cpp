@@ -36,9 +36,13 @@ void AppendStepperSegment(std::ostringstream& oss, const StepperStatus& st,
 //        RESISTANCE=r0|r1|...   (- for unmeasured samples),
 //        PHASE=...,MODE=...,STATUS=...,
 //        STEPPER0=...,STEPPER1=...
-// Humidity and box_temp are not emitted. RESISTANCE carries the Sequent RTD
-// card's per-channel PT100 element resistance under the default
-// sensor.resistance_source=sequent_rtd; only "disabled" makes every slot "-".
+// Humidity and box_temp are not emitted. RESISTANCE's meaning follows
+// sensor.resistance_source, whose v3 default is max31865_click: the two
+// MAX31865 clicks' measured specimen resistance, written only into the two
+// sensor.max31865_sample_indices slots (every other slot stays 0.0 and wires
+// as "-"). The pre-v3 sequent_rtd source is still accepted and puts the
+// Sequent RTD card's per-channel PT100 element resistance in every slot;
+// "disabled" makes every slot "-".
 std::string SerializeTelemetryDataFrame(const TelemetryRecord& record,
                                         const std::string& session_id) {
   std::ostringstream oss;

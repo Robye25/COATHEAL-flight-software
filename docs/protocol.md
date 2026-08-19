@@ -2,12 +2,16 @@
 
 All messages are UTF-8 encoded, newline-terminated, and sent over TCP or UDP.
 Rev C keeps the existing wire shape for ground-station compatibility, but the
-hardware meaning is now the final BOM: 8-channel PT100/PT1000 sample
-temperatures through a Sequent Microsystems 8-channel RTD HAT over I2C,
-pressure from DPS310, UV from GUVA-S12SD through ADS1115, and two TMC2240
-motor channels. The legacy MAX31865 (RTD Click) and DAQ-132M (RS485/Modbus)
-sample-temperature paths have been fully retired; the Sequent card is the only
-sample-temperature source.
+hardware meaning is now the schematic v3 final BOM: 8-channel PT100/PT1000
+sample temperatures through a Sequent Microsystems 8-channel RTD HAT over
+I2C, pressure from DPS310, UV from GUVA-S12SD through ADS1115, and two
+TMC5160 motor channels driven SPI-only (no STEP/DIR). The legacy MAX31865
+(RTD Click) **temperature** path and DAQ-132M (RS485/Modbus) sample-
+temperature path have been fully retired; the Sequent card is the only
+sample-temperature source. A MAX31865 pair returns in v3 in an unrelated
+role — the sample-**resistance** instrument described under `RESISTANCE`
+and the `CHECK` command below — this is new hardware and a new function, not
+a revival of the retired temperature path.
 
 > **Breaking wire change.** The `COMPONENT_STATE` field and the `STATUS`
 > field both changed shape in this revision: `DAQ132M`/`RTD_CLICK` collapsed
@@ -30,11 +34,11 @@ DATA,<session_id>,<seq>,<timestamp>,<rtc_valid>,<ambient_temp_c>,<ambient_pressu
 | `uv` | GUVA-S12SD analog output through ADS1115 |
 | `sample_0..sample_7` | PT100/PT1000 sample values, one per Sequent RTD HAT channel; disabled or missing channels serialize as `nan` |
 | `HEATER_DUTY` | Six polyimide heater duty values, H0..H5 |
-| `RESISTANCE` | Per-channel PT100 **element** resistance in Ω, read from the Sequent RTD card, under the default `sensor.resistance_source=sequent_rtd`. `simulated` substitutes the decaying bench model (sample *material* resistance, a different physical quantity on the same field). `disabled` is the only setting that serializes `-` in every slot; a `-` also appears for any individual channel with no positive value yet |
+| `RESISTANCE` | Sample-resistance value in Ω, source selected by `sensor.resistance_source`. Default in v3, `max31865_click`: coating-specimen resistance measured directly by the two MAX31865 clicks, only in the two `sensor.max31865_sample_indices` slots — every other slot serializes `-`. `sequent_rtd`: per-channel PT100 **element** resistance read from the Sequent RTD card instead, all eight slots. `simulated`: the decaying bench model (sample *material* resistance, a different physical quantity on the same field). `disabled`: `-` in every slot. A `-` also appears for any individual channel with no positive value yet |
 | `SENSOR_VALID` | Current validity for ambient temperature (`AT`), pressure (`AP`), UV, and `S0..S7` |
 | `SENSOR_AGE_MS` | Monotonic age of each last successful reading; `-1` means never valid |
 | `COMPONENT_STATE` | Independent state for DPS310, ADS1115, SEQUENT_RTD, both motors, and PWM |
-| `STEPPER0`, `STEPPER1` | TMC2240-driven NEMA 17 ball-screw motor snapshots |
+| `STEPPER0`, `STEPPER1` | TMC5160-driven NEMA 17 ball-screw motor snapshots (SPI-only position dribble; no STEP/DIR) |
 
 The parser locates `HEATER_DUTY=` by token name, so sample count is inferred
 from the position of that token. Frames with any number of sample columns parse
@@ -61,7 +65,7 @@ STATUS=SD_OK|USB_OK|I2C_OK|SPI_OK|LINK_OK|T_AMBIENT_OK|P_AMBIENT_OK|UNIFORMITY_O
 | `SD_OK` / `SD_FAIL` | Primary SD-card CSV log health |
 | `USB_OK` / `USB_FAIL` | Secondary USB mirror log health |
 | `I2C_OK` / `I2C_FAIL` | Latest DPS310 and ADS1115 read health, ANDed with Sequent RTD HAT bus health (did the last `Probe`/`ReadAll` conversation succeed). Bus-level only — a card that answers but has one open/short channel still reports `I2C_OK`; per-channel detail is in `sample_temp_valid` and `SEQUENT_RTD` |
-| `SPI_OK` / `SPI_FAIL` | TMC2240 SPI setup/check health |
+| `SPI_OK` / `SPI_FAIL` | TMC5160 SPI setup/check health |
 | `LINK_OK` / `LINK_FAIL` | Last telemetry drain/ACK status |
 | `T_AMBIENT_OK` / `T_AMBIENT_FAIL` | Ambient temperature in configured range |
 | `P_AMBIENT_OK` / `P_AMBIENT_FAIL` | Ambient pressure in configured range |
@@ -74,7 +78,7 @@ STATUS=SD_OK|USB_OK|I2C_OK|SPI_OK|LINK_OK|T_AMBIENT_OK|P_AMBIENT_OK|UNIFORMITY_O
 | `SIMULATED` / `REAL_SENSORS` | Explicit sensor mode |
 | `SEQ_PAUSED` / `SEQ_READY` | At least one bend sequence is paused/faulted, or no sequence fault is active |
 | `HEATER_ACTIVE` / `HEATER_INHIBITED` | Heaters are inhibited while a motor holds `MotionLock` |
-| `RESISTANCE_OK` / `RESISTANCE_FAIL` | Under the default `sensor.resistance_source=sequent_rtd`, tracks RTD-card bus health — OK while the card conversation succeeds, FAIL when it does not. Always OK under `disabled` and `simulated`. Bus-level, not per-channel: a card answering with one open probe still reports OK here, and the affected channel shows up on `SENSOR_VALID` and `COMPONENT_STATE` instead |
+| `RESISTANCE_OK` / `RESISTANCE_FAIL` | Under the default `sensor.resistance_source=max31865_click`, tracks both clicks' bus health — OK while both clicks' last conversation succeeded, FAIL when either did not. Under `sequent_rtd`, tracks RTD-card bus health instead. Always OK under `disabled` and `simulated`. Bus-level, not per-channel: a saturated (out-of-range) specimen reading, or a card answering with one open probe, still reports OK here — that is a valid measurement of an out-of-range channel, not a bus failure, and shows up on `SENSOR_VALID`/`COMPONENT_STATE` instead |
 
 ## Pull-Cycle Event Frame
 
@@ -153,7 +157,7 @@ NACK,<COMMAND>,<reason>
 | `PING` | none | Liveness check |
 | `STATUS` | none | Lightweight live state: phase/mode, fallback, queue, current hardware flags, and sequence state |
 | `COMPONENTS` | none | Non-invasive cached component state, error, and channel summary |
-| `CHECK` | `[ALL\|DPS310\|ADS1115\|SEQUENT_RTD\|DAQ132M\|RTD_CLICK\|PWM\|MOTOR0\|MOTOR1\|STORAGE\|COMMS]` | Active probe of all or one selected component. `DAQ132M`/`RTD_CLICK` are accepted as legacy aliases for `SEQUENT_RTD` |
+| `CHECK` | `[ALL\|DPS310\|ADS1115\|SEQUENT_RTD\|DAQ132M\|RTD_CLICK\|MAX31865\|PWM\|MOTOR0\|MOTOR1\|STORAGE\|COMMS]` | Active probe of all or one selected component. `DAQ132M`/`RTD_CLICK` are accepted as legacy aliases for `SEQUENT_RTD` (the retired temperature path). `MAX31865` selects the two v3 sample-resistance clicks — a command-argument addition only, no `COMPONENT_STATE`/frame-format change |
 | `ARM` | none | Enable manual flight outputs |
 | `DISARM` | none | Disable outputs, clear heater overrides, stop steppers |
 | `SET_PHASE` | `<phase>` | Set `BOOT`, `ASCENT`, `PRE_FLOAT`, `FLOAT`, `DESCENT`, `LANDED`, or `STOPPED` |

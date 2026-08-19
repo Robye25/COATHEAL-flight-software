@@ -15,9 +15,11 @@
 #include "coatheal/hal/rtc_adapter.hpp"
 #include "coatheal/hal/sequent_rtd_adapter.hpp"
 #include "coatheal/hal/spi_adapter.hpp"
+#include "coatheal/hal/spi_bus.hpp"
 #include "coatheal/sensor_manager.hpp"
 #include "coatheal/telemetry.hpp"
 #include "fake_i2c_bus.hpp"
+#include "fake_spi_bus.hpp"
 
 using namespace coatheal;
 
@@ -444,6 +446,291 @@ void TestSequentRtdResistanceFailsOnUnreachableBus() {
   assert(!ever_ok);
 }
 
+// ---------------------------------------------------------------------------
+// resistance_source=max31865_click (the v3-shipped default) coverage.
+//
+// Hand-computed scripted ohms (R = code * reference_ohm / 32768,
+// reference_ohm defaults to 470.0): code 16384 (raw 0x8000, MSB=0x80,
+// LSB=0x00, fault bit clear) -> 16384*470/32768 = 235.0 ohm exact (16384 is
+// exactly half of 32768). Code 8192 (raw 0x4000, MSB=0x40, LSB=0x00) ->
+// 8192*470/32768 = 117.5 ohm exact (matches the figure already pinned in
+// test_max31865_adapter.cpp). Click 0 (SAMPLE1, /dev/spidev0.1) is scripted
+// with 235.0 and click 1 (SAMPLE2, /dev/spidev0.0) with 117.5 so the two
+// monitored indices are independently distinguishable in an assertion.
+//
+// Every SensorManager below is constructed with ina=nullptr (unlike the
+// sequent_rtd fixtures above, which intentionally keep it): the "disabled"
+// resistance_source branch's flat 0.0 padding is fine either way, but the
+// `ina_ != nullptr && ina_->healthy()` fallback that "sequent_rtd" relies on
+// its *failing* test to catch (see the comment block above) would instead
+// make deleting the max31865_click dispatch branch invisible to the HEALTHY
+// test here (Max31865Loop still populates sample_resistance_ohm_ under the
+// hood; the INA stub's always-true healthy() would still report
+// resistance_ok()==true and the branch-less snapshot would still forward the
+// same vector). ina=nullptr routes a dropped branch to the final `else`
+// (resistance_ok_=false, vector padded to 0.0) instead, so the healthy test
+// below is the one that catches it, matching the plan's mutation list.
+//
+// Timing choice: MakeMax31865Options() (sensor_manager.cpp) does not
+// override Max31865Adapter::Options' settle_ms/conversion_ms, so every
+// ReadOneShot() here really sleeps ~75 ms (10 + 65, the datasheet minimums)
+// per click -- the plan explicitly sanctions this ("accept the ~75ms ...
+// budget deadlines generously: 3s") rather than adding a fourth config key
+// or a narrow test-only timing hook. To keep the strict, finite FakeSpiBus
+// expectation queue from being drained by a second worker pass mid-test
+// (the queue holds exactly one scripted one-shot sequence per click), the
+// healthy/saturation fixtures below set max31865_poll_ms to 5 s: Stop() is
+// called as soon as the first pass is observed, well inside that window, so
+// only one pass ever runs.
+constexpr double kClick0ResistanceOhm = 235.0;  // code 16384 @ 470 ohm ref
+constexpr double kClick1ResistanceOhm = 117.5;  // code 8192 @ 470 ohm ref
+
+OnboardConfig MakeMax31865TestConfig() {
+  OnboardConfig config;
+  config.hardware.sample_count = 8;
+  config.hardware.heater_count = 6;
+  config.runtime.use_simulated_sensors = false;
+  config.sensors.dps310_enabled = false;
+  config.sensors.ads1115_enabled = false;
+  config.sensors.resistance_source = "max31865_click";
+  config.sensors.max31865_sample_indices = {0, 4};
+  return config;
+}
+
+void ScriptHealthyOneShot(FakeSpiBus* bus, std::uint8_t msb, std::uint8_t lsb) {
+  bus->Expect({0x80, 0x81}, {0, 0});        // VBIAS on
+  bus->Expect({0x80, 0xA1}, {0, 0});        // 1SHOT
+  bus->Expect({0x01, 0, 0}, {0, msb, lsb}); // RTD MSB/LSB, no fault
+  bus->Expect({0x80, 0x01}, {0, 0});        // VBIAS off
+}
+
+void ScriptSaturatedOneShot(FakeSpiBus* bus, std::uint8_t msb, std::uint8_t lsb,
+                            std::uint8_t fault_byte) {
+  bus->Expect({0x80, 0x81}, {0, 0});             // VBIAS on
+  bus->Expect({0x80, 0xA1}, {0, 0});             // 1SHOT
+  bus->Expect({0x01, 0, 0}, {0, msb, lsb});      // RTD MSB/LSB, fault bit set
+  bus->Expect({0x80, 0x01}, {0, 0});             // VBIAS off
+  bus->Expect({0x07, 0}, {0, fault_byte});       // fault status read
+  bus->Expect({0x80, 0x03}, {0, 0});             // FAULTCLR write
+}
+
+void TestMax31865HealthyClicksPopulateOnlyMonitoredIndices() {
+  OnboardConfig config = MakeMax31865TestConfig();
+  config.sensors.max31865_poll_ms = 5000;  // see the timing-choice comment above
+  // Fix-round 1 Critical 2: the RTD worker must be live in THIS test too,
+  // not merely absent (rtd_bus_override left nullptr made this assertion
+  // vacuous -- LinuxI2cBus::available() is compile-time false on this host,
+  // so SequentRtdLoop never started and could never have written the
+  // "unmonitored" indices this test checks below). A dedicated FakeI2cBus,
+  // scripted healthy on every channel via the existing LiveRtdImage()
+  // helper, makes SequentRtdLoop actually run concurrently with
+  // Max31865Loop -- the real flight-hardware scenario Critical 1 was about.
+  config.sensors.sequent_rtd_poll_ms = 5;
+  FakeI2cBus good_rtd_bus;
+  good_rtd_bus.SetImage(LiveRtdImage());
+
+  FakeSpiBus click1_bus;  // click 0, SAMPLE1 -> index 0
+  FakeSpiBus click2_bus;  // click 1, SAMPLE2 -> index 4
+  ScriptHealthyOneShot(&click1_bus, 0x80, 0x00);  // code 16384 -> 235.0
+  ScriptHealthyOneShot(&click2_bus, 0x40, 0x00);  // code 8192 -> 117.5
+
+  SpiAdapter spi;
+  I2cAdapter i2c;
+  RtcAdapter rtc;
+  SensorManager sm(config, &spi, &i2c, &rtc, /*ina=*/nullptr,
+                   &good_rtd_bus, &click1_bus, &click2_bus);
+  sm.Start();
+
+  const std::vector<double> heater_duty(6, 0.0);
+  SensorSnapshot snap;
+  bool published = false;
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  while (std::chrono::steady_clock::now() < deadline) {
+    snap = sm.ReadSnapshot(MissionPhase::kAscent, heater_duty, 0.1);
+    // Wait for BOTH the click resistance AND the RTD temperature to have
+    // been published at least once, so a passing test proves the injected
+    // RTD fake actually ran concurrently rather than the loop exiting
+    // before SequentRtdLoop's first pass.
+    if (!snap.sample_resistance_ohm.empty() &&
+        std::fabs(snap.sample_resistance_ohm[0] - kClick0ResistanceOhm) <
+            0.001 &&
+        !snap.sample_temp_valid.empty() && snap.sample_temp_valid[0]) {
+      published = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  const bool resistance_ok = sm.resistance_ok();
+  sm.Stop();
+
+  assert(published);
+  // Bus-level health, not per-channel: both clicks' one-shot conversations
+  // succeeded, so resistance_ok() must be true.
+  assert(resistance_ok);
+  assert(snap.sample_resistance_ohm.size() == 8);
+  assert(std::fabs(snap.sample_resistance_ohm[0] - kClick0ResistanceOhm) <
+        0.001);
+  assert(std::fabs(snap.sample_resistance_ohm[4] - kClick1ResistanceOhm) <
+        0.001);
+  // Every unmonitored index must stay exactly 0.0 -- Max31865Loop must never
+  // write outside the two configured sample_indices entries, AND
+  // SequentRtdLoop must not have written its own (different-quantity)
+  // element ohms into any of them either -- this is the Critical-1 defect
+  // this injected RTD fake exists to make observable.
+  for (std::size_t i = 0; i < snap.sample_resistance_ohm.size(); ++i) {
+    if (i == 0 || i == 4) continue;
+    assert(snap.sample_resistance_ohm[i] == 0.0);
+  }
+  // Companion assertion (not vacuous): the RTD fake really is live and
+  // driving the temperature path, independent of resistance_source.
+  assert(snap.sample_temp_valid[0]);
+  assert(std::fabs(snap.sample_temps_c[0] - kBenchTemperatureC) < 0.5);
+}
+
+void TestMax31865OneClickBusFailureFailsResistanceOk() {
+  OnboardConfig config = MakeMax31865TestConfig();
+  config.sensors.max31865_poll_ms = 5;
+
+  FakeSpiBus click1_bus;  // click 0 never opens: a genuine bus failure.
+  click1_bus.SetOpenFails(true);
+  FakeSpiBus click2_bus;  // click 1 healthy -- proves the AND, not just OR.
+  ScriptHealthyOneShot(&click2_bus, 0x40, 0x00);
+
+  SpiAdapter spi;
+  I2cAdapter i2c;
+  RtcAdapter rtc;
+  SensorManager sm(config, &spi, &i2c, &rtc, /*ina=*/nullptr,
+                   /*rtd_bus_override=*/nullptr, &click1_bus, &click2_bus);
+  sm.Start();
+
+  const std::vector<double> heater_duty(6, 0.0);
+  bool ever_ok = false;
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(750);
+  while (std::chrono::steady_clock::now() < deadline) {
+    sm.ReadSnapshot(MissionPhase::kAscent, heater_duty, 0.1);
+    if (sm.resistance_ok()) {
+      ever_ok = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  sm.Stop();
+  // One click never answering must never report resistance_ok() true, even
+  // though the other click is perfectly healthy every pass.
+  assert(!ever_ok);
+}
+
+void TestMax31865SaturatedReadingKeepsClicksBusOkWhileIndexReadsZero() {
+  OnboardConfig config = MakeMax31865TestConfig();
+  config.sensors.max31865_poll_ms = 5000;  // see the timing-choice comment above
+
+  FakeSpiBus click1_bus;  // click 0, SAMPLE1 -> index 0, healthy.
+  FakeSpiBus click2_bus;  // click 1, SAMPLE2 -> index 4, SATURATED.
+  ScriptHealthyOneShot(&click1_bus, 0x80, 0x00);       // code 16384 -> 235.0
+  ScriptSaturatedOneShot(&click2_bus, 0x40, 0x01, 0x04); // fault bit set
+
+  SpiAdapter spi;
+  I2cAdapter i2c;
+  RtcAdapter rtc;
+  SensorManager sm(config, &spi, &i2c, &rtc, /*ina=*/nullptr,
+                   /*rtd_bus_override=*/nullptr, &click1_bus, &click2_bus);
+  sm.Start();
+
+  const std::vector<double> heater_duty(6, 0.0);
+  SensorSnapshot snap;
+  bool published = false;
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  while (std::chrono::steady_clock::now() < deadline) {
+    snap = sm.ReadSnapshot(MissionPhase::kAscent, heater_duty, 0.1);
+    // click1's write and the saturated click2's write land under the same
+    // cache_mu_ critical section within one Max31865Loop pass (see the
+    // implementation), so observing index 0 here is proof index 4 has
+    // already been written too, saturated or not.
+    if (!snap.sample_resistance_ohm.empty() &&
+        std::fabs(snap.sample_resistance_ohm[0] - kClick0ResistanceOhm) <
+            0.001) {
+      published = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  const bool resistance_ok = sm.resistance_ok();
+  sm.Stop();
+
+  assert(published);
+  // THE finding-class assertion, both directions in one test: a saturated
+  // specimen reading is a VALID measurement (bus healthy, channel
+  // out-of-range) so resistance_ok() must stay true here...
+  assert(resistance_ok);
+  // ...while the saturated channel's own index carries the wire "not valid"
+  // 0.0 convention -- never the diagnostic resistance_ohm value the fault
+  // reading still computed internally.
+  assert(snap.sample_resistance_ohm[4] == 0.0);
+  assert(std::fabs(snap.sample_resistance_ohm[0] - kClick0ResistanceOhm) <
+        0.001);
+}
+
+// ---------------------------------------------------------------------------
+// Fix-round 1 Important 3 + Important 4: click health surface coverage
+// (ComponentSummary()/ActiveCheck("MAX31865")), combined into one three-phase
+// test since all three states chain naturally through the same click1_bus.
+//
+// No sm.Start() anywhere in this test: ActiveCheck()/check_max31865 is a
+// synchronous, on-demand conversation independent of the worker poll loop
+// (see sensor_manager.cpp), so every phase can be driven directly with no
+// background thread to race or to wait out on a deadline.
+void TestMax31865ActiveCheckAndComponentSummaryReflectHealthTransitions() {
+  OnboardConfig config = MakeMax31865TestConfig();
+
+  FakeSpiBus click1_bus;  // driven through all three phases below.
+  FakeSpiBus click2_bus;  // stays healthy throughout -- isolates click1.
+
+  SpiAdapter spi;
+  I2cAdapter i2c;
+  RtcAdapter rtc;
+  SensorManager sm(config, &spi, &i2c, &rtc, /*ina=*/nullptr,
+                   /*rtd_bus_override=*/nullptr, &click1_bus, &click2_bus);
+
+  // Phase 1: click1's bus never opens -- a genuine call failure.
+  click1_bus.SetOpenFails(true);
+  ScriptHealthyOneShot(&click2_bus, 0x40, 0x00);
+  std::string details;
+  assert(!sm.ActiveCheck("MAX31865", &details));
+  assert(details.find("max31865_1=FAIL") != std::string::npos);
+  assert(sm.ComponentSummary().find("max31865_1=FAILED") != std::string::npos);
+
+  // Phase 2: click1 recovers. Important 4's load-bearing proof: health must
+  // reflect OK immediately after THIS ActiveCheck() call -- no worker poll
+  // has ever run in this test (Start() was never called), so if
+  // check_max31865 did not refresh max31865_health_ itself, this would
+  // still read FAILED from phase 1.
+  click1_bus.SetOpenFails(false);
+  ScriptHealthyOneShot(&click1_bus, 0x80, 0x00);
+  ScriptHealthyOneShot(&click2_bus, 0x40, 0x00);
+  assert(sm.ActiveCheck("MAX31865", &details));
+  assert(details.find("max31865_1=OK") != std::string::npos);
+  const std::string recovered = sm.ComponentSummary();
+  assert(recovered.find("max31865_1=OK") != std::string::npos);
+  assert(recovered.find("max31865_1_error=NONE") != std::string::npos);
+
+  // Phase 3: click1 answers but SATURATED (fault bit set). Important 3's
+  // coverage: ComponentSummary must show DEGRADED/OUT_OF_RANGE, while
+  // ActiveCheck must still report the CALL itself as OK -- the same
+  // call-result-vs-Reading.valid distinction the resistance-dispatch tests
+  // above prove, now proven on the on-demand CHECK path too.
+  ScriptSaturatedOneShot(&click1_bus, 0x40, 0x01, 0x04);
+  ScriptHealthyOneShot(&click2_bus, 0x40, 0x00);
+  assert(sm.ActiveCheck("MAX31865", &details));
+  assert(details.find("max31865_1=OK") != std::string::npos);
+  const std::string saturated_summary = sm.ComponentSummary();
+  assert(saturated_summary.find("max31865_1=DEGRADED") != std::string::npos);
+  assert(saturated_summary.find("max31865_1_error=OUT_OF_RANGE") !=
+        std::string::npos);
+}
+
 }  // namespace
 
 int main() {
@@ -458,5 +745,9 @@ int main() {
   TestI2cOkRecoversOnHealthyRtdBus();
   TestSequentRtdResistanceFollowsHealthyBus();
   TestSequentRtdResistanceFailsOnUnreachableBus();
+  TestMax31865HealthyClicksPopulateOnlyMonitoredIndices();
+  TestMax31865OneClickBusFailureFailsResistanceOk();
+  TestMax31865SaturatedReadingKeepsClicksBusOkWhileIndexReadsZero();
+  TestMax31865ActiveCheckAndComponentSummaryReflectHealthTransitions();
   return 0;
 }

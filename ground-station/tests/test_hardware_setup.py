@@ -42,12 +42,44 @@ class HardwareSetupTests(unittest.TestCase):
         self.assertTrue(result.endswith("b=3\n"))
 
     def test_validate_candidate_detects_gpio_conflict(self) -> None:
+        # motor0.enable_line collides with heater.output_lines[0] (BCM 19,
+        # see FINAL_PIN_VALUES/EXAMPLE_CONFIG) - a plain same-chip collision
+        # between two non-reserved owners, distinct from the reserved-line
+        # collision covered by test_validate_candidate_detects_reserved_gpio_collision.
         source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
         broken = hardware_setup.replace_ini(
-            source, {"motor0.step_line": "17"})
+            source, {"motor0.enable_line": "19"})
         errors = hardware_setup.validate_candidate(broken)
         self.assertTrue(
-            any("/dev/gpiochip0 line 17" in error for error in errors))
+            any("/dev/gpiochip0 line 19" in error for error in errors))
+
+    def test_validate_candidate_detects_reserved_gpio_collision(self) -> None:
+        # v3 reserved lines (Sequent RTD HAT + hardware SPI0 chip-selects)
+        # must never be claimable by a heater. Six-entry list (matches
+        # hardware.heater_count=6) so the count check passes and the GPIO
+        # claim check is actually reached.
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        broken = hardware_setup.replace_ini(
+            source, {"heater.output_lines": "17,13,6,5,24,23"})
+        errors = hardware_setup.validate_candidate(broken)
+        self.assertTrue(
+            any("reserved: sequent_hat" in error for error in errors))
+
+    def test_validate_candidate_rejects_retired_tmc2240_driver(self) -> None:
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        broken = hardware_setup.replace_ini(
+            source, {"motor0.driver": "tmc2240"})
+        errors = hardware_setup.validate_candidate(broken)
+        self.assertIn(
+            "motor0.driver=tmc2240 is retired; use tmc5160", errors)
+
+    def test_validate_candidate_rejects_bad_sense_resistor(self) -> None:
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        broken = hardware_setup.replace_ini(
+            source, {"motor0.sense_resistor_ohm": "0"})
+        errors = hardware_setup.validate_candidate(broken)
+        self.assertIn(
+            "motor0.sense_resistor_ohm must be in (0, 1)", errors)
 
     def test_validate_candidate_detects_sequent_rtd_stack_out_of_range(self) -> None:
         source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
@@ -153,61 +185,249 @@ class HardwareSetupTests(unittest.TestCase):
             "sensor.sequent_rtd_resistance_max_ohm", errors)
 
     def test_validate_candidate_detects_bad_resistance_source(self) -> None:
-        # Mirrors config.cpp:619-626, including the two legacy labels that
-        # stay accepted so a fielded INI still loads.
+        # Mirrors config.cpp:610-621, including the three legacy/back-compat
+        # labels that stay accepted so a fielded INI still loads.
         source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
         broken = hardware_setup.replace_ini(
             source, {"sensor.resistance_source": "ina3221"})
         errors = hardware_setup.validate_candidate(broken)
         self.assertIn(
             "sensor.resistance_source must be disabled, simulated, "
-            "or sequent_rtd", errors)
+            "sequent_rtd, or max31865_click", errors)
 
     def test_validate_candidate_accepts_every_resistance_source(self) -> None:
         source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
-        for value in ("sequent_rtd", "disabled", "simulated"):
+        for value in ("sequent_rtd", "disabled", "simulated", "max31865_click"):
             candidate = hardware_setup.replace_ini(
                 source, {"sensor.resistance_source": value})
             self.assertEqual(
                 hardware_setup.validate_candidate(candidate), [], value)
 
+    # ---- owner power cap (mirrors config.cpp's power-cap block) ----------
+    #
+    # Both keys are now in FINAL_PIN_VALUES, so this script writes them and
+    # therefore validates them. Each case is isolated: EXAMPLE_CONFIG is
+    # otherwise valid, so exactly one check can produce each error, and the
+    # assertions use assertEqual on the whole error list where the point is
+    # that NOTHING else fired.
+
+    def test_validate_candidate_rejects_too_many_active_heaters(self) -> None:
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        broken = hardware_setup.replace_ini(
+            source, {"power.max_active_heaters": "4"})
+        errors = hardware_setup.validate_candidate(broken)
+        self.assertEqual(
+            errors,
+            ["power.max_active_heaters must be 1..3 (owner power rule: "
+             "never more than 3 heaters)"])
+
+    def test_validate_candidate_rejects_zero_active_heaters(self) -> None:
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        broken = hardware_setup.replace_ini(
+            source, {"power.max_active_heaters": "0"})
+        errors = hardware_setup.validate_candidate(broken)
+        self.assertEqual(
+            errors,
+            ["power.max_active_heaters must be 1..3 (owner power rule: "
+             "never more than 3 heaters)"])
+
+    def test_validate_candidate_rejects_thermal_watts_above_ceiling(
+            self) -> None:
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        broken = hardware_setup.replace_ini(
+            source, {"power.max_thermal_w": "20.0"})
+        errors = hardware_setup.validate_candidate(broken)
+        self.assertEqual(
+            errors,
+            ["power.max_thermal_w must be > 0 and <= 15.0 (owner power rule)"])
+
+    def test_validate_candidate_rejects_non_positive_thermal_watts(
+            self) -> None:
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        for value in ("0", "-1.0"):
+            broken = hardware_setup.replace_ini(
+                source, {"power.max_thermal_w": value})
+            errors = hardware_setup.validate_candidate(broken)
+            self.assertEqual(
+                errors,
+                ["power.max_thermal_w must be > 0 and <= 15.0 "
+                 "(owner power rule)"],
+                value)
+
+    def test_validate_candidate_accepts_the_owner_power_values(self) -> None:
+        # Both directions: a validator that rejected everything would pass
+        # the four negative cases above. The owner's own values, and the
+        # inclusive edges (3 heaters, exactly 15.0 W), must still load.
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        for heaters, watts in (("3", "15.0"), ("1", "0.5")):
+            candidate = hardware_setup.replace_ini(
+                source,
+                {"power.max_active_heaters": heaters,
+                 "power.max_thermal_w": watts})
+            self.assertEqual(
+                hardware_setup.validate_candidate(candidate), [],
+                f"{heaters}/{watts}")
+
+    def test_power_cap_keys_are_tracked_final_pin_values(self) -> None:
+        # The keys must be in the table the wizard/pin-check pin, not merely
+        # validated -- otherwise `migrate_config` would carry a fielded INI's
+        # out-of-policy value straight through.
+        self.assertEqual(
+            hardware_setup.FINAL_PIN_VALUES["power.max_active_heaters"], "3")
+        self.assertEqual(
+            hardware_setup.FINAL_PIN_VALUES["power.max_thermal_w"], "15.0")
+
+    def test_validate_candidate_detects_bad_max31865_reference_ohm(self) -> None:
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        broken = hardware_setup.replace_ini(
+            source, {"sensor.max31865_reference_ohm": "0"})
+        errors = hardware_setup.validate_candidate(broken)
+        self.assertIn("sensor.max31865_reference_ohm must be > 0", errors)
+
+    def test_validate_candidate_detects_negative_max31865_reference_ohm(self) -> None:
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        broken = hardware_setup.replace_ini(
+            source, {"sensor.max31865_reference_ohm": "-5"})
+        errors = hardware_setup.validate_candidate(broken)
+        self.assertIn("sensor.max31865_reference_ohm must be > 0", errors)
+
+    def test_validate_candidate_detects_bad_max31865_poll_ms(self) -> None:
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        broken = hardware_setup.replace_ini(
+            source, {"sensor.max31865_poll_ms": "0"})
+        errors = hardware_setup.validate_candidate(broken)
+        self.assertIn("sensor.max31865_poll_ms must be > 0", errors)
+
+    def test_validate_candidate_detects_wrong_count_max31865_sample_indices(
+            self) -> None:
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        broken = hardware_setup.replace_ini(
+            source, {"sensor.max31865_sample_indices": "0,1,2"})
+        errors = hardware_setup.validate_candidate(broken)
+        self.assertIn(
+            "sensor.max31865_sample_indices must have exactly two entries",
+            errors)
+
+    def test_validate_candidate_detects_duplicate_max31865_sample_indices(
+            self) -> None:
+        # Isolates the distinctness rule: the count is exactly two and both
+        # entries are in range, so only a duplicate-entries check can fire.
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        broken = hardware_setup.replace_ini(
+            source, {"sensor.max31865_sample_indices": "3,3"})
+        errors = hardware_setup.validate_candidate(broken)
+        self.assertIn(
+            "sensor.max31865_sample_indices entries must be distinct", errors)
+
+    def test_validate_candidate_detects_out_of_range_max31865_sample_indices(
+            self) -> None:
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        broken = hardware_setup.replace_ini(
+            source, {"sensor.max31865_sample_indices": "0,8"})
+        errors = hardware_setup.validate_candidate(broken)
+        self.assertIn(
+            "sensor.max31865_sample_indices entries must be less than "
+            "hardware.sample_count", errors)
+
+    def test_validate_candidate_detects_max31865_duplicate_after_parsing(
+            self) -> None:
+        # Fix-round 1 minor: "0" and "00" are different raw INI strings but
+        # the same parsed index -- a raw-string distinctness check (the
+        # pre-fix bug) would miss this entirely, unlike config.cpp, which
+        # compares the parsed std::size_t values. Distinct from
+        # test_validate_candidate_detects_duplicate_max31865_sample_indices
+        # above (which uses two textually-identical entries and would pass
+        # under either the buggy or fixed comparison).
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        broken = hardware_setup.replace_ini(
+            source, {"sensor.max31865_sample_indices": "0,00"})
+        errors = hardware_setup.validate_candidate(broken)
+        self.assertIn(
+            "sensor.max31865_sample_indices entries must be distinct", errors)
+
     def test_same_line_on_different_gpio_chips_is_valid(self) -> None:
+        # BCM 17 is a v3-reserved line (Sequent HAT rs485_dir) on the default
+        # gpio_chip, but motor0 is moved to a *different* chip here, so the
+        # reserved claim (scoped to runtime.gpio_chip) must not collide.
         source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
         candidate = hardware_setup.replace_ini(
             source,
             {
                 "motor0.gpio_chip": "/dev/gpiochip1",
-                "motor0.step_line": "17",
+                "motor0.cs_line": "17",
             },
         )
         self.assertEqual(hardware_setup.validate_candidate(candidate), [])
 
-    def test_tmc2240_current_must_fit_selected_range(self) -> None:
+    def test_motor_current_rejects_sense_resistor_ceiling(self) -> None:
+        # TMC5160 hardware ceiling: at the default motor0.sense_resistor_ohm
+        # (0.075, see EXAMPLE_CONFIG), the sense resistor's maximum
+        # deliverable current is 0.325/0.075 = 4.3333 A_peak, i.e.
+        # 4.3333/sqrt(2) = 3.0641 A_rms. 3.08 A_rms sits just above that
+        # (3.08*sqrt(2) = 4.3558 A_peak > 4.3333) while staying under the
+        # *separate* flat (0, 3.1] ceiling -- deliberately chosen so this
+        # test isolates the sense-resistor-derived rule: deleting only that
+        # rule (leaving the flat bound in place) must make this assertion
+        # fail, since 3.08 alone would then pass validation.
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        candidate = hardware_setup.replace_ini(
+            source, {"motor0.run_current_a_rms": "3.08"})
+        errors = hardware_setup.validate_candidate(candidate)
+        self.assertTrue(any(
+            "exceeds the sense resistor's deliverable current ceiling"
+            in error for error in errors))
+
+    def test_motor_current_rejects_flat_bound(self) -> None:
+        # Isolates the flat (0, 3.1] absolute ceiling from the
+        # sense-resistor ceiling above: with sense_resistor_ohm=0.05 the
+        # sense-resistor ceiling is 0.325/0.05 = 6.5 A_peak, i.e.
+        # 6.5/sqrt(2) = 4.5962 A_rms. run_current_a_rms=3.5 is well under
+        # that (3.5*sqrt(2) = 4.9497 < 6.5 A_peak, so the sense-resistor
+        # rule does NOT fire) but exceeds the flat 3.1 bound -- so this test
+        # can only pass because the flat-bound rule specifically fired.
+        # Deleting only that rule (leaving the sense-resistor ceiling in
+        # place) must make this assertion fail, since 3.5/0.05 alone would
+        # then pass validation.
         source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
         candidate = hardware_setup.replace_ini(
             source,
             {
-                "motor0.run_current_a_rms": "0.8",
-                "motor0.current_range_a_peak": "1",
+                "motor0.run_current_a_rms": "3.5",
+                "motor0.sense_resistor_ohm": "0.05",
             },
         )
         errors = hardware_setup.validate_candidate(candidate)
-        self.assertTrue(any("does not fit selected peak range" in error
-                            for error in errors))
+        self.assertIn(
+            "motor0.run_current_a_rms must be in (0, 3.1]", errors)
+        # Distinct from the sense-resistor ceiling's fragment: this case
+        # must NOT be rejected via that other mechanism.
+        self.assertFalse(any(
+            "exceeds the sense resistor's deliverable current ceiling"
+            in error for error in errors))
 
-    def test_tmc2240_rejects_unusable_global_scaler(self) -> None:
+    def test_motor_current_accepts_flat_bound_boundary(self) -> None:
+        # Both-directions companion to test_motor_current_rejects_flat_bound:
+        # the flat bound is inclusive, "(0, 3.1]", so exactly 3.1 A_rms must
+        # validate cleanly. sense_resistor_ohm=0.05 keeps the sense-resistor
+        # ceiling (6.5 A_peak, i.e. 4.5962 A_rms) well clear of 3.1 so only
+        # the flat bound's own edge is exercised. Catches a `>` -> `>=`
+        # mutation that the 3.5 A_rms rejection case cannot (3.5 is
+        # rejected either way).
         source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
         candidate = hardware_setup.replace_ini(
-            source, {"motor0.run_current_a_rms": "0.01"})
-        errors = hardware_setup.validate_candidate(candidate)
-        self.assertTrue(any("invalid GLOBALSCALER" in error
-                            for error in errors))
+            source,
+            {
+                "motor0.run_current_a_rms": "3.1",
+                "motor0.sense_resistor_ohm": "0.05",
+            },
+        )
+        self.assertEqual(hardware_setup.validate_candidate(candidate), [])
 
     def test_example_configuration_mappings_are_valid(self) -> None:
         source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
         self.assertEqual(hardware_setup.validate_candidate(source), [])
 
-    def test_migrate_config_removes_stale_keys_and_forces_rtd_tmc2240(self) -> None:
+    def test_migrate_config_removes_stale_keys_and_forces_rtd_tmc5160(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             old_path = root / "onboard.ini"
@@ -215,14 +435,20 @@ class HardwareSetupTests(unittest.TestCase):
             old_text = hardware_setup.replace_ini(
                 hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8"),
                 {
-                    "motor0.driver": "tmc5160",
-                    "motor1.driver": "tmc5160",
+                    # Retired driver identity: migration must force tmc5160
+                    # regardless of what a stale source config says.
+                    "motor0.driver": "tmc2240",
+                    "motor1.driver": "tmc2240",
                     "sensor.sample_temperature_source": "daq132m_modbus",
                     "sensor.daq132m_enabled": "true",
                     "sensor.rtd_click_enabled": "false",
                 },
             )
-            old_text += "stepper.microstep=16\nmotor0.sense_resistor=0.075\n"
+            old_text += (
+                "stepper.microstep=16\nmotor0.sense_resistor=0.075\n"
+                "motor0.step_line=19\nmotor0.dir_line=26\n"
+                "motor0.pulse_high_us=3\n"
+            )
             old_path.write_text(old_text, encoding="utf-8")
 
             rc = hardware_setup.migrate_config(argparse.Namespace(
@@ -233,8 +459,8 @@ class HardwareSetupTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             migrated = new_path.read_text(encoding="utf-8")
             values = hardware_setup._ini_values(migrated)
-            self.assertEqual(values["motor0.driver"], "tmc2240")
-            self.assertEqual(values["motor1.driver"], "tmc2240")
+            self.assertEqual(values["motor0.driver"], "tmc5160")
+            self.assertEqual(values["motor1.driver"], "tmc5160")
             for retired in (
                 "sensor.sample_temperature_source",
                 "sensor.daq132m_enabled",
@@ -246,6 +472,9 @@ class HardwareSetupTests(unittest.TestCase):
                 values["sensor.sequent_rtd_channels"], "1,2,3,4,5,6,7,8")
             self.assertNotIn("stepper.microstep=", migrated)
             self.assertNotIn("motor0.sense_resistor=", migrated)
+            self.assertNotIn("motor0.step_line=", migrated)
+            self.assertNotIn("motor0.dir_line=", migrated)
+            self.assertNotIn("motor0.pulse_high_us=", migrated)
             self.assertTrue(list(root.glob("onboard.ini.bak.*")))
             if os.name != "nt":
                 self.assertEqual(new_path.stat().st_mode & 0o777, 0o644)
@@ -281,6 +510,37 @@ class HardwareSetupTests(unittest.TestCase):
             self.assertEqual(values["sensor.sequent_rtd_stack"], "0")
             self.assertEqual(
                 values["sensor.sequent_rtd_channels"], "1,2,3,4,5,6,7,8")
+
+    def test_migrate_config_drops_retired_motor_keys(self) -> None:
+        # Same pattern as test_migrate_config_drops_retired_sensor_keys:
+        # step_line/dir_line/pulse_high_us no longer exist (v3 has no
+        # STEP/DIR lines) and must never survive migration, through the
+        # OBSOLETE_CONFIG_KEYS blocklist extended for them. current_range_a_
+        # peak (the retired TMC2240 range-select current model) gets the
+        # same treatment.
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "old.ini"
+            source.write_text(
+                "motor0.step_line=19\n"
+                "motor0.dir_line=26\n"
+                "motor0.pulse_high_us=3\n"
+                "motor0.current_range_a_peak=0\n"
+                "motor1.step_line=24\n"
+                "motor1.dir_line=20\n"
+                "motor1.pulse_high_us=3\n"
+                "motor1.current_range_a_peak=0\n",
+                encoding="utf-8",
+            )
+            values = migrated_values(source)
+            for retired in (
+                "motor0.step_line", "motor0.dir_line", "motor0.pulse_high_us",
+                "motor0.current_range_a_peak",
+                "motor1.step_line", "motor1.dir_line", "motor1.pulse_high_us",
+                "motor1.current_range_a_peak",
+            ):
+                self.assertNotIn(retired, values)
+            self.assertEqual(values["motor0.driver"], "tmc5160")
+            self.assertEqual(values["motor0.sense_resistor_ohm"], "0.075")
 
     def test_retired_keys_dropped_even_if_template_regresses(self) -> None:
         # RETIRED_SENSOR_KEYS is deliberately redundant with the

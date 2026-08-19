@@ -85,10 +85,11 @@ struct SensorRangeConfig {
 };
 
 struct PowerConfig {
-  // Final BOM: 5 W polyimide film heaters; at most 4 energized at once,
-  // yielding the default 20 W combined thermal draw ceiling.
-  std::size_t max_active_heaters = 4;
-  double max_thermal_w = 20.0;
+  // Final BOM: 5 W polyimide film heaters. Owner power-budget rule: never
+  // more than 3 energized at once, yielding the default 15 W combined
+  // thermal draw ceiling.
+  std::size_t max_active_heaters = 3;
+  double max_thermal_w = 15.0;
   double max_system_w = 48.23;
   double heater_nominal_w = 5.0;
   // BEXUS User Manual §5.2: each team is allocated 150 Wh for the full flight.
@@ -139,13 +140,34 @@ struct SensorHardwareConfig {
   int uv_ads1115_channel = 0;
   double uv_full_scale_v = 4.096;
 
-  std::string resistance_source = "sequent_rtd";
+  // v3 default: the MAX31865 dual-click sample-resistance instrument.
+  // "sequent_rtd", "disabled" and "simulated" remain accepted (see
+  // config.cpp's validation) for back-compat with fielded/legacy configs.
+  std::string resistance_source = "max31865_click";
+
+  // MAX31865 dual-click sample-resistance instrument (schematic v3): two
+  // clicks, each wired 4-wire Kelvin to one coating specimen. Device paths
+  // are fixed by hardware (SensorManager owns the constants: CE1/GP07 =
+  // click 0 = SAMPLE1 = /dev/spidev0.1; CE0/GP08 = click 1 = SAMPLE2 =
+  // /dev/spidev0.0) and are therefore not configurable -- these three keys
+  // are the only tunables.
+  double max31865_reference_ohm = 470.0;
+  int max31865_poll_ms = 1000;
+  // Which two of hardware.sample_count indices the two clicks feed,
+  // click-index-ordered (entry 0 -> click 0/SAMPLE1, entry 1 -> click
+  // 1/SAMPLE2). OWNER-FLAGGED PLACEHOLDER: {0, 4} is the first specimen of
+  // each motor group (motor0.samples starts at 0, motor1.samples starts at
+  // 4) -- config-only to change once the real commissioning mapping from
+  // the coating bench is known.
+  std::vector<std::size_t> max31865_sample_indices{0, 4};
 };
 
 struct HeaterOutputConfig {
   std::vector<std::size_t> output_lines;
   std::vector<std::size_t> temperature_channels;
-  double pwm_frequency_hz = 10.0;
+  // v3: film heaters have high thermal inertia, so a 1 Hz software PWM loop
+  // (no hardware PWM channel is wired) is the owner-confirmed rate.
+  double pwm_frequency_hz = 1.0;
   bool active_high = true;
   double debug_max_duty = 0.25;
   double debug_max_seconds = 10.0;
@@ -171,21 +193,27 @@ struct PullConfig {
 };
 
 struct MotorConfig {
-  std::string driver = "tmc2240";
+  // v3 schematic: TMC5160 SPI-only motion (position dribble via XTARGET).
+  // No STEP/DIR lines exist. CS is a software chip-select GPIO because the
+  // SPI0 native chip-selects (CE0/CE1) are wired to the MAX31865
+  // sample-resistance clicks instead.
+  std::string driver = "tmc5160";
   std::string gpio_chip = "/dev/gpiochip0";
   std::string spi_device = "/dev/spidev0.0";
   std::size_t cs_line = 22;
-  std::size_t step_line = 19;
-  std::size_t dir_line = 26;
-  std::size_t enable_line = 12;
+  std::size_t enable_line = 20;
   bool invert_direction = false;
   bool enable_active_low = true;
+  // Validated at config load against both an absolute ceiling and the
+  // sense resistor's physical current limit -- see config.cpp's per-motor
+  // validation block.
   double run_current_a_rms = 0.8;
-  double current_range_a_peak = 0.0;
   double hold_current_frac = 0.30;
   bool stealth_chop = true;
   std::uint32_t spi_speed_hz = 1000000;
-  int pulse_high_us = 3;
+  // TMC5160 current-sense resistor value (ohms); feeds the
+  // GLOBALSCALER/IHOLD_IRUN current calculation.
+  double sense_resistor_ohm = 0.075;
   int retry_ms = 2000;
   std::vector<std::size_t> samples;
 };

@@ -74,25 +74,22 @@ bool ParseSizeList(const std::string& value, std::vector<std::size_t>* out) {
 }  // namespace
 
 OnboardConfig::OnboardConfig() {
-  heaters.output_lines = {17, 18, 27, 5, 6, 13};
+  // v3 GPIO map (BCM), single source of truth: heaters H1..H6.
+  heaters.output_lines = {19, 13, 6, 5, 24, 23};
   heaters.temperature_channels = {0, 1, 2, 3, 4, 5};
   sensors.sequent_rtd_channels = {1, 2, 3, 4, 5, 6, 7, 8};
 
-  motors[0].driver = "tmc2240";
+  motors[0].driver = "tmc5160";
   motors[0].gpio_chip = runtime.gpio_chip;
   motors[0].spi_device = "/dev/spidev0.0";
   motors[0].cs_line = 22;
-  motors[0].step_line = 19;
-  motors[0].dir_line = 26;
-  motors[0].enable_line = 12;
+  motors[0].enable_line = 20;
   motors[0].samples = {0, 1, 2, 3};
 
-  motors[1].driver = "tmc2240";
+  motors[1].driver = "tmc5160";
   motors[1].gpio_chip = runtime.gpio_chip;
   motors[1].spi_device = "/dev/spidev0.0";
-  motors[1].cs_line = 23;
-  motors[1].step_line = 24;
-  motors[1].dir_line = 20;
+  motors[1].cs_line = 27;
   motors[1].enable_line = 21;
   motors[1].samples = {4, 5, 6, 7};
 }
@@ -373,6 +370,15 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
       if (!parse_double(key, value, &config->sensors.uv_full_scale_v, line_no)) return false;
     } else if (key == "sensor.resistance_source") {
       config->sensors.resistance_source = value;
+    } else if (key == "sensor.max31865_reference_ohm") {
+      if (!parse_double(key, value, &config->sensors.max31865_reference_ohm, line_no)) return false;
+    } else if (key == "sensor.max31865_poll_ms") {
+      if (!parse_int(key, value, &config->sensors.max31865_poll_ms, line_no)) return false;
+    } else if (key == "sensor.max31865_sample_indices") {
+      if (!ParseSizeList(value, &config->sensors.max31865_sample_indices)) {
+        if (error != nullptr) *error = "invalid sensor.max31865_sample_indices";
+        return false;
+      }
 
     } else if (key == "heater.output_lines") {
       if (!ParseSizeList(value, &config->heaters.output_lines)) {
@@ -437,10 +443,6 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
         motor.spi_device = value;
       } else if (suffix == "cs_line") {
         if (!parse_size_t(key, value, &motor.cs_line, line_no)) return false;
-      } else if (suffix == "step_line") {
-        if (!parse_size_t(key, value, &motor.step_line, line_no)) return false;
-      } else if (suffix == "dir_line") {
-        if (!parse_size_t(key, value, &motor.dir_line, line_no)) return false;
       } else if (suffix == "enable_line") {
         if (!parse_size_t(key, value, &motor.enable_line, line_no)) return false;
       } else if (suffix == "invert_direction") {
@@ -449,8 +451,6 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
         if (!parse_bool(key, value, &motor.enable_active_low, line_no)) return false;
       } else if (suffix == "run_current_a_rms") {
         if (!parse_double(key, value, &motor.run_current_a_rms, line_no)) return false;
-      } else if (suffix == "current_range_a_peak") {
-        if (!parse_double(key, value, &motor.current_range_a_peak, line_no)) return false;
       } else if (suffix == "hold_current_frac") {
         if (!parse_double(key, value, &motor.hold_current_frac, line_no)) return false;
       } else if (suffix == "stealth_chop") {
@@ -459,8 +459,8 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
         int speed = 0;
         if (!parse_int(key, value, &speed, line_no)) return false;
         motor.spi_speed_hz = static_cast<std::uint32_t>(speed);
-      } else if (suffix == "pulse_high_us") {
-        if (!parse_int(key, value, &motor.pulse_high_us, line_no)) return false;
+      } else if (suffix == "sense_resistor_ohm") {
+        if (!parse_double(key, value, &motor.sense_resistor_ohm, line_no)) return false;
       } else if (suffix == "retry_ms") {
         if (!parse_int(key, value, &motor.retry_ms, line_no)) return false;
       } else if (suffix == "samples") {
@@ -534,6 +534,30 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
   if (config->heaters.pwm_frequency_hz <= 0.0) {
     if (error != nullptr) {
       *error = "heater.pwm_frequency_hz must be > 0";
+    }
+    return false;
+  }
+
+  // Owner hard rule (schematic v3 power budget): never more than 3 heaters
+  // energised, never more than 15 W of thermal load. HeaterScheduler enforces
+  // these at runtime, but until now nothing stopped an INI from RAISING the
+  // ceiling it enforces -- a one-character edit could have put six heaters on
+  // a rail sized for three. Rejected at load instead.
+  if (config->power.max_active_heaters == 0U ||
+      config->power.max_active_heaters > 3U) {
+    if (error != nullptr) {
+      *error =
+          "power.max_active_heaters must be 1..3 (owner power rule: never "
+          "more than 3 heaters)";
+    }
+    return false;
+  }
+
+  if (!(config->power.max_thermal_w > 0.0) ||
+      config->power.max_thermal_w > 15.0) {
+    if (error != nullptr) {
+      *error =
+          "power.max_thermal_w must be > 0 and <= 15.0 (owner power rule)";
     }
     return false;
   }
@@ -612,15 +636,18 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
     return false;
   }
 
-  // "disabled" and "simulated" remain accepted alongside the HAT-backed
-  // "sequent_rtd" source: fielded configs may still say "disabled", and
-  // Ina3221Adapter (the only consumer) is still a compiled stub, so refusing
-  // to load an otherwise-valid config over this label would be a poor trade.
+  // "max31865_click" is the v3-shipped default. "disabled", "simulated" and
+  // the pre-v3 "sequent_rtd" source remain accepted: fielded configs may
+  // still say any of them, and Ina3221Adapter (the "disabled"/"simulated"
+  // fallback consumer) is still a compiled stub, so refusing to load an
+  // otherwise-valid config over this label would be a poor trade.
   if (config->sensors.resistance_source != "disabled" &&
       config->sensors.resistance_source != "simulated" &&
-      config->sensors.resistance_source != "sequent_rtd") {
+      config->sensors.resistance_source != "sequent_rtd" &&
+      config->sensors.resistance_source != "max31865_click") {
     if (error != nullptr) {
-      *error = "sensor.resistance_source must be disabled, simulated, or sequent_rtd";
+      *error = "sensor.resistance_source must be disabled, simulated, "
+               "sequent_rtd, or max31865_click";
     }
     return false;
   }
@@ -693,6 +720,47 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
     }
     return false;
   }
+
+  // Max31865Loop polls both clicks whenever their SPI bus is available,
+  // independent of resistance_source (mirrors the Sequent RTD card always
+  // polling temperature regardless of resistance_source) -- so these are
+  // validated unconditionally too, not only when resistance_source is
+  // "max31865_click".
+  if (config->sensors.max31865_reference_ohm <= 0.0) {
+    if (error != nullptr) {
+      *error = "sensor.max31865_reference_ohm must be > 0";
+    }
+    return false;
+  }
+  if (config->sensors.max31865_poll_ms <= 0) {
+    if (error != nullptr) {
+      *error = "sensor.max31865_poll_ms must be > 0";
+    }
+    return false;
+  }
+  if (config->sensors.max31865_sample_indices.size() != 2U) {
+    if (error != nullptr) {
+      *error = "sensor.max31865_sample_indices must have exactly two entries";
+    }
+    return false;
+  }
+  if (config->sensors.max31865_sample_indices[0] ==
+      config->sensors.max31865_sample_indices[1]) {
+    if (error != nullptr) {
+      *error = "sensor.max31865_sample_indices entries must be distinct";
+    }
+    return false;
+  }
+  for (const std::size_t index : config->sensors.max31865_sample_indices) {
+    if (index >= config->hardware.sample_count) {
+      if (error != nullptr) {
+        *error = "sensor.max31865_sample_indices entries must be less than "
+                 "hardware.sample_count";
+      }
+      return false;
+    }
+  }
+
   if (config->heaters.debug_max_duty < 0.0 ||
       config->heaters.debug_max_duty > 1.0 ||
       config->heaters.debug_max_seconds <= 0.0 ||
@@ -728,43 +796,76 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
 
   for (std::size_t i = 0; i < config->motors.size(); ++i) {
     const MotorConfig& motor = config->motors[i];
-    if (motor.driver != "tmc2240") {
+    // v3: TMC2240/GPIO-pulse motion is retired in favor of TMC5160 SPI-only
+    // motion. Name the retirement explicitly so a stale field INI fails
+    // loudly with an actionable message instead of a generic rejection.
+    if (motor.driver == "tmc2240") {
       if (error != nullptr) {
-        *error = "motor" + std::to_string(i) + ".driver must be tmc2240";
+        *error = "motor" + std::to_string(i) +
+                 ".driver=tmc2240 is retired; use tmc5160";
       }
       return false;
     }
-    const double requested_peak = motor.run_current_a_rms * std::sqrt(2.0);
-    const bool valid_current_range =
-        motor.current_range_a_peak == 0.0 ||
-        motor.current_range_a_peak == 1.0 ||
-        motor.current_range_a_peak == 2.0 ||
-        motor.current_range_a_peak == 3.0;
-    const double selected_range =
-        motor.current_range_a_peak > 0.0
-            ? motor.current_range_a_peak
-            : (requested_peak <= 1.0 ? 1.0
-                                     : (requested_peak <= 2.0 ? 2.0 : 3.0));
-    const long global_scaler =
-        std::isfinite(requested_peak) && std::isfinite(selected_range) &&
-                selected_range > 0.0
-            ? std::lround(requested_peak * 256.0 / selected_range)
-            : 0L;
+    if (motor.driver != "tmc5160" && motor.driver != "simulated") {
+      if (error != nullptr) {
+        *error = "motor" + std::to_string(i) + ".driver must be tmc5160 or simulated";
+      }
+      return false;
+    }
+    // v3: the TMC2240 range-select current model (current_range_a_peak ->
+    // one of four fixed peak-current ranges -> GLOBALSCALER) is retired;
+    // the TMC5160 driver's CalculateCurrent() derives GLOBALSCALER/IRUN/
+    // IHOLD directly from run_current_a_rms and sense_resistor_ohm with a
+    // continuous scaler, no range selection involved. run_current_a_rms
+    // gets a flat absolute ceiling plus a sense-resistor-derived physical
+    // ceiling instead (below, once sense_resistor_ohm itself is known
+    // valid).
     if (motor.gpio_chip.empty() || motor.spi_device.empty() ||
-        !std::isfinite(motor.run_current_a_rms) ||
-        !std::isfinite(motor.current_range_a_peak) ||
         !std::isfinite(motor.hold_current_frac) ||
-        motor.run_current_a_rms <= 0.0 || motor.run_current_a_rms > 2.1 ||
-        !valid_current_range ||
-        (motor.current_range_a_peak > 0.0 &&
-         requested_peak > motor.current_range_a_peak) ||
-        global_scaler < 32 || global_scaler > 256 ||
         motor.hold_current_frac < 0.0 || motor.hold_current_frac > 1.0 ||
         motor.spi_speed_hz == 0U || motor.spi_speed_hz > 10000000U ||
-        motor.pulse_high_us < 1 ||
+        !std::isfinite(motor.sense_resistor_ohm) ||
+        motor.sense_resistor_ohm <= 0.0 || motor.sense_resistor_ohm >= 1.0 ||
         motor.retry_ms < 100 || motor.samples.empty()) {
       if (error != nullptr) {
         *error = "invalid motor" + std::to_string(i) + " configuration";
+      }
+      return false;
+    }
+    // Flat absolute ceiling on run_current_a_rms, independent of
+    // sense_resistor_ohm (a hardware/enclosure/wiring limit backstop for
+    // configs with a very small sense resistor, where the sense-resistor
+    // ceiling below would otherwise never bind). Split out of the omnibus
+    // check above into its own dedicated message so it -- and the
+    // sense-resistor ceiling below -- can each be tested in isolation; the
+    // shared "invalid motorN configuration" message can't distinguish
+    // which of several unrelated conditions fired.
+    if (!std::isfinite(motor.run_current_a_rms) ||
+        motor.run_current_a_rms <= 0.0 || motor.run_current_a_rms > 3.1) {
+      if (error != nullptr) {
+        *error = "motor" + std::to_string(i) +
+                 ".run_current_a_rms must be in (0, 3.1]";
+      }
+      return false;
+    }
+    // TMC5160 hardware ceiling: the chip's fixed full-scale sense voltage
+    // (Vfs = 0.325 V, see tmc5160_driver.cpp's kVfs) means peak deliverable
+    // current is Vfs/sense_resistor_ohm regardless of GLOBALSCALER/IRUN.
+    // CalculateCurrent() already rejects an unreachable request, but that
+    // only surfaces as an unhealthy driver once the service is already
+    // running (SystemController::Initialize's build_tmc5160); checking it
+    // here fails config load loudly at the bench instead, before power-up.
+    // sense_resistor_ohm is already known finite and in (0, 1) from the
+    // check above, so the division below is safe.
+    constexpr double kTmc5160FullScaleSenseVoltage = 0.325;
+    const double max_peak_a =
+        kTmc5160FullScaleSenseVoltage / motor.sense_resistor_ohm;
+    if (motor.run_current_a_rms * std::sqrt(2.0) > max_peak_a) {
+      if (error != nullptr) {
+        *error = "motor" + std::to_string(i) +
+                 ".run_current_a_rms exceeds the sense resistor's "
+                 "deliverable current ceiling (run_current_a_rms*sqrt(2) "
+                 "must be <= 0.325/sense_resistor_ohm)";
       }
       return false;
     }
@@ -793,6 +894,25 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
     return true;
   };
 
+  // v3 schematic: GPIO lines fixed-owned by the Sequent RTD HAT and by the
+  // hardware SPI0 chip-selects (physically wired to the MAX31865 sample-
+  // resistance clicks, not available for heater/motor use). Claim these
+  // first so any heater or motor line colliding with one fails config load
+  // with the reserved owner named in the error.
+  static const std::pair<std::size_t, const char*> kReservedGpioLines[] = {
+      {14, "reserved: sequent_hat uart_tx"},
+      {15, "reserved: sequent_hat uart_rx"},
+      {17, "reserved: sequent_hat rs485_dir"},
+      {26, "reserved: sequent_hat intn"},
+      {7, "reserved: spi0_ce1 (max31865 sample1)"},
+      {8, "reserved: spi0_ce0 (max31865 sample2)"},
+  };
+  for (const auto& [line, owner] : kReservedGpioLines) {
+    if (!claim_gpio(config->runtime.gpio_chip, line, owner)) {
+      return false;
+    }
+  }
+
   for (std::size_t i = 0; i < config->heaters.output_lines.size(); ++i) {
     if (!claim_gpio(config->runtime.gpio_chip, config->heaters.output_lines[i],
                     "heater.output_lines[" + std::to_string(i) + "]")) {
@@ -803,8 +923,6 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
     const std::string prefix = "motor" + std::to_string(i);
     const std::string& chip = config->motors[i].gpio_chip;
     if (!claim_gpio(chip, config->motors[i].cs_line, prefix + ".cs_line") ||
-        !claim_gpio(chip, config->motors[i].step_line, prefix + ".step_line") ||
-        !claim_gpio(chip, config->motors[i].dir_line, prefix + ".dir_line") ||
         !claim_gpio(chip, config->motors[i].enable_line,
                     prefix + ".enable_line")) {
       return false;

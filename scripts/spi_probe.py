@@ -23,7 +23,7 @@ from typing import Iterable, List, Sequence
 # main() decide, per section, whether that is fatal.
 #
 # `from __future__ import annotations` above keeps the `spidev.SpiDev`
-# annotations on transfer()/read_tmc2240() from being evaluated, so leaving
+# annotations on transfer()/read_tmc5160() from being evaluated, so leaving
 # these names as None is safe until something actually calls into them.
 try:
     import spidev  # type: ignore
@@ -57,8 +57,11 @@ class Device:
 
 
 DEVICES = (
-    Device("MOTOR0_TMC2240", 22, "tmc2240"),
-    Device("MOTOR1_TMC2240", 23, "tmc2240"),
+    # v3 pinout: TMC5160, SPI-only motion (no STEP/DIR). CS is a software
+    # chip-select GPIO (soft-CS below) because the SPI0 native chip-selects
+    # (CE0/CE1) are wired to the MAX31865 sample-resistance clicks instead.
+    Device("MOTOR0_TMC5160", 22, "tmc5160"),
+    Device("MOTOR1_TMC5160", 27, "tmc5160"),
 )
 
 
@@ -133,25 +136,25 @@ def probe_sequent_rtd(stack: int = 0) -> int:
     return 0
 
 
-def read_tmc2240(spi: spidev.SpiDev, cs: CsLine, reg: int, label: str) -> int:
+def read_tmc5160(spi: spidev.SpiDev, cs: CsLine, reg: int, label: str) -> int:
     tx = [reg & 0x7f, 0x00, 0x00, 0x00, 0x00]
     rx1 = transfer(spi, cs, tx)
     rx2 = transfer(spi, cs, tx)
     value = ((rx2[1] << 24) | (rx2[2] << 16) | (rx2[3] << 8) | rx2[4]) & 0xffffffff
     print(
-        f"    tmc2240 {label} reg=0x{reg:02x} "
+        f"    tmc5160 {label} reg=0x{reg:02x} "
         f"tx={hex_bytes(tx)} rx1={hex_bytes(rx1)} rx2={hex_bytes(rx2)} "
         f"value=0x{value:08x}"
     )
     return value
 
 
-def read_tmc2240_set(spi: spidev.SpiDev, cs: CsLine) -> None:
-    ioin = read_tmc2240(spi, cs, 0x04, "IOIN")
+def read_tmc5160_set(spi: spidev.SpiDev, cs: CsLine) -> None:
+    ioin = read_tmc5160(spi, cs, 0x04, "IOIN")
     version = (ioin >> 24) & 0xff
-    print(f"    tmc2240 decoded IOIN.VERSION=0x{version:02x} expected=0x40")
-    read_tmc2240(spi, cs, 0x01, "GSTAT")
-    read_tmc2240(spi, cs, 0x6f, "DRV_STATUS")
+    print(f"    tmc5160 decoded IOIN.VERSION=0x{version:02x} expected=0x30")
+    read_tmc5160(spi, cs, 0x01, "GSTAT")
+    read_tmc5160(spi, cs, 0x6f, "DRV_STATUS")
 
 
 def parse_speeds(value: str) -> List[int]:
@@ -206,7 +209,7 @@ def main() -> int:
         # being able to run it is a failure rather than a skip.
         if args.device:
             raise SystemExit(f"--device requires the SPI stack: {spi_error}")
-        print(f"\n=== SPI (TMC2240) SKIPPED: {spi_error} ===")
+        print(f"\n=== SPI (TMC5160) SKIPPED: {spi_error} ===")
         print("Install python3-spidev and python3-libgpiod to probe the "
               "motor drivers; the I2C section above ran regardless.")
         return rtd_rc
@@ -215,6 +218,13 @@ def main() -> int:
     spi.open(args.spi_bus, args.spi_device)
     spi.mode = 0b11
     spi.bits_per_word = 8
+    # SPI_NO_CS is mandatory here, not cosmetic: on this bus/device, CE0/CE1
+    # are physically wired to the MAX31865 sample-resistance clicks, not to
+    # the TMC5160 motor drivers. Motor chip-select is done entirely in
+    # software via CsLine (a GPIO line toggled around each datagram, see
+    # transfer() above). Without no_cs, the kernel would assert the native
+    # hardware CE line on every motor SPI transfer and glitch whichever
+    # MAX31865 click happens to share that CE.
     if hasattr(spi, "no_cs"):
         spi.no_cs = True
 
@@ -231,8 +241,8 @@ def main() -> int:
                 print(f"  [{device.name}] cs=BCM{device.cs_line}")
                 cs = CsLine(args.gpio_chip, device.cs_line)
                 try:
-                    if device.kind == "tmc2240":
-                        read_tmc2240_set(spi, cs)
+                    if device.kind == "tmc5160":
+                        read_tmc5160_set(spi, cs)
                     else:
                         raise AssertionError(device.kind)
                 finally:
