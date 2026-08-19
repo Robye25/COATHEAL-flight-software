@@ -22,24 +22,24 @@ DEFAULT_CONFIG = ROOT / "config" / "onboard.local.ini"
 EXAMPLE_CONFIG = ROOT / "config" / "onboard.example.ini"
 LEGACY_CONFIG = ROOT / "config" / "onboard.ini"
 FINAL_PIN_VALUES = {
-    "heater.output_lines": "17,18,27,5,6,13",
+    # v3 GPIO map (BCM), single source of truth: heaters H1..H6.
+    "heater.output_lines": "19,13,6,5,24,23",
     "heater.temperature_channels": "0,1,2,3,4,5",
     "hal.status_led_enabled": "false",
     "hal.mode_led_enabled": "false",
-    "motor0.driver": "tmc2240",
+    # v3: TMC5160, SPI-only motion - no STEP/DIR lines exist.
+    "motor0.driver": "tmc5160",
     "motor0.gpio_chip": "/dev/gpiochip0",
     "motor0.spi_device": "/dev/spidev0.0",
     "motor0.cs_line": "22",
-    "motor0.enable_line": "12",
-    "motor0.step_line": "19",
-    "motor0.dir_line": "26",
-    "motor1.driver": "tmc2240",
+    "motor0.enable_line": "20",
+    "motor0.sense_resistor_ohm": "0.075",
+    "motor1.driver": "tmc5160",
     "motor1.gpio_chip": "/dev/gpiochip0",
     "motor1.spi_device": "/dev/spidev0.0",
-    "motor1.cs_line": "23",
+    "motor1.cs_line": "27",
     "motor1.enable_line": "21",
-    "motor1.step_line": "24",
-    "motor1.dir_line": "20",
+    "motor1.sense_resistor_ohm": "0.075",
     "sensor.sequent_rtd_stack": "0",
     "sensor.sequent_rtd_channels": "1,2,3,4,5,6,7,8",
     "sensor.sequent_rtd_poll_ms": "1000",
@@ -47,9 +47,23 @@ FINAL_PIN_VALUES = {
     "sensor.sequent_rtd_resistance_min_ohm": "60.0",
     "sensor.sequent_rtd_resistance_max_ohm": "390.0",
     "sensor.sequent_rtd_crosscheck_tol_c": "2.0",
-    "sensor.resistance_source": "sequent_rtd",
-    "motor0.current_range_a_peak": "0",
-    "motor1.current_range_a_peak": "0",
+    # MAX31865 dual-click sample-resistance instrument (schematic v3).
+    # Device paths are fixed by hardware (CE1/GP07 = click 0 = SAMPLE1 =
+    # /dev/spidev0.1; CE0/GP08 = click 1 = SAMPLE2 = /dev/spidev0.0), not
+    # configurable. sample_indices "0,4" is an OWNER-FLAGGED PLACEHOLDER:
+    # first specimen of each motor group -- update once the real
+    # commissioning mapping from the coating bench is known.
+    "sensor.max31865_reference_ohm": "470.0",
+    "sensor.max31865_poll_ms": "1000",
+    "sensor.max31865_sample_indices": "0,4",
+    "sensor.resistance_source": "max31865_click",
+    # Owner hard rule (schematic v3 power budget): never more than 3 heaters
+    # energised, never more than 15 W thermal. Tracked here so `pin-check`
+    # and the wizard pin the owner's values, and validated in
+    # validate_candidate() so a hand-edited INI cannot raise the ceiling
+    # HeaterScheduler enforces.
+    "power.max_active_heaters": "3",
+    "power.max_thermal_w": "15.0",
 }
 OBSOLETE_CONFIG_KEYS = {
     "stepper.microstep",
@@ -64,7 +78,34 @@ OBSOLETE_CONFIG_KEYS = {
     "motor1.sense_resistor",
     "motor0.sense_resistance",
     "motor1.sense_resistance",
+    # v3: no STEP/DIR lines exist (TMC5160 SPI-only motion); pulse_high_us
+    # was only ever meaningful for GPIO-pulse (STEP/DIR) motion.
+    "motor0.step_line",
+    "motor0.dir_line",
+    "motor0.pulse_high_us",
+    "motor1.step_line",
+    "motor1.dir_line",
+    "motor1.pulse_high_us",
+    # v3: the TMC2240 range-select current model (current_range_a_peak ->
+    # one of four fixed peak-current ranges) is retired; the TMC5160
+    # driver's CalculateCurrent() derives GLOBALSCALER/IRUN/IHOLD directly
+    # from run_current_a_rms and sense_resistor_ohm with a continuous
+    # scaler, no range selection involved.
+    "motor0.current_range_a_peak",
+    "motor1.current_range_a_peak",
 }
+# v3 reserved GPIO lines (BCM), mirroring config.cpp's kReservedGpioLines:
+# Sequent RTD HAT lines plus the hardware SPI0 chip-selects, which are wired
+# to the MAX31865 sample-resistance clicks and are not available for
+# heater/motor use.
+RESERVED_GPIO_LINES = (
+    (14, "reserved: sequent_hat uart_tx"),
+    (15, "reserved: sequent_hat uart_rx"),
+    (17, "reserved: sequent_hat rs485_dir"),
+    (26, "reserved: sequent_hat intn"),
+    (7, "reserved: spi0_ce1 (max31865 sample1)"),
+    (8, "reserved: spi0_ce0 (max31865 sample2)"),
+)
 RETIRED_SENSOR_KEYS = frozenset({
     "sensor.sample_temperature_source",
     "sensor.daq132m_enabled", "sensor.daq132m_auto_discover",
@@ -235,16 +276,88 @@ def validate_candidate(text: str) -> list[str]:
             errors.append("sensor.sequent_rtd_resistance_min_ohm must be "
                           "below sensor.sequent_rtd_resistance_max_ohm")
 
-    # config.cpp:619-626 - "disabled" and "simulated" stay accepted alongside
-    # the HAT-backed default so a fielded INI still loads.
+    # config.cpp:610-621 - "max31865_click" is the v3-shipped default;
+    # "disabled", "simulated" and the pre-v3 "sequent_rtd" source stay
+    # accepted so a fielded INI still loads.
     if values.get("sensor.resistance_source") not in {
-            "sequent_rtd", "disabled", "simulated"}:
+            "sequent_rtd", "disabled", "simulated", "max31865_click"}:
         errors.append("sensor.resistance_source must be disabled, simulated, "
-                      "or sequent_rtd")
+                      "sequent_rtd, or max31865_click")
+
+    # config.cpp's Max31865Loop-adjacent validation block - unconditional
+    # (independent of resistance_source), mirroring the sequent_rtd_* keys
+    # above: the worker always polls both clicks when their bus is
+    # available, regardless of which resistance_source is selected.
+    try:
+        max31865_reference_ohm = float(values["sensor.max31865_reference_ohm"])
+    except (KeyError, ValueError):
+        errors.append("sensor.max31865_reference_ohm must be a number")
+    else:
+        if not math.isfinite(max31865_reference_ohm) or max31865_reference_ohm <= 0.0:
+            errors.append("sensor.max31865_reference_ohm must be > 0")
+
+    try:
+        max31865_poll_ms = int(values["sensor.max31865_poll_ms"])
+    except (KeyError, ValueError):
+        errors.append("sensor.max31865_poll_ms must be an integer")
+    else:
+        if max31865_poll_ms <= 0:
+            errors.append("sensor.max31865_poll_ms must be > 0")
+
+    raw_max31865_indices = values.get("sensor.max31865_sample_indices", "")
+    raw_max31865_pieces = [
+        c.strip() for c in raw_max31865_indices.split(",") if c.strip()]
+    if len(raw_max31865_pieces) != 2:
+        errors.append(
+            "sensor.max31865_sample_indices must have exactly two entries")
+    elif any(not c.isdigit() for c in raw_max31865_pieces):
+        # Mirrors config.cpp's ParseSizeList failure -- a non-numeric entry
+        # is a parse error, kept distinct from the range message below.
+        errors.append("sensor.max31865_sample_indices must be numeric")
+    else:
+        # Parse before comparing, matching config.cpp (which compares the
+        # parsed std::size_t values, not the raw INI text): a raw-string
+        # comparison would miss "0" vs "00" as a duplicate even though both
+        # parse to the same index.
+        max31865_indices = [int(c) for c in raw_max31865_pieces]
+        if len(set(max31865_indices)) != len(max31865_indices):
+            errors.append(
+                "sensor.max31865_sample_indices entries must be distinct")
+        elif any(index >= samples for index in max31865_indices):
+            errors.append("sensor.max31865_sample_indices entries must be "
+                          "less than hardware.sample_count")
+
+    # Owner hard rule, mirroring config.cpp's power-cap block: <= 3 active
+    # heaters and <= 15.0 W thermal. This is a deliberate, narrow reversal of
+    # the "validator scope asymmetry by design" note -- that note said this
+    # script validates the keys it WRITES, and these two are now keys it
+    # writes (FINAL_PIN_VALUES above). The asymmetry stands everywhere else.
+    try:
+        max_active_heaters = int(values["power.max_active_heaters"])
+    except (KeyError, ValueError):
+        errors.append("power.max_active_heaters must be an integer")
+    else:
+        if not 1 <= max_active_heaters <= 3:
+            errors.append("power.max_active_heaters must be 1..3 (owner power "
+                          "rule: never more than 3 heaters)")
+
+    try:
+        max_thermal_w = float(values["power.max_thermal_w"])
+    except (KeyError, ValueError):
+        errors.append("power.max_thermal_w must be a number")
+    else:
+        if not math.isfinite(max_thermal_w) or not 0.0 < max_thermal_w <= 15.0:
+            errors.append(
+                "power.max_thermal_w must be > 0 and <= 15.0 (owner power rule)")
 
     runtime_chip = values.get("runtime.gpio_chip", "/dev/gpiochip0")
     gpio_claims: dict[tuple[str, int], str] = {}
+    # Reserved lines are claimed first, mirroring config.cpp's claim order,
+    # so a heater or motor line colliding with one fails with the reserved
+    # owner named in the error.
     gpio_keys = [
+        (runtime_chip, owner, line) for line, owner in RESERVED_GPIO_LINES
+    ] + [
         (runtime_chip, f"heater.output_lines[{index}]", line)
         for index, line in enumerate(output_lines)
     ]
@@ -253,44 +366,60 @@ def validate_candidate(text: str) -> list[str]:
         chip = values.get(chip_key, "")
         if not chip:
             errors.append(f"invalid or missing {chip_key}")
-        for suffix in ("cs_line", "step_line", "dir_line", "enable_line"):
+        # v3: no STEP/DIR lines exist (TMC5160 SPI-only motion).
+        for suffix in ("cs_line", "enable_line"):
             key = f"motor{motor}.{suffix}"
             try:
                 gpio_keys.append((chip, key, int(values[key], 0)))
             except (KeyError, ValueError):
                 errors.append(f"invalid or missing {key}")
-        if values.get(f"motor{motor}.driver") != "tmc2240":
-            errors.append(f"motor{motor}.driver must be tmc2240")
+        driver = values.get(f"motor{motor}.driver")
+        if driver == "tmc2240":
+            errors.append(f"motor{motor}.driver=tmc2240 is retired; use tmc5160")
+        elif driver not in ("tmc5160", "simulated"):
+            errors.append(f"motor{motor}.driver must be tmc5160 or simulated")
         try:
+            # v3: the TMC2240 range-select current model
+            # (current_range_a_peak -> one of four fixed peak-current
+            # ranges -> GLOBALSCALER) is retired; the TMC5160 driver's
+            # CalculateCurrent() derives GLOBALSCALER/IRUN/IHOLD directly
+            # from run_current_a_rms and sense_resistor_ohm with a
+            # continuous scaler, no range selection involved.
+            # run_current_a_rms gets a flat absolute ceiling plus a
+            # sense-resistor-derived physical ceiling instead (mirrors
+            # config.cpp's per-motor validation block).
             run_current = float(values[f"motor{motor}.run_current_a_rms"])
-            current_range = float(
-                values[f"motor{motor}.current_range_a_peak"])
             spi_speed = int(values[f"motor{motor}.spi_speed_hz"], 0)
-            pulse_high = int(values[f"motor{motor}.pulse_high_us"], 0)
-            if not math.isfinite(run_current) or not 0.0 < run_current <= 2.1:
+            sense_resistor_ohm = float(
+                values[f"motor{motor}.sense_resistor_ohm"])
+            if not math.isfinite(run_current) or not 0.0 < run_current <= 3.1:
                 errors.append(
-                    f"motor{motor}.run_current_a_rms must be in (0, 2.1]")
-            if current_range not in (0.0, 1.0, 2.0, 3.0):
-                errors.append(
-                    f"motor{motor}.current_range_a_peak must be 0, 1, 2, or 3")
-            if current_range > 0.0 and run_current * math.sqrt(2.0) > current_range:
-                errors.append(
-                    f"motor{motor} current does not fit selected peak range")
-            requested_peak = run_current * math.sqrt(2.0)
-            selected_range = current_range or (
-                1.0 if requested_peak <= 1.0 else
-                2.0 if requested_peak <= 2.0 else 3.0)
-            global_scaler = math.floor(
-                requested_peak * 256.0 / selected_range + 0.5)
-            if not 32 <= global_scaler <= 256:
-                errors.append(
-                    f"motor{motor} current produces invalid GLOBALSCALER")
+                    f"motor{motor}.run_current_a_rms must be in (0, 3.1]")
             if not 0 < spi_speed <= 10_000_000:
                 errors.append(
                     f"motor{motor}.spi_speed_hz must be in [1, 10000000]")
-            if pulse_high < 1:
+            if not math.isfinite(sense_resistor_ohm) or not (
+                    0.0 < sense_resistor_ohm < 1.0):
                 errors.append(
-                    f"motor{motor}.pulse_high_us must be at least 1")
+                    f"motor{motor}.sense_resistor_ohm must be in (0, 1)")
+            elif math.isfinite(run_current):
+                # TMC5160 hardware ceiling: the chip's fixed full-scale
+                # sense voltage (Vfs = 0.325 V, see tmc5160_driver.cpp's
+                # kVfs) means peak deliverable current is
+                # Vfs/sense_resistor_ohm regardless of GLOBALSCALER/IRUN.
+                # The onboard binary's CalculateCurrent() already rejects
+                # an unreachable request, but that only surfaces as an
+                # unhealthy driver once the service is running; checking
+                # it here fails migration/validation loudly at the bench
+                # instead. sense_resistor_ohm is already known finite and
+                # in (0, 1) here, so the division below is safe.
+                max_peak = 0.325 / sense_resistor_ohm
+                if run_current * math.sqrt(2.0) > max_peak:
+                    errors.append(
+                        f"motor{motor}.run_current_a_rms exceeds the "
+                        "sense resistor's deliverable current ceiling "
+                        "(run_current_a_rms*sqrt(2) must be <= "
+                        "0.325/sense_resistor_ohm)")
         except (KeyError, ValueError):
             errors.append(f"invalid or missing motor{motor} electrical setting")
     for chip, owner, line in gpio_keys:
@@ -394,6 +523,9 @@ def pin_check(args: argparse.Namespace) -> int:
                 "sensor.sequent_rtd_resistance_min_ohm",
                 "sensor.sequent_rtd_resistance_max_ohm",
                 "sensor.sequent_rtd_crosscheck_tol_c",
+                "sensor.max31865_reference_ohm",
+                "sensor.max31865_poll_ms",
+                "sensor.max31865_sample_indices",
                 "sensor.resistance_source"}:
             continue
         actual = values.get(key)

@@ -43,9 +43,10 @@ Default GPIO values are BCM GPIO line numbers on `/dev/gpiochip0`, not physical
 
 | Subsystem | Final component | Software interface |
 |---|---|---|
-| Stepper driver | TMC2240 carrier | SPI mode 3 + STEP/DIR/EN GPIO |
-| Linear actuator | NEMA 17 external ball-screw linear stepper, 2.5 A, 48 mm | Controlled through TMC2240 |
+| Stepper driver | TMC5160 carrier (QHV5160 v2) | SPI-only position dribble — no STEP/DIR |
+| Linear actuator | NEMA 17 external ball-screw linear stepper, 2.5 A, 48 mm | Driven by TMC5160 over SPI |
 | Sample temperature | 8x XF-931-FAR PT100 Class B probes | Sequent Microsystems 8-channel RTD HAT, I2C `0x40 + stack` |
+| Sample resistance | 2x MikroE RTD Click (MAX31865), 4-wire Kelvin per specimen | SPI0 native CS (CE0/CE1) |
 | ADC for UV | Adafruit ADS1115 16-bit 4-channel ADC | I2C, STEMMA QT/Qwiic |
 | Pressure / ambient T | Adafruit DPS310 | I2C, STEMMA QT/Qwiic |
 | UV sensor | GUVA-S12SD analog UV breakout | Analog into ADS1115 |
@@ -64,16 +65,17 @@ Default GPIO values are BCM GPIO line numbers on `/dev/gpiochip0`, not physical
 | Plug-and-play Ethernet | Implemented | Pi must keep `169.254.10.10/16`; Windows firewall must allow telemetry |
 | Telemetry logging and durable queue | Implemented | Verify SD/USB paths on the Pi |
 | Final-BOM config schema | Implemented | Use `config/onboard.example.ini` as the template |
-| TMC2240 config path | Implemented | Bench-verify integrated current/chopper setup and motor polarity |
-| STEP/DIR/EN pulses | Implemented with libgpiod | Bench-verify waveform timing, direction, and travel |
-| Heater PWM mapping | Implemented with zero-safe software PWM | Validate with current-limited dummy loads |
+| TMC5160 SPI-only motion | Implemented (software CS, `SPI_NO_CS`, position dribble; no STEP/DIR GPIO) | Bench-verify current model against the boards' actual sense resistor; see [tmc5160-commissioning.md](tmc5160-commissioning.md) |
+| Heater PWM mapping | Implemented with zero-safe 1 Hz software PWM | Validate with current-limited dummy loads |
 | DPS310 / ADS1115 reads | Linux `i2c-dev` reads implemented | Verify addresses and values on the assembled bus |
 | Sequent RTD HAT | I2C read backend implemented; register map derived from vendor source | Complete the bench register-map verification gate in [sequent-rtd-bring-up.md](sequent-rtd-bring-up.md) before trusting readings |
-| Sample resistance | PT100 element resistance read by the RTD HAT | Telemetry `RESISTANCE=` carries real values by default (`sensor.resistance_source=sequent_rtd`); `disabled` emits `-` |
+| MAX31865 dual-click | SPI native-CE one-shot read backend implemented | Complete gates 4-5 (reference resistor, coating-resistance range) in [sequent-rtd-bring-up.md §9](sequent-rtd-bring-up.md#9-max31865-sample-resistance-click-bring-up-blocking-gates) |
+| Sample resistance | Coating-specimen resistance read directly by the MAX31865 clicks | Telemetry `RESISTANCE=` carries real values by default (`sensor.resistance_source=max31865_click`); `sequent_rtd` and `disabled` remain available |
 
 The remaining work before powered hardware operation is physical validation on
-the assembled Pi: bus addressing, RTD register-map verification, GPIO
-waveforms, motor current/polarity, and heater dummy-load behavior.
+the assembled Pi: bus addressing, RTD register-map verification, MAX31865
+reference-resistor/coating-range characterisation, TMC5160 sense-resistor
+confirmation, and heater dummy-load behavior.
 
 ## Ground Station Installation
 
@@ -321,13 +323,16 @@ This map matches the final pinout diagram. GPIO values are BCM numbers.
 | Function | Default | Config key |
 |---|---|---|
 | Status LEDs | Disabled; none in final diagram | `hal.*_led_enabled` |
-| Heater H0..H5 inputs | BCM 17,18,27,5,6,13 | `heater.output_lines` |
-| Heater PWM frequency | 10 Hz | `heater.pwm_frequency_hz` |
+| Heater H1..H6 inputs | BCM 19,13,6,5,24,23 | `heater.output_lines` |
+| Heater PWM frequency | 1 Hz | `heater.pwm_frequency_hz` |
 | Heater input polarity | active-high | `heater.active_high` |
-| Motor 0 STEP/DIR/EN | BCM 19 / 26 / 12 | `motor0.step_line`, `motor0.dir_line`, `motor0.enable_line` |
-| Motor 0 SPI | `/dev/spidev0.0`, CS BCM 22 | `motor0.spi_device`, `motor0.cs_line` |
-| Motor 1 STEP/DIR/EN | BCM 24 / 20 / 21 | `motor1.step_line`, `motor1.dir_line`, `motor1.enable_line` |
-| Motor 1 SPI | `/dev/spidev0.0`, CS BCM 23 | `motor1.spi_device`, `motor1.cs_line` |
+| Max simultaneous heaters | 3 | `power.max_active_heaters` |
+| Motor 0 CS (soft) / EN | BCM 22 / 20 | `motor0.cs_line`, `motor0.enable_line` |
+| Motor 0 SPI | `/dev/spidev0.0`, `SPI_NO_CS` | `motor0.spi_device`, `motor0.cs_line` |
+| Motor 1 CS (soft) / EN | BCM 27 / 21 | `motor1.cs_line`, `motor1.enable_line` |
+| Motor 1 SPI | `/dev/spidev0.0`, `SPI_NO_CS` | `motor1.spi_device`, `motor1.cs_line` |
+| MAX31865 click 1/SAMPLE1 | CE1 hard CS, BCM 07, `/dev/spidev0.1` | fixed by hardware, not configurable |
+| MAX31865 click 2/SAMPLE2 | CE0 hard CS, BCM 08, `/dev/spidev0.0` | fixed by hardware, not configurable |
 | Freed pins (unassigned) | BCM 16 / 25, formerly RTD Click CS/DRDY | none |
 | I2C bus | Pi I2C-1, SDA BCM 2, SCL BCM 3 | fixed by Pi |
 | DPS310 address | `0x77` | `sensor.dps310_i2c_addr` |
@@ -335,7 +340,8 @@ This map matches the final pinout diagram. GPIO values are BCM numbers.
 | GUVA-S12SD ADC input | ADS1115 A0 | `sensor.uv_ads1115_channel` |
 | Sequent RTD HAT address | `0x40 + stack` | `sensor.sequent_rtd_stack` |
 
-Check interfaces on the Pi:
+**There is no STEP or DIR GPIO — the TMC5160 motors are SPI-only.** Check
+interfaces on the Pi:
 
 ```bash
 i2cdetect -y 1
@@ -343,10 +349,14 @@ ls -l /dev/spidev*
 gpioinfo gpiochip0
 ```
 
-The software uses `SPI_NO_CS` and drives BCM 22/23 through libgpiod. Remove the
-old `dtoverlay=spi0-2cs,cs0_pin=22,cs1_pin=23` line if it is present, then
-reboot. `/dev/spidev0.0` is shared by both TMC2240 drivers; the Sequent RTD
-HAT is I2C-only and does not use SPI0.
+The software uses `SPI_NO_CS` and drives BCM 22/27 through libgpiod. Remove
+any old `dtoverlay=spi0-2cs,cs0_pin=22,cs1_pin=23`-style overlay if present,
+then reboot. `/dev/spidev0.0` is shared by both TMC5160 drivers (software CS)
+and MAX31865 click 2/SAMPLE2 (native CE0); click 1/SAMPLE1 uses
+`/dev/spidev0.1` (native CE1). The Sequent RTD HAT is I2C-only and does not
+use SPI0 at all. See
+[TMC5160 Commissioning §4](tmc5160-commissioning.md#4-spi-topology--four-devices-one-bus)
+for the full topology.
 
 Expected I2C devices:
 
@@ -389,36 +399,37 @@ sensor.dps310_i2c_addr=0x77
 sensor.uv_source=guva_s12sd_ads1115
 sensor.ads1115_i2c_addr=0x48
 sensor.uv_ads1115_channel=0
-sensor.resistance_source=sequent_rtd
+sensor.max31865_reference_ohm=470.0
+sensor.max31865_poll_ms=1000
+sensor.max31865_sample_indices=0,4
+sensor.resistance_source=max31865_click
 
 hal.status_led_enabled=false
 hal.mode_led_enabled=false
-heater.output_lines=17,18,27,5,6,13
-heater.pwm_frequency_hz=10.0
+heater.output_lines=19,13,6,5,24,23
+heater.pwm_frequency_hz=1.0
 heater.active_high=true
 heater.target_min_c=0.0
 heater.target_max_c=80.0
+power.max_active_heaters=3
+power.max_thermal_w=15.0
 
-motor0.driver=tmc2240
+motor0.driver=tmc5160
 motor0.gpio_chip=/dev/gpiochip0
 motor0.spi_device=/dev/spidev0.0
 motor0.cs_line=22
-motor0.step_line=19
-motor0.dir_line=26
-motor0.enable_line=12
+motor0.enable_line=20
 motor0.run_current_a_rms=0.8
-motor0.current_range_a_peak=0
+motor0.sense_resistor_ohm=0.075
 motor0.samples=0,1,2,3
 
-motor1.driver=tmc2240
+motor1.driver=tmc5160
 motor1.gpio_chip=/dev/gpiochip0
 motor1.spi_device=/dev/spidev0.0
-motor1.cs_line=23
-motor1.step_line=24
-motor1.dir_line=20
+motor1.cs_line=27
 motor1.enable_line=21
 motor1.run_current_a_rms=0.8
-motor1.current_range_a_peak=0
+motor1.sense_resistor_ohm=0.075
 motor1.samples=4,5,6,7
 ```
 
@@ -487,7 +498,7 @@ Before connecting heater or motor power:
 4. Run `CHECK`; do not continue until required real devices report `OK`.
 5. Confirm `HEATERS_OFF` is ACKed and all configured heater outputs are off.
 6. Test each MOSFET output with a current-limited dummy load.
-7. Test each TMC2240 with motor supply current-limited and one motor only.
+7. Test each TMC5160 with motor supply current-limited and one motor only.
 8. Confirm motor direction and travel limits with the ball screw unloaded.
 9. Confirm bend-sequence motion reports `HEATER_INHIBITED`.
 10. Only then connect heaters and the mechanical sample fixtures.

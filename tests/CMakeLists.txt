@@ -129,6 +129,55 @@ target_include_directories(coatheal_i2c_bus_tests PRIVATE
 
 add_test(NAME coatheal_i2c_bus_tests COMMAND coatheal_i2c_bus_tests)
 
+# SPI transport seam contract tests.
+add_executable(coatheal_spi_bus_tests
+  unit/test_spi_bus.cpp
+)
+
+target_link_libraries(coatheal_spi_bus_tests PRIVATE coatheal_onboard_core)
+
+target_include_directories(coatheal_spi_bus_tests PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/unit
+)
+
+add_test(NAME coatheal_spi_bus_tests COMMAND coatheal_spi_bus_tests)
+
+# TMC5160 SPI-motion stepper driver tests. No hardware required.
+add_executable(coatheal_tmc5160_tests
+  unit/test_tmc5160_driver.cpp
+)
+
+target_link_libraries(coatheal_tmc5160_tests PRIVATE coatheal_onboard_core)
+
+target_include_directories(coatheal_tmc5160_tests PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/unit
+)
+
+add_test(NAME coatheal_tmc5160_tests COMMAND coatheal_tmc5160_tests)
+
+# MAX31865 RTD-click sample-resistance adapter tests. No hardware required.
+add_executable(coatheal_max31865_tests
+  unit/test_max31865_adapter.cpp
+)
+
+target_link_libraries(coatheal_max31865_tests PRIVATE coatheal_onboard_core)
+
+target_include_directories(coatheal_max31865_tests PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/unit
+)
+
+add_test(NAME coatheal_max31865_tests COMMAND coatheal_max31865_tests)
+
+# Software-PWM slice renderer: proves the duty is sampled per SLICE, not
+# per period (heater inhibit latency). No GPIO required.
+add_executable(coatheal_pwm_slice_tests
+  unit/test_pwm_slice.cpp
+)
+
+target_link_libraries(coatheal_pwm_slice_tests PRIVATE coatheal_onboard_core)
+
+add_test(NAME coatheal_pwm_slice_tests COMMAND coatheal_pwm_slice_tests)
+
 # Sequent RTD HAT register-conversation tests. No hardware required.
 add_executable(coatheal_sequent_rtd_tests
   unit/test_sequent_rtd_adapter.cpp

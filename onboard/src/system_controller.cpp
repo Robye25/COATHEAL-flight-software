@@ -12,11 +12,12 @@
 #include <sstream>
 #include <thread>
 
+#include "coatheal/hal/spi_bus.hpp"
 #include "coatheal/hal/stepper_driver.hpp"
 #include "coatheal/sd_notify.hpp"
 #include "coatheal/stepper_channel.hpp"
 #include "coatheal/telemetry.hpp"
-#include "coatheal/tmc2240_driver.hpp"
+#include "coatheal/tmc5160_driver.hpp"
 
 // Perf instrumentation. Off in flight builds (default). Enable with
 // -DCOATHEAL_PERF_TRACE to emit a single "[perf]" line per 60 ticks with
@@ -65,6 +66,35 @@ bool ParseIndex(const std::string& text, std::size_t* out) {
 bool IsLoopbackPeer(const std::string& ip) {
   return ip == "127.0.0.1" || ip == "::1";
 }
+
+// Tmc5160Driver does not own its SpiBus -- tmc5160_driver.hpp is explicit
+// that the caller "keeps it alive for the driver's lifetime and is
+// responsible for its storage." The factory below builds one LinuxSpiBus
+// per motor, and this thin wrapper ties that bus's lifetime to the
+// driver's so StepperController still only needs one
+// std::unique_ptr<StepperDriver> per motor to own. Chosen over extending
+// Tmc5160Driver to optionally own its bus so the reviewed-clean Task 4
+// driver stays untouched.
+class OwnedBusTmc5160Driver : public StepperDriver {
+ public:
+  OwnedBusTmc5160Driver(std::unique_ptr<SpiBus> bus, const Tmc5160Config& cfg)
+      : bus_(std::move(bus)), driver_(cfg, bus_.get(), /*use_gpio=*/true) {}
+
+  bool Enable(bool enable) override { return driver_.Enable(enable); }
+  bool Step(bool direction_forward) override {
+    return driver_.Step(direction_forward);
+  }
+  void SetMicrostep(int divisor) override { driver_.SetMicrostep(divisor); }
+  bool healthy() const override { return driver_.healthy(); }
+  bool ActiveCheck() override { return driver_.ActiveCheck(); }
+  std::uint64_t pulses_issued() const override {
+    return driver_.pulses_issued();
+  }
+
+ private:
+  std::unique_ptr<SpiBus> bus_;
+  Tmc5160Driver driver_;
+};
 
 }  // namespace
 
@@ -147,7 +177,8 @@ bool SystemController::Initialize(std::string* error) {
   }
   mode_led_->Set(StatusLed::Pattern::kSolid);
 
-  // Final BOM: two TMC2240-driven NEMA 17 ball-screw actuators. Motor channel,
+  // Final BOM (schematic v3): two TMC5160-driven NEMA 17 ball-screw
+  // actuators, SPI-only motion (no STEP/DIR lines exist). Motor channel,
   // sample mapping, SPI device, current, and GPIO lines come from onboard.ini.
   std::vector<StepperChannelConfig> channel_cfgs;
   channel_cfgs.reserve(config_.motors.size());
@@ -175,40 +206,48 @@ bool SystemController::Initialize(std::string* error) {
       drivers.emplace_back(std::make_unique<SimulatedStepperDriver>());
     }
   } else {
-    // Keep an unhealthy TMC backend present for diagnostics/retry, but never
-    // fall back to unconfigured raw STEP/DIR motion.
-    auto build_tmc =
+    // Keep an unhealthy backend present for diagnostics/retry (CHECK MOTORn
+    // and the pull cycle's driver_retry_ms re-probe both need a live
+    // Tmc5160Driver to call Reinitialize()/ActiveCheck() on), rather than
+    // skipping construction when initial SPI bring-up fails.
+    auto build_tmc5160 =
         [&](const char* motor_label, const MotorConfig& motor)
             -> std::unique_ptr<StepperDriver> {
-      Tmc2240Config tcfg;
+      Tmc5160Config tcfg;
       tcfg.gpio_chip = motor.gpio_chip;
       tcfg.spi_device = motor.spi_device;
+      tcfg.spi_speed_hz = motor.spi_speed_hz;
       tcfg.cs_line = motor.cs_line;
-      tcfg.step_line = motor.step_line;
-      tcfg.dir_line = motor.dir_line;
       tcfg.enable_line = motor.enable_line;
       tcfg.invert_direction = motor.invert_direction;
       tcfg.enable_active_low = motor.enable_active_low;
-      tcfg.microstep = config_.pull.microstep;
       tcfg.run_current_a_rms = motor.run_current_a_rms;
-      tcfg.current_range_a_peak = motor.current_range_a_peak;
       tcfg.hold_current_frac = motor.hold_current_frac;
+      tcfg.sense_resistor_ohm = motor.sense_resistor_ohm;
       tcfg.stealth_chop = motor.stealth_chop;
-      tcfg.spi_speed_hz = motor.spi_speed_hz;
-      tcfg.pulse_high_us = motor.pulse_high_us;
-      auto tmc = std::make_unique<Tmc2240Driver>(tcfg);
-      if (!tmc->healthy()) {
+      // Sane startup default only -- StepperChannel::Tick calls
+      // SetMicrostep(cfg_.microstep) on this driver right after
+      // construction (stepper_channel.cpp), and that cfg_.microstep is
+      // itself sourced from config_.pull.microstep, so pull.microstep is
+      // what actually governs the runtime divisor.
+      tcfg.microstep = config_.pull.microstep;
+      tcfg.retry_ms = motor.retry_ms;
+
+      auto bus = std::make_unique<LinuxSpiBus>();
+      auto driver = std::make_unique<OwnedBusTmc5160Driver>(
+          std::move(bus), tcfg);
+      if (!driver->healthy()) {
         tmc_spi_ok_ = false;
         std::cerr << "[system] " << motor_label
-                  << ": TMC2240 bring-up on " << motor.spi_device
+                  << ": TMC5160 bring-up on " << motor.spi_device
                   << " failed; motor remains unavailable until CHECK or restart"
                   << " completes SPI setup." << '\n';
       }
-      return tmc;
+      return driver;
     };
-    drivers.emplace_back(build_tmc(
+    drivers.emplace_back(build_tmc5160(
         "motor0", config_.motors[0]));
-    drivers.emplace_back(build_tmc(
+    drivers.emplace_back(build_tmc5160(
         "motor1", config_.motors[1]));
   }
   spi_.set_healthy(config_.runtime.use_simulated_pwm || tmc_spi_ok_);
@@ -1055,10 +1094,14 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       // COMPONENT_STATE, so it belongs in this whitelist too — otherwise an
       // operator reading SEQUENT_RTD:DEGRADED and typing the obvious
       // `CHECK SEQUENT_RTD` gets rejected while the two retired names work.
+      // MAX31865 selects the two v3 sample-resistance clicks; this is a
+      // command-argument addition only, not a wire-format change (no
+      // COMPONENT_STATE token changes anywhere).
       const bool check_sensors =
           selected == "ALL" || selected == "DPS310" ||
           selected == "ADS1115" || selected == "SEQUENT_RTD" ||
-          selected == "DAQ132M" || selected == "RTD_CLICK";
+          selected == "DAQ132M" || selected == "RTD_CLICK" ||
+          selected == "MAX31865";
       const bool check_pwm = selected == "ALL" || selected == "PWM";
       const bool check_motor0 = selected == "ALL" || selected == "MOTOR0";
       const bool check_motor1 = selected == "ALL" || selected == "MOTOR1";

@@ -2,8 +2,17 @@
 
 This is the bench commissioning procedure for the Sequent Microsystems
 8-channel RTD HAT, the sole PT100/PT1000 sample-temperature source in the
-final Rev C BOM. It replaces the retired RTD Click (MAX31865/SPI) and
-DAQ-132M (RS485/Modbus) bring-up paths.
+final schematic v3 BOM. It replaces the retired RTD Click (MAX31865/SPI) and
+DAQ-132M (RS485/Modbus) bring-up paths **for temperature**.
+
+This document also carries the bench commissioning gates for the schematic
+v3 **MAX31865 dual-click sample-resistance instrument** (sections 9-10) — a
+physically separate pair of devices on SPI0, not the RTD HAT's I2C bus, that
+measures coating-specimen resistance directly rather than PT100 element
+resistance. It is grouped into this document, rather than a separate one,
+because it is the sample-resistance measurement path this schematic revision
+ships with; for the stepper/SPI bring-up it shares a bus with, see
+[TMC5160 Commissioning](tmc5160-commissioning.md).
 
 The register offsets in `onboard/include/coatheal/hal/sequent_rtd_adapter.hpp`
 are **derived from vendor source** ([`SequentMicrosystems/rtd-rpi`](https://github.com/SequentMicrosystems/rtd-rpi)),
@@ -11,7 +20,7 @@ not measured against a live card. Step 2 below is a blocking gate: do not
 trust any reading, and do not proceed to the rest of this document, until it
 passes on real hardware.
 
-For wiring, configuration keys, and the rest of the Rev C commissioning
+For wiring, configuration keys, and the rest of the v3 commissioning
 sequence, see [Component Configuration and Bring-Up](component-configuration-and-bring-up.md).
 
 ## 1. DIP Switch Stack Addressing
@@ -281,9 +290,12 @@ Removing RTD Click frees two GPIO lines that it previously used:
 | BCM 25 | RTD Click DRDY | Released, deliberately **unassigned** |
 
 Reassigning these pins to a new purpose is a separate hardware decision, out
-of scope for this migration. SPI0 now serves only the two TMC2240 stepper
-drivers (`/dev/spidev0.0`, software CS on BCM 22/23); the Sequent RTD card is
-I2C-only and does not touch SPI0 at all.
+of scope for this migration. In schematic v3, SPI0 carries four devices: the
+two TMC5160 stepper drivers (`/dev/spidev0.0`, software CS on BCM 22/27) and
+the two MAX31865 sample-resistance clicks (hardware CS on BCM 07/08 — see
+[TMC5160 Commissioning §4](tmc5160-commissioning.md#4-spi-topology--four-devices-one-bus)
+for the full topology). The Sequent RTD card itself is I2C-only and does not
+touch SPI0 at all.
 
 ## 8. Mission-Envelope Resistance Survey
 
@@ -323,6 +335,126 @@ Leave headroom on both ends for probe tolerance and lead resistance — the
 window's job is to reject broken hardware, not to second-guess a cold sample.
 Until this survey is done, the `60.0 .. 390.0` defaults stand.
 
+## 9. MAX31865 Sample-Resistance Click Bring-Up (BLOCKING GATES)
+
+Two MikroE RTD Click boards (MAX31865), one per coating specimen, sit on
+SPI0's **native** chip-selects — CE1 (BCM 07, `/dev/spidev0.1`) is click 1 /
+SAMPLE1; CE0 (BCM 08, `/dev/spidev0.0`) is click 2 / SAMPLE2. Unlike the two
+TMC5160 motor drivers sharing this same bus, the clicks use the kernel's
+normal hardware chip-select — no `SPI_NO_CS`, no software CS GPIO. See
+[TMC5160 Commissioning §4](tmc5160-commissioning.md#4-spi-topology--four-devices-one-bus)
+for the full four-device SPI0 topology and why the motors, not the clicks,
+need the software-CS treatment.
+
+Conversion: `R = code * R_ref / 32768`. Saturation (a fault bit set, or the
+ADC code sitting near full scale) is a **first-class result, not an error to
+paper over** — the adapter reports `valid=false, out_of_range=true` rather
+than a plausible-looking number, specifically so gate 5 below can
+characterise a coating resistance range nobody has measured yet without the
+software inventing a number for it.
+
+### Gate 4 — Click Reference Resistor Value (BLOCKING)
+
+`sensor.max31865_reference_ohm` defaults to `470.0` Ω — the MikroE RTD Click's
+nominal reference resistor value. The retired pre-migration code assumed
+`400` Ω instead. **Do not trust any resistance reading from either click
+until the populated reference resistor value is confirmed against the actual
+board**, not the nominal datasheet/BOM value:
+
+1. With the clicks unpowered and unplugged from the Pi, read the reference
+   resistor's marked value directly off each board (component near the RTD
+   terminal block, usually labelled `R_REF` or similar in the MikroE
+   silkscreen).
+2. Confirm both clicks use the same populated value — a board with a
+   different reference resistor populated than its sibling would need a
+   value **per channel**, which the current single
+   `sensor.max31865_reference_ohm` key cannot express (a config-level
+   limitation to flag if this happens, not a bench workaround to invent).
+3. Set `sensor.max31865_reference_ohm` to the confirmed value.
+
+**Record here:**
+
+- Click 1 (SAMPLE1) reference resistor, read off the board: `____ Ω`
+  *(fill in at bench — expected 470, confirm against the actual part)*
+- Click 2 (SAMPLE2) reference resistor, read off the board: `____ Ω`
+  *(fill in at bench)*
+- Both clicks match: YES / NO *(fill in at bench)*
+- `sensor.max31865_reference_ohm` set to: `____`
+- Gate 4 result: PASS / FAIL *(fill in at bench)*
+
+### Gate 5 — Coating Resistance Range Characterisation (BLOCKING)
+
+The coating specimens' resistance range is **unknown and untested** — this is
+stated as ground truth in the schematic v3 design, not an oversight. Nothing
+in software assumes a plausibility window for this measurement the way the
+RTD HAT's `sequent_rtd_resistance_min_ohm`/`_max_ohm` window does for PT100
+element resistance; the instrument is required to measure and report,
+including reporting "out of range," rather than assume a window in advance.
+
+1. With both clicks wired 4-wire Kelvin to their specimens (SAMPLE1 -> click
+   1, SAMPLE2 -> click 2 — do not cross them), read resistance via
+   `printf 'CHECK MAX31865\n' | nc 127.0.0.1 5000` or the telemetry
+   `RESISTANCE=` field (see [Configuration Reference](configuration.md) for
+   `sensor.max31865_sample_indices`, which selects which two of the eight
+   wire slots the clicks fill).
+2. Record the resistance across the specimen(s) actually wired at the bench,
+   across whatever range of specimen states (as-deposited, after thermal
+   cycling, after mechanical pull) is practical to exercise during
+   commissioning.
+3. If a reading saturates (`valid=false, out_of_range=true` at the adapter
+   level; on the wire this shows as the channel's slot **not** advancing from
+   its `-`/last-good value while `resistance_ok` on `CHECK MAX31865` stays
+   healthy — saturation is a valid measurement of an out-of-range specimen,
+   not a bus failure), record that the specimen exceeded the instrument's
+   measurable range at `R_ref`, and roughly how far past it saturated if
+   determinable (e.g. by temporarily raising `sensor.max31865_reference_ohm`
+   on the bench to shift the measurable window, then restoring it before
+   flight).
+4. This procedure is explicitly bench-only characterisation, not a software
+   change — the plan's open "untested-range question" is answered by what
+   gets recorded here, not by picking a plausibility window in code.
+
+**Record here:**
+
+- SAMPLE1 resistance observed (or "saturated"), by specimen state: `____`
+  *(fill in at bench)*
+- SAMPLE2 resistance observed (or "saturated"), by specimen state: `____`
+  *(fill in at bench)*
+- Any saturation observed: YES / NO *(fill in at bench)*
+- If YES, approximate range past which saturation begins: `____`
+  *(fill in at bench, if determinable)*
+- Gate 5 result: PASS / FAIL *(fill in at bench — FAIL only if the clicks
+  cannot produce a valid reading on a specimen known to be in a sane state,
+  not merely because the range turns out to be wide or saturates easily)*
+
+## 10. Sample-Index Mapping (`max31865_sample_indices`) — Placeholder, Fill In At Bench
+
+`sensor.max31865_sample_indices` defaults to `0,4` — entry 0 feeds click 1 /
+SAMPLE1, entry 1 feeds click 2 / SAMPLE2. **This default is an
+owner-flagged placeholder**: `0,4` is simply "the first sample index of each
+motor's group" (`motor0.samples` starts at 0, `motor1.samples` starts at 4),
+chosen because *some* valid default was needed at config-load time, not
+because sample 0 and sample 4 are confirmed to be where the two click-wired
+specimens physically live.
+
+Determining the real mapping is a bench/integration task, not a software
+task — record which physical specimen positions SAMPLE1 and SAMPLE2 actually
+correspond to once the clicks are wired into the finished mechanism, then set
+this key to match. The two entries must be distinct and each less than
+`hardware.sample_count` (validated at config load); nothing else constrains
+them.
+
+**Record here:**
+
+- Physical specimen position SAMPLE1 (click 1, CE1) actually measures, as a
+  software sample index: `____` *(fill in at bench/integration —
+  placeholder default is `0`)*
+- Physical specimen position SAMPLE2 (click 2, CE0) actually measures, as a
+  software sample index: `____` *(fill in at bench/integration —
+  placeholder default is `4`)*
+- Config line to set once confirmed:
+  `sensor.max31865_sample_indices=____,____ ` *(fill in at bench)*
+
 ## Useful Operator Commands
 
 Read-only I2C presence probe (reads the firmware revision byte at offset 57,
@@ -333,7 +465,8 @@ python3 scripts/spi_probe.py --rtd-stack 0
 ```
 
 Pass `--skip-rtd` to omit the RTD presence check when probing only the
-TMC2240 SPI devices.
+TMC5160 SPI devices (`spi_probe.py` does not currently probe the MAX31865
+clicks; use `CHECK MAX31865` below for that).
 
 Active health check through the onboard command server:
 
@@ -359,6 +492,23 @@ printf 'CHECK SEQUENT_RTD\n' | nc 127.0.0.1 5000
 `DAQ132M` and `RTD_CLICK` are still accepted on the wire as legacy aliases for
 `SEQUENT_RTD` (see [Wire Protocol](protocol.md)), but the reply always reports
 `sequent_rtd=OK`/`sequent_rtd=FAILED`, never `rtd_click=OK` or `daq132m=OK`.
+Note that `RTD_CLICK` selects the *retired* MAX31865 temperature path alias
+for `SEQUENT_RTD` — it is unrelated to the current, unrelated-purpose
+`MAX31865` selector below, which reads the two v3 sample-resistance clicks.
+
+MAX31865 sample-resistance click check:
+
+```bash
+printf 'CHECK MAX31865\n' | nc 127.0.0.1 5000
+```
+
+Expect `max31865_1=OK;max31865_1_error=NONE;max31865_2=OK;max31865_2_error=NONE`
+in the reply (real hardware) alongside `overall=OK`. A saturated-but-healthy
+specimen still reports `max31865_1=OK`/`max31865_2=OK` — saturation is a
+valid measurement outcome, not a check failure (gate 5 above). `CHECK
+MAX31865` performs a real one-shot conversion on each click, the same as
+`CHECK SEQUENT_RTD` performs a real card read — neither is a cached-health
+readback.
 
 ## Configuration Reference
 
@@ -370,7 +520,19 @@ sensor.sequent_rtd_expect_sensor_type=pt100
 sensor.sequent_rtd_resistance_min_ohm=60.0
 sensor.sequent_rtd_resistance_max_ohm=390.0
 sensor.sequent_rtd_crosscheck_tol_c=2.0
-sensor.resistance_source=sequent_rtd
+
+# MAX31865 dual-click sample-resistance instrument (schematic v3, section 9-10
+# above). Device paths are fixed by hardware (CE1/GP07 = click 1 = SAMPLE1 =
+# /dev/spidev0.1; CE0/GP08 = click 2 = SAMPLE2 = /dev/spidev0.0), not
+# configurable.
+sensor.max31865_reference_ohm=470.0
+sensor.max31865_poll_ms=1000
+sensor.max31865_sample_indices=0,4           # OWNER-FLAGGED PLACEHOLDER, see section 10
+
+# max31865_click is the v3-shipped default -- coating/specimen resistance
+# from the two clicks. sequent_rtd (PT100 element resistance from the RTD
+# HAT above), disabled (`-` on the wire), and simulated remain accepted.
+sensor.resistance_source=max31865_click
 ```
 
 `sensor.sequent_rtd_expect_sensor_type` accepts `pt100` only — see section 5
@@ -379,7 +541,11 @@ for why `pt1000` is rejected at load rather than accepted and silently broken.
 The `60.0 .. 390.0` Ω window above maps through the PT100 CVD curve to roughly
 −102 °C to +845 °C, far wider than the mission envelope; the real thermal
 guard is the `heater.max_sample_temp_c` over-temp latch at 85 °C. Section 8's
-bench survey is expected to narrow it.
+bench survey is expected to narrow it. This window applies only to the RTD
+HAT's own `sequent_rtd` resistance path — the MAX31865 click instrument
+deliberately has no equivalent plausibility window (section 9, gate 5): its
+job is to measure and report an unknown coating-resistance range, not assume
+one.
 
 See [Configuration Reference](configuration.md) for the full key list and
 validation rules.
@@ -401,3 +567,11 @@ sections 3-5) is filled in with a bench observation, not an assumption.
       proposed. Not a flight blocker on its own — the shipped `60.0 .. 390.0`
       window is safe, just loose — but the survey is the only thing that can
       tighten it.
+- [ ] Section 9, gate 4 (MAX31865 reference resistor value) PASSED and
+      `sensor.max31865_reference_ohm` set to the confirmed value on both
+      clicks.
+- [ ] Section 9, gate 5 (coating resistance range characterisation) PASSED
+      and observations recorded, including any saturation behaviour.
+- [ ] Section 10 (`max31865_sample_indices` physical mapping) confirmed
+      against the real specimen wiring and `sensor.max31865_sample_indices`
+      updated from the `0,4` placeholder if the mapping differs.

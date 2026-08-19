@@ -19,9 +19,10 @@ python main.py command --cmd ARM
 ```
 
 `STATUS` reports cached live state and does not disturb hardware. `CHECK`
-actively opens/flushes both log paths, reads DPS310, ADS1115, and the Sequent
-RTD HAT, checks the PWM/stepper GPIO backends, and re-runs the TMC2240 SPI
-setup. Run motor-focused `CHECK` only while both motors are idle.
+actively opens/flushes both log paths, reads DPS310, ADS1115, the Sequent
+RTD HAT, and the two MAX31865 sample-resistance clicks, checks the PWM
+backend, and re-runs the TMC5160 SPI setup (SPI-only, no STEP/DIR GPIO). Run
+motor-focused `CHECK` only while both motors are idle.
 
 ## Thermal Control
 

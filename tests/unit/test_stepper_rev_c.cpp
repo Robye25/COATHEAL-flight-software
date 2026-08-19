@@ -310,6 +310,90 @@ void TestMotionLockExclusion() {
   assert(lock.holder() == -1);
 }
 
+// A driver that refuses to disable. SimulatedStepperDriver's Enable() always
+// succeeds, so this is the only way to reach StepperChannel::SetEnabled's
+// failure path; everything else mirrors the simulated driver.
+class RefusesToDisableStepperDriver : public StepperDriver {
+ public:
+  bool Enable(bool enable) override {
+    if (!enable) return false;  // disable always fails
+    enabled_ = true;
+    return true;
+  }
+  bool Step(bool direction_forward) override {
+    (void)direction_forward;
+    ++pulses_;
+    return true;
+  }
+  void SetMicrostep(int divisor) override { (void)divisor; }
+  bool healthy() const override { return true; }
+  std::uint64_t pulses_issued() const override { return pulses_; }
+
+ private:
+  bool enabled_ = false;
+  std::uint64_t pulses_ = 0;
+};
+
+// SetEnabled(false) must tear the channel down even when the driver refuses.
+//
+// HeaterScheduler clamps every heater duty to 0 whenever MotionLock is active,
+// and the lock is released from SetEnabled(false) (and from motion
+// completing). The old early-return left enabled_ true and the lock latched
+// with no motion left to release it: all six heaters forced off and the other
+// motor locked out indefinitely, because a driver already known to be broken
+// returned false.
+void TestSetEnabledFalseReleasesLockEvenWhenDriverRefuses() {
+  MotionLock lock;
+  auto cfg = MakeChannelCfg(0);
+  auto ch = std::make_unique<StepperChannel>(
+      std::move(cfg), std::make_unique<RefusesToDisableStepperDriver>(), &lock);
+
+  std::string err;
+  assert(ch->ArmPullCycle(&err));
+  assert(lock.holder() == 0);
+  assert(ch->Snapshot().enabled);
+
+  // The driver refuses, so the call must still report failure...
+  assert(!ch->SetEnabled(false));
+  // ...but the channel is torn down anyway. The lock is asserted FIRST
+  // because it is the consequence that matters: HeaterScheduler clamps every
+  // duty while the lock is active, so a latched lock means all six heaters
+  // off indefinitely.
+  assert(lock.holder() == -1);
+  assert(!lock.is_active());
+  assert(!ch->Snapshot().enabled);
+  assert(!ch->Snapshot().moving);
+
+  // A second motor can now take the lock -- the observable consequence.
+  auto ch1 = MakeChannel(1, &lock);
+  assert(ch1->ArmPullCycle(&err));
+  assert(lock.holder() == 1);
+}
+
+// Opposite direction: an Enable(TRUE) failure must NOT record the channel as
+// enabled. Isolating this from the case above is the point -- the two
+// directions have deliberately different policies.
+void TestSetEnabledTrueFailureLeavesChannelDisabled() {
+  class RefusesToEnableStepperDriver : public StepperDriver {
+   public:
+    bool Enable(bool enable) override { return enable ? false : true; }
+    bool Step(bool) override { return true; }
+    void SetMicrostep(int) override {}
+    bool healthy() const override { return true; }
+    std::uint64_t pulses_issued() const override { return 0; }
+  };
+
+  MotionLock lock;
+  auto cfg = MakeChannelCfg(0);
+  cfg.enable_on_boot = false;
+  auto ch = std::make_unique<StepperChannel>(
+      std::move(cfg), std::make_unique<RefusesToEnableStepperDriver>(), &lock);
+
+  assert(!ch->Snapshot().enabled);
+  assert(!ch->SetEnabled(true));
+  assert(!ch->Snapshot().enabled);
+}
+
 // Bonus coverage: StepperChannel integrates with MotionLock for pull cycles,
 // and samples() returns the configured mapping.
 void TestPullCycleAcquiresLock() {
@@ -397,6 +481,8 @@ int main() {
   TestBendArityDisambiguation();
   TestMaxStepHzCeiling();
   TestMotionLockExclusion();
+  TestSetEnabledFalseReleasesLockEvenWhenDriverRefuses();
+  TestSetEnabledTrueFailureLeavesChannelDisabled();
   TestPullCycleAcquiresLock();
   TestControllerMultiChannelDispatch();
   std::cout << "Rev C stepper tests passed" << std::endl;

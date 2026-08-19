@@ -52,15 +52,19 @@ start motor motion. Operators use explicit jog, pull, or `BENDSEQ_*` commands.
 | Ambient pressure / temperature | DPS310 over I2C |
 | UV | GUVA-S12SD analog output through ADS1115 over I2C |
 | Heaters | 6 polyimide heaters through EKM014/UCC27524 MOSFET inputs |
-| Motors | 2 NEMA 17 ball-screw actuators through TMC2240 carriers |
-| Resistance | PT100 element resistance read by the Sequent RTD HAT alongside temperature; drives the compatibility `RESISTANCE=` field by default |
+| Motors | 2 NEMA 17 ball-screw actuators through TMC5160 carriers, SPI-only position dribble (no STEP/DIR) |
+| Sample resistance | 2 MAX31865 clicks, 4-wire Kelvin per coating specimen, on SPI0 native CE — drives the compatibility `RESISTANCE=` field by default (`max31865_click`) |
+| RTD element resistance | PT100 element resistance read by the Sequent RTD HAT alongside temperature; available as the `sequent_rtd` `RESISTANCE=` source |
 
-Real backends are implemented for libgpiod heater PWM and STEP/DIR/EN,
-software-CS TMC2240 SPI setup, the Sequent RTD HAT through Linux `i2c-dev`,
-and DPS310/ADS1115 through Linux `i2c-dev`. They still require bench
-validation against the exact boards, wiring, current limits, and powered
-loads. The RTD HAT's register map is derived from vendor source and gated on
-bench verification; see [Sequent RTD Bench Bring-Up](sequent-rtd-bring-up.md).
+Real backends are implemented for libgpiod heater PWM, software-CS TMC5160
+SPI-only motion, MAX31865 click SPI reads, the Sequent RTD HAT through Linux
+`i2c-dev`, and DPS310/ADS1115 through Linux `i2c-dev`. They still require
+bench validation against the exact boards, wiring, current limits, and
+powered loads. The RTD HAT's register map is derived from vendor source and
+gated on bench verification; see
+[Sequent RTD Bench Bring-Up](sequent-rtd-bring-up.md). The TMC5160 current
+model and SPI0 topology are gated on bench verification too; see
+[TMC5160 Commissioning](tmc5160-commissioning.md).
 
 ## Thermal Control
 
@@ -87,8 +91,8 @@ untargeted channels.
 
 | Limit | Default |
 |---|---|
-| `power.max_active_heaters` | 4 |
-| `power.max_thermal_w` | 20 W |
+| `power.max_active_heaters` | 3 |
+| `power.max_thermal_w` | 15 W |
 | `power.heater_nominal_w` | 5 W |
 | `power.energy_budget_wh` | 130 Wh |
 
@@ -97,7 +101,8 @@ telemetry reports `HEATER_INHIBITED`.
 
 ## SensorManager
 
-`SensorManager` runs DPS310, ADS1115, and the Sequent RTD HAT in separate
+`SensorManager` runs DPS310, ADS1115, the Sequent RTD HAT, and the MAX31865
+click pair (`Max31865Loop`, one worker polling both clicks) in separate
 bounded polling threads. The 1 Hz main loop only copies the thread-safe
 cache, so missing or timed-out sensors cannot delay commands, logging, or
 telemetry.
@@ -110,7 +115,7 @@ telemetry.
 | `ambient_pressure_mbar` | DPS310 |
 | `uv` | GUVA-S12SD through ADS1115 |
 | `sample_temps_c` | Sequent RTD HAT, one card channel per logical sample |
-| `sample_resistance_ohm` | Sequent RTD HAT per-channel PT100 element resistance (or `-`/simulated per `sensor.resistance_source`) |
+| `sample_resistance_ohm` | MAX31865 click coating-specimen resistance by default (`max31865_click`, two monitored indices only); Sequent RTD HAT per-channel PT100 element resistance under `sequent_rtd`; `-`/simulated per `sensor.resistance_source` otherwise |
 
 Simulation is used only when `runtime.use_simulated_sensors=true`. Real mode
 does not replace failed reads with synthetic data and reports `SIMULATED` or
@@ -122,15 +127,20 @@ values are `nan`; failed readings retain their last value with validity false.
 ## Motion
 
 The two motor channels are configured from `[motor0]`, `[motor1]`, and `[pull]`
-INI keys.
+INI keys. **There is no STEP or DIR GPIO — motion is SPI-only.**
 
-| Motor | Default samples | Default SPI | STEP / DIR / EN |
-|---|---|---|---|
-| M0 | 0,1,2,3 | `/dev/spidev0.0`, CS BCM 22 | BCM 19 / 26 / 12 |
-| M1 | 4,5,6,7 | `/dev/spidev0.0`, CS BCM 23 | BCM 24 / 20 / 21 |
+| Motor | Default samples | Default SPI | CS (soft) | EN |
+|---|---|---|---:|---:|
+| M0 | 0,1,2,3 | `/dev/spidev0.0`, `SPI_NO_CS` | BCM 22 | BCM 20 |
+| M1 | 4,5,6,7 | `/dev/spidev0.0`, `SPI_NO_CS` | BCM 27 | BCM 21 |
 
-`Tmc2240Driver` uses SPI mode 3 with `SPI_NO_CS`, drives the configured CS GPIO, performs
-pipelined register reads, and verifies IOIN/version and written registers.
+`Tmc5160Driver` uses SPI mode 3 with `SPI_NO_CS` (mandatory: SPI0's native
+chip-selects are wired to the MAX31865 clicks, not the motors), drives the
+configured CS GPIO in software, performs pipelined register reads, and
+verifies IOIN/`VERSION==0x30` and written registers. Each `Step()` call maps
+to one `ΔXTARGET` write into the chip's ramp generator ("position dribble")
+rather than a STEP pulse — see
+[TMC5160 Commissioning](tmc5160-commissioning.md) for the full contract.
 Every absolute motion requires a
 software zero established by `SET_POSITION_ZERO`; there are no limit switches.
 `MotionLock` serializes both manual moves and runtime bend sequences.
@@ -144,9 +154,12 @@ DATA,<session>,<seq>,<ts>,<rtc_valid>,<ambient_temp_c>,<ambient_pressure_mbar>,<
 ```
 
 `RESISTANCE=` remains on the wire for parser compatibility. By default
-(`sensor.resistance_source=sequent_rtd`) each slot carries the Sequent RTD
-HAT's per-channel PT100 element resistance; with `sensor.resistance_source=disabled`,
-every slot serializes as `-`.
+(`sensor.resistance_source=max31865_click`) only the two monitored
+`sensor.max31865_sample_indices` slots carry coating-specimen resistance from
+the MAX31865 clicks; every other slot serializes `-`. With
+`sensor.resistance_source=sequent_rtd`, all eight slots instead carry the
+Sequent RTD HAT's per-channel PT100 element resistance; with
+`sensor.resistance_source=disabled`, every slot serializes as `-`.
 
 `SerializeTelemetryPullEventFrame` emits:
 
@@ -189,11 +202,11 @@ See `docs/protocol.md` for the complete command list.
 
 | Adapter | Status |
 |---|---|
-| `Tmc2240Driver` | SPI register writes and GPIO CS/STEP/DIR/EN implemented; bench validation required |
-| `GpioStepDirStepperDriver` | Real libgpiod STEP/DIR/EN pulses implemented |
-| `LibgpiodPwmController` | Real 10 Hz software PWM thread with zero-on-start/stop |
+| `Tmc5160Driver` | SPI-only position dribble: register writes and software CS/EN GPIO implemented; no STEP/DIR (retired with `GpioStepDirStepperDriver`, deleted); current model bench validation required |
+| `LibgpiodPwmController` | Real 1 Hz software PWM thread with zero-on-start/stop |
 | `I2cAdapter` | DPS310, ADS1115, and Sequent RTD HAT reads implemented |
-| `SpiAdapter` | Health boundary; shared by both TMC2240 drivers only |
+| `Max31865Adapter` | Real one-shot SPI reads (native CE, mode 1) implemented for both clicks; reference resistor and coating-resistance range bench validation required |
+| `SpiBus` (`LinuxSpiBus`) | Health boundary; shared by both TMC5160 drivers and, via native CE, both MAX31865 clicks |
 | `RtcAdapter` | System-clock fallback |
 | `Ina3221Adapter` | Retired stub; I2C addresses `0x40`/`0x41` are now the Sequent RTD card's stack-0/1 addresses and the INA3221 must not be re-enabled without re-addressing |
 

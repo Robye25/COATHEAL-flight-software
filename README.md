@@ -35,12 +35,12 @@ docs/            Architecture, protocol, configuration, and hardware docs
 | Document | Description |
 |---|---|
 | [docs/rev-c-installation-and-hardware-setup.md](docs/rev-c-installation-and-hardware-setup.md) | Installation, plug-and-play Ethernet, final component setup, pins, and commands |
-| [docs/sequent-rtd-bring-up.md](docs/sequent-rtd-bring-up.md) | Sequent RTD HAT bench bring-up: register-map verification gate, burst-read confirmation, calibration |
-| [docs/hardware.md](docs/hardware.md) | Final Rev C hardware reference and HAL status |
+| [docs/sequent-rtd-bring-up.md](docs/sequent-rtd-bring-up.md) | Sequent RTD HAT bench bring-up (register-map verification gate, burst-read confirmation, calibration) and MAX31865 sample-resistance click bring-up (reference resistor, coating-resistance range, sample-index mapping) |
+| [docs/tmc5160-commissioning.md](docs/tmc5160-commissioning.md) | TMC5160 SPI-only motion commissioning: v3 pin map, four-device SPI0 topology, current model, bench gates |
+| [docs/hardware.md](docs/hardware.md) | Final schematic v3 hardware reference and HAL status |
 | [docs/configuration.md](docs/configuration.md) | Full INI configuration reference |
-| [docs/component-configuration-and-bring-up.md](docs/component-configuration-and-bring-up.md) | Authoritative Rev C wiring, discovery, and commissioning guide |
+| [docs/component-configuration-and-bring-up.md](docs/component-configuration-and-bring-up.md) | Authoritative v3 wiring, discovery, and commissioning guide |
 | [docs/rev-c-instruction-manual.md](docs/rev-c-instruction-manual.md) | Complete installation, pin configuration, commissioning, operation, and troubleshooting manual |
-| [docs/tmc2240-pin-configuration-and-commissioning.md](docs/tmc2240-pin-configuration-and-commissioning.md) | TMC2240 wiring, configurable pins, current setup, and supervised motor commissioning |
 | [docs/protocol.md](docs/protocol.md) | DATA, `EVT,PULL`, ACK, discovery, and command protocol |
 | [docs/manual-operations.md](docs/manual-operations.md) | Complete CLI workflow for thermal control, zeroing, bend sequences, fallback, and safe stop |
 | [docs/onboard.md](docs/onboard.md) | Onboard C++ module reference |
@@ -102,13 +102,14 @@ python -m unittest discover -s ground-station/tests -p "test_*.py"
 | `LANDED` | `SET_PHASE LANDED` | Explicit manual targets/duties only |
 | `STOPPED` | `SHUTDOWN_SAFE` | Heaters off |
 
-## Final Rev C Component List
+## Final Rev C Component List (Schematic v3)
 
 | Subsystem | Component | Interface |
 |---|---|---|
-| Stepper driver | TMC2240 carrier | SPI mode 3 + STEP/DIR/EN |
-| Linear actuator | NEMA 17 external ball-screw linear stepper, 2.5 A, 48 mm | Through TMC2240 |
+| Stepper driver | TMC5160 carrier (QHV5160 v2) | SPI-only position dribble, no STEP/DIR |
+| Linear actuator | NEMA 17 external ball-screw linear stepper, 2.5 A, 48 mm | Driven by TMC5160 over SPI |
 | Sample PT100 | 8x XF-931-FAR PT100 Class B probes | Sequent Microsystems 8-channel RTD HAT, I2C `0x40 + stack` |
+| Sample resistance | 2x MikroE RTD Click (MAX31865), 4-wire Kelvin per specimen | SPI0 native CS (CE0/CE1) |
 | Pressure / ambient T | Adafruit DPS310 | I2C / STEMMA QT |
 | UV ADC | Adafruit ADS1115 | I2C / STEMMA QT |
 | UV sensor | GUVA-S12SD | Analog into ADS1115 |
@@ -139,15 +140,19 @@ See [docs/protocol.md](docs/protocol.md) for the complete command list.
 
 ## Hardware Status
 
-The real hardware paths are implemented for libgpiod heater PWM, TMC2240
-configuration with GPIO chip-select, STEP/DIR/EN pulses, DPS310, ADS1115, and
-the Sequent Microsystems 8-channel RTD HAT over I2C.
+The real hardware paths are implemented for libgpiod heater PWM, TMC5160
+SPI-only position-dribble motion (software chip-select, no STEP/DIR — see
+[docs/tmc5160-commissioning.md](docs/tmc5160-commissioning.md)), the
+MAX31865 dual-click sample-resistance instrument, DPS310, ADS1115, and the
+Sequent Microsystems 8-channel RTD HAT over I2C.
 `runtime.use_simulated_sensors=true` and `runtime.use_simulated_pwm=true` are
 explicit debug-only switches. The RTD HAT's register map is derived from
 vendor source and gated on bench verification (see
 [docs/sequent-rtd-bring-up.md](docs/sequent-rtd-bring-up.md)); motor current
-calibration and dummy-load heater tests are also still required before
-powered flight hardware operation.
+calibration (including confirming the TMC5160 boards' actual sense-resistor
+value), the MAX31865 clicks' reference-resistor value and coating-resistance
+range, and dummy-load heater tests are also still required before powered
+flight hardware operation.
 
 ## Security
 
