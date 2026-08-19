@@ -140,9 +140,17 @@ class TelemetryReceiver(QThread):
                         self.log_message.emit("[telemetry] onboard disconnected")
         except Exception as exc:
             self.log_message.emit(f"[error] receiver fatal: {exc}")
-            # Distinct from "searching"/"stale" — the socket never bound
-            # (e.g. port already in use), so there is no receiver to find.
-            # MainWindow uses this to unstick the Start Telemetry button.
+            # Distinct from "searching"/"stale". This `except` wraps the
+            # WHOLE run() body -- the bind, the accept loop, and every
+            # connection handled -- so "failed" does not mean "the bind
+            # never happened" specifically; it can just as easily fire
+            # mid-run after one or more successful connections (e.g. an
+            # unwritable log directory, a bad --bind IP that only breaks
+            # on a later accept(), or any other uncaught exception). The
+            # log line above carries the real cause; MainWindow's status
+            # label must stay cause-neutral and point there rather than
+            # guessing "port in use". MainWindow uses this signal to
+            # unstick the Start Telemetry button either way.
             self.status_changed.emit("failed")
         finally:
             self._stop_flag.set()

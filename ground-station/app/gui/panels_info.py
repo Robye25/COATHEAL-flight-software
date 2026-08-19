@@ -21,7 +21,9 @@ from .dispatch import CommandHistoryEntry
 # panels_health already owns OK_FAIL_FLAGS -- the single source of truth
 # this aggregate is derived from -- so importing both from one module
 # means the flag list and its colors can never drift apart.
-from .panels_health import GRAY, GREEN, OK_FAIL_FLAGS, RED
+from .panels_health import (
+    AMBER, COMPONENTS, GRAY, GREEN, OK_FAIL_FLAGS, RED, component_color,
+)
 from .theme import mode_color, phase_color
 from .widgets import StatusDot
 
@@ -69,9 +71,13 @@ class TopStatusStrip(QWidget):
             _lbl.setMinimumWidth(1)
 
         # Aggregate health dot: green only when every OK/FAIL flag present
-        # in the current packet is OK; red if any is FAIL; gray before the
-        # first packet or when a packet carries none of the known flags
-        # (legacy replay) -- same "stay quiet" rule as the Health tab.
+        # in the current packet is OK, no COMPONENT_STATE entry is
+        # DEGRADED/STALE/FAILED, and SIMULATED isn't active; red if any
+        # flag is FAIL or any component is in that red set; amber if
+        # everything else is green-worthy but sensors are simulated;
+        # gray before the first packet or when a packet carries none of
+        # the known flags (legacy replay) -- same "stay quiet" rule as
+        # the Health tab.
         health_label = QLabel("HEALTH:")
         health_label.setStyleSheet("font-family: monospace; font-size: 10pt; color: #888;")
         self._health_dot = StatusDot(10)
@@ -122,10 +128,36 @@ class TopStatusStrip(QWidget):
                 failing.append(key)
             elif f"{key}_OK" not in tokens:
                 unreported.append(key)
-        if failing:
-            return RED, ", ".join(failing) + " failing"
+
+        # COMPONENT_STATE can fail independently of the 14 OK/FAIL flags
+        # (e.g. COMPONENT_STATE=MOTOR0:FAILED alongside a fully-OK
+        # STATUS=) -- the aggregate must not paint green over red dots
+        # on the Health tab's Components section. Reuses
+        # panels_health.component_color (the same function the Health
+        # tab itself uses) rather than a duplicated red-state set, so the
+        # two can never drift apart.
+        component_state = pkt.component_state or {}
+        red_components = [
+            f"{key} {component_state[key]}" for key, _label in COMPONENTS
+            if component_color(component_state.get(key)) == RED
+        ]
+
+        if failing or red_components:
+            parts = []
+            if failing:
+                parts.append(", ".join(failing) + " failing")
+            if red_components:
+                parts.append(", ".join(red_components))
+            return RED, "; ".join(parts)
+
         if not unreported:
-            return GREEN, "All health flags OK"
+            # SIMULATED is checked only once every flag/component is
+            # otherwise green-worthy -- fake sensor data must never hide
+            # under a plain green "all clear", but it also isn't a
+            # failure, so it gets its own amber tier rather than red.
+            if "SIMULATED" in tokens:
+                return AMBER, "running on simulated sensors"
+            return GREEN, "All 14 system flags OK, components OK"
         if len(unreported) == len(OK_FAIL_FLAGS):
             return GRAY, "no health flags reported"
         return GRAY, f"{len(unreported)} flags unreported: " + ", ".join(unreported)
@@ -325,10 +357,27 @@ class PreflightPanel(QWidget):
         mark("uniformity", "UNIFORMITY_FAIL" not in pkt.status)
         mark("overtemp", "OVERTEMP_FAIL" not in pkt.status)
 
+    def set_link_down(self) -> None:
+        """Directly repaint the "Telemetry link healthy" dot when the
+        receiver itself has died. No packet will ever arrive on a dead
+        receiver, so the normal `on_packet()` repaint path can never run
+        -- without this, a dead receiver would leave the last packet's
+        stale green (or red) dot showing forever, over a ConnectionPanel
+        that plainly says "receiver failed". Gray, not red: once the
+        receiver is gone, whether the underlying link itself was healthy
+        is simply unknowable, not a confirmed failure."""
+        dot, _lbl = self._items["link"]
+        dot.set_color(GRAY)
+        dot.setToolTip("Telemetry receiver failed -- link state unknown")
+
     def dot_color(self, key: str) -> str:
         """Current checklist dot color for `key` (e.g. "stepper_en"), as
         ``#rrggbb``. Test-only accessor."""
         return self._items[key][0].color()
+
+    def dot_tooltip(self, key: str) -> str:
+        """Current checklist dot tooltip for `key`. Test-only accessor."""
+        return self._items[key][0].toolTip()
 
 
 # ── Command history ───────────────────────────────────────────────────────────

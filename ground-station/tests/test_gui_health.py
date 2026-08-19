@@ -16,8 +16,23 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.protocol import TelemetryPacket
-from app.gui.panels_health import OK_FAIL_FLAGS, TRI_STATE_FLAGS, COMPONENTS
+# These pull in PyQt6 transitively (app.gui.panels_health imports
+# PyQt6.QtWidgets at module level) -- guarded so an unavailable PyQt6
+# fails cleanly via setUpClass's SkipTest below instead of crashing the
+# whole module's import (and therefore the whole file's test discovery)
+# with an uncaught ImportError, matching test_gui_smoke.py's convention
+# of never importing app.gui.* at module level.
+try:
+    from app.protocol import TelemetryPacket
+    from app.gui.panels_health import OK_FAIL_FLAGS, TRI_STATE_FLAGS, COMPONENTS
+    from app.gui.panels_info import TopStatusStrip
+except Exception as _import_exc:  # pragma: no cover - exercised only when PyQt6 is absent
+    TelemetryPacket = None
+    OK_FAIL_FLAGS, TRI_STATE_FLAGS, COMPONENTS = [], [], []
+    TopStatusStrip = None
+    _IMPORT_ERROR = _import_exc
+else:
+    _IMPORT_ERROR = None
 
 GREEN = "#2ecc71"
 RED = "#e74c3c"
@@ -45,6 +60,8 @@ ALL_TRI_HEALTHY_STATUS = "|".join(green for _amber, green, _label in TRI_STATE_F
 class HealthPanelTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        if _IMPORT_ERROR is not None:
+            raise unittest.SkipTest(f"PyQt6 unavailable: {_IMPORT_ERROR}")
         try:
             from PyQt6.QtWidgets import QApplication
         except Exception as exc:
@@ -158,9 +175,9 @@ class HealthPanelTests(unittest.TestCase):
             win.close()
 
     # MUTATION: revert `_health_summary` to the old any-OK rule (`if
-    # any_ok: return GREEN, "All health flags OK"`) and confirm
-    # test_partial_status_single_ok_token_is_gray_not_green fails by
-    # naming the wrong color ('#2ecc71' where gray was expected).
+    # any_ok: return GREEN, "All 14 system flags OK, components OK"`) and
+    # confirm test_partial_status_single_ok_token_is_gray_not_green fails
+    # by naming the wrong color ('#2ecc71' where gray was expected).
 
     def test_thirteen_ok_one_fail_is_red_naming_only_the_failer(self) -> None:
         """All 14 flags reported (13 as OK, 1 as FAIL) is the 'fully
@@ -186,7 +203,7 @@ class HealthPanelTests(unittest.TestCase):
         try:
             win._on_packet(_packet(status=ALL_OK_STATUS))
             self.assertEqual(win._top.health_color(), GREEN)
-            self.assertEqual(win._top.health_tooltip(), "All health flags OK")
+            self.assertEqual(win._top.health_tooltip(), "All 14 system flags OK, components OK")
         finally:
             win.close()
 
@@ -392,6 +409,54 @@ class HealthPanelTests(unittest.TestCase):
     # ValuesPanel.__init__ and confirm
     # test_valuespanel_no_longer_shows_removed_flag_text_rows fails on the
     # heater_inhibit assertNotIn line.
+
+    # ── fix round: aggregate must not go green over a red component or
+    # simulated sensors (Task 3 fix round 2) ──
+    def test_component_failed_makes_aggregate_red_even_with_all_ok_flags(self) -> None:
+        """Proven contradiction: all 14 OK/FAIL flags OK plus
+        COMPONENT_STATE=MOTOR0:FAILED|DPS310:FAILED previously painted the
+        aggregate green ("All health flags OK") while the Health tab
+        showed two red FAILED dots. The aggregate must go red and name
+        the failed components.
+
+        Tests `TopStatusStrip._health_summary` directly (a `@staticmethod`,
+        no widget construction needed) rather than through a full
+        MainWindow -- the on_packet()->_health_summary() wiring itself is
+        already exercised by every other test in this file; a MainWindow
+        per test here just adds unnecessary pyqtgraph/Qt object churn to
+        the full suite run for no additional coverage."""
+        color, tooltip = TopStatusStrip._health_summary(_packet(
+            status=ALL_OK_STATUS,
+            component_state={"MOTOR0": "FAILED", "DPS310": "FAILED"},
+        ))
+        self.assertEqual(color, RED,
+                          "a red component must override an all-OK flag set")
+        self.assertIn("MOTOR0", tooltip)
+        self.assertIn("FAILED", tooltip)
+        self.assertIn("DPS310", tooltip)
+
+    # MUTATION: drop the `or red_components` clause from the `if failing
+    # or red_components:` check in panels_info.py's `_health_summary` and
+    # confirm test_component_failed_makes_aggregate_red_even_with_all_ok_flags
+    # fails, reporting green instead of red.
+
+    def test_simulated_sensors_make_aggregate_amber_not_green(self) -> None:
+        """Proven contradiction: all 14 OK/FAIL flags OK while SIMULATED
+        is active (fake sensor data) previously painted the aggregate a
+        plain green all-clear, hiding that the data isn't real. Must be
+        amber -- not green (hides the fakery) and not red (SIMULATED
+        isn't a failure). Same no-MainWindow rationale as the test above."""
+        color, tooltip = TopStatusStrip._health_summary(
+            _packet(status=ALL_OK_STATUS + "|SIMULATED")
+        )
+        self.assertEqual(color, AMBER,
+                          "SIMULATED must be amber, not a plain green all-clear")
+        self.assertEqual(tooltip, "running on simulated sensors")
+
+    # MUTATION: delete the `if "SIMULATED" in tokens: return AMBER, ...`
+    # branch from `_health_summary` in panels_info.py and confirm
+    # test_simulated_sensors_make_aggregate_amber_not_green fails,
+    # reporting green instead of amber.
 
 
 if __name__ == "__main__":
