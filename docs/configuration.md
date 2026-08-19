@@ -106,7 +106,7 @@ guessed range (section 9, gate 5 of the same bring-up doc).
 | `heater.target_max_c` | `80.0` | Highest accepted manual PID target; must stay below the overtemperature latch. |
 | `heater.output_lines` | `19,13,6,5,24,23` | BCM GPIO lines for HEAT_EN1..6 (schematic v3 map). |
 | `heater.temperature_channels` | `0,1,2,3,4,5` | DAQ sample supplying feedback for H0..H5. |
-| `heater.pwm_frequency_hz` | `1.0` | Requested heater PWM frequency. v3: film heaters have high thermal inertia and no hardware PWM channel is wired, so 1 Hz software PWM is the owner-confirmed rate (was 10.0 pre-v3). |
+| `heater.pwm_frequency_hz` | `1.0` | Requested heater PWM frequency. v3: film heaters have high thermal inertia and no hardware PWM channel is wired, so 1 Hz software PWM is the owner-confirmed rate (was 10.0 pre-v3). The software PWM period is divided into 100 slices and the duty is re-read every slice, so a `SetDuty(0)` from the motion heater-inhibit reaches the GPIO within one slice — 1000/100 = **10 ms** at 1 Hz — not one whole period. |
 | `heater.active_high` | `true` | MOSFET input polarity. |
 | `heater.debug_max_duty` | `0.25` | Bench-only maximum `HEATER_TEST` duty. |
 | `heater.debug_max_seconds` | `10.0` | Bench-only maximum `HEATER_TEST` duration. |

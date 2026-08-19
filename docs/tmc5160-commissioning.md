@@ -449,8 +449,25 @@ multi-heater operation. See
    - the correct physical sample position warms (thermally or via the
      mapped PT100 in `heater.temperature_channels`).
 3. Confirm no *other* heater or GPIO activates during any single-heater test.
+4. **Heater-inhibit latency — scope check (BLOCKING).** With one heater
+   energised at a duty that is clearly ON (say 0.5), command a PULL on the
+   motor owning that sample and scope or logic-analyse the heater's BCM line
+   against the motor's CS line. The heater GPIO must go low **within one PWM
+   SLICE of the PULL, not within one period.** At
+   `heater.pwm_frequency_hz = 1.0` a period is 1000 ms and a slice is
+   1000/100 = **10 ms**, so the acceptance bound is ~10 ms (allow a couple of
+   slices for scheduler jitter on a loaded Pi; anything approaching 1000 ms
+   means the duty is being sampled once per period again — see
+   `RenderPwmPeriod` in `onboard/include/coatheal/hal/pwm_controller.hpp`).
+   This step exists because the software-PWM worker thread cannot run on the
+   Windows dev host (`COATHEAL_HAS_LIBGPIOD` is undefined there): the unit
+   tests cover the slice-timing decision the loop delegates to, and this gate
+   is the only place the real GPIO drop is measured end-to-end.
 
 **Record here:**
+
+- Heater GPIO fall time after PULL command: `____` ms
+  *(must be within a few slices of ~10 ms, NOT ~1000 ms)*
 
 | Heater | BCM | Confirmed correct GPIO | Confirmed correct sample |
 |---|---:|---|---|

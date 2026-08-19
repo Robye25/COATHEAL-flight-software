@@ -144,6 +144,7 @@ void LibgpiodPwmController::PwmLoop() {
   const auto slice_duration = std::chrono::duration<double>(
       1.0 / (safe_frequency * static_cast<double>(kSlices)));
   std::vector<bool> last_state(duty_.size(), false);
+  const std::size_t channels = duty_.size();
   auto next_retry = std::chrono::steady_clock::now();
 
   while (running_.load()) {
@@ -152,22 +153,20 @@ void LibgpiodPwmController::PwmLoop() {
       RetryMissingLines();
       next_retry = now + std::chrono::seconds(2);
     }
-    std::vector<double> snapshot;
-    {
-      std::lock_guard<std::mutex> lock(mu_);
-      snapshot = duty_;
-    }
-    for (int slice = 0; slice < kSlices && running_.load(); ++slice) {
-      for (std::size_t channel = 0; channel < snapshot.size(); ++channel) {
-        const bool on = static_cast<double>(slice) <
-                        std::round(snapshot[channel] * kSlices);
-        if (on != last_state[channel]) {
-          WriteLine(channel, on);
-          last_state[channel] = on;
-        }
-      }
-      std::this_thread::sleep_for(slice_duration);
-    }
+    // The duty is read INSIDE the slice loop (see RenderPwmPeriod), not
+    // snapshotted once per period as it used to be: at 1 Hz a period is a
+    // whole second, so the old snapshot delayed a heater-inhibit SetDuty(0)
+    // by up to 1000 ms. Slice count and pacing are otherwise unchanged.
+    RenderPwmPeriod(
+        kSlices, channels,
+        [this](std::size_t channel) {
+          std::lock_guard<std::mutex> lock(mu_);
+          return duty_[channel];
+        },
+        [this](std::size_t channel, bool on) { WriteLine(channel, on); },
+        [this]() { return running_.load(); },
+        [&slice_duration]() { std::this_thread::sleep_for(slice_duration); },
+        &last_state);
   }
   AllOff();
 }
