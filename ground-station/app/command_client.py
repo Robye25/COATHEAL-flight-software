@@ -6,7 +6,7 @@ import socket
 import time
 from pathlib import Path
 
-from .protocol import build_command
+from .protocol import build_command, timeout_for
 
 DEFAULT_STATIC_HOST = "169.254.10.10"
 
@@ -91,7 +91,12 @@ def add_subparser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
     parser.add_argument("--host", default=None, help="Onboard host/IP. If omitted, auto-discovery is used.")
     parser.add_argument("--port", type=int, default=5000)
     parser.add_argument("--cmd", required=True, help='Example: "STATUS" or "FORCE_START"')
-    parser.add_argument("--timeout", type=float, default=3.0)
+    parser.add_argument(
+        "--timeout", type=float, default=None,
+        help="Seconds to wait for a response. Defaults to a per-command "
+             "value (see protocol.timeout_for): most commands use 3.0s, "
+             "CHECK uses 15.0s. Passing --timeout always overrides that.",
+    )
     parser.add_argument("--yes", action="store_true", help="Skip safety confirmation")
     parser.add_argument("--discovery-enabled", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--discovery-port", type=int, default=4100)
@@ -126,6 +131,7 @@ def _handle(args: argparse.Namespace) -> int:
         host = args.static_host
         print(f"[command] discovery unavailable, using static host {host}")
 
-    response = send_command(host, args.port, args.cmd, args.timeout)
+    timeout = args.timeout if args.timeout is not None else timeout_for(args.cmd)
+    response = send_command(host, args.port, args.cmd, timeout)
     print(response)
     return 0
