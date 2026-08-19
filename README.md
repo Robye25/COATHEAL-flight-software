@@ -41,6 +41,11 @@ onboard auto-discovery); every later run launches instantly. The GUI then
 discovers and connects to the onboard automatically — no addresses to type.
 Diagnostics without opening the GUI: run the same file with `--check`.
 
+**Ground station (Linux)** — same experience via
+`ground-station/COATHEAL-GroundStation.sh` (run it from a terminal or
+double-click → "Run in Terminal"). It also handles `ufw` instead of the
+Windows firewall. `--check` works identically.
+
 ## Repository Layout
 
 ```text
