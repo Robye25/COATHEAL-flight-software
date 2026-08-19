@@ -38,6 +38,31 @@ class FakeSpiBus : public SpiBus {
   void FailNextTransfers(int count) { fail_transfers_ = count; }
   void SetOpenFails(bool value) { open_fails_ = value; }
 
+  // Models an ABSENT device instead of a scripted one.
+  //
+  // This is the fidelity gap that let a real defect through: every
+  // expectation above models a chip that ANSWERS, and SPI absence looks
+  // nothing like that. SPI has no acknowledgement, so with no chip
+  // populated (or none selected) the master still clocks a completely
+  // successful transfer and simply samples whatever the idle MISO line
+  // sits at -- 0x00 where it floats or is pulled low, 0xFF where a pull-up
+  // holds it high. Both levels really occur in the field, which is why
+  // this takes the level as a parameter rather than assuming zeros.
+  //
+  // So: transfers SUCCEED while the device is absent. That is the whole
+  // hazard. A driver that treats "the transfer returned true" as "the
+  // device is there" reports a healthy measurement of nothing at all, and
+  // no amount of scripting can express that -- only this can.
+  //
+  // While a floating level is set the expectation queue is bypassed
+  // entirely (a chip that is not there cannot answer a script) and
+  // remaining expectations are left untouched.
+  void SetFloatingLevel(std::uint8_t level) {
+    floating_ = true;
+    floating_level_ = level;
+  }
+  void ClearFloatingLevel() { floating_ = false; }
+
   const std::string& open_device() const { return open_device_; }
   std::uint8_t open_mode() const { return open_mode_; }
   std::uint32_t open_speed_hz() const { return open_speed_hz_; }
@@ -90,6 +115,15 @@ class FakeSpiBus : public SpiBus {
       return false;
     }
 
+    // Absent device: the transfer succeeds and clocks back the idle line
+    // level. Deliberately after the FailNextTransfers() hook -- a genuine
+    // transport failure still wins -- and before the expectation queue,
+    // which an absent chip can never reach.
+    if (floating_) {
+      std::fill(rx, rx + len, floating_level_);
+      return true;
+    }
+
     if (expectations_.empty()) return false;
 
     Exchange next = std::move(expectations_.front());
@@ -118,6 +152,8 @@ class FakeSpiBus : public SpiBus {
 
   std::deque<Exchange> expectations_;
   int fail_transfers_ = 0;
+  bool floating_ = false;
+  std::uint8_t floating_level_ = 0x00;
   bool open_fails_ = false;
   bool open_ = false;
   int open_count_ = 0;
