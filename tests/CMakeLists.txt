@@ -168,6 +168,16 @@ target_include_directories(coatheal_max31865_tests PRIVATE
 
 add_test(NAME coatheal_max31865_tests COMMAND coatheal_max31865_tests)
 
+# Software-PWM slice renderer: proves the duty is sampled per SLICE, not
+# per period (heater inhibit latency). No GPIO required.
+add_executable(coatheal_pwm_slice_tests
+  unit/test_pwm_slice.cpp
+)
+
+target_link_libraries(coatheal_pwm_slice_tests PRIVATE coatheal_onboard_core)
+
+add_test(NAME coatheal_pwm_slice_tests COMMAND coatheal_pwm_slice_tests)
+
 # Sequent RTD HAT register-conversation tests. No hardware required.
 add_executable(coatheal_sequent_rtd_tests
   unit/test_sequent_rtd_adapter.cpp
