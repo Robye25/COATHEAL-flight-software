@@ -215,6 +215,104 @@ class GuiSmoke(unittest.TestCase):
         finally:
             blocker.close()
 
+    def test_start_telemetry_retry_succeeds_after_bind_failure(self) -> None:
+        """End-to-end recovery: bind fails, the operator (or another
+        auto-start) retries once the port frees up, and the retry must
+        actually take -- covers the identity guard too, since the retry
+        constructs a second TelemetryReceiver while the first (dead) one
+        may still have signals in flight."""
+        from app.gui.main_window import MainWindow
+
+        port = 44009
+        blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            blocker.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        else:
+            blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        blocker.bind(("127.0.0.1", port))
+        blocker.listen(1)
+
+        win = MainWindow(bind="127.0.0.1", tel_port=port, cmd_port=45009,
+                         cmd_host="127.0.0.1",
+                         log_path=Path("logs/smoke_retry.csv"),
+                         firewall_check=False)
+        try:
+            reported_failed = _pump_until(
+                self._app,
+                lambda: "failed" in win._connection._status.text().lower(),
+            )
+            self.assertTrue(reported_failed, "receiver never reported failed")
+            btn = win._connection._start_btn
+            self.assertTrue(btn.isEnabled())
+
+            # Free the port, then retry exactly the way the operator
+            # would: click the button.
+            blocker.close()
+            btn.click()
+
+            bound = _pump_until(self._app, lambda: not btn.isEnabled())
+            self.assertTrue(bound, "retry receiver never reported listening")
+            self.assertIn("running", btn.text().lower())
+            self.assertIsNotNone(
+                win._receiver,
+                "a successful retry must leave the live receiver tracked",
+            )
+        finally:
+            win.close()
+
+    def test_stale_receiver_signal_does_not_clobber_live_receiver(self) -> None:
+        """Deterministic version of the race the guard exists for: a
+        signal arrives from a receiver that is no longer `self._receiver`
+        (e.g. a superseded attempt whose queued "failed" was delivered
+        late). This is synthesized directly rather than raced -- a real
+        QObject.emit() from a distinct, unconnected TelemetryReceiver gives
+        genuine Qt sender-tracking (self.sender() inside the slot) without
+        depending on thread/event-loop timing, so the guard is exercised
+        exactly as it runs in production, deterministically."""
+        from app.gui.dispatch import TelemetryReceiver
+        from app.gui.main_window import MainWindow
+
+        win = MainWindow(bind="127.0.0.1", tel_port=44010, cmd_port=45010,
+                         cmd_host="127.0.0.1",
+                         log_path=Path("logs/smoke_stale.csv"),
+                         firewall_check=False)
+        try:
+            listening = _pump_until(
+                self._app, lambda: not win._connection._start_btn.isEnabled()
+            )
+            self.assertTrue(listening, "live receiver never reported listening")
+            live_receiver = win._receiver
+            self.assertIsNotNone(live_receiver)
+
+            # A stand-in for a superseded receiver -- never started, only
+            # used for its QObject identity so its signal has a genuine,
+            # distinct sender.
+            stale = TelemetryReceiver("127.0.0.1", 44010, Path("logs/smoke_stale2.csv"))
+            stale.status_changed.connect(win._on_receiver_status)
+            stale.connection_changed.connect(win._on_connection_changed)
+            try:
+                stale.status_changed.emit("failed")
+                stale.connection_changed.emit(True, "10.0.0.99:9999")
+
+                self.assertIs(
+                    win._receiver, live_receiver,
+                    "stale signal must not null out the live receiver",
+                )
+                btn = win._connection._start_btn
+                self.assertFalse(btn.isEnabled())
+                self.assertIn("running", btn.text().lower())
+                self.assertFalse(
+                    win._link_ok,
+                    "stale connection_changed(True, ...) from a superseded "
+                    "receiver must be dropped, not allowed to flip "
+                    "_link_ok -- the live receiver never actually accepted "
+                    "a peer in this test, so _link_ok must still be False",
+                )
+            finally:
+                stale.deleteLater()
+        finally:
+            win.close()
+
     def test_command_dispatcher_uses_static_host_for_blank_endpoint(self) -> None:
         from app.gui.dispatch import CommandDispatcher, DEFAULT_COMMAND_HOST
 

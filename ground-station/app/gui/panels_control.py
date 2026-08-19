@@ -94,7 +94,11 @@ class ConnectionPanel(QGroupBox):
     def _emit_start(self) -> None:
         self.start_requested.emit(self._bind.text().strip(), self._tel_port.value(),
                                   self._cmd_port.value(), self._cmd_host.text().strip())
-        self.set_receiver_running(True)
+        # No optimistic flip here. `set_receiver_running(True)` is only
+        # ever called by MainWindow, from a receiver-proven
+        # "listening"/"connected" signal -- the same rule the boot
+        # auto-start path follows. That keeps exactly one writer of the
+        # "running" claim across the whole surface: the receiver itself.
 
     def set_receiver_running(self, running: bool) -> None:
         """Reflect receiver start/stop in the button — used both by the

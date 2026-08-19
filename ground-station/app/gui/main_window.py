@@ -224,13 +224,24 @@ class MainWindow(QMainWindow):
         self._receiver.start()
 
     def _on_receiver_status(self, state: str) -> None:
+        if self.sender() is not self._receiver:
+            # Stale signal from a superseded receiver -- e.g. a retry built
+            # receiver #2 while a queued "failed" from dead receiver #1 was
+            # still in flight (plausible: the firewall prompt can stall the
+            # event loop right after auto-start). Acting on it would null
+            # out the live receiver's reference and disable the button
+            # under it. `self.sender()` is reliable here because every
+            # receiver signal below is connected as a plain bound-method
+            # slot (no lambda), so Qt's per-emission sender tracking always
+            # names the actual emitting QObject.
+            return
         self._connection.set_status(state)
         colors = {"listening": "#3498db", "connected": "#2ecc71",
                   "stale": "#f39c12", "searching": "#f39c12",
                   "failed": "#e74c3c"}
         self._top.set_discovery(f"tel: {state}", colors.get(state, "#888"))
         if state in ("listening", "connected"):
-            # Bind succeeded (or a peer is already talking to it) — the
+            # Bind succeeded (or a peer is already talking to it) -- the
             # button's "running" claim is now backed by reality.
             self._connection.set_receiver_running(True)
         elif state == "failed":
@@ -292,6 +303,12 @@ class MainWindow(QMainWindow):
         self._top.set_discovery(f"cmd: {host}:{cmd_port}", "#2ecc71")
 
     def _on_connection_changed(self, connected: bool, addr: str) -> None:
+        if self.sender() is not self._receiver:
+            # Same stale-signal hazard as _on_receiver_status: this handler
+            # mutates self._link_ok (feeds the preflight "link" check) and
+            # can retarget the command dispatcher at a peer address, so a
+            # signal from a superseded receiver must not be trusted either.
+            return
         self._link_ok = connected
         self._connection.set_connected(connected, addr)
         if connected:
@@ -309,6 +326,11 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"{'Connected: ' + addr if connected else 'Waiting for onboard…'}")
 
     def _on_packet(self, pkt: TelemetryPacket) -> None:
+        # No sender-identity guard: a stray packet from a just-superseded
+        # receiver only repaints plots/values/preflight with data that
+        # briefly predates the live receiver's own -- near-harmless, and
+        # `_on_start_telemetry`'s guard means a superseded receiver is
+        # always a dead one that stops emitting almost immediately anyway.
         self._top.on_packet(pkt)
         self._plots.on_packet(pkt)
         self._values.on_packet(pkt)
@@ -319,6 +341,8 @@ class MainWindow(QMainWindow):
         self._preflight.on_packet(pkt, self._link_ok)
 
     def _on_pull_event(self, ev) -> None:
+        # Same reasoning as _on_packet: purely additive to the pull-events
+        # log table, no MainWindow state mutated -- near-harmless if stale.
         self._pull_events.on_pull_event(ev)
 
     def _on_response(self, cmd: str, resp: CommandResponse, ms: float, tag) -> None:
