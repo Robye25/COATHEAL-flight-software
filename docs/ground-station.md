@@ -61,7 +61,7 @@ does not duplicate CSV rows.
 | Temperature plot | PT100 sample temperatures S0..S7 from the Sequent RTD HAT; invalid channels show as unavailable |
 | Pressure plot | DPS310 pressure |
 | Environment / UV plot | GUVA-S12SD value through ADS1115 |
-| Resistance plot | Sequent RTD HAT per-channel PT100 element resistance by default; `-`/simulated per `sensor.resistance_source` |
+| Resistance plot | MAX31865 click coating-specimen resistance by default (two monitored slots only); Sequent RTD HAT per-channel PT100 element resistance under `sequent_rtd`; `-`/simulated per `sensor.resistance_source` |
 | Values panel | Latest parsed telemetry fields and status tokens |
 | Status bar | Phase, sequence, pressure, sample mean, link state, packet rate |
 
@@ -113,10 +113,13 @@ Bench-only commands require `runtime.bench_mode=true` and `ARM_DEBUG`. After deb
 | ACK | `build_ack` |
 | Command line | `build_command` |
 
-The parser keeps compatibility with the `RESISTANCE=` field. By default it
-carries the Sequent RTD HAT's per-channel PT100 element resistance;
-`sensor.resistance_source=disabled` on the onboard side is what makes that
-field serialize as `-` placeholders.
+The parser keeps compatibility with the `RESISTANCE=` field. By default
+(`sensor.resistance_source=max31865_click`) it carries coating-specimen
+resistance from the two MAX31865 clicks, only in their two monitored slots;
+`sequent_rtd` carries the Sequent RTD HAT's per-channel PT100 element
+resistance in all eight slots instead; `sensor.resistance_source=disabled`
+on the onboard side is what makes the field serialize as `-` placeholders in
+every slot.
 
 Invalid samples are not added to plots. Before a sensor has ever succeeded the
 readout is `N/A`; after a failure it shows the last good value and stale age.

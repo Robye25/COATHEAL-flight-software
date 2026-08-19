@@ -79,16 +79,23 @@ at load time.
 | `sensor.ads1115_i2c_addr` | `0x48` | ADS1115 I2C address. |
 | `sensor.uv_ads1115_channel` | `0` | ADS1115 channel for GUVA-S12SD output. |
 | `sensor.uv_full_scale_v` | `4.096` | ADC full-scale used for normalization. |
-| `sensor.resistance_source` | `sequent_rtd` | Source for the compatibility `RESISTANCE=` field: `sequent_rtd` serializes the card's per-channel PT100 element resistance; `disabled` emits `-`; `simulated` uses the decaying bench model. |
+| `sensor.resistance_source` | `max31865_click` | Source for the compatibility `RESISTANCE=` field. `max31865_click` (v3-shipped default): coating-specimen resistance measured directly by the two MAX31865 clicks, in the two `sensor.max31865_sample_indices` slots only (other slots emit `-`). `sequent_rtd`: the RTD card's per-channel PT100 element resistance, all eight slots. `disabled`: `-` in every slot. `simulated`: the decaying bench model. |
+| `sensor.max31865_reference_ohm` | `470.0` | MAX31865 reference resistor value (Ω), shared by both clicks. MikroE RTD Click nominal; **bench-confirm against the populated part** — the retired pre-migration code assumed `400`. See [Sequent RTD Bench Bring-Up §9](sequent-rtd-bring-up.md#9-max31865-sample-resistance-click-bring-up-blocking-gates), gate 4. |
+| `sensor.max31865_poll_ms` | `1000` | MAX31865 click worker polling interval. |
+| `sensor.max31865_sample_indices` | `0,4` | Which two of `hardware.sample_count` indices the two clicks feed: entry 0 -> click 1/SAMPLE1 (CE1, `/dev/spidev0.1`), entry 1 -> click 2/SAMPLE2 (CE0, `/dev/spidev0.0`). Must be two distinct entries in `[0, hardware.sample_count)`. **`0,4` is an OWNER-FLAGGED PLACEHOLDER** — the first sample index of each motor's group, not a confirmed physical mapping; see [Sequent RTD Bench Bring-Up §10](sequent-rtd-bring-up.md#10-sample-index-mapping-max31865_sample_indices--placeholder-fill-in-at-bench). |
 
-The default `60.0 .. 390.0` Ω resistance window is a PT100 *sensor-range*
-sanity check, not a mission-envelope check: through the PT100 CVD curve it
-spans roughly −102 °C to +845 °C, far wider than anything this payload should
-ever see. It catches an open, shorted, or miswired probe and nothing subtler —
-the actual thermal guard is the `heater.max_sample_temp_c` over-temp latch at
-85 °C. The bench survey in section 8 of
+The default `60.0 .. 390.0` Ω `sequent_rtd_resistance_*` window is a PT100
+*sensor-range* sanity check, not a mission-envelope check: through the PT100
+CVD curve it spans roughly −102 °C to +845 °C, far wider than anything this
+payload should ever see. It catches an open, shorted, or miswired probe and
+nothing subtler — the actual thermal guard is the `heater.max_sample_temp_c`
+over-temp latch at 85 °C. The bench survey in section 8 of
 [Sequent RTD Bench Bring-Up](sequent-rtd-bring-up.md) is expected to replace
-these defaults with a narrower mission-envelope window.
+these defaults with a narrower mission-envelope window. This window applies
+only to the `sequent_rtd` resistance path — the MAX31865 click instrument
+deliberately has no plausibility window of its own; an out-of-range coating
+specimen is expected to saturate and be reported as such, not clamped to a
+guessed range (section 9, gate 5 of the same bring-up doc).
 
 ## Heater Control
 
@@ -97,9 +104,9 @@ these defaults with a narrower mission-envelope window.
 | `heater.max_sample_temp_c` | `85.0` | Per-sample overtemperature latch. |
 | `heater.target_min_c` | `0.0` | Lowest accepted manual PID target. |
 | `heater.target_max_c` | `80.0` | Highest accepted manual PID target; must stay below the overtemperature latch. |
-| `heater.output_lines` | `17,18,27,5,6,13` | BCM GPIO lines for HEAT_EN1..6. |
+| `heater.output_lines` | `19,13,6,5,24,23` | BCM GPIO lines for HEAT_EN1..6 (schematic v3 map). |
 | `heater.temperature_channels` | `0,1,2,3,4,5` | DAQ sample supplying feedback for H0..H5. |
-| `heater.pwm_frequency_hz` | `10.0` | Requested heater PWM frequency. |
+| `heater.pwm_frequency_hz` | `1.0` | Requested heater PWM frequency. v3: film heaters have high thermal inertia and no hardware PWM channel is wired, so 1 Hz software PWM is the owner-confirmed rate (was 10.0 pre-v3). |
 | `heater.active_high` | `true` | MOSFET input polarity. |
 | `heater.debug_max_duty` | `0.25` | Bench-only maximum `HEATER_TEST` duty. |
 | `heater.debug_max_seconds` | `10.0` | Bench-only maximum `HEATER_TEST` duration. |
@@ -108,8 +115,8 @@ these defaults with a narrower mission-envelope window.
 
 | Key | Default | Description |
 |---|---:|---|
-| `power.max_active_heaters` | `4` | Scheduler limit. |
-| `power.max_thermal_w` | `20.0` | Thermal power cap. |
+| `power.max_active_heaters` | `3` | Scheduler limit. Owner power-budget rule: never more than 3 of the six 5 W heaters energised simultaneously (was 4 pre-v3). |
+| `power.max_thermal_w` | `15.0` | Thermal power cap: `3 * power.heater_nominal_w` (was 20.0 pre-v3). |
 | `power.max_system_w` | `48.23` | Informational system budget. |
 | `power.heater_nominal_w` | `5.0` | Per-heater nominal power. |
 | `power.energy_budget_wh` | `130.0` | Heater energy latch threshold; `0` disables. |
@@ -146,37 +153,51 @@ these defaults with a narrower mission-envelope window.
 | `stepper.enable_on_boot` | `false` | Keep drivers de-energized until commanded. |
 | `pull.max_step_hz` | `100.0` | Pull cycle max rate. |
 | `pull.accel_steps_per_s2` | `200.0` | Pull acceleration/deceleration. |
-| `pull.microstep` | `4` | Microstep divisor programmed into each TMC2240. |
+| `pull.microstep` | `4` | Microstep divisor programmed into each TMC5160. |
 | `pull.travel_full_steps` | `200` | Pull travel in full steps; calibrate to ball-screw lead. |
 | `pull.hold_s` | `5.0` | Hold time at target. |
 
 ## Motor Channels
 
+Schematic v3: TMC5160 SPI-only motion (position dribble via XTARGET writes —
+see [TMC5160 Commissioning](tmc5160-commissioning.md)). **There is no
+`step_line`, `dir_line`, or `pulse_high_us` key; those are rejected at config
+load as unknown motor keys, not merely deprecated.**
+
 | Key | Motor 0 default | Motor 1 default | Description |
 |---|---:|---:|---|
-| `motor*.driver` | `tmc2240` | `tmc2240` | Required final driver type. |
-| `motor*.gpio_chip` | `/dev/gpiochip0` | `/dev/gpiochip0` | GPIO chip containing CS, STEP, DIR, and EN lines. |
-| `motor*.spi_device` | `/dev/spidev0.0` | `/dev/spidev0.0` | Shared SPI0 bus device; software drives each configured CS GPIO. |
-| `motor*.cs_line` | `22` | `23` | Chip select GPIO. |
-| `motor*.step_line` | `19` | `16` | STEP GPIO. |
-| `motor*.dir_line` | `26` | `20` | DIR GPIO. |
-| `motor*.enable_line` | `12` | `21` | EN GPIO. |
-| `motor*.run_current_a_rms` | `0.8` | `0.8` | Conservative commissioning current; increase only after thermal validation. |
-| `motor*.current_range_a_peak` | `0` | `0` | TMC2240 peak-current range: `0` auto, or exactly `1`, `2`, or `3` A. |
-| `motor*.hold_current_frac` | `0.30` | `0.30` | Hold current fraction. |
-| `motor*.stealth_chop` | `true` | `true` | StealthChop request. |
+| `motor*.driver` | `tmc5160` | `tmc5160` | Required driver type; only `tmc5160` and `simulated` are accepted. `tmc2240` is rejected at load, naming it retired. |
+| `motor*.gpio_chip` | `/dev/gpiochip0` | `/dev/gpiochip0` | GPIO chip containing the CS and EN lines. |
+| `motor*.spi_device` | `/dev/spidev0.0` | `/dev/spidev0.0` | Shared SPI0 bus device; software drives each configured CS GPIO with `SPI_NO_CS` (see below). |
+| `motor*.cs_line` | `22` | `27` | Chip select GPIO (software CS). |
+| `motor*.enable_line` | `20` | `21` | EN GPIO. |
+| `motor*.run_current_a_rms` | `0.8` | `0.8` | Conservative commissioning current; increase only after thermal validation. Validated against both a flat `(0, 3.1]` A_rms ceiling and the sense resistor's physical current limit (below). |
+| `motor*.hold_current_frac` | `0.30` | `0.30` | Hold current fraction, relative to the chosen IRUN. |
+| `motor*.stealth_chop` | `true` | `true` | StealthChop request. Parsed and validated, but the TMC5160 backend currently enables GCONF's StealthChop bit unconditionally — this key is not yet wired to driver behaviour. |
 | `motor*.spi_speed_hz` | `1000000` | `1000000` | SPI speed. |
-| `motor*.pulse_high_us` | `3` | `3` | STEP high time. |
+| `motor*.sense_resistor_ohm` | `0.075` | `0.075` | TMC5160 current-sense resistor value (Ω); feeds the GLOBALSCALER/IHOLD_IRUN current calculation. `0.075` is an assumed typical value for this board family — **read the actual value off the board at the bench** (see [TMC5160 Commissioning §6](tmc5160-commissioning.md#6-current-model-globalscaler--irun-two-regimes)). Validated `> 0.0 && < 1.0`. |
 | `motor*.retry_ms` | `2000` | `2000` | Idle driver re-probe interval after a fault. |
 | `motor*.samples` | `0,1,2,3` | `4,5,6,7` | Sample indices pulled by the motor. |
 
-The TMC2240 backend uses SPI mode 3, opens SPI with kernel chip-select
-disabled, and drives
-`motor0.cs_line` and `motor1.cs_line` through libgpiod. Do not install the old
-`spi0-2cs,cs0_pin=22,cs1_pin=23` overlay because it would reserve those GPIO
-lines in the kernel and conflict with the software-controlled chip selects.
-`run_current_a_rms` is converted to the integrated-sense `CURRENT_RANGE` and
-`GLOBALSCALER` settings; external phase-sense-resistor keys are invalid.
+The TMC5160 backend uses SPI mode 3, opens SPI with the kernel chip-select
+disabled (`SPI_NO_CS`), and drives `motor0.cs_line`/`motor1.cs_line` through
+libgpiod as software chip-selects. This is mandatory, not an optimisation:
+SPI0's native chip-selects (CE0/CE1) are wired to the MAX31865
+sample-resistance clicks, not the motors — without `SPI_NO_CS` the kernel
+would assert a click's CE line on every motor transfer. Do not install a
+`spi0-2cs` overlay; it would reserve BCM 22/27 in the kernel and conflict
+with the software-controlled chip selects.
+
+`run_current_a_rms` and `sense_resistor_ohm` feed
+`Tmc5160Driver::CalculateCurrent()`, which derives GLOBALSCALER (32..256) and
+IRUN (0..31) directly — there is no TMC2240-style fixed peak-current range
+selector, and `current_range_a_peak` no longer exists as a key. At the
+assumed `sense_resistor_ohm=0.075`, the sense resistor can deliver at most
+about 3.06 A_rms; requests below roughly 1.5 % of that ceiling are rejected
+rather than silently overcurrenting the motor. See
+[TMC5160 Commissioning §6](tmc5160-commissioning.md#6-current-model-globalscaler--irun-two-regimes)
+for the full derivation and the bench-confirmation blank for the real sense
+resistor value.
 
 ## HAL
 

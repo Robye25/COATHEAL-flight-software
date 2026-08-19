@@ -19,14 +19,15 @@ Raspberry Pi 4
         Sequent RTD HAT over I2C: PT100 samples 0..7
         DPS310 over I2C: pressure + ambient temperature
         ADS1115 over I2C: GUVA-S12SD UV analog input
+        MAX31865 dual-click over SPI0 (native CE): coating resistance
       ThermalController
         6 manual target PIDs; fallback floor for untargeted channels
       HeaterScheduler
-        4 active / 20 W / energy budget / MotionLock gate
+        3 active / 15 W / energy budget / MotionLock gate
       PwmController
         H0..H5 MOSFET input mapping
       StepperController
-        M0 + M1 TMC2240 motor channels
+        M0 + M1 TMC5160 motor channels, SPI-only (no STEP/DIR)
 
 Ground station laptop
   gui_app.py
@@ -87,13 +88,14 @@ where telemetry should be returned.
 
 | Boundary | Configured in software | Physical-driver status |
 |---|---|---|
-| TMC2240 SPI setup | Yes | GPIO-CS SPI mode 3 register writes implemented; bench validation required |
-| STEP/DIR/EN GPIO | Yes | libgpiod pulse backend implemented; bench timing validation required |
-| Heater MOSFET outputs | Yes | zero-safe software PWM implemented; dummy-load validation required |
+| TMC5160 SPI-only motion (position dribble) | Yes | Software-CS `SPI_NO_CS` SPI mode 3 register writes implemented; no STEP/DIR GPIO exists; current-model bench validation required, see [tmc5160-commissioning.md](tmc5160-commissioning.md) |
+| Heater MOSFET outputs | Yes | zero-safe 1 Hz software PWM implemented; dummy-load validation required |
 | Sequent RTD HAT I2C | Yes | 8-channel PT100/PT1000 read path implemented; register map derived from vendor source and gated on bench verification, see [sequent-rtd-bring-up.md](sequent-rtd-bring-up.md) |
+| MAX31865 dual-click SPI | Yes | native-CE one-shot read path implemented for both clicks; reference resistor and coating-resistance range gated on bench verification, see [sequent-rtd-bring-up.md](sequent-rtd-bring-up.md) |
 | DPS310 I2C | Yes | compensated `i2c-dev` reads implemented |
 | ADS1115 I2C | Yes | single-ended `i2c-dev` reads implemented |
-| PT100 element resistance | Yes | Read alongside temperature by the Sequent RTD HAT; drives per-channel plausibility/cross-check and the compatibility `RESISTANCE=` field |
+| PT100 element resistance | Yes | Read alongside temperature by the Sequent RTD HAT; drives per-channel plausibility/cross-check and the `sequent_rtd` `RESISTANCE=` source |
+| Coating-specimen resistance | Yes | Read directly by the two MAX31865 clicks; drives the default `max31865_click` `RESISTANCE=` source |
 
 ## Telemetry Shape
 
@@ -102,5 +104,7 @@ DATA,<session>,<seq>,<timestamp>,<rtc_valid>,<ambient_temp_c>,<ambient_pressure_
 ```
 
 The ground station accepts the compatibility `RESISTANCE=` field. By default
-(`sensor.resistance_source=sequent_rtd`) it carries the Sequent RTD HAT's
-per-channel PT100 element resistance; `disabled` emits `-` values instead.
+(`sensor.resistance_source=max31865_click`) it carries coating-specimen
+resistance from the two MAX31865 clicks in their two monitored slots only;
+`sequent_rtd` carries the Sequent RTD HAT's per-channel PT100 element
+resistance in all eight slots instead; `disabled` emits `-` values.
