@@ -41,6 +41,11 @@ onboard auto-discovery); every later run launches instantly. The GUI then
 discovers and connects to the onboard automatically — no addresses to type.
 Diagnostics without opening the GUI: run the same file with `--check`.
 
+**Ground station (Linux)** — same experience via
+`ground-station/COATHEAL-GroundStation.sh` (run it from a terminal or
+double-click → "Run in Terminal"). It also handles `ufw` instead of the
+Windows firewall. `--check` works identically.
+
 ## Repository Layout
 
 ```text
@@ -75,7 +80,6 @@ docs/            Architecture, protocol, configuration, and hardware docs
 ## Quick Start: Ground Station
 
 ```powershell
-cd D:\COATHEAL-flight-software\COATHEAL-flight-software
 cd ground-station
 py -3 -m venv .venv
 .\.venv\Scripts\Activate.ps1
@@ -98,9 +102,9 @@ cmake --build build --parallel
 On the Pi, migrate stale config and install the service:
 
 ```bash
-python3 scripts/hardware_setup.py plug-and-play \
+python3 scripts/hardware_setup.py migrate-config \
   --config config/onboard.local.ini \
-  --migrate-from config/onboard.ini \
+  --migrate-from config/onboard.local.ini \
   --yes
 ```
 
