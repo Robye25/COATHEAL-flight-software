@@ -57,7 +57,7 @@ Registers this driver touches (all TMC5160 datasheet addresses):
 | VSTOP | `0x2B` | Ramp stop velocity |
 | XTARGET | `0x2D` | Ramp generator's target position |
 | CHOPCONF | `0x6C` | `MRES` (bits 27:24), `TOFF` (bits 3:0) |
-| DRV_STATUS | `0x6F` | Driver status/diagnostics |
+| DRV_STATUS | `0x6F` | Driver status/diagnostics — read by `scripts/spi_probe.py`, not by the flight software |
 
 Primary reference: [Analog Devices TMC5160A data sheet](https://www.analog.com/media/en/technical-documentation/data-sheets/TMC5160A_datasheet_rev1.17.pdf).
 
@@ -255,7 +255,20 @@ of the work as it can:
 | `I_peak_max = V_fs / R_sense` | `0.325 / 0.075` ≈ **4.333 A peak** |
 | `run_current_a_rms` ceiling (`I_peak_max / sqrt(2)`) | ≈ **3.06 A_rms** |
 | Absolute flat ceiling (independent of sense resistor) | `3.1 A_rms` (config-enforced backstop) |
-| Low-current rejection floor | requests below ~1.5 % of `I_peak_max` (≈ 0.065 A_rms at this R) rejected |
+| Low-current rejection floor | ~1.5 % of `I_peak_max` = **0.065 A_peak** (≈ **0.046 A_rms**) — see note below |
+
+**Note on the low-current floor.** `0.065` is a **peak** current
+(1.5 % × 4.333 A peak), not an RMS one — ≈ 0.046 A_rms. It is also not the
+actual accept/reject threshold: `CalculateCurrent` rejects when the value it
+*can* deliver at the GLOBALSCALER floor exceeds the request by more than
+10 %, and IRUN is a 5-bit ladder, so acceptance in this region is **ragged**
+rather than a clean cut. Measured against the shipped implementation at
+`R_sense = 0.075 Ω`, the first crossover into acceptance is at
+≈ **0.032–0.033 A_rms**, but isolated rejection bands persist above it (e.g.
+≈ 0.042 and ≈ 0.054 A_rms); requests above ≈ **0.055 A_rms** are accepted
+without exception. Treat anything under ~0.06 A_rms as "may be rejected —
+check the load log", not as a guaranteed floor. All of these rescale with
+`R_sense`.
 
 **This table is only correct if the board's actual sense resistor is really
 0.075 Ω.** Read it off the board (silkscreen value or QHV5160 v2

@@ -162,6 +162,16 @@ class SensorManager {
   // Max31865Loop, under cache_mu_.
   bool click_has_success_[2] = {false, false};
   std::chrono::steady_clock::time_point click_last_success_[2];
+  // Saturation-edge visibility. A specimen going out of range is a valid
+  // measurement (bus healthy, channel invalid), so it never trips
+  // clicks_bus_ok_ and the only wire evidence is a "-" appearing in a
+  // RESISTANCE slot -- indistinguishable from an unmonitored sample. These
+  // two carry a rate-limited stderr line on the valid -> out_of_range EDGE so
+  // the operator sees it happen. Written only under cache_mu_, alongside the
+  // health they describe. No wire change: this is a log line, nothing more.
+  bool click_was_out_of_range_[2] = {false, false};
+  std::chrono::steady_clock::time_point click_last_saturation_log_[2];
+  bool click_has_saturation_log_[2] = {false, false};
   int resolved_dps_address_ = -1;
   int resolved_ads_address_ = -1;
   mutable std::mutex dps_io_mu_;

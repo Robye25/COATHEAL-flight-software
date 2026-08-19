@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iomanip>
+#include <iostream>
 #include <limits>
 #include <numeric>
 #include <sstream>
@@ -656,9 +657,34 @@ void SensorManager::UpdateClickHealth(
     if (reading.out_of_range) {
       health.state = ComponentState::kDegraded;
       health.error = "OUT_OF_RANGE";
+      // Saturation-edge visibility. Log on the valid -> out_of_range EDGE
+      // only, and no more than once a minute per click, so a permanently
+      // out-of-range specimen cannot flood the log at the poll rate. Nothing
+      // about the reading, the health state or the wire format depends on
+      // this line -- it exists because saturation is otherwise silent: the
+      // bus stays healthy and the only wire evidence is a "-" that looks
+      // exactly like an unmonitored sample.
+      constexpr auto kSaturationLogInterval = std::chrono::seconds(60);
+      const bool is_edge = !click_was_out_of_range_[click];
+      const bool interval_elapsed =
+          !click_has_saturation_log_[click] ||
+          (now - click_last_saturation_log_[click]) >= kSaturationLogInterval;
+      if (is_edge && interval_elapsed) {
+        std::cerr << "[max31865] MAX31865_" << (click + 1)
+                  << " specimen out of range: raw="
+                  << reading.resistance_ohm << " ohm (NOT a valid "
+                  << "measurement), fault_bits=0x" << std::hex
+                  << static_cast<int>(reading.fault_bits) << std::dec
+                  << "; bus healthy, channel reported invalid\n";
+        click_last_saturation_log_[click] = now;
+        click_has_saturation_log_[click] = true;
+      }
+      click_was_out_of_range_[click] = true;
     } else {
       health.state = ComponentState::kOk;
       health.error = "NONE";
+      // Recovery re-arms the edge: the next excursion logs immediately.
+      click_was_out_of_range_[click] = false;
     }
   } else {
     health.state =
