@@ -32,9 +32,22 @@ constexpr std::uint8_t kCfgBiasOff = kBit50Hz;                           // 0x01
 // Issued after ReadOneShot() has already written VBIAS off, so this
 // carries VBIAS=0 forward and adds FAULTCLR.
 constexpr std::uint8_t kCfgFaultClear = kBitFaultClr | kBit50Hz;         // 0x03
-// Probe()'s benign value: no VBIAS, no 1SHOT -- see the header comment on
-// why that makes the readback check a plain equality.
+// The presence check's benign value: no VBIAS, no 1SHOT -- see the header
+// comment on why that makes the readback check a plain equality.
+//
+// Byte-identical to kCfgBiasOff on purpose: this IS the adapter's resting
+// config, so writing it can never perturb the conversion that follows and
+// can never leave the 50 Hz filter bit anywhere other than where every
+// other write in this file leaves it (set). Every constant above carries
+// kBit50Hz for exactly that reason -- the notch never moves between
+// conversions, so a presence check can never change a reading.
 constexpr std::uint8_t kCfgProbe = kBit50Hz;                             // 0x01
+
+// Nothing answered as configured on a bus conversation that itself worked.
+// Deliberately distinct from every transport error string below: "the
+// click is not there / is not answering" and "the transfer failed" call
+// for different actions on the ground.
+constexpr char kClickNotDetected[] = "CLICK_NOT_DETECTED";
 
 }  // namespace
 
@@ -112,9 +125,29 @@ double Max31865Adapter::CodeToOhms(std::uint16_t code, double reference_ohm) {
   return static_cast<double>(code) * reference_ohm / 32768.0;
 }
 
-bool Max31865Adapter::Probe(std::string* error) {
-  if (!EnsureOpen(error)) return false;
-
+// Presence proof: write the benign config value, read it straight back.
+// Two register conversations, each taking the controller lock for itself
+// (see the block comment above) and no sleeps between them, so this adds
+// nothing to the time the motors are locked out of the bus.
+//
+// THIS IS THE ONLY THING BETWEEN AN ABSENT CLICK AND A PLAUSIBLE-LOOKING
+// MEASUREMENT. SPI has no acknowledgement. With no chip answering, the
+// master still clocks a perfectly "successful" transfer and simply samples
+// whatever the idle MISO line sits at -- 0x00 where it floats or is pulled
+// low, 0xFF where it is pulled high. So every transfer of a one-shot
+// sequence SUCCEEDS against a click that is not there: the RTD code reads
+// back 0x0000, the fault bit is clear, and the adapter hands out a
+// perfectly healthy 0-ohm reading. That is exactly what an unpopulated
+// flight stack reported on the bench -- RESISTANCE_OK on the wire with
+// every resistance channel blank -- and it is why this check exists.
+// Contrast the neighbouring devices, which self-detect: an absent I2C card
+// never ACKs (SequentRtdAdapter reports CARD_NOT_DETECTED) and the TMC5160
+// has a VERSION identity byte. The MAX31865 has neither, so presence has
+// to be proven explicitly.
+//
+// kCfgProbe (0x01) is chosen so neither idle level can forge the readback:
+// it is neither 0x00 nor 0xFF.
+bool Max31865Adapter::VerifyPresence(std::string* error) {
   if (!WriteConfig(kCfgProbe)) {
     SetError(error, "CONFIG_WRITE_FAILED");
     open_ = false;  // I/O failure: force a re-open next attempt.
@@ -131,9 +164,15 @@ bool Max31865Adapter::Probe(std::string* error) {
     // answering as configured. Configuration rejection, not an I/O
     // failure -- open_ is left as-is (mirrors SequentRtdAdapter's
     // I/O-failure-vs-configuration-rejection convention).
-    SetError(error, "CONFIG_READBACK_MISMATCH");
+    SetError(error, kClickNotDetected);
     return false;
   }
+  return true;
+}
+
+bool Max31865Adapter::Probe(std::string* error) {
+  if (!EnsureOpen(error)) return false;
+  if (!VerifyPresence(error)) return false;
   SetError(error, "");
   return true;
 }
@@ -145,6 +184,19 @@ bool Max31865Adapter::ReadOneShot(Reading* out, std::string* error) {
   }
   *out = Reading{};
   if (!EnsureOpen(error)) return false;
+
+  // Presence FIRST, before VBIAS is ever asserted. Folding it in here
+  // rather than leaving it to the callers is the point: ReadOneShot is the
+  // only entry point the poll loop and CHECK both go through, so a click
+  // that is not on the bus can no longer report a successful conversation
+  // by any route. Two register conversations buy that; a doomed one-shot
+  // would instead burn the full ~75 ms of settle + conversion sleeps
+  // before returning a fake 0-ohm reading.
+  //
+  // No bias-off recovery is needed on this path: VBIAS has not been
+  // touched yet and kCfgProbe leaves it off. `*out` was reset above, so a
+  // caller that ignores the return value still sees valid == false.
+  if (!VerifyPresence(error)) return false;
 
   if (!WriteConfig(kCfgBiasOn)) {
     SetError(error, "BIAS_ON_WRITE_FAILED");

@@ -31,6 +31,11 @@ constexpr std::uint8_t kCfgBiasOff = 0x01;      // 50HZ
 constexpr std::uint8_t kCfgFaultClear = 0x03;   // FAULTCLR | 50HZ
 constexpr std::uint8_t kCfgProbe = 0x01;        // 50HZ (benign)
 
+// The exact string an absent / non-answering click reports. Pinned as a
+// constant because the whole point of it is that it differs from every
+// transport error below -- ground software keys off it.
+constexpr char kClickNotDetected[] = "CLICK_NOT_DETECTED";
+
 void ExpectConfigWrite(FakeSpiBus* bus, std::uint8_t value) {
   bus->Expect({static_cast<std::uint8_t>(kRegConfig | kWriteBit), value},
               {0, 0});
@@ -38,6 +43,18 @@ void ExpectConfigWrite(FakeSpiBus* bus, std::uint8_t value) {
 
 void ExpectConfigRead(FakeSpiBus* bus, std::uint8_t value) {
   bus->Expect({kRegConfig, 0}, {0, value});
+}
+
+// The presence check that now opens every ReadOneShot(): write the benign
+// config value, read the SAME value straight back. This is the config
+// register modelled faithfully -- a real MAX31865 latches what was written
+// and hands it back, and a script that does anything else is not modelling
+// a MAX31865. Note the readback value is kCfgProbe, echoed, not an
+// independently chosen byte: an implementation that compared against
+// something else would be caught by the mismatch assertions below.
+void ExpectPresenceCheck(FakeSpiBus* bus) {
+  ExpectConfigWrite(bus, kCfgProbe);
+  ExpectConfigRead(bus, kCfgProbe);
 }
 
 void ExpectRtdRead(FakeSpiBus* bus, std::uint8_t msb, std::uint8_t lsb) {
@@ -120,6 +137,7 @@ void TestOneShotHealthySequenceOrderAndOpenParams() {
   const auto opts = TestOptions();
   Max31865Adapter adapter(&bus, opts);
 
+  ExpectPresenceCheck(&bus);
   ExpectConfigWrite(&bus, kCfgBiasOn);
   ExpectConfigWrite(&bus, kCfgBiasOn1Shot);
   // raw = 0x4000 -> code = raw>>1 = 8192, LSB bit0 = 0 (no fault).
@@ -152,6 +170,7 @@ void TestFaultBitSetTriggersOutOfRangeAndFaultClear() {
   const auto opts = TestOptions();
   Max31865Adapter adapter(&bus, opts);
 
+  ExpectPresenceCheck(&bus);
   ExpectConfigWrite(&bus, kCfgBiasOn);
   ExpectConfigWrite(&bus, kCfgBiasOn1Shot);
   // raw = 0x4001 -> code = raw>>1 = 8192 (well under kNearFullScaleCode),
@@ -190,6 +209,7 @@ void TestNearFullScaleCodeTriggersOutOfRangeWithoutFaultBit() {
 
   // code = 32760 (threshold), fault bit clear: raw = code*2 = 65520 =
   // 0xFFF0. MSB=0xFF, LSB=0xF0 (bit0=0).
+  ExpectPresenceCheck(&bus);
   ExpectConfigWrite(&bus, kCfgBiasOn);
   ExpectConfigWrite(&bus, kCfgBiasOn1Shot);
   ExpectRtdRead(&bus, /*msb=*/0xFF, /*lsb=*/0xF0);
@@ -215,6 +235,7 @@ void TestJustBelowFullScaleThresholdWithoutFaultBitIsValid() {
 
   // code = 32759 (one below the threshold), fault bit clear: raw =
   // 32759*2 = 65518 = 0xFFEE. MSB=0xFF, LSB=0xEE (bit0=0).
+  ExpectPresenceCheck(&bus);
   ExpectConfigWrite(&bus, kCfgBiasOn);
   ExpectConfigWrite(&bus, kCfgBiasOn1Shot);
   ExpectRtdRead(&bus, /*msb=*/0xFF, /*lsb=*/0xEE);
@@ -261,10 +282,147 @@ void TestProbeReadbackMismatchReturnsFalse() {
 
   std::string error;
   assert(!adapter.Probe(&error));
-  assert(!error.empty());
+  assert(error == kClickNotDetected);
   // Both scripted exchanges matched their wire content exactly -- the
   // mismatch is semantic (readback != written value), not a wire-level
   // one, so mismatch_count stays 0.
+  assert(bus.mismatch_count() == 0);
+  assert(bus.remaining_expectations() == 0);
+}
+
+// ---------------------------------------------------------------------
+// THE REGRESSION TESTS FOR THE PI BRING-UP FINDING.
+//
+// With no clicks fitted, the flight software reported RESISTANCE_OK on the
+// wire and max31865_1=OK / max31865_2=OK in CHECK while every resistance
+// channel serialised as "-". The cause is that SPI cannot detect absence at
+// the transport layer: nothing acknowledges, nothing NAKs, the master just
+// clocks bits and samples an idle MISO line. So every transfer of the
+// one-shot sequence returned true, the RTD register read back 0x0000, the
+// fault bit was clear, and ReadOneShot() reported a healthy 0-ohm
+// measurement of a click that was not on the board.
+//
+// FakeSpiBus::SetFloatingLevel() is what makes that expressible: it models
+// a device that is NOT THERE (successful transfers, idle level clocked
+// back) rather than one that answers a script. Both idle levels are
+// covered because both occur in the field -- a floating/pulled-down line
+// reads 0x00, a pulled-up one reads 0xFF.
+//
+// Mutation target: delete the presence check from ReadOneShot(). Both tests
+// below then see ReadOneShot() return TRUE against an empty bus, which is
+// exactly the flight defect.
+// ---------------------------------------------------------------------
+
+void AssertAbsentClickDetected(std::uint8_t idle_level) {
+  FakeSpiBus bus;
+  const auto opts = TestOptions();
+  Max31865Adapter adapter(&bus, opts);
+
+  bus.SetFloatingLevel(idle_level);
+  // Nothing scripted on purpose: an absent chip answers no script. Every
+  // Transfer() below still SUCCEEDS -- that is the hazard being modelled.
+
+  Max31865Adapter::Reading reading;
+  std::string error;
+  const bool ok = adapter.ReadOneShot(&reading, &error);
+
+  // Health FALSE: the click is not on the bus, so this is not a
+  // measurement of anything.
+  assert(!ok);
+  // Named, distinct diagnosis -- not a transport error, because the
+  // transport worked perfectly.
+  assert(error == kClickNotDetected);
+  assert(!reading.valid);
+  // No plausible-looking number leaks out of a device that isn't there.
+  assert(reading.resistance_ohm == 0.0);
+
+  // Exactly TWO transfers: the presence write and its readback. Proves the
+  // sequence aborted at the presence check rather than running the whole
+  // conversion (which would be six) -- so an absent click also costs no
+  // settle/conversion sleeps, and VBIAS is never asserted into an unknown
+  // board.
+  assert(bus.settings_applications() == 2);
+  assert(bus.mismatch_count() == 0);
+}
+
+void TestAbsentClickFloatingLowIsDetected() {
+  AssertAbsentClickDetected(0x00);
+}
+
+void TestAbsentClickFloatingHighIsDetected() {
+  AssertAbsentClickDetected(0xFF);
+}
+
+// Probe() must reach the same verdict on the same evidence -- it is the
+// standalone presence question and shares the implementation.
+void TestProbeOnAbsentClickReportsNotDetected() {
+  FakeSpiBus bus;
+  const auto opts = TestOptions();
+  Max31865Adapter adapter(&bus, opts);
+
+  bus.SetFloatingLevel(0x00);
+  std::string error;
+  assert(!adapter.Probe(&error));
+  assert(error == kClickNotDetected);
+}
+
+// ---------------------------------------------------------------------
+// ANTI-REGRESSION for the deliberate saturation semantics: "bus healthy !=
+// channel valid". A click that IS present and answers the presence check
+// but reads a saturated specimen (code >= kNearFullScaleCode) is a VALID
+// MEASUREMENT of an out-of-range specimen. It must keep reporting health
+// TRUE -- the presence check must not be reachable by, or confused with,
+// an out-of-range reading.
+//
+// Mutation target: keying health off `reading.valid` (or folding the
+// saturation branch into the return value) to "fix" the absent case. This
+// test fails immediately, and so does the SensorManager resistance_ok()
+// test that mirrors it.
+// ---------------------------------------------------------------------
+
+void TestPresentClickWithSaturatedSpecimenStaysHealthy() {
+  FakeSpiBus bus;
+  const auto opts = TestOptions();
+  Max31865Adapter adapter(&bus, opts);
+
+  // Presence answered correctly -> the click IS there...
+  ExpectPresenceCheck(&bus);
+  ExpectConfigWrite(&bus, kCfgBiasOn);
+  ExpectConfigWrite(&bus, kCfgBiasOn1Shot);
+  // ...and reads code 32760 (== kNearFullScaleCode, raw 0xFFF0), the
+  // saturation threshold itself, with the fault bit clear.
+  ExpectRtdRead(&bus, /*msb=*/0xFF, /*lsb=*/0xF0);
+  ExpectConfigWrite(&bus, kCfgBiasOff);
+  ExpectFaultRead(&bus, 0x00);
+  ExpectConfigWrite(&bus, kCfgFaultClear);
+
+  Max31865Adapter::Reading reading;
+  std::string error;
+  // Health TRUE: the conversation succeeded end to end.
+  assert(adapter.ReadOneShot(&reading, &error));
+  assert(error.empty());
+  // Channel invalid: the specimen is out of range.
+  assert(!reading.valid);
+  assert(reading.out_of_range);
+  assert(bus.mismatch_count() == 0);
+  assert(bus.remaining_expectations() == 0);
+}
+
+// A transport failure ON the presence write is NOT absence, and must not
+// borrow the absent click's diagnosis. Pins the two apart in one place.
+void TestPresenceTransportFailureReportsIoErrorNotAbsence() {
+  FakeSpiBus bus;
+  const auto opts = TestOptions();
+  Max31865Adapter adapter(&bus, opts);
+
+  bus.FailNextTransfers(1);  // the presence write itself fails
+
+  Max31865Adapter::Reading reading;
+  std::string error;
+  assert(!adapter.ReadOneShot(&reading, &error));
+  assert(error == "CONFIG_WRITE_FAILED");
+  assert(error != kClickNotDetected);
+  // No bias-off recovery: VBIAS was never asserted on this path.
   assert(bus.mismatch_count() == 0);
   assert(bus.remaining_expectations() == 0);
 }
@@ -281,11 +439,12 @@ void TestTransferFailureDuringOneShotWriteAttemptsBiasOff() {
   const auto opts = TestOptions();
   Max31865Adapter adapter(&bus, opts);
 
+  ExpectPresenceCheck(&bus);
   ExpectConfigWrite(&bus, kCfgBiasOn);  // succeeds normally
   // FailNextTransfers() counts from "now" -- set before ReadOneShot()
   // even starts, it can only ever hit that call's *first* Transfer(),
-  // never its second or third. To fail the 1SHOT write specifically (the
-  // second Transfer() of this sequence) without disturbing its position
+  // never a later one. To fail the 1SHOT write specifically (the
+  // fourth Transfer() of this sequence) without disturbing its position
   // in the queue, script a deliberately-wrong exchange there instead: a
   // content mismatch makes Transfer() return false at exactly this point,
   // the same observable outcome the adapter reacts to.
@@ -305,10 +464,11 @@ void TestTransferFailureDuringRtdReadAttemptsBiasOff() {
   const auto opts = TestOptions();
   Max31865Adapter adapter(&bus, opts);
 
+  ExpectPresenceCheck(&bus);
   ExpectConfigWrite(&bus, kCfgBiasOn);
   ExpectConfigWrite(&bus, kCfgBiasOn1Shot);
   // Same technique as above (see its comment), positioned at the RTD
-  // MSB/LSB read (the third Transfer() of this sequence, a 3-byte
+  // MSB/LSB read (the fifth Transfer() of this sequence, a 3-byte
   // exchange).
   bus.Expect({0xEE, 0xEE, 0xEE}, {0xEE, 0xEE, 0xEE});
   ExpectConfigWrite(&bus, kCfgBiasOff);  // best-effort recovery write
@@ -326,19 +486,28 @@ void TestTransferFailureDuringBiasOnWriteAttemptsNoExtraTransfer() {
   const auto opts = TestOptions();
   Max31865Adapter adapter(&bus, opts);
 
-  bus.FailNextTransfers(1);  // the very first write (VBIAS on) fails
+  // The presence check now runs first, so FailNextTransfers() can no
+  // longer reach the VBIAS-on write (it is the third Transfer()). Same
+  // technique as the two tests above: let the presence check pass on a
+  // faithful script, then park a deliberately-wrong exchange exactly
+  // where the VBIAS-on write lands so Transfer() returns false there.
+  ExpectPresenceCheck(&bus);
+  bus.Expect({0xEE, 0xEE}, {0xEE, 0xEE});
   // Deliberately nothing else scripted: the failed write never reached
   // the chip, so there is no bias state to recover from. If the adapter
   // wrongly attempted a bias-off write here anyway, remaining_expectations
-  // would still read 0 (nothing was queued to consume), which is why this
-  // is checked together with the sibling tests above that DO expect a
-  // recovery write to land -- together they isolate "recovers exactly
-  // when it should, and only then."
+  // would still read 0 (nothing was queued to consume) -- so this is
+  // checked via the transfer count too, which pins "three transfers, no
+  // fourth", and alongside the sibling tests above that DO expect a
+  // recovery write to land. Together they isolate "recovers exactly when
+  // it should, and only then."
   Max31865Adapter::Reading reading;
   std::string error;
   assert(!adapter.ReadOneShot(&reading, &error));
-  assert(bus.mismatch_count() == 0);
+  assert(error == "BIAS_ON_WRITE_FAILED");
+  assert(bus.mismatch_count() == 1);
   assert(bus.remaining_expectations() == 0);
+  assert(bus.settings_applications() == 3);  // no recovery write attempted
 }
 
 // ---------------------------------------------------------------------
@@ -349,17 +518,27 @@ void TestTransferFailureDuringBiasOnWriteAttemptsNoExtraTransfer() {
 // with this opener's own mode re-applied inside it.
 //
 // Hand-computed expectations, pinned before the assertions:
-//   * a healthy ReadOneShot() is exactly FOUR Transfer() calls:
-//     WriteConfig(bias on), WriteConfig(bias on|1shot), ReadRtdCode (one
-//     3-byte auto-increment read), WriteConfig(bias off). No fault read,
-//     no FAULTCLR, because msb/lsb 0x40/0x00 -> code 8192, fault bit 0.
+//   * a healthy ReadOneShot() is exactly SIX Transfer() calls:
+//     WriteConfig(probe) and ReadRegister(config) for the presence check,
+//     then WriteConfig(bias on), WriteConfig(bias on|1shot), ReadRtdCode
+//     (one 3-byte auto-increment read), WriteConfig(bias off). No fault
+//     read, no FAULTCLR, because msb/lsb 0x40/0x00 -> code 8192, fault
+//     bit 0.
 //   * so across the SECOND one-shot (bus already open, no Open() hold):
-//     lock acquisitions +4, settings applications +4.
+//     lock acquisitions +6, settings applications +6.
 //   * this click sits on /dev/spidev0.1; the motors on /dev/spidev0.0 must
 //     read the SAME counter — one controller, one lock.
+//
+// The presence check adds two holds, NOT a longer one: it is two ordinary
+// register conversations with no sleep between them, so it obeys the same
+// rule as the rest of the sequence (rule 3 in hal/spi_bus_lock.hpp -- the
+// lock is never held across the settle/conversion waits, which is what
+// keeps the motors' access to the shared SPI0 bus). A count of 6 is the
+// evidence: one hold per conversation, none spanning two.
 // ---------------------------------------------------------------------
 
 void ScriptHealthyOneShot(FakeSpiBus* bus) {
+  ExpectPresenceCheck(bus);
   ExpectConfigWrite(bus, kCfgBiasOn);
   ExpectConfigWrite(bus, kCfgBiasOn1Shot);
   ExpectRtdRead(bus, /*msb=*/0x40, /*lsb=*/0x00);
@@ -385,11 +564,11 @@ void TestEachTransferIsOneControllerLockHoldWithModeReapplied() {
   assert(adapter.ReadOneShot(&reading, &error));
   assert(reading.valid);
 
-  assert(SpiBusLockAcquireCount(opts.spi_device) == locks_before + 4);
-  assert(bus.settings_applications() == applies_before + 4);
+  assert(SpiBusLockAcquireCount(opts.spi_device) == locks_before + 6);
+  assert(bus.settings_applications() == applies_before + 6);
 
   // Controller-keyed, not device-keyed: the motors' node sees these holds.
-  assert(SpiBusLockAcquireCount("/dev/spidev0.0") == locks_before + 4);
+  assert(SpiBusLockAcquireCount("/dev/spidev0.0") == locks_before + 6);
 
   // Re-applied settings are the click's own (mode 1, native CE), not a
   // motor's (mode 3 | SPI_NO_CS).
@@ -412,6 +591,11 @@ int main() {
   TestJustBelowFullScaleThresholdWithoutFaultBitIsValid();
   TestProbeSucceedsOnMatchingReadback();
   TestProbeReadbackMismatchReturnsFalse();
+  TestAbsentClickFloatingLowIsDetected();
+  TestAbsentClickFloatingHighIsDetected();
+  TestProbeOnAbsentClickReportsNotDetected();
+  TestPresentClickWithSaturatedSpecimenStaysHealthy();
+  TestPresenceTransportFailureReportsIoErrorNotAbsence();
   TestTransferFailureDuringOneShotWriteAttemptsBiasOff();
   TestTransferFailureDuringRtdReadAttemptsBiasOff();
   TestTransferFailureDuringBiasOnWriteAttemptsNoExtraTransfer();

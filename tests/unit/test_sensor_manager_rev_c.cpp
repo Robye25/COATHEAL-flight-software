@@ -497,7 +497,22 @@ OnboardConfig MakeMax31865TestConfig() {
   return config;
 }
 
+// The exact error string an absent / non-answering click reports, asserted
+// on the CHECK wire below. Distinct from every transport error on purpose.
+constexpr char kClickNotDetected[] = "CLICK_NOT_DETECTED";
+
+// Every ReadOneShot() now opens with a presence check -- a benign config
+// write (VBIAS off, 50 Hz) and a readback of the SAME value, modelling the
+// config register the way a real MAX31865 behaves: it latches what was
+// written and hands it back. A click that is not on the bus cannot do
+// that, which is the whole point (see the absent-click tests below).
+void ScriptPresenceCheck(FakeSpiBus* bus) {
+  bus->Expect({0x80, 0x01}, {0, 0});        // benign config write
+  bus->Expect({0x00, 0}, {0, 0x01});        // ...read straight back
+}
+
 void ScriptHealthyOneShot(FakeSpiBus* bus, std::uint8_t msb, std::uint8_t lsb) {
+  ScriptPresenceCheck(bus);
   bus->Expect({0x80, 0x81}, {0, 0});        // VBIAS on
   bus->Expect({0x80, 0xA1}, {0, 0});        // 1SHOT
   bus->Expect({0x01, 0, 0}, {0, msb, lsb}); // RTD MSB/LSB, no fault
@@ -506,6 +521,7 @@ void ScriptHealthyOneShot(FakeSpiBus* bus, std::uint8_t msb, std::uint8_t lsb) {
 
 void ScriptSaturatedOneShot(FakeSpiBus* bus, std::uint8_t msb, std::uint8_t lsb,
                             std::uint8_t fault_byte) {
+  ScriptPresenceCheck(bus);
   bus->Expect({0x80, 0x81}, {0, 0});             // VBIAS on
   bus->Expect({0x80, 0xA1}, {0, 0});             // 1SHOT
   bus->Expect({0x01, 0, 0}, {0, msb, lsb});      // RTD MSB/LSB, fault bit set
@@ -664,6 +680,12 @@ void TestMax31865SaturatedReadingKeepsClicksBusOkWhileIndexReadsZero() {
   // THE finding-class assertion, both directions in one test: a saturated
   // specimen reading is a VALID measurement (bus healthy, channel
   // out-of-range) so resistance_ok() must stay true here...
+  //
+  // This is also the anti-regression guard for the absent-click fix below:
+  // click 1 answers the presence check and is genuinely on the bus, so
+  // "not answering" and "answering with an out-of-range specimen" must
+  // stay two different verdicts. Any attempt to close the absent-click
+  // hole by keying health off Reading.valid fails right here.
   assert(resistance_ok);
   // ...while the saturated channel's own index carries the wire "not valid"
   // 0.0 convention -- never the diagnostic resistance_ohm value the fault
@@ -671,6 +693,92 @@ void TestMax31865SaturatedReadingKeepsClicksBusOkWhileIndexReadsZero() {
   assert(snap.sample_resistance_ohm[4] == 0.0);
   assert(std::fabs(snap.sample_resistance_ohm[0] - kClick0ResistanceOhm) <
         0.001);
+}
+
+// ---------------------------------------------------------------------------
+// THE REGRESSION TEST FOR THE PI BRING-UP FINDING.
+//
+// Observed on real hardware with NO MAX31865 clicks attached: the onboard
+// put RESISTANCE_OK on the wire and max31865_1=OK / max31865_2=OK in CHECK
+// while r0..r7 all serialised as "-". A silent loss of the science
+// instrument -- the one failure that looks exactly like success.
+//
+// The cause is that SPI cannot detect absence at the transport layer.
+// Nothing acknowledges and nothing NAKs: the master clocks bits and samples
+// an idle MISO line, so every transfer against an empty socket SUCCEEDS,
+// the RTD register reads back 0x0000, the fault bit is clear, and
+// ReadOneShot() reported a healthy measurement. clicks_bus_ok_ -- and
+// therefore resistance_ok() -- is keyed off exactly that return value.
+// (Contrast the neighbours, which self-detect and behaved correctly on the
+// same bring-up: the Sequent RTD card is I2C and never ACKed
+// (CARD_NOT_DETECTED); the TMC5160 has a VERSION identity byte.)
+//
+// FakeSpiBus::SetFloatingLevel() models absence -- successful transfers
+// clocking back the idle level -- which no scripted expectation can
+// express. Both idle levels are covered because both occur in the field.
+//
+// Mutation target: remove the presence check from Max31865Adapter (or make
+// the absent case return true). Both halves below flip: resistance_ok()
+// goes true with every channel blank, and CHECK reports max31865_1=OK.
+// ---------------------------------------------------------------------------
+
+void AssertAbsentClickFailsResistanceAndCheck(std::uint8_t idle_level) {
+  OnboardConfig config = MakeMax31865TestConfig();
+  config.sensors.max31865_poll_ms = 5;
+
+  FakeSpiBus click1_bus;  // click 0: NOT FITTED -- MISO idles.
+  FakeSpiBus click2_bus;  // click 1: fitted and perfectly healthy.
+  click1_bus.SetFloatingLevel(idle_level);
+
+  SpiAdapter spi;
+  I2cAdapter i2c;
+  RtcAdapter rtc;
+  SensorManager sm(config, &spi, &i2c, &rtc, /*ina=*/nullptr,
+                   /*rtd_bus_override=*/nullptr, &click1_bus, &click2_bus);
+
+  // --- Half 1: the CHECK surface, driven synchronously (no worker
+  // thread), so click2's finite script is consumed exactly once here.
+  ScriptHealthyOneShot(&click2_bus, 0x40, 0x00);
+  std::string details;
+  assert(!sm.ActiveCheck("MAX31865", &details));
+  assert(details.find("max31865_1=FAIL") != std::string::npos);
+  assert(details.find(std::string("max31865_1_error=") + kClickNotDetected) !=
+         std::string::npos);
+  // The fitted click is unaffected: absence is diagnosed per click, and a
+  // healthy neighbour is not dragged down with it.
+  assert(details.find("max31865_2=OK") != std::string::npos);
+
+  // --- Half 2: the wire health flag. The worker polls click1 forever
+  // (absence needs no script), so resistance_ok() must never once read
+  // true across the whole window.
+  sm.Start();
+  const std::vector<double> heater_duty(6, 0.0);
+  bool ever_ok = false;
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(750);
+  while (std::chrono::steady_clock::now() < deadline) {
+    sm.ReadSnapshot(MissionPhase::kAscent, heater_duty, 0.1);
+    if (sm.resistance_ok()) {
+      ever_ok = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  sm.Stop();
+  // RESISTANCE_FAIL, not RESISTANCE_OK: a click that is not on the bus is
+  // not a healthy resistance channel, no matter what the transport says.
+  assert(!ever_ok);
+}
+
+void TestMax31865AbsentClickFloatingLowFailsResistanceOk() {
+  // Floating / pulled-down MISO reads 0x00 -- the level the flight stack
+  // actually reported.
+  AssertAbsentClickFailsResistanceAndCheck(0x00);
+}
+
+void TestMax31865AbsentClickFloatingHighFailsResistanceOk() {
+  // Some boards idle the line high; 0xFF must be caught just the same.
+  AssertAbsentClickFailsResistanceAndCheck(0xFF);
 }
 
 // ---------------------------------------------------------------------------
@@ -748,6 +856,8 @@ int main() {
   TestMax31865HealthyClicksPopulateOnlyMonitoredIndices();
   TestMax31865OneClickBusFailureFailsResistanceOk();
   TestMax31865SaturatedReadingKeepsClicksBusOkWhileIndexReadsZero();
+  TestMax31865AbsentClickFloatingLowFailsResistanceOk();
+  TestMax31865AbsentClickFloatingHighFailsResistanceOk();
   TestMax31865ActiveCheckAndComponentSummaryReflectHealthTransitions();
   return 0;
 }
