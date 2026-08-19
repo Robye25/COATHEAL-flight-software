@@ -537,6 +537,30 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
     }
     return false;
   }
+
+  // Owner hard rule (schematic v3 power budget): never more than 3 heaters
+  // energised, never more than 15 W of thermal load. HeaterScheduler enforces
+  // these at runtime, but until now nothing stopped an INI from RAISING the
+  // ceiling it enforces -- a one-character edit could have put six heaters on
+  // a rail sized for three. Rejected at load instead.
+  if (config->power.max_active_heaters == 0U ||
+      config->power.max_active_heaters > 3U) {
+    if (error != nullptr) {
+      *error =
+          "power.max_active_heaters must be 1..3 (owner power rule: never "
+          "more than 3 heaters)";
+    }
+    return false;
+  }
+
+  if (!(config->power.max_thermal_w > 0.0) ||
+      config->power.max_thermal_w > 15.0) {
+    if (error != nullptr) {
+      *error =
+          "power.max_thermal_w must be > 0 and <= 15.0 (owner power rule)";
+    }
+    return false;
+  }
   if (!config->manual.manual_first) {
     if (error != nullptr) {
       *error = "manual.manual_first must be true in Rev C";

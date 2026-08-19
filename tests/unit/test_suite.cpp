@@ -721,6 +721,58 @@ void TestSequentRtdConfigRejectsBadValues() {
   }
 }
 
+// Owner hard rule: <= 3 active heaters, <= 15.0 W thermal. The rule was
+// enforced only by HeaterScheduler at runtime; nothing stopped an INI from
+// raising the ceiling the scheduler enforces. Each case is isolated -- the
+// baseline WriteTempConfig body is otherwise valid, so exactly one mechanism
+// can reject each of these.
+void TestPowerCapRejectsValuesAboveTheOwnerRule() {
+  struct Case { const char* body; const char* fragment; };
+  const Case cases[] = {
+    // Above the ceiling.
+    {"power.max_active_heaters=4\n", "owner power rule: never more than 3"},
+    {"power.max_active_heaters=6\n", "owner power rule: never more than 3"},
+    // Zero-sanity, same mechanism, opposite end.
+    {"power.max_active_heaters=0\n", "must be 1..3"},
+    // Above the thermal ceiling. The inclusive edge (exactly 15.0 loads) is
+    // pinned by TestPowerCapAcceptsTheOwnerValues below.
+    {"power.max_thermal_w=15.5\n", "must be > 0 and <= 15.0"},
+    {"power.max_thermal_w=20.0\n", "must be > 0 and <= 15.0"},
+    {"power.max_thermal_w=0\n", "must be > 0 and <= 15.0"},
+    {"power.max_thermal_w=-1.0\n", "must be > 0 and <= 15.0"},
+  };
+  for (const Case& c : cases) {
+    const std::string path = WriteTempConfig(c.body);
+    coatheal::OnboardConfig cfg;
+    std::string error;
+    assert(!coatheal::LoadConfigFromIni(path, &cfg, &error));
+    assert(error.find(c.fragment) != std::string::npos);
+
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+  }
+}
+
+// Both directions: the owner's own values must still LOAD. Without this, a
+// validator that rejected everything would pass the negative cases above.
+void TestPowerCapAcceptsTheOwnerValues() {
+  struct Case { const char* body; };
+  const Case cases[] = {
+    {"power.max_active_heaters=3\npower.max_thermal_w=15.0\n"},
+    {"power.max_active_heaters=1\npower.max_thermal_w=0.1\n"},
+  };
+  for (const Case& c : cases) {
+    const std::string path = WriteTempConfig(c.body);
+    coatheal::OnboardConfig cfg;
+    std::string error;
+    assert(coatheal::LoadConfigFromIni(path, &cfg, &error));
+    assert(error.empty());
+
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+  }
+}
+
 void TestMax31865ConfigDefaultsAndParsing() {
   coatheal::OnboardConfig defaults;
   assert(std::fabs(defaults.sensors.max31865_reference_ohm - 470.0) < 1e-9);
@@ -918,6 +970,8 @@ int main() {
   TestConfigAcceptsFlatCurrentBoundary();
   TestSequentRtdConfigDefaultsAndParsing();
   TestSequentRtdConfigRejectsBadValues();
+  TestPowerCapRejectsValuesAboveTheOwnerRule();
+  TestPowerCapAcceptsTheOwnerValues();
   TestMax31865ConfigDefaultsAndParsing();
   TestMax31865ConfigRejectsBadValues();
   TestLegacySensorKeysAreRejected();
