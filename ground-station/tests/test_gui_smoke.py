@@ -250,6 +250,18 @@ class GuiSmoke(unittest.TestCase):
             blocker.close()
             btn.click()
 
+            # Synchronous check, before any event pump: the click itself
+            # must not claim "running". The honest path can only flip the
+            # button via the receiver's queued "listening" signal, which
+            # cannot have been delivered yet -- so an immediate flip here
+            # is exactly the optimistic lie the single-writer rule bans.
+            self.assertTrue(
+                btn.isEnabled(),
+                "the click alone must not claim 'running' -- only the "
+                "receiver's own listening/connected signal may flip the "
+                "button (single-writer rule)",
+            )
+
             bound = _pump_until(self._app, lambda: not btn.isEnabled())
             self.assertTrue(bound, "retry receiver never reported listening")
             self.assertIn("running", btn.text().lower())
