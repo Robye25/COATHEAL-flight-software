@@ -173,7 +173,7 @@ load as unknown motor keys, not merely deprecated.**
 | `motor*.enable_line` | `20` | `21` | EN GPIO. |
 | `motor*.run_current_a_rms` | `0.8` | `0.8` | Conservative commissioning current; increase only after thermal validation. Validated against both a flat `(0, 3.1]` A_rms ceiling and the sense resistor's physical current limit (below). |
 | `motor*.hold_current_frac` | `0.30` | `0.30` | Hold current fraction, relative to the chosen IRUN. |
-| `motor*.stealth_chop` | `true` | `true` | StealthChop request. Parsed and validated, but the TMC5160 backend currently enables GCONF's StealthChop bit unconditionally — this key is not yet wired to driver behaviour. |
+| `motor*.stealth_chop` | `true` | `true` | StealthChop (GCONF `en_pwm_mode`, bit 2). `true` writes `GCONF=0x00000004`, `false` writes `GCONF=0x00000000`; the driver's GCONF readback verify confirms it during `Reinitialize()`. Quiet, low-vibration chopper at low speed; set `false` for spreadCycle's torque headroom. |
 | `motor*.spi_speed_hz` | `1000000` | `1000000` | SPI speed. |
 | `motor*.sense_resistor_ohm` | `0.075` | `0.075` | TMC5160 current-sense resistor value (Ω); feeds the GLOBALSCALER/IHOLD_IRUN current calculation. `0.075` is an assumed typical value for this board family — **read the actual value off the board at the bench** (see [TMC5160 Commissioning §6](tmc5160-commissioning.md#6-current-model-globalscaler--irun-two-regimes)). Validated `> 0.0 && < 1.0`. |
 | `motor*.retry_ms` | `2000` | `2000` | Idle driver re-probe interval after a fault. |

@@ -99,7 +99,11 @@ void ScriptReinitSequence(FakeSpiBus* bus, const Tmc5160Config& cfg,
       &globalscaler, &irun, &ihold);
   assert(current_ok);
 
-  const std::uint32_t gconf = 0x00000004U;
+  // GCONF is exactly the en_pwm_mode bit (bit 2) or nothing: every other
+  // GCONF bit stays at its reset value of 0. Derived from cfg here rather
+  // than hardcoded, so the stealth_chop fixtures below script what the
+  // driver must actually write.
+  const std::uint32_t gconf = cfg.stealth_chop ? 0x00000004U : 0x00000000U;
   const std::uint32_t chopconf_run = Chopconf(cfg.microstep, /*toff=*/3);
   const std::uint32_t gs_reg = globalscaler >= 256U ? 0U : globalscaler;
   const std::uint32_t ihold_irun =
@@ -573,6 +577,49 @@ void TestEachDatagramIsOneControllerLockHoldWithModeReapplied() {
   assert(bus.remaining_expectations() == 0);
 }
 
+// ---------------------------------------------------------------------
+// I3: motorN.stealth_chop reaches the wire.
+//
+// The key was parsed and validated but the driver wrote GCONF's en_pwm_mode
+// bit ON unconditionally, so setting it false did nothing. Both fixtures are
+// scripted through the strict FakeSpiBus, so the assertion is on the exact
+// bytes GCONF is written with -- and the driver's existing GCONF readback
+// verify means a wrong value would also fail bring-up.
+//
+// Hand-computed, pinned before the assertions:
+//   stealth_chop = true  -> GCONF = 0x00000004 (bit 2 set)
+//   stealth_chop = false -> GCONF = 0x00000000 (all reset values)
+// On the wire that is `0x80 0x00 0x00 0x00 0x04` vs
+// `0x80 0x00 0x00 0x00 0x00` (address 0x00 | write bit).
+// ---------------------------------------------------------------------
+
+void TestStealthChopSelectsGconfEnPwmModeBit() {
+  {
+    FakeSpiBus bus;
+    Tmc5160Config cfg;
+    cfg.stealth_chop = true;
+    // MakeHealthyDriver scripts GCONF = 0x00000004 for this fixture and
+    // FakeSpiBus rejects any other tx bytes, so a driver writing the wrong
+    // value cannot reach healthy().
+    auto driver = MakeHealthyDriver(&bus, cfg);
+    assert(driver->healthy());
+    assert(bus.mismatch_count() == 0);
+    assert(bus.remaining_expectations() == 0);
+  }
+  {
+    FakeSpiBus bus;
+    Tmc5160Config cfg;
+    cfg.stealth_chop = false;
+    // Same sequence, GCONF = 0x00000000. Before the wire-through this
+    // fixture could not come up healthy: the driver wrote 0x04 into a script
+    // expecting 0x00, so the Expect() mismatched and Reinitialize failed.
+    auto driver = MakeHealthyDriver(&bus, cfg);
+    assert(driver->healthy());
+    assert(bus.mismatch_count() == 0);
+    assert(bus.remaining_expectations() == 0);
+  }
+}
+
 void TestSetMicrostepRejectsInvalidDivisor() {
   FakeSpiBus bus;
   Tmc5160Config cfg;
@@ -621,6 +668,7 @@ int main() {
   TestEnableFalseFreezesInOrder();
   TestTransferFailureMarksUnhealthyAndActiveCheckReprobes();
   TestEachDatagramIsOneControllerLockHoldWithModeReapplied();
+  TestStealthChopSelectsGconfEnPwmModeBit();
   TestSetMicrostepRejectsInvalidDivisor();
   return 0;
 }

@@ -224,6 +224,7 @@ bool SystemController::Initialize(std::string* error) {
       tcfg.run_current_a_rms = motor.run_current_a_rms;
       tcfg.hold_current_frac = motor.hold_current_frac;
       tcfg.sense_resistor_ohm = motor.sense_resistor_ohm;
+      tcfg.stealth_chop = motor.stealth_chop;
       // Sane startup default only -- StepperChannel::Tick calls
       // SetMicrostep(cfg_.microstep) on this driver right after
       // construction (stepper_channel.cpp), and that cfg_.microstep is

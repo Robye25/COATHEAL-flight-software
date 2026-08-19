@@ -202,11 +202,15 @@ pull.accel_steps_per_s2=200.0
 `motor*.driver` accepts only `tmc5160` and `simulated`. `tmc2240` is rejected
 at load with an error naming it retired.
 
-`motor*.stealth_chop` is still parsed and validated (a plain boolean), but the
-TMC5160 backend currently writes GCONF's `en_pwm_mode` (StealthChop) bit ON
-unconditionally, regardless of this key's value — it is not yet wired through
-`Tmc5160Config`. Setting it to `false` has no effect on driver behaviour today;
-treat it as reserved rather than load-bearing until that wiring exists.
+`motor*.stealth_chop` selects GCONF's `en_pwm_mode` (StealthChop) bit:
+`true` (the default) writes `GCONF = 0x00000004`, `false` writes
+`GCONF = 0x00000000`. Every other GCONF bit stays at its reset value, so GCONF
+is exactly this bit or nothing. The value is carried through
+`Tmc5160Config::stealth_chop` and confirmed by the driver's existing GCONF
+readback verify during `Reinitialize()`, so a chip that does not accept it
+fails bring-up loudly rather than running in the wrong chopper mode. Set it to
+`false` when you need spreadCycle's torque headroom instead of StealthChop's
+quiet low-speed operation.
 
 `motor*.current_range_a_peak` and `motor*.pulse_high_us` no longer exist —
 the TMC5160 does not use TMC2240-style fixed peak-current ranges (section 6
