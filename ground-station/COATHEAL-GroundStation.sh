@@ -23,21 +23,42 @@ fail() { printf '\n\033[1;31m  %s\033[0m\n' "$*"; exit 1; }
 # ---- 1. Python + venv support ------------------------------------------
 command -v python3 >/dev/null 2>&1 || fail "python3 not found. Install it:  sudo apt install python3 python3-venv python3-pip"
 
-if ! python3 -m venv --help >/dev/null 2>&1; then
-  say "The python3-venv package is missing"
-  read -r -p "  Install it now with apt? [Y/n] " ans
+# Debian-family systems ship the venv module but strip ensurepip out of it
+# until python3-venv is installed; "python3 -m venv" then either fails or
+# leaves a half-built .venv with no pip inside. So the gate is functional:
+# the venv only counts as created once its own pip answers.
+ensure_venv_tooling() {
+  say "The python3-venv/pip packages are missing or incomplete"
+  read -r -p "  Install them now with apt? [Y/n] " ans
   case "${ans:-Y}" in
-    [Yy]*) sudo apt-get install -y python3-venv python3-pip || fail "apt install failed" ;;
-    *) fail "Cannot continue without python3-venv." ;;
+    [Yy]*) sudo apt-get update -y && sudo apt-get install -y python3-venv python3-pip || fail "apt install failed" ;;
+    *) fail "Cannot continue without python3-venv. Install it and re-run:  sudo apt install python3-venv python3-pip" ;;
   esac
-fi
+}
 
 # ---- 2. Create the local environment on first run ----------------------
-if [[ ! -x "$VENV/bin/python" ]]; then
-  say "First run: creating the Python environment"
-  python3 -m venv "$VENV" || fail "could not create the Python environment"
-fi
 VPY="$VENV/bin/python"
+venv_ok() { [[ -x "$VPY" ]] && "$VPY" -m pip --version >/dev/null 2>&1; }
+
+if ! venv_ok; then
+  # A .venv without a working pip is a broken half-creation from an earlier
+  # attempt (the classic "No module named pip"). Try to repair in place,
+  # then rebuild from scratch, installing the apt packages if needed.
+  if [[ -x "$VPY" ]]; then
+    say "Repairing the Python environment (pip is missing inside it)"
+    "$VPY" -m ensurepip --upgrade >/dev/null 2>&1 || true
+  fi
+  if ! venv_ok; then
+    [[ -d "$VENV" ]] && rm -rf "$VENV"
+    say "Creating the Python environment"
+    if ! python3 -m venv "$VENV" || ! venv_ok; then
+      rm -rf "$VENV"
+      ensure_venv_tooling
+      say "Creating the Python environment"
+      python3 -m venv "$VENV" && venv_ok || fail "could not create a working Python environment"
+    fi
+  fi
+fi
 
 # ---- 3. Install dependencies only when requirements changed ------------
 REQ_HASH="$(sha256sum "$REQ" | awk '{print $1}')"
