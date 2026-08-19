@@ -249,11 +249,13 @@ void SensorManager::NotePullCompleted(int motor_id) {
   if (config_.sensors.resistance_source != "simulated") return;
   const std::size_t start = motor_id == 0 ? 0U : 4U;
   if (motor_id != 0 && motor_id != 1) return;
-  // The early return above and the owns_resistance guard in SequentRtdLoop
-  // together mean only one of the two ever writes this vector, so the two
-  // cannot actually race. Take cache_mu_ anyway: it keeps the invariant that
-  // every access to sample_resistance_ohm_ is under cache_mu_, which is what
-  // makes the ownership split checkable locally instead of by argument.
+  // The early return above and the owns_resistance guards in SequentRtdLoop
+  // ("sequent_rtd") and Max31865Loop ("max31865_click") together mean only
+  // one of the three ever writes this vector for a given resistance_source,
+  // so none of them can actually race each other. Take cache_mu_ anyway: it
+  // keeps the invariant that every access to sample_resistance_ohm_ is under
+  // cache_mu_, which is what makes the ownership split checkable locally
+  // instead of by argument.
   std::lock_guard<std::mutex> lock(cache_mu_);
   const std::size_t end = motor_id == 0 ? 4U : sample_resistance_ohm_.size();
   for (std::size_t i = start; i < end && i < sample_resistance_ohm_.size(); ++i) {
@@ -556,16 +558,21 @@ void SensorManager::SequentRtdLoop() {
       std::lock_guard<std::mutex> lock(cache_mu_);
       std::vector<bool> channel_valid(sample_cache_.size(), false);
       std::size_t valid_count = 0;
-      // sample_resistance_ohm_ has two possible owners and they mean
-      // different physical quantities on the same telemetry field. What the
-      // card reports is the PT100 *element* resistance; what
-      // NotePullCompleted decays is a model of the sample *material*
-      // resistance, and that model owns the vector whenever
-      // sensor.resistance_source is "simulated". Writing it from here in that
-      // mode would clobber the decay every poll and put element ohms on the
-      // RESISTANCE= wire field, where ground software expects material ohms.
+      // sample_resistance_ohm_ has THREE possible writers, each meaning a
+      // different physical quantity on the same telemetry field, and each
+      // owning the vector only under its own resistance_source: (1)
+      // NotePullCompleted decays a model of the sample *material*
+      // resistance whenever resistance_source == "simulated"; (2) this loop
+      // writes the PT100 *element* resistance the Sequent card reports,
+      // whenever resistance_source == "sequent_rtd"; (3) Max31865Loop
+      // writes specimen resistance from the two clicks whenever
+      // resistance_source == "max31865_click". This must be narrowed to
+      // exactly "sequent_rtd" (not merely "!= simulated"): on real
+      // hardware with the v3-shipped default, a wider guard here would
+      // race Max31865Loop for the same indices every poll and put element
+      // ohms on indices the wire is supposed to show as unmonitored ("-").
       const bool owns_resistance =
-          config_.sensors.resistance_source != "simulated";
+          config_.sensors.resistance_source == "sequent_rtd";
 
       if (ok) {
         rtd_last_reading_ = reading;
