@@ -5,8 +5,9 @@ Sections:
   * ModePanel      — big state tile + ARM/DISARM/SAFE/RADIO rows.
   * HeaterPanel    — 5x2 grid of HeaterCell with global presets.
   * StepperPanel   — motor-selectable jog, zeroing, and sequence controls.
-  * CommandPanel   — diagnostics (PING/STATUS/TICK_HZ) + ARM_DEBUG + arbitrary
-                     command entry.
+  * CommandPanel   — diagnostics (PING/STATUS/TICK_HZ) + arbitrary command
+                     entry (bench-only commands like ARM_DEBUG go through
+                     the free-command box).
   * EmergencyBar   — always-visible red bar of panic actions.
 
 Every button uses CommandDispatcher.send() with a tag so toasts anchor
@@ -16,19 +17,18 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Optional
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QComboBox, QDoubleSpinBox, QFormLayout, QFrame, QGridLayout, QGroupBox,
-    QHBoxLayout, QLabel, QLineEdit, QProgressBar, QPushButton, QScrollArea,
+    QHBoxLayout, QLabel, QLineEdit, QProgressBar, QPushButton,
     QSizePolicy, QSlider, QSpinBox, QTableWidget, QTableWidgetItem,
     QVBoxLayout, QWidget,
 )
 
 from ..protocol import (
-    CommandResponse, StepperSnapshot, TelemetryPacket,
+    CommandResponse, TelemetryPacket,
     validate_duty, validate_heater_index, validate_microstep,
     validate_pid_gains, validate_temperature_target,
     validate_revolutions, validate_speed_hz, validate_stepper_move,
@@ -94,8 +94,14 @@ class ConnectionPanel(QGroupBox):
     def _emit_start(self) -> None:
         self.start_requested.emit(self._bind.text().strip(), self._tel_port.value(),
                                   self._cmd_port.value(), self._cmd_host.text().strip())
-        self._start_btn.setEnabled(False)
-        self._start_btn.setText("■ Receiver running")
+        self.set_receiver_running(True)
+
+    def set_receiver_running(self, running: bool) -> None:
+        """Reflect receiver start/stop in the button — used both by the
+        manual click path and by MainWindow's telemetry auto-start so the
+        button never lies about whether a receiver is actually up."""
+        self._start_btn.setEnabled(not running)
+        self._start_btn.setText("■ Receiver running" if running else "▶ Start Telemetry")
 
     def set_connected(self, connected: bool, addr: str) -> None:
         if connected:
@@ -338,8 +344,8 @@ class HeaterPanel(QGroupBox):
         )
         outer.addWidget(self._banner)
 
-        # Final BOM: 6 heater cells (H0..H5). Box heater is absent.
-        # from the flight hardware. Laid out 3x2 (two columns).
+        # Final BOM: 6 heater cells (H0..H5); no box heater on the flight
+        # hardware. Laid out 3x2 (two columns).
         grid = QGridLayout(); grid.setSpacing(4)
         self._cells: list[HeaterCell] = []
         num_cells = len(HEATER_LABELS)
@@ -431,17 +437,6 @@ class HeaterPanel(QGroupBox):
         profile_row.addWidget(save_profile)
         profile_row.addWidget(apply_profile)
         outer.addLayout(profile_row)
-
-        self.set_armed(True)
-
-    def set_armed(self, _armed: bool) -> None:
-        self._banner.setText("Manual thermal controls")
-        self._banner.setStyleSheet(
-            "background: #1a2d3a; color: #8fd3ff; padding: 4px; border-radius: 3px; "
-            "font-weight: bold; font-size: 10pt;"
-        )
-        for c in self._cells:
-            c.set_enabled_controls(True)
 
     def _send(self, cmd: str) -> None:
         self._disp.send(cmd, tag=self)
@@ -780,42 +775,32 @@ class StepperPanel(QGroupBox):
         self._disp.send(f"STEPPER_STOP {self._motor_id()}", tag=self._stop)
 
     def update_from_packet(self, pkt: TelemetryPacket) -> None:
-        # Show a compact one-liner per motor if dual; otherwise fall
-        # back to the legacy single-motor rendering via `pkt.stepper`.
-        if pkt.steppers:
-            lines = []
-            any_moving = False
-            any_enabled = False
-            for m in pkt.steppers:
-                en  = "EN"  if m["enabled"] else "DIS"
-                mv  = "MOVING" if m["moving"] else ("HOLD" if m["holding"] else "idle")
-                any_moving |= bool(m["moving"])
-                any_enabled |= bool(m["enabled"])
-                hold_suffix = f" {m['hold_s']:.0f}s" if m["holding"] else ""
-                lines.append(
-                    f"M{m['motor_id']}: pos {m['position']} / tgt {m['target']} · "
-                    f"{m['hz']:.0f} Hz · µ{m['microstep']} · {en} · {mv}"
-                    f"{hold_suffix} · src={m['source']}"
-                )
-            self._state.setText("\n".join(lines))
-            color = ("#2ecc71" if (any_enabled and not any_moving)
-                     else ("#f39c12" if any_moving else "#e74c3c"))
-            self._state.setStyleSheet(
-                f"background: #111; color: {color}; padding: 6px; border-radius: 3px; "
-                "font-family: monospace; font-size: 10pt;"
-            )
-            return
-
-        s = pkt.stepper
-        if s is None:
+        # Compact one-liner per motor. `pkt.steppers` is populated whenever
+        # the onboard sends any stepper telemetry at all — indexed dual-motor
+        # segments (STEPPER0=/STEPPER1=) synthesize one entry per motor, and
+        # even the legacy single STEPPER= segment synthesizes a one-entry
+        # list (see protocol.py's `parse_telemetry_csv`). So an empty list
+        # means "no stepper telemetry yet", not "legacy frame".
+        if not pkt.steppers:
             self._state.setText("pos — / tgt — · — Hz · µ— · — · — · src=—")
             return
-        en  = "EN"  if s.enabled else "DIS"
-        mv  = "MOVING" if s.moving else ("HOLD" if s.holding else "idle")
-        text = (f"pos {s.position} / tgt {s.target} · {s.hz:.0f} Hz · µ{s.microstep} · "
-                f"{en} · {mv}{f' {s.hold_s:.0f}s' if s.holding else ''} · src={s.source}")
-        self._state.setText(text)
-        color = "#2ecc71" if s.enabled and not s.moving else "#f39c12" if s.moving else "#e74c3c"
+        lines = []
+        any_moving = False
+        any_enabled = False
+        for m in pkt.steppers:
+            en  = "EN"  if m["enabled"] else "DIS"
+            mv  = "MOVING" if m["moving"] else ("HOLD" if m["holding"] else "idle")
+            any_moving |= bool(m["moving"])
+            any_enabled |= bool(m["enabled"])
+            hold_suffix = f" {m['hold_s']:.0f}s" if m["holding"] else ""
+            lines.append(
+                f"M{m['motor_id']}: pos {m['position']} / tgt {m['target']} · "
+                f"{m['hz']:.0f} Hz · µ{m['microstep']} · {en} · {mv}"
+                f"{hold_suffix} · src={m['source']}"
+            )
+        self._state.setText("\n".join(lines))
+        color = ("#2ecc71" if (any_enabled and not any_moving)
+                 else ("#f39c12" if any_moving else "#e74c3c"))
         self._state.setStyleSheet(
             f"background: #111; color: {color}; padding: 6px; border-radius: 3px; "
             "font-family: monospace; font-size: 10pt;"
@@ -824,8 +809,6 @@ class StepperPanel(QGroupBox):
 
 # ── Command / diagnostics ─────────────────────────────────────────────────────
 class CommandPanel(QGroupBox):
-    debug_armed_changed = pyqtSignal(bool)
-
     def __init__(self, dispatcher: CommandDispatcher, parent=None):
         super().__init__("Diagnostics", parent)
         self._disp = dispatcher
@@ -852,22 +835,14 @@ class CommandPanel(QGroupBox):
         hz_row.addWidget(hz_btn)
         outer.addLayout(hz_row)
 
-        # ARM_DEBUG
-        arm_row = QHBoxLayout()
-        arm_row.addWidget(QLabel("Token:"))
-        self._token = QLineEdit(); self._token.setEchoMode(QLineEdit.EchoMode.Password)
-        self._token.setPlaceholderText("COATHEAL_DEBUG")
-        arm_row.addWidget(self._token)
-        arm_btn = QPushButton("ARM_DEBUG"); _style_button(arm_btn, bg="#c0392b", bold=True)
-        dis_btn = QPushButton("DISARM");    _style_button(dis_btn, bg="#7f8c8d")
-        arm_btn.clicked.connect(self._on_arm_debug)
-        dis_btn.clicked.connect(self._on_disarm_debug)
-        arm_row.addWidget(arm_btn); arm_row.addWidget(dis_btn)
-        outer.addLayout(arm_row)
-
-        # Arbitrary command
+        # Arbitrary command — also how bench-only commands (ARM_DEBUG,
+        # DISARM_DEBUG, HEATER_TEST, ...) reach the onboard; they don't get
+        # dedicated buttons here.
         free_row = QHBoxLayout()
-        self._free = QLineEdit(); self._free.setPlaceholderText("arbitrary command (e.g. SET_ALL_DUTY 0.25)")
+        self._free = QLineEdit()
+        self._free.setPlaceholderText(
+            "arbitrary command (e.g. ARM_DEBUG COATHEAL_DEBUG, HEATER_TEST 0 0.25)"
+        )
         send_btn = QPushButton("Send"); _style_button(send_btn, bg="#2c3e50")
         self._free.returnPressed.connect(lambda: self._fire_free(send_btn))
         send_btn.clicked.connect(lambda: self._fire_free(send_btn))
@@ -883,15 +858,6 @@ class CommandPanel(QGroupBox):
         if not ok:
             Toast.anchor(self, norm, ok=False); return
         self._disp.send(f"SET_TICK_HZ {norm}", tag=self)
-
-    def _on_arm_debug(self) -> None:
-        tok = self._token.text().strip() or "COATHEAL_DEBUG"
-        self._disp.send(f"ARM_DEBUG {tok}", tag=self)
-        self.debug_armed_changed.emit(True)
-
-    def _on_disarm_debug(self) -> None:
-        self._disp.send("DISARM_DEBUG", tag=self)
-        self.debug_armed_changed.emit(False)
 
     def _fire_free(self, tag) -> None:
         cmd = self._free.text().strip()

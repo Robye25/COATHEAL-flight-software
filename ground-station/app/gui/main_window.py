@@ -18,7 +18,6 @@ from . import firewall
 from .dispatch import CommandDispatcher, TelemetryReceiver
 from .discovery import (
     CommandProbe, GsBeacon, OnboardListener, DISCOVERY_PORT_DEFAULT,
-    STATIC_ONBOARD_HOST_DEFAULT,
 )
 from .panels_control import (
     CommandPanel, ConnectionPanel, EmergencyBar, HeaterPanel, ModePanel,
@@ -74,7 +73,6 @@ class MainWindow(QMainWindow):
         self._heater_panel = HeaterPanel(self._dispatcher)
         self._stepper_panel = StepperPanel(self._dispatcher)
         self._command_panel = CommandPanel(self._dispatcher)
-        self._command_panel.debug_armed_changed.connect(self._heater_panel.set_armed)
 
         left_splitter = QSplitter(Qt.Orientation.Vertical)
         left_splitter.setChildrenCollapsible(True)
@@ -171,6 +169,10 @@ class MainWindow(QMainWindow):
         # Connection panel's button remains a user-visible trigger for the
         # case where auto-start failed (e.g. port already in use).
         self._on_start_telemetry(bind, tel_port, cmd_port, cmd_host)
+        # `_on_start_telemetry` above either found a receiver already
+        # running or just started one — either way the button should stop
+        # inviting a redundant click and read what actually happened.
+        self._connection.set_receiver_running(True)
 
         # ── restore geometry ──
         # ── firewall / network-profile auto-configure (Windows only) ──

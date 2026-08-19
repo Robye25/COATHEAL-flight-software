@@ -64,6 +64,86 @@ class GuiSmoke(unittest.TestCase):
         finally:
             win.close()
 
+    def test_preflight_stepper_dot_reflects_motor_enable_state(self) -> None:
+        """The preflight "Motors enabled" dot must be derived from the
+        dual-motor `pkt.steppers` list, not the legacy single-motor
+        `pkt.stepper` field (which modern dual-motor frames never
+        populate and which would leave this dot permanently red)."""
+        from app.gui.main_window import MainWindow
+        from app.protocol import TelemetryPacket
+
+        win = MainWindow(bind="127.0.0.1", tel_port=44001, cmd_port=45001,
+                         cmd_host="127.0.0.1", log_path=Path("logs/smoke_preflight.csv"),
+                         firewall_check=False)
+        try:
+            def motor(motor_id: int, enabled: bool) -> dict:
+                return {
+                    "motor_id": motor_id, "position": 0, "target": 0,
+                    "hz": 400.0, "microstep": 16, "enabled": enabled,
+                    "healthy": True, "moving": False, "holding": False,
+                    "hold_s": 0.0, "pulses": 0, "missed_deadlines": 0,
+                    "source": "test",
+                }
+
+            def packet(steppers) -> TelemetryPacket:
+                return TelemetryPacket(
+                    session_id="sess-preflight", seq=1,
+                    timestamp="2026-04-13T12:00:00Z", rtc_valid=1,
+                    ambient_temp_c=-25.0, ambient_pressure_mbar=180.0,
+                    uv=0.5, sample_temps_c=[-29.0] * 8, heater_duty=[0.1] * 6,
+                    sample_resistance_ohm=[10.0] * 8, phase="FLOAT",
+                    status="LINK_OK", mode="RUN", steppers=steppers,
+                )
+
+            win._on_packet(packet([motor(0, True), motor(1, True)]))
+            self.assertEqual(win._preflight.dot_color("stepper_en"), "#2ecc71",
+                              "both motors enabled should be green")
+
+            win._on_packet(packet([motor(0, True), motor(1, False)]))
+            self.assertEqual(win._preflight.dot_color("stepper_en"), "#f39c12",
+                              "exactly one motor enabled should be amber")
+
+            win._on_packet(packet([motor(0, False), motor(1, False)]))
+            self.assertEqual(win._preflight.dot_color("stepper_en"), "#e74c3c",
+                              "no motors enabled should be red")
+        finally:
+            win.close()
+
+    def test_no_debug_armed_signal(self) -> None:
+        """ARM_DEBUG/DISARM were removed as dedicated CommandPanel controls
+        (owner ruling) — the bench command is still reachable through the
+        free-command box. This documents that the gating machinery
+        (`debug_armed_changed`, `HeaterPanel.set_armed`) is fully gone."""
+        from app.gui.main_window import MainWindow
+
+        win = MainWindow(bind="127.0.0.1", tel_port=44002, cmd_port=45002,
+                         cmd_host="127.0.0.1", log_path=Path("logs/smoke_armdebug.csv"),
+                         firewall_check=False)
+        try:
+            self.assertFalse(hasattr(win._command_panel, "debug_armed_changed"))
+            self.assertFalse(hasattr(win._heater_panel, "set_armed"))
+            self.assertFalse(hasattr(win._command_panel, "_on_arm_debug"))
+            self.assertFalse(hasattr(win._command_panel, "_on_disarm_debug"))
+        finally:
+            win.close()
+
+    def test_connection_panel_shows_running_after_autostart(self) -> None:
+        """MainWindow auto-starts the telemetry receiver at boot; the
+        Connection panel's Start button must reflect that immediately
+        instead of still inviting a click that just logs "already
+        running"."""
+        from app.gui.main_window import MainWindow
+
+        win = MainWindow(bind="127.0.0.1", tel_port=44003, cmd_port=45003,
+                         cmd_host="127.0.0.1", log_path=Path("logs/smoke_autostart.csv"),
+                         firewall_check=False)
+        try:
+            btn = win._connection._start_btn
+            self.assertFalse(btn.isEnabled())
+            self.assertIn("running", btn.text().lower())
+        finally:
+            win.close()
+
     def test_command_dispatcher_uses_static_host_for_blank_endpoint(self) -> None:
         from app.gui.dispatch import CommandDispatcher, DEFAULT_COMMAND_HOST
 

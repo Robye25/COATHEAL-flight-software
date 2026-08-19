@@ -12,8 +12,9 @@ HEATER_COLORS = [
 # Final BOM: 6 sample-bank heaters (H0..H5). No box heater.
 HEATER_LABELS = [f"H{i}" for i in range(6)]
 
-# Compatibility resistance traces, sharing the 6-entry HEATER_COLORS palette.
-# Final-BOM hardware normally renders these as dashed placeholders.
+# Sample-resistance traces (R0..R7); colors 0-5 echo HEATER_COLORS. Sample
+# resistance is a real 2-channel MAX31865 instrument: only the two monitored
+# specimens carry live ohms, the remaining channels legitimately dash.
 RESISTANCE_COLORS = [
     "#e74c3c", "#e67e22", "#f1c40f", "#2ecc71", "#1abc9c",
     "#3498db", "#9b59b6", "#e91e63",
