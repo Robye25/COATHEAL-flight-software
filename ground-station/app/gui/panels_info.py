@@ -17,7 +17,11 @@ from PyQt6.QtWidgets import (
 
 from ..protocol import PullEvent, TelemetryPacket
 from .dispatch import CommandHistoryEntry
-from .panels_health import OK_FAIL_FLAGS
+# Color tokens live in panels_health.py (not theme.py) because
+# panels_health already owns OK_FAIL_FLAGS -- the single source of truth
+# this aggregate is derived from -- so importing both from one module
+# means the flag list and its colors can never drift apart.
+from .panels_health import GRAY, GREEN, OK_FAIL_FLAGS, RED
 from .theme import mode_color, phase_color
 from .widgets import StatusDot
 
@@ -47,7 +51,7 @@ class TopStatusStrip(QWidget):
         health_label = QLabel("HEALTH:")
         health_label.setStyleSheet("font-family: monospace; font-size: 10pt; color: #888;")
         self._health_dot = StatusDot(10)
-        self._health_dot.set_color("#666666")
+        self._health_dot.set_color(GRAY)
         self._health_dot.setToolTip("No health data")
 
         lay.addWidget(self._mode); lay.addWidget(self._phase)
@@ -81,19 +85,25 @@ class TopStatusStrip(QWidget):
 
     @staticmethod
     def _health_summary(pkt: TelemetryPacket) -> tuple[str, str]:
+        # Green requires every one of the 14 OK/FAIL flags to be present
+        # and OK -- a single surviving `<key>_OK` token in an otherwise
+        # truncated/partial STATUS field must NOT paint the master dot
+        # green while the other 13 subsystems are simply unreported.
         tokens = set(pkt.status.split("|")) if pkt.status else set()
         failing: list[str] = []
-        any_ok = False
+        unreported: list[str] = []
         for key, _label in OK_FAIL_FLAGS:
             if f"{key}_FAIL" in tokens:
                 failing.append(key)
-            elif f"{key}_OK" in tokens:
-                any_ok = True
+            elif f"{key}_OK" not in tokens:
+                unreported.append(key)
         if failing:
-            return "#e74c3c", ", ".join(failing) + " failing"
-        if any_ok:
-            return "#2ecc71", "All health flags OK"
-        return "#666666", "No health data"
+            return RED, ", ".join(failing) + " failing"
+        if not unreported:
+            return GREEN, "All health flags OK"
+        if len(unreported) == len(OK_FAIL_FLAGS):
+            return GRAY, "no health flags reported"
+        return GRAY, f"{len(unreported)} flags unreported: " + ", ".join(unreported)
 
     def health_color(self) -> str:
         """Current aggregate health dot color, as ``#rrggbb``. Test-only

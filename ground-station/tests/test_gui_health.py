@@ -135,6 +135,73 @@ class HealthPanelTests(unittest.TestCase):
         finally:
             win.close()
 
+    # ── fix round 1: partial STATUS coverage must not paint green ──
+    def test_partial_status_single_ok_token_is_gray_not_green(self) -> None:
+        """A truncated STATUS field carrying exactly one `<key>_OK` token
+        (13 of 14 flags entirely unreported) must NOT paint the aggregate
+        dot green -- green requires all 14 OK/FAIL flags to be present and
+        OK. The tooltip must name the unreported flags so an operator can
+        tell 'partial telemetry' from 'everything checked out'."""
+        win = self._make_window(44114, 45114, "partialok")
+        try:
+            win._on_packet(_packet(status="SD_OK"))
+            self.assertEqual(win._top.health_color(), GRAY,
+                              "one lone _OK token must not turn the aggregate green")
+            tooltip = win._top.health_tooltip()
+            self.assertIn("13", tooltip, "tooltip must report the unreported count")
+            for key, _label in OK_FAIL_FLAGS:
+                if key == "SD":
+                    continue
+                self.assertIn(key, tooltip,
+                              f"{key} must be named among the unreported flags")
+        finally:
+            win.close()
+
+    # MUTATION: revert `_health_summary` to the old any-OK rule (`if
+    # any_ok: return GREEN, "All health flags OK"`) and confirm
+    # test_partial_status_single_ok_token_is_gray_not_green fails by
+    # naming the wrong color ('#2ecc71' where gray was expected).
+
+    def test_thirteen_ok_one_fail_is_red_naming_only_the_failer(self) -> None:
+        """All 14 flags reported (13 as OK, 1 as FAIL) is the 'fully
+        populated' case, distinct from the partial/unreported case above --
+        it must stay red, naming only the one flag that actually failed."""
+        win = self._make_window(44115, 45115, "thirteenok")
+        try:
+            status = ALL_OK_STATUS.replace("I2C_OK", "I2C_FAIL")
+            win._on_packet(_packet(status=status))
+            self.assertEqual(win._top.health_color(), RED)
+            tooltip = win._top.health_tooltip()
+            self.assertIn("I2C", tooltip)
+            self.assertNotIn("unreported", tooltip,
+                              "a fully-reported packet must never say 'unreported'")
+        finally:
+            win.close()
+
+    def test_all_fourteen_ok_flags_aggregate_is_green(self) -> None:
+        """Positive control for the fix above: full OK coverage must still
+        reach green -- the partial-coverage fix must not have collaterally
+        broken the true-positive path."""
+        win = self._make_window(44116, 45116, "allfourteen")
+        try:
+            win._on_packet(_packet(status=ALL_OK_STATUS))
+            self.assertEqual(win._top.health_color(), GREEN)
+            self.assertEqual(win._top.health_tooltip(), "All health flags OK")
+        finally:
+            win.close()
+
+    def test_fully_empty_status_tooltip_says_no_flags_reported(self) -> None:
+        """Fully-empty STATUS (all 14 flags unreported) is gray like the
+        partial case, but gets its own short tooltip rather than an
+        unwieldy 14-flag list."""
+        win = self._make_window(44117, 45117, "fullyempty")
+        try:
+            win._on_packet(_packet(status=""))
+            self.assertEqual(win._top.health_color(), GRAY)
+            self.assertEqual(win._top.health_tooltip(), "no health flags reported")
+        finally:
+            win.close()
+
     # ── absent flags (legacy packet, no STATUS tokens) -> gray, aggregate gray ──
     def test_legacy_packet_with_no_status_tokens_is_gray_not_red(self) -> None:
         """Legacy replays with an empty/unrecognized STATUS field must stay
@@ -232,20 +299,44 @@ class HealthPanelTests(unittest.TestCase):
         finally:
             win.close()
 
-    def test_component_state_discovering_and_disabled_are_gray_not_red(self) -> None:
-        """Rule: DISCOVERING (boot-time, not yet resolved) and DISABLED
-        (intentionally off) are gray, not red -- neither is an error."""
+    def test_component_state_discovering_is_gray_not_red(self) -> None:
+        """Rule: DISCOVERING (boot-time, not yet resolved) is gray, not
+        red -- it isn't an error, it just hasn't resolved yet."""
         win = self._make_window(44110, 45110, "compgray")
         try:
             states = {
-                "DPS310": "DISCOVERING", "ADS1115": "DISABLED",
-                "SEQUENT_RTD": "OK", "MOTOR0": "OK", "MOTOR1": "OK", "PWM": "OK",
+                "DPS310": "DISCOVERING",
+                "ADS1115": "OK", "SEQUENT_RTD": "OK", "MOTOR0": "OK",
+                "MOTOR1": "OK", "PWM": "OK",
             }
             win._on_packet(_packet(component_state=states))
             self.assertEqual(win._health.dot_color("component_DPS310"), GRAY)
-            self.assertEqual(win._health.dot_color("component_ADS1115"), GRAY)
         finally:
             win.close()
+
+    def test_component_state_disabled_is_amber_not_gray(self) -> None:
+        """Design ruling (fix round 1): DISABLED must be amber, not gray --
+        sharing gray with 'unknown/absent' made a deliberately-disabled
+        component (e.g. off by config mistake) look identical to 'not
+        reported'. Amber already means 'non-nominal, not failing' for the
+        tri-state flags; a disabled component fits that meaning."""
+        win = self._make_window(44118, 45118, "compamber")
+        try:
+            states = {
+                "ADS1115": "DISABLED",
+                "DPS310": "OK", "SEQUENT_RTD": "OK", "MOTOR0": "OK",
+                "MOTOR1": "OK", "PWM": "OK",
+            }
+            win._on_packet(_packet(component_state=states))
+            self.assertEqual(win._health.dot_color("component_ADS1115"), AMBER,
+                              "DISABLED must render amber, not gray")
+            self.assertEqual(win._health.state_word("component_ADS1115"), "DISABLED")
+        finally:
+            win.close()
+
+    # MUTATION: move DISABLED back into the gray fallback (drop it from
+    # `_COMPONENT_AMBER`) and confirm test_component_state_disabled_is_amber_not_gray
+    # fails, naming the DISABLED-must-render-amber assertion.
 
     def test_component_state_unknown_word_maps_to_gray_not_red(self) -> None:
         """Rule: a state word this GUI doesn't recognize (future firmware,
