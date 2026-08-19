@@ -155,6 +155,19 @@ target_include_directories(coatheal_tmc5160_tests PRIVATE
 
 add_test(NAME coatheal_tmc5160_tests COMMAND coatheal_tmc5160_tests)
 
+# MAX31865 RTD-click sample-resistance adapter tests. No hardware required.
+add_executable(coatheal_max31865_tests
+  unit/test_max31865_adapter.cpp
+)
+
+target_link_libraries(coatheal_max31865_tests PRIVATE coatheal_onboard_core)
+
+target_include_directories(coatheal_max31865_tests PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/unit
+)
+
+add_test(NAME coatheal_max31865_tests COMMAND coatheal_max31865_tests)
+
 # Sequent RTD HAT register-conversation tests. No hardware required.
 add_executable(coatheal_sequent_rtd_tests
   unit/test_sequent_rtd_adapter.cpp
