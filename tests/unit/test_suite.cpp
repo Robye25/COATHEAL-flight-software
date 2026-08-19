@@ -585,6 +585,51 @@ void TestConfigRejectsOvercurrentCeiling() {
   std::filesystem::remove(path, ec);
 }
 
+void TestConfigRejectsFlatCurrentBound() {
+  // Isolates the flat (0, 3.1] absolute ceiling from the sense-resistor
+  // ceiling above: with sense_resistor_ohm=0.05 the sense-resistor ceiling
+  // is 0.325/0.05 = 6.5 A_peak, i.e. 6.5/sqrt(2) = 4.5962 A_rms.
+  // run_current_a_rms=3.5 is well under that (3.5*sqrt(2) = 4.9497 <
+  // 6.5 A_peak, so the sense-resistor rule does NOT fire) but exceeds the
+  // flat 3.1 bound -- so this test can only pass because the flat-bound
+  // rule specifically fired. Deleting only that rule (leaving the
+  // sense-resistor ceiling in place) must make this assertion fail, since
+  // 3.5/0.05 alone would then load successfully.
+  const std::string path = WriteTempConfig(
+      "motor0.run_current_a_rms=3.5\n"
+      "motor0.sense_resistor_ohm=0.05\n");
+  coatheal::OnboardConfig cfg;
+  std::string error;
+  assert(!coatheal::LoadConfigFromIni(path, &cfg, &error));
+  assert(error.find("motor0.run_current_a_rms must be in (0, 3.1]") !=
+         std::string::npos);
+  // Distinct from the sense-resistor ceiling's fragment: this case must
+  // NOT be rejected via that other mechanism.
+  assert(error.find("exceeds the sense resistor's deliverable current "
+                     "ceiling") == std::string::npos);
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+}
+
+void TestConfigAcceptsFlatCurrentBoundary() {
+  // Both-directions companion to TestConfigRejectsFlatCurrentBound: the
+  // flat bound is inclusive, "(0, 3.1]", so exactly 3.1 A_rms must load
+  // successfully. sense_resistor_ohm=0.05 keeps the sense-resistor ceiling
+  // (6.5 A_peak, i.e. 4.5962 A_rms) well clear of 3.1 so only the flat
+  // bound's own edge is exercised. Catches a `>` -> `>=` mutation on the
+  // flat-bound comparison that TestConfigRejectsFlatCurrentBound's 3.5
+  // A_rms case cannot: 3.5 is rejected either way.
+  const std::string path = WriteTempConfig(
+      "motor0.run_current_a_rms=3.1\n"
+      "motor0.sense_resistor_ohm=0.05\n");
+  coatheal::OnboardConfig cfg;
+  std::string error;
+  assert(coatheal::LoadConfigFromIni(path, &cfg, &error));
+  assert(std::fabs(cfg.motors[0].run_current_a_rms - 3.1) < 1e-9);
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+}
+
 void TestSequentRtdConfigDefaultsAndParsing() {
   coatheal::OnboardConfig defaults;
   assert(defaults.sensors.sequent_rtd_stack == 0);
@@ -797,6 +842,8 @@ int main() {
   TestConfigRejectsReservedGpioCollisions();
   TestConfigRejectsRetiredMotorKeys();
   TestConfigRejectsOvercurrentCeiling();
+  TestConfigRejectsFlatCurrentBound();
+  TestConfigAcceptsFlatCurrentBoundary();
   TestSequentRtdConfigDefaultsAndParsing();
   TestSequentRtdConfigRejectsBadValues();
   TestLegacySensorKeysAreRejected();
