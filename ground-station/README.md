@@ -42,7 +42,7 @@ python gui_app.py [--host <onboard-ip>] [--tel-port 4000] [--cmd-port 5000]
 
 | Panel | Location | Description |
 |---|---|---|
-| **Connection** | Left dock | Onboard IP, telemetry port, command port; Start/Stop button; connection status |
+| **Connection** | Left dock | Onboard IP, telemetry port, command port; Start Telemetry button; connection status |
 | **Heater Control** | Left dock | 6 duties, manual targets, PID tuning, and local JSON profiles |
 | **Motor Control** | Left dock | M0/M1 selection, jog/absolute commands, software zero, and bend sequence editor |
 | **Commands** | Left dock | Diagnostics including `CHECK`, plus arbitrary command entry |
@@ -50,7 +50,7 @@ python gui_app.py [--host <onboard-ip>] [--tel-port 4000] [--cmd-port 5000]
 | **Pressure** | Center tab | Live pressure trace |
 | **Heater Duties** | Center tab | All 6 heater duty traces over time |
 | **Resistance** | Center tab | Compatibility traces; final BOM normally emits `-` because no resistance instrument is carried |
-| **Values** | Right panel | Latest value for every telemetry field; status flags color-coded |
+| **Values** | Right panel | Latest value for every telemetry field (status/component flags live on the Health tab, not here) |
 | **Log** | Bottom dock | Timestamped scrolling log; auto-scroll toggle; save to file |
 | **Status bar** | Bottom edge | Phase (color-coded), SEQ, pressure, hottest sample, LINK status, staleness |
 
@@ -65,20 +65,12 @@ python gui_app.py [--host <onboard-ip>] [--tel-port 4000] [--cmd-port 5000]
 **Safety-critical** (confirmation dialog):
 - `FORCE STOP`, `HEATERS OFF`, `RESET CTRL`, `SHUTDOWN SAFE`
 
-**Debug** (`ARM_DEBUG` token required first):
-- `ARM DEBUG <token>`, `DISARM DEBUG`
-- `BENCH ON` / `BENCH OFF`
-
 Thermal profiles are saved to `profiles/thermal_profiles.json` and are applied
 by re-sending PID gains and targets to the Pi.
 
 ### Reconnect Behaviour
 
-The GUI automatically reconnects when the onboard restarts or the link drops. The telemetry receiver detects a stale connection after 3 seconds of no data, closes it, and immediately waits for a new connection. The onboard retries every ~2 seconds.
-
-### Replaying a CSV Log
-
-**File → Open CSV log…** loads any previously recorded `ground_telemetry.csv` into all plot panels for post-flight analysis.
+The GUI automatically reconnects when the onboard restarts or the link drops. The telemetry receiver detects a stale connection after 8.0 seconds of no data, closes it, and immediately waits for a new connection. The onboard retries every ~2 seconds.
 
 ---
 

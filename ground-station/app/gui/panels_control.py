@@ -149,7 +149,7 @@ class ConnectionPanel(QGroupBox):
             "connected": ("#2ecc71", "● connected"),
             "stale":     ("#f39c12", "● stale (no data)"),
             "searching": ("#f39c12", "● searching for onboard…"),
-            "failed":    ("#e74c3c", "● failed to start (port in use?)"),
+            "failed":    ("#e74c3c", "● receiver failed (see log)"),
         }
         color, text = colors.get(state, ("#888", f"● {state}"))
         self._status.setText(text)
@@ -979,7 +979,7 @@ class CommandPanel(QGroupBox):
         free_row = QHBoxLayout()
         self._free = QLineEdit()
         self._free.setPlaceholderText(
-            "arbitrary command (e.g. ARM_DEBUG COATHEAL_DEBUG, HEATER_TEST 0 0.25)"
+            "arbitrary command (e.g. STATUS, BENDSEQ_STATUS 0)"
         )
         send_btn = QPushButton("Send"); _style_button(send_btn, cls="primary")
         send_btn.setToolTip("Sends: <command> (exactly what's typed, verbatim)")

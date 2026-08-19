@@ -254,10 +254,15 @@ class MainWindow(QMainWindow):
             # button's "running" claim is now backed by reality.
             self._connection.set_receiver_running(True)
         elif state == "failed":
-            # Bind never happened (e.g. port in use). Undo any optimistic
-            # "running" claim and drop the dead receiver so a retry (button
-            # click or another auto-start) isn't blocked by the
-            # already-running guard in `_on_start_telemetry`.
+            # The receiver's run() loop hit an uncaught exception -- NOT
+            # necessarily a bind failure; run()'s except wraps the whole
+            # body, so this can fire mid-run after a live connection too
+            # (bad --bind IP, unwritable log dir, etc.). The receiver log
+            # line carries the real cause; this handler stays
+            # cause-neutral. Undo any optimistic "running" claim and drop
+            # the dead receiver so a retry (button click or another
+            # auto-start) isn't blocked by the already-running guard in
+            # `_on_start_telemetry`.
             self._connection.set_receiver_running(False)
             self._receiver = None
             # This branch just nulled `self._receiver` above, so any late
@@ -269,12 +274,20 @@ class MainWindow(QMainWindow):
             # must do it itself rather than relying on that now-unreachable
             # signal.
             self._link_ok = False
-            self._connection.set_connected(False, "")
-            # `set_connected` and `set_status` both paint ConnectionPanel's
-            # single status label -- re-assert "failed" so the operator
-            # still sees *why* the receiver died, not just "waiting for
-            # onboard" (set_connected's text), which would silently mask
-            # the actual bind failure.
+            # What actually keeps the operator honestly informed here:
+            # `_link_ok = False` above feeds PreflightPanel's "link" item
+            # on the next real `on_packet()` (if the app ever gets one
+            # again); `set_link_down()` below repaints that same "link"
+            # dot RIGHT NOW, since a dead receiver means no packet -- and
+            # therefore no `on_packet()` -- will ever arrive to do it
+            # otherwise, which would otherwise leave a stale green (or
+            # red) dot showing forever over a status label that plainly
+            # says the receiver failed. (A `set_connected(False, "")`
+            # call used to sit here too -- dropped: it only repaints
+            # ConnectionPanel's status label, which `set_status(state)`
+            # below repaints again immediately after with "failed", so it
+            # was dead paint, not a second source of truth.)
+            self._preflight.set_link_down()
             self._connection.set_status(state)
 
     def _on_priority_changed(self, p: int) -> None:
@@ -418,6 +431,11 @@ class MainWindow(QMainWindow):
             "Shift+R — RADIO_RESUME\n"
             "Ctrl+1..5 — switch plot tab\n"
             "Ctrl+Q — quit\n"
+            "\n"
+            "While a confirm dialog is open, all shortcuts are blocked — "
+            "Esc closes the dialog first.\n"
+            "Esc while editing a table cell closes the editor first; "
+            "press Esc again to stop motors.\n"
         )
 
     # ── shortcuts ──

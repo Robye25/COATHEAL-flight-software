@@ -150,6 +150,61 @@ class GuiUiUxTests(unittest.TestCase):
     # test_receiver_failed_state_clears_link_ok fails (`_link_ok` stays
     # True).
 
+    # ── 3b. failed receiver repaints the preflight "link" dot directly ──
+    def test_receiver_failed_state_grays_out_preflight_link_dot(self) -> None:
+        """Proven bug: PreflightPanel's "Telemetry link healthy" dot only
+        repaints inside `on_packet()`, and a dead receiver will never
+        deliver another packet -- so without a direct repaint, a stale
+        green dot would sit forever over a status label that plainly
+        says the receiver failed. GRAY is the honest color here (not
+        red): once the receiver is dead, whether the underlying link was
+        healthy is simply unknowable, not a confirmed failure."""
+        win = self._make_window(44212, 45212, "preflightlinkdown")
+        try:
+            listening = _pump_until(
+                self._app, lambda: not win._connection._start_btn.isEnabled()
+            )
+            self.assertTrue(listening, "live receiver never reported listening")
+            live_receiver = win._receiver
+
+            # Prove the dot actually was green before the failure, so the
+            # gray we assert afterward is a real repaint, not a color it
+            # happened to start at.
+            from app.protocol import TelemetryPacket
+            pkt = TelemetryPacket(
+                session_id="sess-preflight-link", seq=1,
+                timestamp="2026-08-19T00:00:00Z", rtc_valid=1,
+                ambient_temp_c=-10.0, ambient_pressure_mbar=140.0, uv=0.1,
+                sample_temps_c=[-5.0] * 8, heater_duty=[0.1] * 6,
+                sample_resistance_ohm=[10.0] * 8, phase="FLOAT", mode="RUN",
+                status="LINK_OK", steppers=[],
+            )
+            win._preflight.on_packet(pkt, True)
+            self.assertEqual(win._preflight.dot_color("link"), "#2ecc71",
+                              "sanity check: link dot must start green before the failure")
+
+            live_receiver.status_changed.emit("failed")
+
+            self.assertEqual(
+                win._preflight.dot_color("link"), "#666666",
+                "the preflight link dot must be repainted gray (link state "
+                "unknown) the moment the receiver dies, not left showing a "
+                "stale green from the last packet",
+            )
+            self.assertIn(
+                "unknown", win._preflight.dot_tooltip("link").lower(),
+                "the gray dot's tooltip should explain why it went gray",
+            )
+        finally:
+            live_receiver.stop()
+            live_receiver.wait(2000)
+            win.close()
+
+    # MUTATION: comment out `self._preflight.set_link_down()` in
+    # main_window.py's `_on_receiver_status` failed branch and confirm
+    # test_receiver_failed_state_grays_out_preflight_link_dot fails --
+    # the link dot stays green ("#2ecc71") instead of turning gray.
+
     # ── 4. ModePanel ARM row is a 2x2 grid ──
     def test_mode_panel_arm_row_is_2x2_grid(self) -> None:
         win = self._make_window(44203, 45203, "modegrid")
