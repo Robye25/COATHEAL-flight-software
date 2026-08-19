@@ -15,6 +15,12 @@ Windows-firewall setup so onboard auto-discovery works (one administrator
 prompt). Every later run launches instantly. Run the same file with
 `--check` to verify the environment without opening the GUI.
 
+## Linux quick start
+
+Same flow via **`./COATHEAL-GroundStation.sh`** — bootstraps `.venv`,
+installs dependencies (offering `python3-venv`/`libxcb-cursor0` via apt if
+missing), opens `ufw` ports on request, then launches. `--check` supported.
+
 ## Requirements
 
 ```bash
