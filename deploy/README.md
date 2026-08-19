@@ -5,6 +5,11 @@ software on the Pi. Installation is driven by
 `scripts/install_onboard_service.sh`; uninstall by
 `scripts/uninstall_onboard_service.sh`.
 
+> **One-command deployment:** operators normally never run the installer
+> directly — `coatheal-deploy` (see `deploy_onboard.sh` in the repo root and
+> the README's *Deployment quickstart*) pulls, cleans up previous
+> iterations, migrates the config, rebuilds, and drives this installer.
+
 ## Units
 
 | Unit                              | Purpose                                                              | Enabled by installer? |

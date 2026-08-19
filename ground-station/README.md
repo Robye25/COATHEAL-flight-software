@@ -7,6 +7,14 @@ Two interfaces are available:
 - **GUI** (`gui_app.py`) — PyQt6 desktop application with live plots, heater bars, command buttons, and a log viewer. Recommended for operations.
 - **CLI** (`main.py`) — Headless telemetry server and command uplink for scripting and testing.
 
+## Windows quick start (no shell commands)
+
+Double-click **`COATHEAL-GroundStation.bat`**. The first run creates a local
+Python environment, installs the dependencies, and offers a one-click
+Windows-firewall setup so onboard auto-discovery works (one administrator
+prompt). Every later run launches instantly. Run the same file with
+`--check` to verify the environment without opening the GUI.
+
 ## Requirements
 
 ```bash

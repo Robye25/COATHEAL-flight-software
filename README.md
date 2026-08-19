@@ -18,6 +18,29 @@ coatheal_onboard                       gui_app.py / CLI
   durable telemetry queue              CSV logs + live plots
 ```
 
+## Deployment quickstart (plug and play)
+
+**Onboard (Raspberry Pi)** — SSH in and run one command. It pulls the latest
+code, retires any previously installed COATHEAL iteration, migrates the
+existing config to the current schema (original backed up), rebuilds,
+validates the config with the flight binary, and installs + starts the
+service:
+
+```bash
+bash /bexus/code/coatheal/deploy_onboard.sh   # first time
+coatheal-deploy                               # every time after that
+```
+
+The script ends with a green `DEPLOYED and RUNNING` banner and the Pi's IP
+addresses. Add `--dry-run` to see every action without changing anything.
+
+**Ground station (Windows)** — double-click
+`ground-station/COATHEAL-GroundStation.bat`. The first run sets up a local
+Python environment and offers a one-click firewall configuration (needed for
+onboard auto-discovery); every later run launches instantly. The GUI then
+discovers and connects to the onboard automatically — no addresses to type.
+Diagnostics without opening the GUI: run the same file with `--check`.
+
 ## Repository Layout
 
 ```text
