@@ -47,7 +47,16 @@ FINAL_PIN_VALUES = {
     "sensor.sequent_rtd_resistance_min_ohm": "60.0",
     "sensor.sequent_rtd_resistance_max_ohm": "390.0",
     "sensor.sequent_rtd_crosscheck_tol_c": "2.0",
-    "sensor.resistance_source": "sequent_rtd",
+    # MAX31865 dual-click sample-resistance instrument (schematic v3).
+    # Device paths are fixed by hardware (CE1/GP07 = click 0 = SAMPLE1 =
+    # /dev/spidev0.1; CE0/GP08 = click 1 = SAMPLE2 = /dev/spidev0.0), not
+    # configurable. sample_indices "0,4" is an OWNER-FLAGGED PLACEHOLDER:
+    # first specimen of each motor group -- update once the real
+    # commissioning mapping from the coating bench is known.
+    "sensor.max31865_reference_ohm": "470.0",
+    "sensor.max31865_poll_ms": "1000",
+    "sensor.max31865_sample_indices": "0,4",
+    "sensor.resistance_source": "max31865_click",
 }
 OBSOLETE_CONFIG_KEYS = {
     "stepper.microstep",
@@ -260,12 +269,45 @@ def validate_candidate(text: str) -> list[str]:
             errors.append("sensor.sequent_rtd_resistance_min_ohm must be "
                           "below sensor.sequent_rtd_resistance_max_ohm")
 
-    # config.cpp:619-626 - "disabled" and "simulated" stay accepted alongside
-    # the HAT-backed default so a fielded INI still loads.
+    # config.cpp:610-621 - "max31865_click" is the v3-shipped default;
+    # "disabled", "simulated" and the pre-v3 "sequent_rtd" source stay
+    # accepted so a fielded INI still loads.
     if values.get("sensor.resistance_source") not in {
-            "sequent_rtd", "disabled", "simulated"}:
+            "sequent_rtd", "disabled", "simulated", "max31865_click"}:
         errors.append("sensor.resistance_source must be disabled, simulated, "
-                      "or sequent_rtd")
+                      "sequent_rtd, or max31865_click")
+
+    # config.cpp's Max31865Loop-adjacent validation block - unconditional
+    # (independent of resistance_source), mirroring the sequent_rtd_* keys
+    # above: the worker always polls both clicks when their bus is
+    # available, regardless of which resistance_source is selected.
+    try:
+        max31865_reference_ohm = float(values["sensor.max31865_reference_ohm"])
+    except (KeyError, ValueError):
+        errors.append("sensor.max31865_reference_ohm must be a number")
+    else:
+        if not math.isfinite(max31865_reference_ohm) or max31865_reference_ohm <= 0.0:
+            errors.append("sensor.max31865_reference_ohm must be > 0")
+
+    try:
+        max31865_poll_ms = int(values["sensor.max31865_poll_ms"])
+    except (KeyError, ValueError):
+        errors.append("sensor.max31865_poll_ms must be an integer")
+    else:
+        if max31865_poll_ms <= 0:
+            errors.append("sensor.max31865_poll_ms must be > 0")
+
+    raw_max31865_indices = values.get("sensor.max31865_sample_indices", "")
+    max31865_indices = [
+        c.strip() for c in raw_max31865_indices.split(",") if c.strip()]
+    if len(max31865_indices) != 2:
+        errors.append(
+            "sensor.max31865_sample_indices must have exactly two entries")
+    elif len(set(max31865_indices)) != len(max31865_indices):
+        errors.append("sensor.max31865_sample_indices entries must be distinct")
+    elif any(not c.isdigit() or int(c) >= samples for c in max31865_indices):
+        errors.append("sensor.max31865_sample_indices entries must be less "
+                      "than hardware.sample_count")
 
     runtime_chip = values.get("runtime.gpio_chip", "/dev/gpiochip0")
     gpio_claims: dict[tuple[str, int], str] = {}
@@ -440,6 +482,9 @@ def pin_check(args: argparse.Namespace) -> int:
                 "sensor.sequent_rtd_resistance_min_ohm",
                 "sensor.sequent_rtd_resistance_max_ohm",
                 "sensor.sequent_rtd_crosscheck_tol_c",
+                "sensor.max31865_reference_ohm",
+                "sensor.max31865_poll_ms",
+                "sensor.max31865_sample_indices",
                 "sensor.resistance_source"}:
             continue
         actual = values.get(key)

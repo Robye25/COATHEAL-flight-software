@@ -185,23 +185,75 @@ class HardwareSetupTests(unittest.TestCase):
             "sensor.sequent_rtd_resistance_max_ohm", errors)
 
     def test_validate_candidate_detects_bad_resistance_source(self) -> None:
-        # Mirrors config.cpp:619-626, including the two legacy labels that
-        # stay accepted so a fielded INI still loads.
+        # Mirrors config.cpp:610-621, including the three legacy/back-compat
+        # labels that stay accepted so a fielded INI still loads.
         source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
         broken = hardware_setup.replace_ini(
             source, {"sensor.resistance_source": "ina3221"})
         errors = hardware_setup.validate_candidate(broken)
         self.assertIn(
             "sensor.resistance_source must be disabled, simulated, "
-            "or sequent_rtd", errors)
+            "sequent_rtd, or max31865_click", errors)
 
     def test_validate_candidate_accepts_every_resistance_source(self) -> None:
         source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
-        for value in ("sequent_rtd", "disabled", "simulated"):
+        for value in ("sequent_rtd", "disabled", "simulated", "max31865_click"):
             candidate = hardware_setup.replace_ini(
                 source, {"sensor.resistance_source": value})
             self.assertEqual(
                 hardware_setup.validate_candidate(candidate), [], value)
+
+    def test_validate_candidate_detects_bad_max31865_reference_ohm(self) -> None:
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        broken = hardware_setup.replace_ini(
+            source, {"sensor.max31865_reference_ohm": "0"})
+        errors = hardware_setup.validate_candidate(broken)
+        self.assertIn("sensor.max31865_reference_ohm must be > 0", errors)
+
+    def test_validate_candidate_detects_negative_max31865_reference_ohm(self) -> None:
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        broken = hardware_setup.replace_ini(
+            source, {"sensor.max31865_reference_ohm": "-5"})
+        errors = hardware_setup.validate_candidate(broken)
+        self.assertIn("sensor.max31865_reference_ohm must be > 0", errors)
+
+    def test_validate_candidate_detects_bad_max31865_poll_ms(self) -> None:
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        broken = hardware_setup.replace_ini(
+            source, {"sensor.max31865_poll_ms": "0"})
+        errors = hardware_setup.validate_candidate(broken)
+        self.assertIn("sensor.max31865_poll_ms must be > 0", errors)
+
+    def test_validate_candidate_detects_wrong_count_max31865_sample_indices(
+            self) -> None:
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        broken = hardware_setup.replace_ini(
+            source, {"sensor.max31865_sample_indices": "0,1,2"})
+        errors = hardware_setup.validate_candidate(broken)
+        self.assertIn(
+            "sensor.max31865_sample_indices must have exactly two entries",
+            errors)
+
+    def test_validate_candidate_detects_duplicate_max31865_sample_indices(
+            self) -> None:
+        # Isolates the distinctness rule: the count is exactly two and both
+        # entries are in range, so only a duplicate-entries check can fire.
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        broken = hardware_setup.replace_ini(
+            source, {"sensor.max31865_sample_indices": "3,3"})
+        errors = hardware_setup.validate_candidate(broken)
+        self.assertIn(
+            "sensor.max31865_sample_indices entries must be distinct", errors)
+
+    def test_validate_candidate_detects_out_of_range_max31865_sample_indices(
+            self) -> None:
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        broken = hardware_setup.replace_ini(
+            source, {"sensor.max31865_sample_indices": "0,8"})
+        errors = hardware_setup.validate_candidate(broken)
+        self.assertIn(
+            "sensor.max31865_sample_indices entries must be less than "
+            "hardware.sample_count", errors)
 
     def test_same_line_on_different_gpio_chips_is_valid(self) -> None:
         # BCM 17 is a v3-reserved line (Sequent HAT rs485_dir) on the default

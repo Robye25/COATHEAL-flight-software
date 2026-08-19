@@ -370,6 +370,15 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
       if (!parse_double(key, value, &config->sensors.uv_full_scale_v, line_no)) return false;
     } else if (key == "sensor.resistance_source") {
       config->sensors.resistance_source = value;
+    } else if (key == "sensor.max31865_reference_ohm") {
+      if (!parse_double(key, value, &config->sensors.max31865_reference_ohm, line_no)) return false;
+    } else if (key == "sensor.max31865_poll_ms") {
+      if (!parse_int(key, value, &config->sensors.max31865_poll_ms, line_no)) return false;
+    } else if (key == "sensor.max31865_sample_indices") {
+      if (!ParseSizeList(value, &config->sensors.max31865_sample_indices)) {
+        if (error != nullptr) *error = "invalid sensor.max31865_sample_indices";
+        return false;
+      }
 
     } else if (key == "heater.output_lines") {
       if (!ParseSizeList(value, &config->heaters.output_lines)) {
@@ -603,15 +612,18 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
     return false;
   }
 
-  // "disabled" and "simulated" remain accepted alongside the HAT-backed
-  // "sequent_rtd" source: fielded configs may still say "disabled", and
-  // Ina3221Adapter (the only consumer) is still a compiled stub, so refusing
-  // to load an otherwise-valid config over this label would be a poor trade.
+  // "max31865_click" is the v3-shipped default. "disabled", "simulated" and
+  // the pre-v3 "sequent_rtd" source remain accepted: fielded configs may
+  // still say any of them, and Ina3221Adapter (the "disabled"/"simulated"
+  // fallback consumer) is still a compiled stub, so refusing to load an
+  // otherwise-valid config over this label would be a poor trade.
   if (config->sensors.resistance_source != "disabled" &&
       config->sensors.resistance_source != "simulated" &&
-      config->sensors.resistance_source != "sequent_rtd") {
+      config->sensors.resistance_source != "sequent_rtd" &&
+      config->sensors.resistance_source != "max31865_click") {
     if (error != nullptr) {
-      *error = "sensor.resistance_source must be disabled, simulated, or sequent_rtd";
+      *error = "sensor.resistance_source must be disabled, simulated, "
+               "sequent_rtd, or max31865_click";
     }
     return false;
   }
@@ -684,6 +696,47 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
     }
     return false;
   }
+
+  // Max31865Loop polls both clicks whenever their SPI bus is available,
+  // independent of resistance_source (mirrors the Sequent RTD card always
+  // polling temperature regardless of resistance_source) -- so these are
+  // validated unconditionally too, not only when resistance_source is
+  // "max31865_click".
+  if (config->sensors.max31865_reference_ohm <= 0.0) {
+    if (error != nullptr) {
+      *error = "sensor.max31865_reference_ohm must be > 0";
+    }
+    return false;
+  }
+  if (config->sensors.max31865_poll_ms <= 0) {
+    if (error != nullptr) {
+      *error = "sensor.max31865_poll_ms must be > 0";
+    }
+    return false;
+  }
+  if (config->sensors.max31865_sample_indices.size() != 2U) {
+    if (error != nullptr) {
+      *error = "sensor.max31865_sample_indices must have exactly two entries";
+    }
+    return false;
+  }
+  if (config->sensors.max31865_sample_indices[0] ==
+      config->sensors.max31865_sample_indices[1]) {
+    if (error != nullptr) {
+      *error = "sensor.max31865_sample_indices entries must be distinct";
+    }
+    return false;
+  }
+  for (const std::size_t index : config->sensors.max31865_sample_indices) {
+    if (index >= config->hardware.sample_count) {
+      if (error != nullptr) {
+        *error = "sensor.max31865_sample_indices entries must be less than "
+                 "hardware.sample_count";
+      }
+      return false;
+    }
+  }
+
   if (config->heaters.debug_max_duty < 0.0 ||
       config->heaters.debug_max_duty > 1.0 ||
       config->heaters.debug_max_seconds <= 0.0 ||

@@ -1093,10 +1093,14 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       // COMPONENT_STATE, so it belongs in this whitelist too — otherwise an
       // operator reading SEQUENT_RTD:DEGRADED and typing the obvious
       // `CHECK SEQUENT_RTD` gets rejected while the two retired names work.
+      // MAX31865 selects the two v3 sample-resistance clicks; this is a
+      // command-argument addition only, not a wire-format change (no
+      // COMPONENT_STATE token changes anywhere).
       const bool check_sensors =
           selected == "ALL" || selected == "DPS310" ||
           selected == "ADS1115" || selected == "SEQUENT_RTD" ||
-          selected == "DAQ132M" || selected == "RTD_CLICK";
+          selected == "DAQ132M" || selected == "RTD_CLICK" ||
+          selected == "MAX31865";
       const bool check_pwm = selected == "ALL" || selected == "PWM";
       const bool check_motor0 = selected == "ALL" || selected == "MOTOR0";
       const bool check_motor1 = selected == "ALL" || selected == "MOTOR1";

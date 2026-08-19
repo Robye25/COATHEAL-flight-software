@@ -140,7 +140,26 @@ struct SensorHardwareConfig {
   int uv_ads1115_channel = 0;
   double uv_full_scale_v = 4.096;
 
-  std::string resistance_source = "sequent_rtd";
+  // v3 default: the MAX31865 dual-click sample-resistance instrument.
+  // "sequent_rtd", "disabled" and "simulated" remain accepted (see
+  // config.cpp's validation) for back-compat with fielded/legacy configs.
+  std::string resistance_source = "max31865_click";
+
+  // MAX31865 dual-click sample-resistance instrument (schematic v3): two
+  // clicks, each wired 4-wire Kelvin to one coating specimen. Device paths
+  // are fixed by hardware (SensorManager owns the constants: CE1/GP07 =
+  // click 0 = SAMPLE1 = /dev/spidev0.1; CE0/GP08 = click 1 = SAMPLE2 =
+  // /dev/spidev0.0) and are therefore not configurable -- these three keys
+  // are the only tunables.
+  double max31865_reference_ohm = 470.0;
+  int max31865_poll_ms = 1000;
+  // Which two of hardware.sample_count indices the two clicks feed,
+  // click-index-ordered (entry 0 -> click 0/SAMPLE1, entry 1 -> click
+  // 1/SAMPLE2). OWNER-FLAGGED PLACEHOLDER: {0, 4} is the first specimen of
+  // each motor group (motor0.samples starts at 0, motor1.samples starts at
+  // 4) -- config-only to change once the real commissioning mapping from
+  // the coating bench is known.
+  std::vector<std::size_t> max31865_sample_indices{0, 4};
 };
 
 struct HeaterOutputConfig {
