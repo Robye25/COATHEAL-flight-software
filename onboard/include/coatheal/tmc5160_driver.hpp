@@ -29,6 +29,11 @@ struct Tmc5160Config {
   double run_current_a_rms = 0.8;
   double hold_current_frac = 0.30;
   double sense_resistor_ohm = 0.075;
+  // StealthChop (GCONF bit 2, en_pwm_mode): quiet, low-vibration chopper at
+  // low speed, at the cost of torque headroom. True mirrors MotorConfig's
+  // default. Wired through to the GCONF write and covered by the existing
+  // GCONF readback verify.
+  bool stealth_chop = true;
   int microstep = 4;
   // Carried through from MotorConfig for parity with the retired TMC2240
   // path; the actual re-probe pacing lives one layer up in

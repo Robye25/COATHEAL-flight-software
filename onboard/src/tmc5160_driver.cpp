@@ -31,10 +31,11 @@ constexpr std::uint8_t kWriteBit = 0x80;
 
 constexpr std::uint8_t kExpectedVersion = 0x30;
 
-// GCONF: bit2 (en_pwm_mode / stealthChop) set for quiet low-speed operation.
-// Tmc5160Config carries no per-motor GCONF toggle, so this is a fixed
-// constant rather than something CalculateCurrent-style callers can tune.
-constexpr std::uint32_t kGconf = 0x00000004U;
+// GCONF bit2 (en_pwm_mode / StealthChop): quiet low-speed operation, at the
+// cost of torque headroom. Driven by Tmc5160Config::stealth_chop, which the
+// factory copies from motorN.stealth_chop -- every other GCONF bit stays at
+// its reset value of 0, so GCONF is exactly this bit or nothing.
+constexpr std::uint32_t kGconfEnPwmMode = 0x00000004U;
 
 // TMC5160 datasheet fixed full-scale sense voltage.
 constexpr double kVfs = 0.325;
@@ -391,7 +392,7 @@ bool Tmc5160Driver::ReinitializeUnlocked() {
     return false;
   }
 
-  const std::uint32_t gconf = kGconf;
+  const std::uint32_t gconf = cfg_.stealth_chop ? kGconfEnPwmMode : 0U;
   const std::uint32_t chopconf = EncodeChopconf(/*toff=*/3);
   // GLOBALSCALER register convention: 0 means "256" (full scale); 256 never
   // appears on the wire as itself.
