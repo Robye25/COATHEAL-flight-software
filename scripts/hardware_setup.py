@@ -57,6 +57,13 @@ FINAL_PIN_VALUES = {
     "sensor.max31865_poll_ms": "1000",
     "sensor.max31865_sample_indices": "0,4",
     "sensor.resistance_source": "max31865_click",
+    # Owner hard rule (schematic v3 power budget): never more than 3 heaters
+    # energised, never more than 15 W thermal. Tracked here so `pin-check`
+    # and the wizard pin the owner's values, and validated in
+    # validate_candidate() so a hand-edited INI cannot raise the ceiling
+    # HeaterScheduler enforces.
+    "power.max_active_heaters": "3",
+    "power.max_thermal_w": "15.0",
 }
 OBSOLETE_CONFIG_KEYS = {
     "stepper.microstep",
@@ -319,6 +326,29 @@ def validate_candidate(text: str) -> list[str]:
         elif any(index >= samples for index in max31865_indices):
             errors.append("sensor.max31865_sample_indices entries must be "
                           "less than hardware.sample_count")
+
+    # Owner hard rule, mirroring config.cpp's power-cap block: <= 3 active
+    # heaters and <= 15.0 W thermal. This is a deliberate, narrow reversal of
+    # the "validator scope asymmetry by design" note -- that note said this
+    # script validates the keys it WRITES, and these two are now keys it
+    # writes (FINAL_PIN_VALUES above). The asymmetry stands everywhere else.
+    try:
+        max_active_heaters = int(values["power.max_active_heaters"])
+    except (KeyError, ValueError):
+        errors.append("power.max_active_heaters must be an integer")
+    else:
+        if not 1 <= max_active_heaters <= 3:
+            errors.append("power.max_active_heaters must be 1..3 (owner power "
+                          "rule: never more than 3 heaters)")
+
+    try:
+        max_thermal_w = float(values["power.max_thermal_w"])
+    except (KeyError, ValueError):
+        errors.append("power.max_thermal_w must be a number")
+    else:
+        if not math.isfinite(max_thermal_w) or not 0.0 < max_thermal_w <= 15.0:
+            errors.append(
+                "power.max_thermal_w must be > 0 and <= 15.0 (owner power rule)")
 
     runtime_chip = values.get("runtime.gpio_chip", "/dev/gpiochip0")
     gpio_claims: dict[tuple[str, int], str] = {}

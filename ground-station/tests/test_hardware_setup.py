@@ -203,6 +203,80 @@ class HardwareSetupTests(unittest.TestCase):
             self.assertEqual(
                 hardware_setup.validate_candidate(candidate), [], value)
 
+    # ---- owner power cap (mirrors config.cpp's power-cap block) ----------
+    #
+    # Both keys are now in FINAL_PIN_VALUES, so this script writes them and
+    # therefore validates them. Each case is isolated: EXAMPLE_CONFIG is
+    # otherwise valid, so exactly one check can produce each error, and the
+    # assertions use assertEqual on the whole error list where the point is
+    # that NOTHING else fired.
+
+    def test_validate_candidate_rejects_too_many_active_heaters(self) -> None:
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        broken = hardware_setup.replace_ini(
+            source, {"power.max_active_heaters": "4"})
+        errors = hardware_setup.validate_candidate(broken)
+        self.assertEqual(
+            errors,
+            ["power.max_active_heaters must be 1..3 (owner power rule: "
+             "never more than 3 heaters)"])
+
+    def test_validate_candidate_rejects_zero_active_heaters(self) -> None:
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        broken = hardware_setup.replace_ini(
+            source, {"power.max_active_heaters": "0"})
+        errors = hardware_setup.validate_candidate(broken)
+        self.assertEqual(
+            errors,
+            ["power.max_active_heaters must be 1..3 (owner power rule: "
+             "never more than 3 heaters)"])
+
+    def test_validate_candidate_rejects_thermal_watts_above_ceiling(
+            self) -> None:
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        broken = hardware_setup.replace_ini(
+            source, {"power.max_thermal_w": "20.0"})
+        errors = hardware_setup.validate_candidate(broken)
+        self.assertEqual(
+            errors,
+            ["power.max_thermal_w must be > 0 and <= 15.0 (owner power rule)"])
+
+    def test_validate_candidate_rejects_non_positive_thermal_watts(
+            self) -> None:
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        for value in ("0", "-1.0"):
+            broken = hardware_setup.replace_ini(
+                source, {"power.max_thermal_w": value})
+            errors = hardware_setup.validate_candidate(broken)
+            self.assertEqual(
+                errors,
+                ["power.max_thermal_w must be > 0 and <= 15.0 "
+                 "(owner power rule)"],
+                value)
+
+    def test_validate_candidate_accepts_the_owner_power_values(self) -> None:
+        # Both directions: a validator that rejected everything would pass
+        # the four negative cases above. The owner's own values, and the
+        # inclusive edges (3 heaters, exactly 15.0 W), must still load.
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        for heaters, watts in (("3", "15.0"), ("1", "0.5")):
+            candidate = hardware_setup.replace_ini(
+                source,
+                {"power.max_active_heaters": heaters,
+                 "power.max_thermal_w": watts})
+            self.assertEqual(
+                hardware_setup.validate_candidate(candidate), [],
+                f"{heaters}/{watts}")
+
+    def test_power_cap_keys_are_tracked_final_pin_values(self) -> None:
+        # The keys must be in the table the wizard/pin-check pin, not merely
+        # validated -- otherwise `migrate_config` would carry a fielded INI's
+        # out-of-policy value straight through.
+        self.assertEqual(
+            hardware_setup.FINAL_PIN_VALUES["power.max_active_heaters"], "3")
+        self.assertEqual(
+            hardware_setup.FINAL_PIN_VALUES["power.max_thermal_w"], "15.0")
+
     def test_validate_candidate_detects_bad_max31865_reference_ohm(self) -> None:
         source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
         broken = hardware_setup.replace_ini(
