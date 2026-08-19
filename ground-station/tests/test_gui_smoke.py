@@ -5,13 +5,28 @@ usable QPA plugin even with `QT_QPA_PLATFORM=offscreen`.
 from __future__ import annotations
 
 import os
+import socket
 import sys
+import time
 import unittest
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+
+def _pump_until(app, predicate, timeout_s: float = 3.0) -> bool:
+    """Process the Qt event loop (so queued cross-thread signals get
+    delivered) until `predicate()` is true or `timeout_s` elapses. Returns
+    the final predicate value."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        app.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return bool(predicate())
 
 
 class GuiSmoke(unittest.TestCase):
@@ -129,9 +144,10 @@ class GuiSmoke(unittest.TestCase):
 
     def test_connection_panel_shows_running_after_autostart(self) -> None:
         """MainWindow auto-starts the telemetry receiver at boot; the
-        Connection panel's Start button must reflect that immediately
-        instead of still inviting a click that just logs "already
-        running"."""
+        Connection panel's Start button must reflect that once the
+        receiver's TCP bind actually succeeds (reported asynchronously via
+        `status_changed("listening")` from the receiver's QThread) instead
+        of still inviting a click that just logs "already running"."""
         from app.gui.main_window import MainWindow
 
         win = MainWindow(bind="127.0.0.1", tel_port=44003, cmd_port=45003,
@@ -139,10 +155,65 @@ class GuiSmoke(unittest.TestCase):
                          firewall_check=False)
         try:
             btn = win._connection._start_btn
+            bound = _pump_until(self._app, lambda: not btn.isEnabled())
+            self.assertTrue(bound, "receiver never reported listening")
             self.assertFalse(btn.isEnabled())
             self.assertIn("running", btn.text().lower())
         finally:
             win.close()
+
+    def test_connection_panel_recovers_after_autostart_bind_failure(self) -> None:
+        """If the telemetry port is already taken, the receiver's bind
+        fails inside its QThread (dispatch.py's `run()` catches it and
+        emits `status_changed("failed")`). The Connection panel's button
+        must NOT be left disabled and reading "Receiver running" over a
+        dead receiver — it must re-enable with a start affordance so the
+        operator can retry, which is the entire reason the button exists."""
+        from app.gui.main_window import MainWindow
+
+        port = 44006
+        blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # SO_REUSEADDR alone does not reliably reserve a port against a
+        # second bind on Windows (it lets a second SO_REUSEADDR socket bind
+        # to the same address without error) — use the exclusive flag where
+        # available so this test actually forces the collision it claims to.
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            blocker.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        else:
+            blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        blocker.bind(("127.0.0.1", port))
+        blocker.listen(1)
+        try:
+            win = MainWindow(bind="127.0.0.1", tel_port=port, cmd_port=45006,
+                             cmd_host="127.0.0.1",
+                             log_path=Path("logs/smoke_autostart_fail.csv"),
+                             firewall_check=False)
+            try:
+                # Wait for the *actual* failure signal, not merely "the
+                # button happens to be enabled" — with the auto-start fix,
+                # the button starts enabled and is only ever disabled by a
+                # real "listening"/"connected" state, so an unconditioned
+                # isEnabled() check would pass even if "failed" handling
+                # were deleted entirely. Gate on the status text instead,
+                # which only ever says "failed" via the status_changed
+                # signal this test exists to cover.
+                reported_failed = _pump_until(
+                    self._app,
+                    lambda: "failed" in win._connection._status.text().lower(),
+                )
+                self.assertTrue(reported_failed, "receiver never reported failed")
+                btn = win._connection._start_btn
+                self.assertTrue(btn.isEnabled())
+                self.assertNotIn("running", btn.text().lower())
+                self.assertIsNone(
+                    win._receiver,
+                    "dead receiver must be cleared so a retry isn't blocked "
+                    "by the already-running guard",
+                )
+            finally:
+                win.close()
+        finally:
+            blocker.close()
 
     def test_command_dispatcher_uses_static_host_for_blank_endpoint(self) -> None:
         from app.gui.dispatch import CommandDispatcher, DEFAULT_COMMAND_HOST

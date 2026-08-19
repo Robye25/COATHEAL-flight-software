@@ -117,6 +117,7 @@ class ConnectionPanel(QGroupBox):
             "connected": ("#2ecc71", "● connected"),
             "stale":     ("#f39c12", "● stale (no data)"),
             "searching": ("#f39c12", "● searching for onboard…"),
+            "failed":    ("#e74c3c", "● failed to start (port in use?)"),
         }
         color, text = colors.get(state, ("#888", f"● {state}"))
         self._status.setText(text)
