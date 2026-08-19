@@ -517,6 +517,17 @@ void ScriptSaturatedOneShot(FakeSpiBus* bus, std::uint8_t msb, std::uint8_t lsb,
 void TestMax31865HealthyClicksPopulateOnlyMonitoredIndices() {
   OnboardConfig config = MakeMax31865TestConfig();
   config.sensors.max31865_poll_ms = 5000;  // see the timing-choice comment above
+  // Fix-round 1 Critical 2: the RTD worker must be live in THIS test too,
+  // not merely absent (rtd_bus_override left nullptr made this assertion
+  // vacuous -- LinuxI2cBus::available() is compile-time false on this host,
+  // so SequentRtdLoop never started and could never have written the
+  // "unmonitored" indices this test checks below). A dedicated FakeI2cBus,
+  // scripted healthy on every channel via the existing LiveRtdImage()
+  // helper, makes SequentRtdLoop actually run concurrently with
+  // Max31865Loop -- the real flight-hardware scenario Critical 1 was about.
+  config.sensors.sequent_rtd_poll_ms = 5;
+  FakeI2cBus good_rtd_bus;
+  good_rtd_bus.SetImage(LiveRtdImage());
 
   FakeSpiBus click1_bus;  // click 0, SAMPLE1 -> index 0
   FakeSpiBus click2_bus;  // click 1, SAMPLE2 -> index 4
@@ -527,7 +538,7 @@ void TestMax31865HealthyClicksPopulateOnlyMonitoredIndices() {
   I2cAdapter i2c;
   RtcAdapter rtc;
   SensorManager sm(config, &spi, &i2c, &rtc, /*ina=*/nullptr,
-                   /*rtd_bus_override=*/nullptr, &click1_bus, &click2_bus);
+                   &good_rtd_bus, &click1_bus, &click2_bus);
   sm.Start();
 
   const std::vector<double> heater_duty(6, 0.0);
@@ -537,9 +548,14 @@ void TestMax31865HealthyClicksPopulateOnlyMonitoredIndices() {
       std::chrono::steady_clock::now() + std::chrono::seconds(3);
   while (std::chrono::steady_clock::now() < deadline) {
     snap = sm.ReadSnapshot(MissionPhase::kAscent, heater_duty, 0.1);
+    // Wait for BOTH the click resistance AND the RTD temperature to have
+    // been published at least once, so a passing test proves the injected
+    // RTD fake actually ran concurrently rather than the loop exiting
+    // before SequentRtdLoop's first pass.
     if (!snap.sample_resistance_ohm.empty() &&
         std::fabs(snap.sample_resistance_ohm[0] - kClick0ResistanceOhm) <
-            0.001) {
+            0.001 &&
+        !snap.sample_temp_valid.empty() && snap.sample_temp_valid[0]) {
       published = true;
       break;
     }
@@ -558,11 +574,18 @@ void TestMax31865HealthyClicksPopulateOnlyMonitoredIndices() {
   assert(std::fabs(snap.sample_resistance_ohm[4] - kClick1ResistanceOhm) <
         0.001);
   // Every unmonitored index must stay exactly 0.0 -- Max31865Loop must never
-  // write outside the two configured sample_indices entries.
+  // write outside the two configured sample_indices entries, AND
+  // SequentRtdLoop must not have written its own (different-quantity)
+  // element ohms into any of them either -- this is the Critical-1 defect
+  // this injected RTD fake exists to make observable.
   for (std::size_t i = 0; i < snap.sample_resistance_ohm.size(); ++i) {
     if (i == 0 || i == 4) continue;
     assert(snap.sample_resistance_ohm[i] == 0.0);
   }
+  // Companion assertion (not vacuous): the RTD fake really is live and
+  // driving the temperature path, independent of resistance_source.
+  assert(snap.sample_temp_valid[0]);
+  assert(std::fabs(snap.sample_temps_c[0] - kBenchTemperatureC) < 0.5);
 }
 
 void TestMax31865OneClickBusFailureFailsResistanceOk() {
