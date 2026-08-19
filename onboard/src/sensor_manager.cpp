@@ -711,6 +711,14 @@ void SensorManager::Max31865Loop() {
     // specimen (bus healthy, channel invalid) and must never key this --
     // only a call failure (ok[n] == false) does. This is keyed off the
     // ReadOneShot() return value, never off readings[n].valid.
+    //
+    // That return value is only trustworthy because ReadOneShot() proves
+    // the click is on the bus (config write + readback) before every
+    // conversion. SPI has no ACK, so an ABSENT click does not fail a
+    // transfer -- it leaves MISO at its idle level and the whole sequence
+    // "succeeds" with a 0x0000 RTD code. Before that check existed, an
+    // empty click stack reported RESISTANCE_OK here with every channel
+    // blank on the wire. Do not key this off anything weaker.
     clicks_bus_ok_ = ok[0] && ok[1];
 
     const auto now = std::chrono::steady_clock::now();
@@ -912,6 +920,15 @@ SensorSnapshot SensorManager::ReadSnapshot(
       // (bus healthy, channel invalid) and must not drag resistance_ok()
       // down -- that is the whole reason this is keyed off ReadOneShot's
       // call result and never off Reading.valid.
+      //
+      // "Bus-level" here means PRESENT AND ANSWERING, not merely "the
+      // ioctl returned 0". ReadOneShot() proves presence with a config
+      // write + readback before each conversion precisely so this line
+      // can stay this simple; an absent click now fails that check and
+      // lands in RESISTANCE_FAIL, where it belongs. Without it, a flight
+      // stack with no clicks fitted reported RESISTANCE_OK while every
+      // r0..r7 serialised as "-" -- a silent loss of the science
+      // instrument.
       resistance_ok_ = clicks_bus_ok_.load();
       snapshot.sample_resistance_ohm = sample_resistance_ohm_;
     } else if (config_.sensors.resistance_source == "sequent_rtd") {
