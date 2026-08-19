@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt6.QtCore import Qt, QTimer, QPoint
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QPainter, QColor
 from PyQt6.QtWidgets import QLabel, QMessageBox, QWidget
 
@@ -20,6 +20,10 @@ class StatusDot(QWidget):
     def set_color(self, css: str) -> None:
         self._color = QColor(css)
         self.update()
+
+    def color(self) -> str:
+        """Current fill color as ``#rrggbb`` — read accessor for tests."""
+        return self._color.name()
 
     def paintEvent(self, _event) -> None:  # noqa: N802
         p = QPainter(self)
@@ -44,7 +48,7 @@ class Toast(QLabel):
         bg = "#27ae60" if ok else "#c0392b"
         self.setStyleSheet(
             f"background-color: {bg}; color: white; "
-            f"padding: 4px 10px; border-radius: 4px; font-size: 11px;"
+            f"padding: 4px 10px; border-radius: 4px; font-size: 11pt;"
         )
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.adjustSize()

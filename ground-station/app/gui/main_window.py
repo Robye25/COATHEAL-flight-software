@@ -18,12 +18,12 @@ from . import firewall
 from .dispatch import CommandDispatcher, TelemetryReceiver
 from .discovery import (
     CommandProbe, GsBeacon, OnboardListener, DISCOVERY_PORT_DEFAULT,
-    STATIC_ONBOARD_HOST_DEFAULT,
 )
 from .panels_control import (
     CommandPanel, ConnectionPanel, EmergencyBar, HeaterPanel, ModePanel,
     StepperPanel,
 )
+from .panels_health import HealthPanel
 from .panels_info import (
     CmdHistoryPanel, LogPanel, MotorPanel, PreflightPanel, PullEventsPanel,
     TopStatusStrip, ValuesPanel,
@@ -74,7 +74,6 @@ class MainWindow(QMainWindow):
         self._heater_panel = HeaterPanel(self._dispatcher)
         self._stepper_panel = StepperPanel(self._dispatcher)
         self._command_panel = CommandPanel(self._dispatcher)
-        self._command_panel.debug_armed_changed.connect(self._heater_panel.set_armed)
 
         left_splitter = QSplitter(Qt.Orientation.Vertical)
         left_splitter.setChildrenCollapsible(True)
@@ -98,10 +97,12 @@ class MainWindow(QMainWindow):
         left_dock = QDockWidget("Controls", self)
         left_dock.setWidget(left_scroll)
         left_dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
-        left_dock.setMinimumWidth(360)
+        left_dock.setMinimumWidth(300)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, left_dock)
+        self._left_dock = left_dock
 
         # ── right dock: tabs ──
+        self._health = HealthPanel()
         self._values = ValuesPanel()
         self._preflight = PreflightPanel()
         self._history = CmdHistoryPanel()
@@ -110,14 +111,19 @@ class MainWindow(QMainWindow):
         self._motors = MotorPanel()
         self._history.reissue_requested.connect(lambda cmd: self._dispatcher.send(cmd, tag=self._history))
         right_tabs = QTabWidget()
+        # Health is the first tab and default-selected: it's the
+        # single-glance "is anything wrong" view an operator wants on open.
+        right_tabs.addTab(self._health,    "Health")
         right_tabs.addTab(self._values,    "Values")
         right_tabs.addTab(self._motors,    "Motors")
         right_tabs.addTab(self._preflight, "Preflight")
         right_tabs.addTab(self._history,   "Cmd History")
+        right_tabs.setCurrentIndex(0)
         right_dock = QDockWidget("Status", self)
         right_dock.setWidget(right_tabs)
-        right_dock.setMinimumWidth(320)
+        right_dock.setMinimumWidth(280)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, right_dock)
+        self._right_dock = right_dock
 
         # ── bottom: emergency bar + log + pull events (tabbed) ──
         bottom_container = QWidget()
@@ -135,6 +141,7 @@ class MainWindow(QMainWindow):
         bottom_dock.setAllowedAreas(Qt.DockWidgetArea.BottomDockWidgetArea)
         bottom_dock.setMinimumHeight(180)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, bottom_dock)
+        self._bottom_dock = bottom_dock
 
         # ── status bar ──
         self.setStatusBar(QStatusBar())
@@ -171,6 +178,10 @@ class MainWindow(QMainWindow):
         # Connection panel's button remains a user-visible trigger for the
         # case where auto-start failed (e.g. port already in use).
         self._on_start_telemetry(bind, tel_port, cmd_port, cmd_host)
+        # No special-casing needed here: `_on_receiver_status` below flips
+        # the Connection panel's button once the receiver actually reports
+        # "listening" (bind succeeded) or "failed" (it didn't) — the
+        # button reflects reality, not the mere act of calling .start().
 
         # ── restore geometry ──
         # ── firewall / network-profile auto-configure (Windows only) ──
@@ -222,10 +233,62 @@ class MainWindow(QMainWindow):
         self._receiver.start()
 
     def _on_receiver_status(self, state: str) -> None:
+        if self.sender() is not self._receiver:
+            # Stale signal from a superseded receiver -- e.g. a retry built
+            # receiver #2 while a queued "failed" from dead receiver #1 was
+            # still in flight (plausible: the firewall prompt can stall the
+            # event loop right after auto-start). Acting on it would null
+            # out the live receiver's reference and disable the button
+            # under it. `self.sender()` is reliable here because every
+            # receiver signal below is connected as a plain bound-method
+            # slot (no lambda), so Qt's per-emission sender tracking always
+            # names the actual emitting QObject.
+            return
         self._connection.set_status(state)
         colors = {"listening": "#3498db", "connected": "#2ecc71",
-                  "stale": "#f39c12", "searching": "#f39c12"}
+                  "stale": "#f39c12", "searching": "#f39c12",
+                  "failed": "#e74c3c"}
         self._top.set_discovery(f"tel: {state}", colors.get(state, "#888"))
+        if state in ("listening", "connected"):
+            # Bind succeeded (or a peer is already talking to it) -- the
+            # button's "running" claim is now backed by reality.
+            self._connection.set_receiver_running(True)
+        elif state == "failed":
+            # The receiver's run() loop hit an uncaught exception -- NOT
+            # necessarily a bind failure; run()'s except wraps the whole
+            # body, so this can fire mid-run after a live connection too
+            # (bad --bind IP, unwritable log dir, etc.). The receiver log
+            # line carries the real cause; this handler stays
+            # cause-neutral. Undo any optimistic "running" claim and drop
+            # the dead receiver so a retry (button click or another
+            # auto-start) isn't blocked by the already-running guard in
+            # `_on_start_telemetry`.
+            self._connection.set_receiver_running(False)
+            self._receiver = None
+            # This branch just nulled `self._receiver` above, so any late
+            # `connection_changed(False, ...)` from the dying receiver
+            # would be dropped by `_on_connection_changed`'s sender guard
+            # (it only trusts signals whose sender is the *current*
+            # `self._receiver`, which is now None). Nothing else will ever
+            # clear link state for this receiver, so the failed branch
+            # must do it itself rather than relying on that now-unreachable
+            # signal.
+            self._link_ok = False
+            # What actually keeps the operator honestly informed here:
+            # `_link_ok = False` above feeds PreflightPanel's "link" item
+            # on the next real `on_packet()` (if the app ever gets one
+            # again); `set_link_down()` below repaints that same "link"
+            # dot RIGHT NOW, since a dead receiver means no packet -- and
+            # therefore no `on_packet()` -- will ever arrive to do it
+            # otherwise, which would otherwise leave a stale green (or
+            # red) dot showing forever over a status label that plainly
+            # says the receiver failed. (A `set_connected(False, "")`
+            # call used to sit here too -- dropped: it only repaints
+            # ConnectionPanel's status label, which `set_status(state)`
+            # below repaints again immediately after with "failed", so it
+            # was dead paint, not a second source of truth.)
+            self._preflight.set_link_down()
+            self._connection.set_status(state)
 
     def _on_priority_changed(self, p: int) -> None:
         if hasattr(self, "_beacon") and self._beacon is not None:
@@ -278,6 +341,12 @@ class MainWindow(QMainWindow):
         self._top.set_discovery(f"cmd: {host}:{cmd_port}", "#2ecc71")
 
     def _on_connection_changed(self, connected: bool, addr: str) -> None:
+        if self.sender() is not self._receiver:
+            # Same stale-signal hazard as _on_receiver_status: this handler
+            # mutates self._link_ok (feeds the preflight "link" check) and
+            # can retarget the command dispatcher at a peer address, so a
+            # signal from a superseded receiver must not be trusted either.
+            return
         self._link_ok = connected
         self._connection.set_connected(connected, addr)
         if connected:
@@ -295,8 +364,14 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"{'Connected: ' + addr if connected else 'Waiting for onboard…'}")
 
     def _on_packet(self, pkt: TelemetryPacket) -> None:
+        # No sender-identity guard: a stray packet from a just-superseded
+        # receiver only repaints plots/values/preflight with data that
+        # briefly predates the live receiver's own -- near-harmless, and
+        # `_on_start_telemetry`'s guard means a superseded receiver is
+        # always a dead one that stops emitting almost immediately anyway.
         self._top.on_packet(pkt)
         self._plots.on_packet(pkt)
+        self._health.on_packet(pkt)
         self._values.on_packet(pkt)
         self._motors.on_packet(pkt)
         self._heater_panel.update_from_packet(pkt)
@@ -305,6 +380,8 @@ class MainWindow(QMainWindow):
         self._preflight.on_packet(pkt, self._link_ok)
 
     def _on_pull_event(self, ev) -> None:
+        # Same reasoning as _on_packet: purely additive to the pull-events
+        # log table, no MainWindow state mutated -- near-harmless if stale.
         self._pull_events.on_pull_event(ev)
 
     def _on_response(self, cmd: str, resp: CommandResponse, ms: float, tag) -> None:
@@ -333,6 +410,11 @@ class MainWindow(QMainWindow):
         act_quit = QAction("Quit", self); act_quit.triggered.connect(self.close); act_quit.setShortcut("Ctrl+Q")
         file_menu.addAction(act_quit)
 
+        view_menu = self.menuBar().addMenu("&View")
+        for dock in (self._left_dock, self._right_dock, self._bottom_dock):
+            act = dock.toggleViewAction()
+            view_menu.addAction(act)
+
         help_menu = self.menuBar().addMenu("&Help")
         act_cheat = QAction("Keyboard shortcuts", self); act_cheat.setShortcut("F1")
         act_cheat.triggered.connect(self._show_cheatsheet)
@@ -342,13 +424,18 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self, "Shortcuts",
             "Space  — pause/resume plots\n"
-            "Esc    — STEPPER_STOP\n"
+            "Esc    — STEPPER_STOP both motors (panic, no confirm)\n"
             "Shift+H — HEATERS_OFF\n"
             "Shift+E — ENTER_SAFE (confirm)\n"
             "Shift+S — RADIO_SILENCE (confirm)\n"
             "Shift+R — RADIO_RESUME\n"
             "Ctrl+1..5 — switch plot tab\n"
             "Ctrl+Q — quit\n"
+            "\n"
+            "While a confirm dialog is open, all shortcuts are blocked — "
+            "Esc closes the dialog first.\n"
+            "Esc while editing a table cell closes the editor first; "
+            "press Esc again to stop motors.\n"
         )
 
     # ── shortcuts ──
@@ -357,7 +444,11 @@ class MainWindow(QMainWindow):
             s = QShortcut(QKeySequence(keys), self); s.setContext(scope); s.activated.connect(slot); return s
 
         sc("Space",   self._toggle_pause)
-        sc("Esc",     self._stepper_panel.emergency_stop)
+        # Esc is panic-class: stops BOTH motors, no confirmation dialog --
+        # same policy as HEATERS_OFF. Routes through StepperPanel's own
+        # emergency_stop_all (same dispatcher path/wire spelling as the
+        # EmergencyBar's STOP MOTORS button).
+        sc("Esc",     self._stepper_panel.emergency_stop_all)
         sc("Shift+H", lambda: self._dispatcher.send("HEATERS_OFF",   tag=self._emergency))
         sc("Shift+E", lambda: self._fire_confirm("ENTER_SAFE",    "Enter SAFE?"))
         sc("Shift+S", lambda: self._fire_confirm("RADIO_SILENCE", "Silence downlink?"))
