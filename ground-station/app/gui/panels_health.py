@@ -76,13 +76,18 @@ COMPONENTS: List[Tuple[str, str]] = [
 ]
 
 # Component-state color mapping. OK -> green (healthy). DEGRADED / STALE /
-# FAILED -> red (degraded or error -- operator should look). DISCOVERING
-# (boot-time, not yet resolved), DISABLED (intentionally off), any other
-# unrecognized word, and an absent key all -> gray. This mirrors the
-# OK/FAIL flags' "stay quiet on anything we don't positively know is bad"
-# rule: an unrecognized future state word must not paint red.
+# FAILED -> red (degraded or error -- operator should look). DISABLED ->
+# amber: a deliberately-disabled component is "non-nominal, not failing" --
+# the same meaning amber already carries for the tri-state flags above --
+# and must be visually distinct from "not reported" so an off-by-config
+# mistake doesn't read as silence. DISCOVERING (boot-time, not yet
+# resolved), any other unrecognized word, and an absent key all -> gray.
+# This mirrors the OK/FAIL flags' "stay quiet on anything we don't
+# positively know is bad" rule: an unrecognized future state word must not
+# paint red.
 _COMPONENT_RED = {"DEGRADED", "STALE", "FAILED"}
 _COMPONENT_GREEN = {"OK"}
+_COMPONENT_AMBER = {"DISABLED"}
 
 
 def component_color(state: Optional[str]) -> str:
@@ -90,6 +95,8 @@ def component_color(state: Optional[str]) -> str:
         return GREEN
     if state in _COMPONENT_RED:
         return RED
+    if state in _COMPONENT_AMBER:
+        return AMBER
     return GRAY
 
 
