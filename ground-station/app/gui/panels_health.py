@@ -150,7 +150,7 @@ class HealthPanel(QWidget):
     def _section_title(text: str) -> QLabel:
         lbl = QLabel(text)
         lbl.setStyleSheet(
-            "font-weight: bold; color: #aaa; font-size: 10px; "
+            "font-weight: bold; color: #aaa; font-size: 10pt; "
             "border-bottom: 1px solid #333; margin-top: 4px;"
         )
         return lbl
