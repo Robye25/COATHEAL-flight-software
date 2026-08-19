@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
 
 from ..protocol import PullEvent, TelemetryPacket
 from .dispatch import CommandHistoryEntry
+from .panels_health import OK_FAIL_FLAGS
 from .theme import mode_color, phase_color
 from .widgets import StatusDot
 
@@ -39,7 +40,19 @@ class TopStatusStrip(QWidget):
         self._sess = QLabel("sess: —");    self._sess.setStyleSheet("font-family: monospace; font-size: 10pt; color: #888;")
         self._seq  = QLabel("seq: —");     self._seq.setStyleSheet("font-family: monospace; font-size: 10pt; color: #888;")
 
-        lay.addWidget(self._mode); lay.addWidget(self._phase); lay.addStretch()
+        # Aggregate health dot: green only when every OK/FAIL flag present
+        # in the current packet is OK; red if any is FAIL; gray before the
+        # first packet or when a packet carries none of the known flags
+        # (legacy replay) -- same "stay quiet" rule as the Health tab.
+        health_label = QLabel("HEALTH:")
+        health_label.setStyleSheet("font-family: monospace; font-size: 10pt; color: #888;")
+        self._health_dot = StatusDot(10)
+        self._health_dot.set_color("#666666")
+        self._health_dot.setToolTip("No health data")
+
+        lay.addWidget(self._mode); lay.addWidget(self._phase)
+        lay.addWidget(health_label); lay.addWidget(self._health_dot)
+        lay.addStretch()
         lay.addWidget(self._sess); lay.addWidget(self._seq); lay.addWidget(self._link)
 
         self._last_packet_mono: float = 0.0
@@ -62,6 +75,35 @@ class TopStatusStrip(QWidget):
         self._phase.setStyleSheet(f"font-size: 11pt; color: {phase_color(pkt.phase)};")
         self._sess.setText(f"sess: {pkt.session_id[:8]}")
         self._seq.setText(f"seq: {pkt.seq}")
+        color, tooltip = self._health_summary(pkt)
+        self._health_dot.set_color(color)
+        self._health_dot.setToolTip(tooltip)
+
+    @staticmethod
+    def _health_summary(pkt: TelemetryPacket) -> tuple[str, str]:
+        tokens = set(pkt.status.split("|")) if pkt.status else set()
+        failing: list[str] = []
+        any_ok = False
+        for key, _label in OK_FAIL_FLAGS:
+            if f"{key}_FAIL" in tokens:
+                failing.append(key)
+            elif f"{key}_OK" in tokens:
+                any_ok = True
+        if failing:
+            return "#e74c3c", ", ".join(failing) + " failing"
+        if any_ok:
+            return "#2ecc71", "All health flags OK"
+        return "#666666", "No health data"
+
+    def health_color(self) -> str:
+        """Current aggregate health dot color, as ``#rrggbb``. Test-only
+        accessor."""
+        return self._health_dot.color()
+
+    def health_tooltip(self) -> str:
+        """Current aggregate health dot tooltip text. Test-only
+        accessor."""
+        return self._health_dot.toolTip()
 
     def _refresh_link(self) -> None:
         if self._last_packet_mono <= 0.0:
@@ -112,16 +154,10 @@ class ValuesPanel(QScrollArea):
             self._row(f"m{m}_mode", f"M{m} mode")
             self._row(f"m{m}_src", f"M{m} src")
 
-        self._section("STATUS")
-        self._row("status", "flags")
-        # Individual status flags broken out so operators can watch them
-        # without scanning the whole bitfield string.
-        self._row("heater_inhibit", "heater inhibit")
-        self._row("resistance_ok", "resistance")
-        for component in (
-            "DPS310", "ADS1115", "SEQUENT_RTD", "MOTOR0", "MOTOR1", "PWM"
-        ):
-            self._row(f"component_{component}", component)
+        # STATUS flags (raw bitfield, tri-state flags, and COMPONENT_STATE)
+        # are no longer rendered here as text rows -- the Health tab
+        # (panels_health.HealthPanel) is the single home for flag-state
+        # display, with green/red/amber dots for every flag.
 
         self._lay.addStretch()
 
@@ -191,41 +227,9 @@ class ValuesPanel(QScrollArea):
             else:
                 for k in ("state", "cfg", "mode", "src"):
                     f[f"m{m}_{k}"].setText("—")
-        f["status"].setText(pkt.status)
-        # Status bits surfaced as boolean-ish indicators.
-        hi = "HEATER_INHIBITED" in pkt.status
-        f["heater_inhibit"].setText("INHIBITED" if hi else "active")
-        f["heater_inhibit"].setStyleSheet(
-            "font-family: monospace; font-size: 11px; color: "
-            + ("#f39c12" if hi else "#2ecc71") + ";"
-        )
-        # RESISTANCE_OK / RESISTANCE_FAIL reflects the configured resistance
-        # source. If neither bit is in the status string we
-        # treat it as "unknown" to stay visually quiet on legacy replays.
-        res_ok = "RESISTANCE_OK" in pkt.status
-        res_fail = "RESISTANCE_FAIL" in pkt.status
-        f["resistance_ok"].setText("OK" if res_ok else ("FAIL" if res_fail else "—"))
-        f["resistance_ok"].setStyleSheet(
-            "font-family: monospace; font-size: 11px; color: "
-            + ("#2ecc71" if res_ok else "#e74c3c" if res_fail else "#888")
-            + ";"
-        )
-        for component in (
-            "DPS310", "ADS1115", "SEQUENT_RTD", "MOTOR0", "MOTOR1", "PWM"
-        ):
-            state = pkt.component_state.get(component, "UNKNOWN")
-            field = f[f"component_{component}"]
-            field.setText(state)
-            color = (
-                "#2ecc71" if state == "OK"
-                else "#f39c12"
-                if state in ("DEGRADED", "STALE", "DISCOVERING")
-                else "#888"
-                if state in ("DISABLED", "UNKNOWN")
-                else "#e74c3c"
-            )
-            field.setStyleSheet(
-                f"font-family: monospace; font-size: 11px; color: {color};")
+        # Status flags (raw bitfield, heater inhibit, resistance OK/FAIL,
+        # COMPONENT_STATE) are rendered exclusively by the Health tab now
+        # -- see panels_health.HealthPanel.on_packet.
 
 
 # ── Preflight checklist ───────────────────────────────────────────────────────
