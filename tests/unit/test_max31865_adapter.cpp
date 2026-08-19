@@ -9,6 +9,7 @@
 #include <string>
 
 #include "coatheal/hal/max31865_adapter.hpp"
+#include "coatheal/hal/spi_bus_lock.hpp"
 #include "fake_spi_bus.hpp"
 
 using namespace coatheal;
@@ -340,6 +341,66 @@ void TestTransferFailureDuringBiasOnWriteAttemptsNoExtraTransfer() {
   assert(bus.remaining_expectations() == 0);
 }
 
+// ---------------------------------------------------------------------
+// C2(a) + C1 (click side): the adapter used to take NO bus lock at all --
+// SensorManager's clicks_io_mu_ is click-vs-click only and knows nothing
+// about the two TMC5160s on the same physical SPI0 controller. Each single
+// register conversation must now be one hold of the per-CONTROLLER lock,
+// with this opener's own mode re-applied inside it.
+//
+// Hand-computed expectations, pinned before the assertions:
+//   * a healthy ReadOneShot() is exactly FOUR Transfer() calls:
+//     WriteConfig(bias on), WriteConfig(bias on|1shot), ReadRtdCode (one
+//     3-byte auto-increment read), WriteConfig(bias off). No fault read,
+//     no FAULTCLR, because msb/lsb 0x40/0x00 -> code 8192, fault bit 0.
+//   * so across the SECOND one-shot (bus already open, no Open() hold):
+//     lock acquisitions +4, settings applications +4.
+//   * this click sits on /dev/spidev0.1; the motors on /dev/spidev0.0 must
+//     read the SAME counter — one controller, one lock.
+// ---------------------------------------------------------------------
+
+void ScriptHealthyOneShot(FakeSpiBus* bus) {
+  ExpectConfigWrite(bus, kCfgBiasOn);
+  ExpectConfigWrite(bus, kCfgBiasOn1Shot);
+  ExpectRtdRead(bus, /*msb=*/0x40, /*lsb=*/0x00);
+  ExpectConfigWrite(bus, kCfgBiasOff);
+}
+
+void TestEachTransferIsOneControllerLockHoldWithModeReapplied() {
+  FakeSpiBus bus;
+  const auto opts = TestOptions();  // spi_device = "/dev/spidev0.1"
+  Max31865Adapter adapter(&bus, opts);
+
+  // First cycle opens the bus (an extra hold we deliberately exclude).
+  ScriptHealthyOneShot(&bus);
+  Max31865Adapter::Reading reading;
+  std::string error;
+  assert(adapter.ReadOneShot(&reading, &error));
+  assert(reading.valid);
+
+  const std::uint64_t locks_before = SpiBusLockAcquireCount(opts.spi_device);
+  const int applies_before = bus.settings_applications();
+
+  ScriptHealthyOneShot(&bus);
+  assert(adapter.ReadOneShot(&reading, &error));
+  assert(reading.valid);
+
+  assert(SpiBusLockAcquireCount(opts.spi_device) == locks_before + 4);
+  assert(bus.settings_applications() == applies_before + 4);
+
+  // Controller-keyed, not device-keyed: the motors' node sees these holds.
+  assert(SpiBusLockAcquireCount("/dev/spidev0.0") == locks_before + 4);
+
+  // Re-applied settings are the click's own (mode 1, native CE), not a
+  // motor's (mode 3 | SPI_NO_CS).
+  assert(bus.applied_mode() == 1);
+  assert(bus.applied_no_cs() == false);
+  assert(bus.applied_speed_hz() == opts.spi_speed_hz);
+
+  assert(bus.mismatch_count() == 0);
+  assert(bus.remaining_expectations() == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -354,5 +415,6 @@ int main() {
   TestTransferFailureDuringOneShotWriteAttemptsBiasOff();
   TestTransferFailureDuringRtdReadAttemptsBiasOff();
   TestTransferFailureDuringBiasOnWriteAttemptsNoExtraTransfer();
+  TestEachTransferIsOneControllerLockHoldWithModeReapplied();
   return 0;
 }
