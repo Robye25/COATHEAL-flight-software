@@ -11,7 +11,7 @@ from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QAbstractItemView, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
-    QListWidget, QListWidgetItem, QPushButton, QScrollArea, QTableWidget,
+    QListWidget, QListWidgetItem, QPushButton, QScrollArea, QSizePolicy, QTableWidget,
     QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
 )
 
@@ -44,6 +44,15 @@ class TopStatusStrip(QWidget):
         self._sess = QLabel("sess: —");    self._sess.setStyleSheet("font-family: monospace; font-size: 10pt; color: #888;")
         self._seq  = QLabel("seq: —");     self._seq.setStyleSheet("font-family: monospace; font-size: 10pt; color: #888;")
 
+        # sess/seq/link/disc are secondary/debug info (already dimmed,
+        # placed after the stretch) -- Ignored lets the layout shrink them
+        # below their natural text width instead of letting a long IP:port
+        # discovery string force the whole window wider than 1280px.
+        # MODE/PHASE/HEALTH (left of the stretch, safety-relevant) keep
+        # their normal size policy and are never clipped.
+        for _lbl in (self._link, self._sess, self._seq):
+            _lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
         # Aggregate health dot: green only when every OK/FAIL flag present
         # in the current packet is OK; red if any is FAIL; gray before the
         # first packet or when a packet carries none of the known flags
@@ -64,6 +73,7 @@ class TopStatusStrip(QWidget):
 
         self._disc = QLabel("disc: —"); self._disc.setStyleSheet(
             "font-family: monospace; font-size: 10pt; color: #888;")
+        self._disc.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         lay.addWidget(self._disc)
 
     def set_discovery(self, text: str, color: str = "#888") -> None:
@@ -173,14 +183,14 @@ class ValuesPanel(QScrollArea):
 
     def _section(self, title: str) -> None:
         lbl = QLabel(title)
-        lbl.setStyleSheet("font-weight: bold; color: #aaa; font-size: 10px; "
+        lbl.setStyleSheet("font-weight: bold; color: #aaa; font-size: 10pt; "
                           "border-bottom: 1px solid #333; margin-top: 6px;")
         self._lay.addWidget(lbl)
 
     def _row(self, key: str, label: str) -> None:
         w = QWidget(); h = QHBoxLayout(w); h.setContentsMargins(0, 0, 0, 0)
-        name = QLabel(label); name.setMinimumWidth(90); name.setStyleSheet("color: #888; font-size: 11px;")
-        val = QLabel("—"); val.setStyleSheet("font-family: monospace; font-size: 11px;")
+        name = QLabel(label); name.setMinimumWidth(90); name.setStyleSheet("color: #888; font-size: 11pt;")
+        val = QLabel("—"); val.setStyleSheet("font-family: monospace; font-size: 11pt;")
         h.addWidget(name); h.addWidget(val); h.addStretch()
         self._lay.addWidget(w)
         self._fields[key] = val
@@ -263,7 +273,14 @@ class PreflightPanel(QWidget):
             row = QHBoxLayout(); w = QWidget(); w.setLayout(row); row.setContentsMargins(0, 0, 0, 0)
             dot = StatusDot(12); dot.set_color("#555")
             lbl = QLabel(label); lbl.setStyleSheet("font-size: 11pt;")
-            row.addWidget(dot); row.addWidget(lbl); row.addStretch()
+            # Word-wrap (rather than a fixed one-line width) lets this
+            # panel shrink below the widest checklist phrase -- e.g. "6
+            # heater duties reporting" was, at one point, the single
+            # largest contributor to the right dock's minimum width,
+            # forcing the whole window wider than 1280px even after the
+            # dock's own minimum was relaxed.
+            lbl.setWordWrap(True)
+            row.addWidget(dot); row.addWidget(lbl, 1)
             lay.addWidget(w)
             self._items[key] = (dot, lbl)
         lay.addStretch()

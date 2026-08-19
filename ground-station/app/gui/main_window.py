@@ -97,8 +97,9 @@ class MainWindow(QMainWindow):
         left_dock = QDockWidget("Controls", self)
         left_dock.setWidget(left_scroll)
         left_dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
-        left_dock.setMinimumWidth(360)
+        left_dock.setMinimumWidth(300)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, left_dock)
+        self._left_dock = left_dock
 
         # ── right dock: tabs ──
         self._health = HealthPanel()
@@ -120,8 +121,9 @@ class MainWindow(QMainWindow):
         right_tabs.setCurrentIndex(0)
         right_dock = QDockWidget("Status", self)
         right_dock.setWidget(right_tabs)
-        right_dock.setMinimumWidth(320)
+        right_dock.setMinimumWidth(280)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, right_dock)
+        self._right_dock = right_dock
 
         # ── bottom: emergency bar + log + pull events (tabbed) ──
         bottom_container = QWidget()
@@ -139,6 +141,7 @@ class MainWindow(QMainWindow):
         bottom_dock.setAllowedAreas(Qt.DockWidgetArea.BottomDockWidgetArea)
         bottom_dock.setMinimumHeight(180)
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, bottom_dock)
+        self._bottom_dock = bottom_dock
 
         # ── status bar ──
         self.setStatusBar(QStatusBar())
@@ -257,6 +260,22 @@ class MainWindow(QMainWindow):
             # already-running guard in `_on_start_telemetry`.
             self._connection.set_receiver_running(False)
             self._receiver = None
+            # This branch just nulled `self._receiver` above, so any late
+            # `connection_changed(False, ...)` from the dying receiver
+            # would be dropped by `_on_connection_changed`'s sender guard
+            # (it only trusts signals whose sender is the *current*
+            # `self._receiver`, which is now None). Nothing else will ever
+            # clear link state for this receiver, so the failed branch
+            # must do it itself rather than relying on that now-unreachable
+            # signal.
+            self._link_ok = False
+            self._connection.set_connected(False, "")
+            # `set_connected` and `set_status` both paint ConnectionPanel's
+            # single status label -- re-assert "failed" so the operator
+            # still sees *why* the receiver died, not just "waiting for
+            # onboard" (set_connected's text), which would silently mask
+            # the actual bind failure.
+            self._connection.set_status(state)
 
     def _on_priority_changed(self, p: int) -> None:
         if hasattr(self, "_beacon") and self._beacon is not None:
@@ -378,6 +397,11 @@ class MainWindow(QMainWindow):
         act_quit = QAction("Quit", self); act_quit.triggered.connect(self.close); act_quit.setShortcut("Ctrl+Q")
         file_menu.addAction(act_quit)
 
+        view_menu = self.menuBar().addMenu("&View")
+        for dock in (self._left_dock, self._right_dock, self._bottom_dock):
+            act = dock.toggleViewAction()
+            view_menu.addAction(act)
+
         help_menu = self.menuBar().addMenu("&Help")
         act_cheat = QAction("Keyboard shortcuts", self); act_cheat.setShortcut("F1")
         act_cheat.triggered.connect(self._show_cheatsheet)
@@ -387,7 +411,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self, "Shortcuts",
             "Space  — pause/resume plots\n"
-            "Esc    — STEPPER_STOP\n"
+            "Esc    — STEPPER_STOP both motors (panic, no confirm)\n"
             "Shift+H — HEATERS_OFF\n"
             "Shift+E — ENTER_SAFE (confirm)\n"
             "Shift+S — RADIO_SILENCE (confirm)\n"
@@ -402,7 +426,11 @@ class MainWindow(QMainWindow):
             s = QShortcut(QKeySequence(keys), self); s.setContext(scope); s.activated.connect(slot); return s
 
         sc("Space",   self._toggle_pause)
-        sc("Esc",     self._stepper_panel.emergency_stop)
+        # Esc is panic-class: stops BOTH motors, no confirmation dialog --
+        # same policy as HEATERS_OFF. Routes through StepperPanel's own
+        # emergency_stop_all (same dispatcher path/wire spelling as the
+        # EmergencyBar's STOP MOTORS button).
+        sc("Esc",     self._stepper_panel.emergency_stop_all)
         sc("Shift+H", lambda: self._dispatcher.send("HEATERS_OFF",   tag=self._emergency))
         sc("Shift+E", lambda: self._fire_confirm("ENTER_SAFE",    "Enter SAFE?"))
         sc("Shift+S", lambda: self._fire_confirm("RADIO_SILENCE", "Silence downlink?"))

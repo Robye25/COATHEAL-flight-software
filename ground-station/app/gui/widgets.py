@@ -48,7 +48,7 @@ class Toast(QLabel):
         bg = "#27ae60" if ok else "#c0392b"
         self.setStyleSheet(
             f"background-color: {bg}; color: white; "
-            f"padding: 4px 10px; border-radius: 4px; font-size: 11px;"
+            f"padding: 4px 10px; border-radius: 4px; font-size: 11pt;"
         )
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.adjustSize()
