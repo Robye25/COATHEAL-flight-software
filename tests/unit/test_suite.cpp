@@ -374,6 +374,9 @@ std::string WriteTempConfig(const std::string& extra = "") {
   out << "sensor.uv_ads1115_channel=0\n";
   out << "sensor.uv_full_scale_v=4.096\n";
   out << "sensor.resistance_source=disabled\n";
+  out << "sensor.max31865_reference_ohm=470.0\n";
+  out << "sensor.max31865_poll_ms=1000\n";
+  out << "sensor.max31865_sample_indices=0,4\n";
   out << "heater.output_lines=19,13,6,5,24,23\n";
   out << "heater.pwm_frequency_hz=1.0\n";
   out << "heater.active_high=true\n";
@@ -445,6 +448,10 @@ void TestConfigParsesReliabilityFields() {
   assert(cfg.sensors.ads1115_i2c_addr == 0x48);
   assert(cfg.sensors.uv_ads1115_channel == 0);
   assert(cfg.sensors.resistance_source == "disabled");
+  assert(std::fabs(cfg.sensors.max31865_reference_ohm - 470.0) < 1e-9);
+  assert(cfg.sensors.max31865_poll_ms == 1000);
+  assert(cfg.sensors.max31865_sample_indices ==
+        std::vector<std::size_t>({0, 4}));
   assert(cfg.heaters.output_lines.size() == 6U);
   assert(cfg.heaters.output_lines[0] == 19U);
   assert(cfg.heaters.output_lines[5] == 23U);
@@ -638,9 +645,11 @@ void TestSequentRtdConfigDefaultsAndParsing() {
   assert(defaults.sensors.sequent_rtd_channels.size() == 8);
   assert(defaults.sensors.sequent_rtd_channels[0] == 1);
   assert(defaults.sensors.sequent_rtd_channels[7] == 8);
-  // The Sequent RTD HAT is now the sole sample-temperature source, so it is
-  // also the default resistance_source (see config.hpp), not "disabled".
-  assert(defaults.sensors.resistance_source == "sequent_rtd");
+  // v3: the MAX31865 dual-click sample-resistance instrument is the shipped
+  // default resistance_source (see config.hpp), not "disabled". The Sequent
+  // RTD HAT remains the sole sample-*temperature* source regardless of which
+  // resistance_source is selected -- that is a separate config axis.
+  assert(defaults.sensors.resistance_source == "max31865_click");
 
   const std::string path = WriteTempConfig(
       "sensor.sequent_rtd_stack=2\n"
@@ -699,6 +708,69 @@ void TestSequentRtdConfigRejectsBadValues() {
      "must be pt100 (pt1000 is recognised but not implemented: the CVD "
      "cross-check and resistance window are PT100-only)"},
     {"sensor.sequent_rtd_resistance_min_ohm=400.0\n", "sequent_rtd_resistance_min_ohm"},
+  };
+  for (const Case& c : cases) {
+    const std::string path = WriteTempConfig(c.body);
+    coatheal::OnboardConfig cfg;
+    std::string error;
+    assert(!coatheal::LoadConfigFromIni(path, &cfg, &error));
+    assert(error.find(c.fragment) != std::string::npos);
+
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+  }
+}
+
+void TestMax31865ConfigDefaultsAndParsing() {
+  coatheal::OnboardConfig defaults;
+  assert(std::fabs(defaults.sensors.max31865_reference_ohm - 470.0) < 1e-9);
+  assert(defaults.sensors.max31865_poll_ms == 1000);
+  // Owner-flagged placeholder: first specimen of each motor group
+  // (motor0.samples starts at 0, motor1.samples starts at 4).
+  assert(defaults.sensors.max31865_sample_indices ==
+        std::vector<std::size_t>({0, 4}));
+  assert(defaults.sensors.resistance_source == "max31865_click");
+
+  const std::string path = WriteTempConfig(
+      "sensor.max31865_reference_ohm=430.0\n"
+      "sensor.max31865_poll_ms=250\n"
+      "sensor.max31865_sample_indices=2,6\n"
+      "sensor.resistance_source=max31865_click\n");
+
+  coatheal::OnboardConfig cfg;
+  std::string error;
+  assert(coatheal::LoadConfigFromIni(path, &cfg, &error));
+  assert(std::fabs(cfg.sensors.max31865_reference_ohm - 430.0) < 1e-9);
+  assert(cfg.sensors.max31865_poll_ms == 250);
+  assert(cfg.sensors.max31865_sample_indices ==
+        std::vector<std::size_t>({2, 6}));
+  assert(cfg.sensors.resistance_source == "max31865_click");
+
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+}
+
+void TestMax31865ConfigRejectsBadValues() {
+  struct Case { const char* body; const char* fragment; };
+  const Case cases[] = {
+    {"sensor.max31865_reference_ohm=0\n",
+     "sensor.max31865_reference_ohm must be > 0"},
+    {"sensor.max31865_reference_ohm=-5\n",
+     "sensor.max31865_reference_ohm must be > 0"},
+    {"sensor.max31865_poll_ms=0\n",
+     "sensor.max31865_poll_ms must be > 0"},
+    {"sensor.max31865_sample_indices=0\n",
+     "sensor.max31865_sample_indices must have exactly two entries"},
+    {"sensor.max31865_sample_indices=0,1,2\n",
+     "sensor.max31865_sample_indices must have exactly two entries"},
+    // Isolates the distinctness rule from the two rules above/below: the
+    // count is exactly two and every entry is in range, so only a
+    // duplicate-entries check can fire here.
+    {"sensor.max31865_sample_indices=3,3\n",
+     "sensor.max31865_sample_indices entries must be distinct"},
+    {"sensor.max31865_sample_indices=0,8\n",
+     "sensor.max31865_sample_indices entries must be less than "
+     "hardware.sample_count"},
   };
   for (const Case& c : cases) {
     const std::string path = WriteTempConfig(c.body);
@@ -846,6 +918,8 @@ int main() {
   TestConfigAcceptsFlatCurrentBoundary();
   TestSequentRtdConfigDefaultsAndParsing();
   TestSequentRtdConfigRejectsBadValues();
+  TestMax31865ConfigDefaultsAndParsing();
+  TestMax31865ConfigRejectsBadValues();
   TestLegacySensorKeysAreRejected();
   TestStateTransitions();
   TestManualHeaterOverrideWithoutFloorControl();

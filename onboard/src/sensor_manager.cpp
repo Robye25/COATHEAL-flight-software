@@ -30,6 +30,13 @@ constexpr double kResistanceDecayPerPull = 0.05;
 constexpr const char* kI2cDevice = "/dev/i2c-1";
 constexpr double kNoReading = std::numeric_limits<double>::quiet_NaN();
 
+// v3 schematic SPI0 chip-select crossover (see the Global Constraints GPIO
+// map): CE1/GP07 wires to click index 0 (SAMPLE1), which spidev enumerates
+// as /dev/spidev0.1; CE0/GP08 wires to click index 1 (SAMPLE2), enumerated
+// as /dev/spidev0.0. Fixed by hardware, not configurable.
+constexpr const char* kClick1SpiDevice = "/dev/spidev0.1";  // click 0, SAMPLE1
+constexpr const char* kClick2SpiDevice = "/dev/spidev0.0";  // click 1, SAMPLE2
+
 std::int32_t SignExtend(std::uint32_t value, int bits) {
   const std::uint32_t sign = 1U << (bits - 1);
   if ((value & sign) != 0U) {
@@ -56,6 +63,21 @@ SequentRtdAdapter::Options MakeSequentOptions(const OnboardConfig& config) {
     options.channel_map[i] =
         static_cast<std::uint8_t>(config.sensors.sequent_rtd_channels[i]);
   }
+  return options;
+}
+
+// Same rationale as MakeSequentOptions: the HAL does not depend on
+// OnboardConfig, so the config-key -> adapter-options translation lives
+// here. Options::spi_speed_hz/settle_ms/conversion_ms are deliberately left
+// at Max31865Adapter::Options{}'s datasheet-minimum defaults (500 kHz /
+// 10 ms / 65 ms) -- the plan adds exactly three sensor.max31865_* keys
+// (reference ohm, poll interval, sample indices) and no more, so per-click
+// SPI speed or one-shot timing are not configurable.
+Max31865Adapter::Options MakeMax31865Options(const OnboardConfig& config,
+                                             const std::string& device) {
+  Max31865Adapter::Options options;
+  options.spi_device = device;
+  options.reference_ohm = config.sensors.max31865_reference_ohm;
   return options;
 }
 
@@ -113,7 +135,9 @@ SensorManager::SensorManager(const OnboardConfig& config,
                              I2cAdapter* i2c,
                              RtcAdapter* rtc,
                              Ina3221Adapter* ina,
-                             I2cBus* rtd_bus_override)
+                             I2cBus* rtd_bus_override,
+                             SpiBus* click1_bus_override,
+                             SpiBus* click2_bus_override)
     : config_(config),
       spi_(spi),
       i2c_(i2c),
@@ -127,7 +151,17 @@ SensorManager::SensorManager(const OnboardConfig& config,
       rtd_bus_active_(rtd_bus_override != nullptr
                           ? rtd_bus_override
                           : static_cast<I2cBus*>(&rtd_bus_)),
-      rtd_(rtd_bus_active_, MakeSequentOptions(config)) {
+      rtd_(rtd_bus_active_, MakeSequentOptions(config)),
+      click1_bus_(),
+      click2_bus_(),
+      click1_bus_active_(click1_bus_override != nullptr
+                             ? click1_bus_override
+                             : static_cast<SpiBus*>(&click1_bus_)),
+      click2_bus_active_(click2_bus_override != nullptr
+                             ? click2_bus_override
+                             : static_cast<SpiBus*>(&click2_bus_)),
+      click1_(click1_bus_active_, MakeMax31865Options(config, kClick1SpiDevice)),
+      click2_(click2_bus_active_, MakeMax31865Options(config, kClick2SpiDevice)) {
   if (config_.sensors.resistance_source != "simulated") {
     std::fill(sample_resistance_ohm_.begin(), sample_resistance_ohm_.end(), 0.0);
   }
@@ -145,6 +179,18 @@ SensorManager::SensorManager(const OnboardConfig& config,
   rtd_health_.state = rtd_bus_active_->available() ? ComponentState::kDiscovering
                                                    : ComponentState::kDisabled;
   if (!rtd_bus_active_->available()) rtd_health_.error = "I2C_UNAVAILABLE";
+
+  // Same reasoning as the RTD card: no enable key, "configured off" is not
+  // a state the clicks can be in (Max31865Loop always polls when both buses
+  // are available, independent of resistance_source). DISABLED, not FAILED,
+  // on a build host with no Linux SPI support.
+  const bool clicks_available =
+      click1_bus_active_->available() && click2_bus_active_->available();
+  for (ComponentHealth& health : max31865_health_) {
+    health.state = clicks_available ? ComponentState::kDiscovering
+                                    : ComponentState::kDisabled;
+    if (!clicks_available) health.error = "SPI_UNAVAILABLE";
+  }
 }
 
 SensorManager::~SensorManager() { Stop(); }
@@ -160,6 +206,9 @@ void SensorManager::Start() {
   if (rtd_bus_active_->available()) {
     rtd_thread_ = std::thread(&SensorManager::SequentRtdLoop, this);
   }
+  if (click1_bus_active_->available() && click2_bus_active_->available()) {
+    max31865_thread_ = std::thread(&SensorManager::Max31865Loop, this);
+  }
 }
 
 void SensorManager::Stop() {
@@ -168,6 +217,7 @@ void SensorManager::Stop() {
   if (dps_thread_.joinable()) dps_thread_.join();
   if (ads_thread_.joinable()) ads_thread_.join();
   if (rtd_thread_.joinable()) rtd_thread_.join();
+  if (max31865_thread_.joinable()) max31865_thread_.join();
 }
 
 bool SensorManager::WaitForPoll(int milliseconds) {
@@ -581,6 +631,82 @@ void SensorManager::SequentRtdLoop() {
   }
 }
 
+// Polls both MAX31865 clicks every cycle, independent of resistance_source
+// -- exactly the SequentRtdLoop shape (see its owns_resistance comment):
+// this worker always runs and always publishes MAX31865_1/2 health so
+// CHECK MAX31865 and ComponentSummary stay live no matter which
+// resistance_source is selected, but only WRITES sample_resistance_ohm_
+// when max31865_click is actually the configured source.
+void SensorManager::Max31865Loop() {
+  while (running_.load()) {
+    Max31865Adapter::Reading readings[2];
+    std::string errors[2];
+    bool ok[2] = {false, false};
+    {
+      std::lock_guard<std::mutex> io_lock(clicks_io_mu_);
+      ok[0] = click1_.ReadOneShot(&readings[0], &errors[0]);
+      ok[1] = click2_.ReadOneShot(&readings[1], &errors[1]);
+    }
+
+    // Bus-level health: did each click's one-shot CONVERSATION itself
+    // succeed. Saturation is a valid measurement of an out-of-range
+    // specimen (bus healthy, channel invalid) and must never key this --
+    // only a call failure (ok[n] == false) does. This is keyed off the
+    // ReadOneShot() return value, never off readings[n].valid.
+    clicks_bus_ok_ = ok[0] && ok[1];
+
+    const auto now = std::chrono::steady_clock::now();
+    {
+      std::lock_guard<std::mutex> lock(cache_mu_);
+      // Mirrors SequentRtdLoop's owns_resistance guard: sample_resistance_ohm_
+      // has more than one possible writer, and this worker owns it only when
+      // max31865_click is the selected source. It still runs and publishes
+      // click health unconditionally (see the function comment above).
+      const bool owns_resistance =
+          config_.sensors.resistance_source == "max31865_click";
+      for (int click = 0; click < 2; ++click) {
+        ComponentHealth& health = max31865_health_[click];
+        if (ok[click]) {
+          click_has_success_[click] = true;
+          click_last_success_[click] = now;
+          health.last_success_age_ms = 0;
+          if (readings[click].out_of_range) {
+            health.state = ComponentState::kDegraded;
+            health.error = "OUT_OF_RANGE";
+          } else {
+            health.state = ComponentState::kOk;
+            health.error = "NONE";
+          }
+          if (owns_resistance &&
+              static_cast<std::size_t>(click) <
+                  config_.sensors.max31865_sample_indices.size()) {
+            const std::size_t index =
+                config_.sensors.max31865_sample_indices[
+                    static_cast<std::size_t>(click)];
+            // 0.0 is the existing wire dash convention for "not valid" (see
+            // the "disabled" branch in ReadSnapshot below): a saturated
+            // reading writes 0.0 here rather than the diagnostic
+            // resistance_ohm value, keeping an out-of-range specimen
+            // indistinguishable on the wire from an unmonitored index.
+            if (index < sample_resistance_ohm_.size()) {
+              sample_resistance_ohm_[index] =
+                  readings[click].valid ? readings[click].resistance_ohm
+                                        : 0.0;
+            }
+          }
+        } else {
+          health.state =
+              FailedState(click_has_success_[click], click_last_success_[click]);
+          health.error = errors[click].empty() ? "NO_RESPONSE" : errors[click];
+          health.last_success_age_ms =
+              AgeMs(click_last_success_[click], click_has_success_[click]);
+        }
+      }
+    }
+    if (WaitForPoll(config_.sensors.max31865_poll_ms)) break;
+  }
+}
+
 SensorSnapshot SensorManager::ReadSimulatedSnapshot(
     MissionPhase phase, const std::vector<double>& heater_duty,
     double dt_seconds) {
@@ -737,8 +863,19 @@ SensorSnapshot SensorManager::ReadSnapshot(
     } else if (config_.sensors.resistance_source == "simulated") {
       resistance_ok_ = true;
       snapshot.sample_resistance_ohm = sample_resistance_ohm_;
+    } else if (config_.sensors.resistance_source == "max31865_click") {
+      // The v3-shipped default. Max31865Loop is the writer of
+      // sample_resistance_ohm_ here, so health is bus-level: clicks_bus_ok_
+      // tracks whether the last one-shot CONVERSATION with each click
+      // succeeded, not whether the specimen's resistance happened to land
+      // in range. A saturated/out-of-range specimen is a valid measurement
+      // (bus healthy, channel invalid) and must not drag resistance_ok()
+      // down -- that is the whole reason this is keyed off ReadOneShot's
+      // call result and never off Reading.valid.
+      resistance_ok_ = clicks_bus_ok_.load();
+      snapshot.sample_resistance_ohm = sample_resistance_ohm_;
     } else if (config_.sensors.resistance_source == "sequent_rtd") {
-      // The shipped default. SequentRtdLoop is the writer of
+      // Pre-v3 default, still accepted. SequentRtdLoop is the writer of
       // sample_resistance_ohm_ here, so health is bus-level: the numbers are
       // real element resistances exactly when the card conversation works.
       // Per-channel plausibility (open sensor, out-of-window resistance,
@@ -820,6 +957,23 @@ bool SensorManager::ActiveCheck(const std::string& component,
     return false;
   };
 
+  Max31865Adapter::Reading click_readings[2];
+  std::string click_errors[2] = {"SKIPPED", "SKIPPED"};
+  bool click_ok[2] = {false, false};
+  auto check_max31865 = [&]() {
+    // A CHECK is an on-demand full conversation, same as check_rtd below:
+    // a real one-shot conversion on each click, not a cached health read.
+    std::lock_guard<std::mutex> lock(clicks_io_mu_);
+    if (!click1_bus_active_->available() ||
+        !click2_bus_active_->available()) {
+      click_errors[0] = click_errors[1] = "SPI_UNAVAILABLE";
+      return false;
+    }
+    click_ok[0] = click1_.ReadOneShot(&click_readings[0], &click_errors[0]);
+    click_ok[1] = click2_.ReadOneShot(&click_readings[1], &click_errors[1]);
+    return click_ok[0] && click_ok[1];
+  };
+
   std::string rtd_error = "SKIPPED";
   SequentRtdAdapter::Identity identity;
   SequentRtdAdapter::Reading reading;
@@ -872,9 +1026,12 @@ bool SensorManager::ActiveCheck(const std::string& component,
                              component == "SEQUENT_RTD" ||
                              component == "RTD_CLICK" ||
                              component == "DAQ132M";
+  const bool max31865_requested =
+      component == "ALL" || component == "MAX31865";
   const bool dps_ok = !dps_requested || check_dps();
   const bool ads_ok = !ads_requested || check_ads();
   const bool rtd_ok = !rtd_requested || check_rtd();
+  const bool max31865_ok = !max31865_requested || check_max31865();
   if (details != nullptr) {
     std::ostringstream oss;
     oss << "dps310=" << (!dps_requested ? "SKIPPED"
@@ -892,9 +1049,19 @@ bool SensorManager::ActiveCheck(const std::string& component,
         AppendSequentDiagnostics(&oss, reading);
       }
     }
+    oss << ";max31865_1=" << (!max31865_requested
+                                  ? "SKIPPED"
+                                  : (click_ok[0] ? "OK" : "FAIL"))
+        << ";max31865_1_error="
+        << (!max31865_requested ? "SKIPPED" : click_errors[0])
+        << ";max31865_2=" << (!max31865_requested
+                                  ? "SKIPPED"
+                                  : (click_ok[1] ? "OK" : "FAIL"))
+        << ";max31865_2_error="
+        << (!max31865_requested ? "SKIPPED" : click_errors[1]);
     *details = oss.str();
   }
-  return dps_ok && ads_ok && rtd_ok;
+  return dps_ok && ads_ok && rtd_ok && max31865_ok;
 }
 
 std::string SensorManager::ComponentSummary() const {
@@ -922,6 +1089,8 @@ std::string SensorManager::ComponentSummary() const {
   ComponentHealth dps = dps_health_;
   ComponentHealth ads = ads_health_;
   const ComponentHealth rtd = rtd_health_;
+  const ComponentHealth click1_health = max31865_health_[0];
+  const ComponentHealth click2_health = max31865_health_[1];
   dps.last_success_age_ms =
       AgeMs(ambient_temp_cache_.last_success, ambient_temp_cache_.has_value);
   ads.last_success_age_ms =
@@ -959,6 +1128,14 @@ std::string SensorManager::ComponentSummary() const {
       << ";sequent_rtd_burst=" << (burst ? "1" : "0");
   if (probed) AppendSequentIdentity(&oss, identity);
   if (rtd_has_reading_) AppendSequentDiagnostics(&oss, rtd_last_reading_);
+  // max31865_health_ is not re-derived here either, same reasoning as
+  // rtd_health_ just above: Max31865Loop already folded staleness in.
+  oss << ";max31865_1=" << ToString(click1_health.state)
+      << ";max31865_1_error=" << click1_health.error
+      << ";max31865_1_age_ms=" << click1_health.last_success_age_ms
+      << ";max31865_2=" << ToString(click2_health.state)
+      << ";max31865_2_error=" << click2_health.error
+      << ";max31865_2_age_ms=" << click2_health.last_success_age_ms;
   oss << ";sample_valid_channels=" << sample_valid_channels
       << ";heated_channels_ok="
       << (HeatedChannelsValid(config_, channel_valid) ? "1" : "0")

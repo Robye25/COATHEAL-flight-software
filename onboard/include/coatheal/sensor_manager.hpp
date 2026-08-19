@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -15,9 +16,11 @@
 #include "coatheal/hal/i2c_adapter.hpp"
 #include "coatheal/hal/i2c_bus.hpp"
 #include "coatheal/hal/ina3221_adapter.hpp"
+#include "coatheal/hal/max31865_adapter.hpp"
 #include "coatheal/hal/rtc_adapter.hpp"
 #include "coatheal/hal/sequent_rtd_adapter.hpp"
 #include "coatheal/hal/spi_adapter.hpp"
+#include "coatheal/hal/spi_bus.hpp"
 
 namespace coatheal {
 
@@ -31,13 +34,16 @@ class SensorManager {
   // rtd_bus_override lets a test substitute the RTD card's I2C transport
   // (e.g. FakeI2cBus) without touching the owned LinuxI2cBus. nullptr (the
   // default, and every production call site) means "use the owned bus" —
-  // this parameter is purely additive.
+  // this parameter is purely additive. click1/2_bus_override do the same
+  // for the two MAX31865 clicks' SPI transport (e.g. FakeSpiBus).
   SensorManager(const OnboardConfig& config,
                 SpiAdapter* spi,
                 I2cAdapter* i2c,
                 RtcAdapter* rtc,
                 Ina3221Adapter* ina = nullptr,
-                I2cBus* rtd_bus_override = nullptr);
+                I2cBus* rtd_bus_override = nullptr,
+                SpiBus* click1_bus_override = nullptr,
+                SpiBus* click2_bus_override = nullptr);
   ~SensorManager();
 
   void Start();
@@ -77,6 +83,7 @@ class SensorManager {
   void DpsLoop();
   void AdsLoop();
   void SequentRtdLoop();
+  void Max31865Loop();
   bool WaitForPoll(int milliseconds);
   std::int64_t AgeMs(
       const std::chrono::steady_clock::time_point& value,
@@ -113,6 +120,15 @@ class SensorManager {
   std::atomic<bool> rtd_bus_ok_{false};
   std::atomic<bool> sample_temp_ok_{false};
   std::atomic<bool> uv_ok_{false};
+  // Bus-level health of the two MAX31865 clicks: true only when the last
+  // one-shot conversation with BOTH clicks actually succeeded. Saturation
+  // (Reading.valid == false, Reading.out_of_range == true) is a VALID
+  // measurement of an out-of-range specimen -- the bus is fine, the channel
+  // just characterised out of window -- so it must never key this flag; only
+  // ReadOneShot's own call result (Max31865Loop's `ok[click]`) does. Read by
+  // ReadSnapshot's max31865_click dispatch branch exactly the way
+  // rtd_bus_ok_ feeds the sequent_rtd branch.
+  std::atomic<bool> clicks_bus_ok_{false};
   bool simulated_ = false;
   mutable std::mutex cache_mu_;
   std::condition_variable stop_cv_;
@@ -121,6 +137,7 @@ class SensorManager {
   std::thread dps_thread_;
   std::thread ads_thread_;
   std::thread rtd_thread_;
+  std::thread max31865_thread_;
   ScalarCache ambient_temp_cache_;
   ScalarCache pressure_cache_;
   ScalarCache uv_cache_;
@@ -128,15 +145,31 @@ class SensorManager {
   ComponentHealth dps_health_;
   ComponentHealth ads_health_;
   ComponentHealth rtd_health_;
+  // Index 0 = click 0 (SAMPLE1), index 1 = click 1 (SAMPLE2). Written only
+  // by Max31865Loop, under cache_mu_, exactly like rtd_health_.
+  std::array<ComponentHealth, 2> max31865_health_;
+  // Per-click last-successful-conversation bookkeeping for FailedState(),
+  // mirroring ScalarCache's has_value/last_success pair. Written only by
+  // Max31865Loop, under cache_mu_.
+  bool click_has_success_[2] = {false, false};
+  std::chrono::steady_clock::time_point click_last_success_[2];
   int resolved_dps_address_ = -1;
   int resolved_ads_address_ = -1;
   mutable std::mutex dps_io_mu_;
   mutable std::mutex ads_io_mu_;
   mutable std::mutex rtd_io_mu_;
+  // Guards both click1_ and click2_'s SPI conversations. A single mutex
+  // (rather than one per click) is deliberate: Max31865Loop always talks to
+  // both clicks back-to-back every poll, and ActiveCheck's on-demand
+  // MAX31865 conversation does the same, so there is no scenario where
+  // holding it for both calls costs real concurrency -- it only has to keep
+  // the worker and an on-demand CHECK from interleaving mid-conversation.
+  mutable std::mutex clicks_io_mu_;
 
   // Declared last so the constructor initialiser list can stay in
   // declaration order; rtd_ holds a pointer to rtd_bus_active_, so both
-  // must precede it here.
+  // must precede it here. Same reasoning extends to the two MAX31865 click
+  // buses/adapters declared alongside it.
   LinuxI2cBus rtd_bus_;
   // The bus rtd_ and every rtd_bus_.available() check actually use: the
   // constructor sets this to rtd_bus_override when a test supplies one,
@@ -149,6 +182,19 @@ class SensorManager {
   bool rtd_probed_ = false;
   SequentRtdAdapter::Reading rtd_last_reading_;
   bool rtd_has_reading_ = false;
+
+  // Owned SPI transports for the two MAX31865 clicks (production: real
+  // LinuxSpiBus, one per click since each is a distinct spidev device).
+  LinuxSpiBus click1_bus_;
+  LinuxSpiBus click2_bus_;
+  // The bus click1_/click2_ and every click*_bus_active_->available() check
+  // actually use: the constructor sets these to click1/2_bus_override when a
+  // test supplies one, otherwise &click1_bus_/&click2_bus_ -- the same
+  // override-pointer pattern as rtd_bus_active_ above.
+  SpiBus* click1_bus_active_ = nullptr;
+  SpiBus* click2_bus_active_ = nullptr;
+  Max31865Adapter click1_;
+  Max31865Adapter click2_;
 };
 
 }  // namespace coatheal
