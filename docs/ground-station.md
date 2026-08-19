@@ -62,8 +62,27 @@ does not duplicate CSV rows.
 | Pressure plot | DPS310 pressure |
 | Environment / UV plot | GUVA-S12SD value through ADS1115 |
 | Resistance plot | MAX31865 click coating-specimen resistance by default (two monitored slots only); Sequent RTD HAT per-channel PT100 element resistance under `sequent_rtd`; `-`/simulated per `sensor.resistance_source` |
-| Values panel | Latest parsed telemetry fields and status tokens |
+| Health tab | Dot for every OK/FAIL flag, tri-state mode flag, and COMPONENT_STATE entry; feeds the aggregate health dot on the top status strip |
+| Motors tab | Read-only M0/M1 dashboard (position, target, Hz, microstep, enable/moving/holding) -- independent of the Motor dock's controls |
+| Values panel | Latest parsed telemetry fields (status/component flags moved to the Health tab) |
+| Preflight tab | Checklist dots: RTC valid, ambient sensors in-range, heater duties reporting, motors enabled, telemetry link healthy, specimen uniformity, over-temperature latch clear |
 | Status bar | Phase, sequence, pressure, sample mean, link state, packet rate |
+
+## Safety controls
+
+`Esc` stops BOTH motors (`STEPPER_STOP 0` and `STEPPER_STOP 1`) -- panic-class,
+no confirmation dialog. The EmergencyBar's `STOP MOTORS` button (beside
+`HEATERS OFF`) does the same thing from the mouse; both are unconfirmed panic
+buttons by design, same policy. Every other EmergencyBar action
+(`ENTER SAFE`, `SHUTDOWN SAFE`, `RADIO SILENCE`) requires a confirmation
+dialog first.
+
+While a confirm dialog is open, keyboard shortcuts (including `Esc`) are
+blocked by Qt's modal dialog until it's dismissed -- `Esc` closes the dialog
+itself before it can reach anything else. The View menu (checkable actions
+toggling the left/right/bottom docks, wired to each dock's own
+`toggleViewAction()`) lets an operator hide any dock that isn't needed for the
+current phase of operations.
 
 ## Command Workflow
 

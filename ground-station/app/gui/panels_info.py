@@ -15,8 +15,15 @@ from PyQt6.QtWidgets import (
     QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
 )
 
-from ..protocol import CommandResponse, PullEvent, TelemetryPacket
+from ..protocol import PullEvent, TelemetryPacket
 from .dispatch import CommandHistoryEntry
+# Color tokens live in panels_health.py (not theme.py) because
+# panels_health already owns OK_FAIL_FLAGS -- the single source of truth
+# this aggregate is derived from -- so importing both from one module
+# means the flag list and its colors can never drift apart.
+from .panels_health import (
+    AMBER, COMPONENTS, GRAY, GREEN, OK_FAIL_FLAGS, RED, component_color,
+)
 from .theme import mode_color, phase_color
 from .widgets import StatusDot
 
@@ -39,7 +46,47 @@ class TopStatusStrip(QWidget):
         self._sess = QLabel("sess: —");    self._sess.setStyleSheet("font-family: monospace; font-size: 10pt; color: #888;")
         self._seq  = QLabel("seq: —");     self._seq.setStyleSheet("font-family: monospace; font-size: 10pt; color: #888;")
 
-        lay.addWidget(self._mode); lay.addWidget(self._phase); lay.addStretch()
+        # `_link` is the live link-staleness readout ("LINK: STALE Δs") --
+        # safety-relevant, same protected tier as MODE/PHASE/HEALTH below.
+        # It gets NO shrink treatment: default size policy, natural
+        # minimumSizeHint, never clipped or hidden.
+        #
+        # `_sess`/`_seq`/`_disc` are genuinely secondary/debug info
+        # (already dimmed). They keep the default Preferred size policy
+        # (NOT Ignored -- an Ignored widget sharing a QHBoxLayout with a
+        # competing addStretch() gets driven to width 0 UNCONDITIONALLY,
+        # not just under pressure, which made them invisible at every
+        # window size, verified empirically). `setMinimumWidth(1)`
+        # overrides QLabel's minimumSizeHint floor (normally = full text
+        # width) with a 1px floor -- NOT 0: `QWidget.minimumSize()`
+        # defaults to QSize(0, 0), so `setMinimumWidth(0)` is
+        # indistinguishable from never having called it at all and the
+        # layout silently falls back to the full-text-width floor again
+        # (verified empirically -- 0 is a no-op, 1 is not, and visually
+        # identical). With a real (if tiny) explicit minimum, the layout
+        # gives these labels their full natural width whenever there's
+        # room and only compresses them under genuine pressure (e.g. a
+        # long IP:port discovery string at a narrow window width).
+        for _lbl in (self._sess, self._seq):
+            _lbl.setMinimumWidth(1)
+
+        # Aggregate health dot: green only when every OK/FAIL flag present
+        # in the current packet is OK, no COMPONENT_STATE entry is
+        # DEGRADED/STALE/FAILED, and SIMULATED isn't active; red if any
+        # flag is FAIL or any component is in that red set; amber if
+        # everything else is green-worthy but sensors are simulated;
+        # gray before the first packet or when a packet carries none of
+        # the known flags (legacy replay) -- same "stay quiet" rule as
+        # the Health tab.
+        health_label = QLabel("HEALTH:")
+        health_label.setStyleSheet("font-family: monospace; font-size: 10pt; color: #888;")
+        self._health_dot = StatusDot(10)
+        self._health_dot.set_color(GRAY)
+        self._health_dot.setToolTip("No health data")
+
+        lay.addWidget(self._mode); lay.addWidget(self._phase)
+        lay.addWidget(health_label); lay.addWidget(self._health_dot)
+        lay.addStretch()
         lay.addWidget(self._sess); lay.addWidget(self._seq); lay.addWidget(self._link)
 
         self._last_packet_mono: float = 0.0
@@ -47,6 +94,7 @@ class TopStatusStrip(QWidget):
 
         self._disc = QLabel("disc: —"); self._disc.setStyleSheet(
             "font-family: monospace; font-size: 10pt; color: #888;")
+        self._disc.setMinimumWidth(1)
         lay.addWidget(self._disc)
 
     def set_discovery(self, text: str, color: str = "#888") -> None:
@@ -62,6 +110,67 @@ class TopStatusStrip(QWidget):
         self._phase.setStyleSheet(f"font-size: 11pt; color: {phase_color(pkt.phase)};")
         self._sess.setText(f"sess: {pkt.session_id[:8]}")
         self._seq.setText(f"seq: {pkt.seq}")
+        color, tooltip = self._health_summary(pkt)
+        self._health_dot.set_color(color)
+        self._health_dot.setToolTip(tooltip)
+
+    @staticmethod
+    def _health_summary(pkt: TelemetryPacket) -> tuple[str, str]:
+        # Green requires every one of the 14 OK/FAIL flags to be present
+        # and OK -- a single surviving `<key>_OK` token in an otherwise
+        # truncated/partial STATUS field must NOT paint the master dot
+        # green while the other 13 subsystems are simply unreported.
+        tokens = set(pkt.status.split("|")) if pkt.status else set()
+        failing: list[str] = []
+        unreported: list[str] = []
+        for key, _label in OK_FAIL_FLAGS:
+            if f"{key}_FAIL" in tokens:
+                failing.append(key)
+            elif f"{key}_OK" not in tokens:
+                unreported.append(key)
+
+        # COMPONENT_STATE can fail independently of the 14 OK/FAIL flags
+        # (e.g. COMPONENT_STATE=MOTOR0:FAILED alongside a fully-OK
+        # STATUS=) -- the aggregate must not paint green over red dots
+        # on the Health tab's Components section. Reuses
+        # panels_health.component_color (the same function the Health
+        # tab itself uses) rather than a duplicated red-state set, so the
+        # two can never drift apart.
+        component_state = pkt.component_state or {}
+        red_components = [
+            f"{key} {component_state[key]}" for key, _label in COMPONENTS
+            if component_color(component_state.get(key)) == RED
+        ]
+
+        if failing or red_components:
+            parts = []
+            if failing:
+                parts.append(", ".join(failing) + " failing")
+            if red_components:
+                parts.append(", ".join(red_components))
+            return RED, "; ".join(parts)
+
+        if not unreported:
+            # SIMULATED is checked only once every flag/component is
+            # otherwise green-worthy -- fake sensor data must never hide
+            # under a plain green "all clear", but it also isn't a
+            # failure, so it gets its own amber tier rather than red.
+            if "SIMULATED" in tokens:
+                return AMBER, "running on simulated sensors"
+            return GREEN, "All 14 system flags OK, components OK"
+        if len(unreported) == len(OK_FAIL_FLAGS):
+            return GRAY, "no health flags reported"
+        return GRAY, f"{len(unreported)} flags unreported: " + ", ".join(unreported)
+
+    def health_color(self) -> str:
+        """Current aggregate health dot color, as ``#rrggbb``. Test-only
+        accessor."""
+        return self._health_dot.color()
+
+    def health_tooltip(self) -> str:
+        """Current aggregate health dot tooltip text. Test-only
+        accessor."""
+        return self._health_dot.toolTip()
 
     def _refresh_link(self) -> None:
         if self._last_packet_mono <= 0.0:
@@ -112,29 +221,23 @@ class ValuesPanel(QScrollArea):
             self._row(f"m{m}_mode", f"M{m} mode")
             self._row(f"m{m}_src", f"M{m} src")
 
-        self._section("STATUS")
-        self._row("status", "flags")
-        # Individual status flags broken out so operators can watch them
-        # without scanning the whole bitfield string.
-        self._row("heater_inhibit", "heater inhibit")
-        self._row("resistance_ok", "resistance")
-        for component in (
-            "DPS310", "ADS1115", "SEQUENT_RTD", "MOTOR0", "MOTOR1", "PWM"
-        ):
-            self._row(f"component_{component}", component)
+        # STATUS flags (raw bitfield, tri-state flags, and COMPONENT_STATE)
+        # are no longer rendered here as text rows -- the Health tab
+        # (panels_health.HealthPanel) is the single home for flag-state
+        # display, with green/red/amber dots for every flag.
 
         self._lay.addStretch()
 
     def _section(self, title: str) -> None:
         lbl = QLabel(title)
-        lbl.setStyleSheet("font-weight: bold; color: #aaa; font-size: 10px; "
+        lbl.setStyleSheet("font-weight: bold; color: #aaa; font-size: 10pt; "
                           "border-bottom: 1px solid #333; margin-top: 6px;")
         self._lay.addWidget(lbl)
 
     def _row(self, key: str, label: str) -> None:
         w = QWidget(); h = QHBoxLayout(w); h.setContentsMargins(0, 0, 0, 0)
-        name = QLabel(label); name.setMinimumWidth(90); name.setStyleSheet("color: #888; font-size: 11px;")
-        val = QLabel("—"); val.setStyleSheet("font-family: monospace; font-size: 11px;")
+        name = QLabel(label); name.setMinimumWidth(90); name.setStyleSheet("color: #888; font-size: 11pt;")
+        val = QLabel("—"); val.setStyleSheet("font-family: monospace; font-size: 11pt;")
         h.addWidget(name); h.addWidget(val); h.addStretch()
         self._lay.addWidget(w)
         self._fields[key] = val
@@ -166,9 +269,11 @@ class ValuesPanel(QScrollArea):
                     reading(f"S{i}", pkt.sample_temps_c[i], 2))
             else:
                 f[f"sample_{i}"].setText("N/A")
-        # Compatibility resistance rows. A literal '-' on the wire surfaces
-        # as None here; show an em-dash so the operator knows it's an
-        # unmeasured channel rather than a broken sensor.
+        # Sample-resistance rows. Only the two MAX31865-monitored specimens
+        # (sensor.max31865_sample_indices) carry live ohms; every other slot
+        # legitimately dashes. A literal '-' on the wire surfaces as None
+        # here; show an em-dash so the operator knows it's an unmonitored
+        # channel rather than a broken sensor.
         for i in range(8):
             if i < len(pkt.sample_resistance_ohm):
                 v = pkt.sample_resistance_ohm[i]
@@ -189,41 +294,9 @@ class ValuesPanel(QScrollArea):
             else:
                 for k in ("state", "cfg", "mode", "src"):
                     f[f"m{m}_{k}"].setText("—")
-        f["status"].setText(pkt.status)
-        # Status bits surfaced as boolean-ish indicators.
-        hi = "HEATER_INHIBITED" in pkt.status
-        f["heater_inhibit"].setText("INHIBITED" if hi else "active")
-        f["heater_inhibit"].setStyleSheet(
-            "font-family: monospace; font-size: 11px; color: "
-            + ("#f39c12" if hi else "#2ecc71") + ";"
-        )
-        # RESISTANCE_OK / RESISTANCE_FAIL reflects the configured resistance
-        # source. If neither bit is in the status string we
-        # treat it as "unknown" to stay visually quiet on legacy replays.
-        res_ok = "RESISTANCE_OK" in pkt.status
-        res_fail = "RESISTANCE_FAIL" in pkt.status
-        f["resistance_ok"].setText("OK" if res_ok else ("FAIL" if res_fail else "—"))
-        f["resistance_ok"].setStyleSheet(
-            "font-family: monospace; font-size: 11px; color: "
-            + ("#2ecc71" if res_ok else "#e74c3c" if res_fail else "#888")
-            + ";"
-        )
-        for component in (
-            "DPS310", "ADS1115", "SEQUENT_RTD", "MOTOR0", "MOTOR1", "PWM"
-        ):
-            state = pkt.component_state.get(component, "UNKNOWN")
-            field = f[f"component_{component}"]
-            field.setText(state)
-            color = (
-                "#2ecc71" if state == "OK"
-                else "#f39c12"
-                if state in ("DEGRADED", "STALE", "DISCOVERING")
-                else "#888"
-                if state in ("DISABLED", "UNKNOWN")
-                else "#e74c3c"
-            )
-            field.setStyleSheet(
-                f"font-family: monospace; font-size: 11px; color: {color};")
+        # Status flags (raw bitfield, heater inhibit, resistance OK/FAIL,
+        # COMPONENT_STATE) are rendered exclusively by the Health tab now
+        # -- see panels_health.HealthPanel.on_packet.
 
 
 # ── Preflight checklist ───────────────────────────────────────────────────────
@@ -239,7 +312,7 @@ class PreflightPanel(QWidget):
             ("rtc",        "RTC reporting valid"),
             ("ambient",    "Ambient sensors in-range"),
             ("heaters",    "6 heater duties reporting"),
-            ("stepper_en", "Stepper enabled"),
+            ("stepper_en", "Motors enabled"),
             ("link",       "Telemetry link healthy"),
             ("uniformity", "Specimen uniformity OK"),
             ("overtemp",   "No over-temperature latch"),
@@ -247,23 +320,64 @@ class PreflightPanel(QWidget):
             row = QHBoxLayout(); w = QWidget(); w.setLayout(row); row.setContentsMargins(0, 0, 0, 0)
             dot = StatusDot(12); dot.set_color("#555")
             lbl = QLabel(label); lbl.setStyleSheet("font-size: 11pt;")
-            row.addWidget(dot); row.addWidget(lbl); row.addStretch()
+            # Word-wrap (rather than a fixed one-line width) lets this
+            # panel shrink below the widest checklist phrase -- e.g. "6
+            # heater duties reporting" was, at one point, the single
+            # largest contributor to the right dock's minimum width,
+            # forcing the whole window wider than 1280px even after the
+            # dock's own minimum was relaxed.
+            lbl.setWordWrap(True)
+            row.addWidget(dot); row.addWidget(lbl, 1)
             lay.addWidget(w)
             self._items[key] = (dot, lbl)
         lay.addStretch()
 
     def on_packet(self, pkt: TelemetryPacket, link_ok: bool) -> None:
-        def mark(key: str, good: bool) -> None:
+        def mark(key: str, good) -> None:
+            """`good` is either a bool (green/red) or an explicit CSS
+            color string, for checklist items with a tri-state result."""
             dot, _ = self._items[key]
-            dot.set_color("#2ecc71" if good else "#e74c3c")
+            if isinstance(good, str):
+                dot.set_color(good)
+            else:
+                dot.set_color("#2ecc71" if good else "#e74c3c")
         mark("rtc", bool(pkt.rtc_valid))
         mark("ambient", pkt.sensor_valid.get("AT", True) and
              pkt.sensor_valid.get("AP", True))
         mark("heaters", len(pkt.heater_duty) >= 6)
-        mark("stepper_en", pkt.stepper is not None and pkt.stepper.enabled)
+        # Dual-motor frames never populate the legacy `pkt.stepper` field, so
+        # derive the checklist state from `pkt.steppers` instead: both
+        # motors enabled is green, exactly one is amber, none (or no motor
+        # telemetry at all) is red.
+        n_enabled = sum(1 for m in pkt.steppers if m.get("enabled"))
+        mark("stepper_en",
+             "#2ecc71" if n_enabled == 2 else
+             "#f39c12" if n_enabled == 1 else "#e74c3c")
         mark("link", link_ok)
         mark("uniformity", "UNIFORMITY_FAIL" not in pkt.status)
         mark("overtemp", "OVERTEMP_FAIL" not in pkt.status)
+
+    def set_link_down(self) -> None:
+        """Directly repaint the "Telemetry link healthy" dot when the
+        receiver itself has died. No packet will ever arrive on a dead
+        receiver, so the normal `on_packet()` repaint path can never run
+        -- without this, a dead receiver would leave the last packet's
+        stale green (or red) dot showing forever, over a ConnectionPanel
+        that plainly says "receiver failed". Gray, not red: once the
+        receiver is gone, whether the underlying link itself was healthy
+        is simply unknowable, not a confirmed failure."""
+        dot, _lbl = self._items["link"]
+        dot.set_color(GRAY)
+        dot.setToolTip("Telemetry receiver failed -- link state unknown")
+
+    def dot_color(self, key: str) -> str:
+        """Current checklist dot color for `key` (e.g. "stepper_en"), as
+        ``#rrggbb``. Test-only accessor."""
+        return self._items[key][0].color()
+
+    def dot_tooltip(self, key: str) -> str:
+        """Current checklist dot tooltip for `key`. Test-only accessor."""
+        return self._items[key][0].toolTip()
 
 
 # ── Command history ───────────────────────────────────────────────────────────
@@ -293,11 +407,9 @@ class CmdHistoryPanel(QWidget):
         color = "#2ecc71" if entry.ok else "#e74c3c"
         body = entry.response.body if entry.ok else entry.response.error or entry.response.raw
         item = QListWidgetItem(f"{entry.ts}  {mark}  {entry.command}   ({entry.latency_ms:5.0f} ms)   {body}")
-        item.setForeground(Qt.GlobalColor.white)
+        item.setForeground(QColor(color))
         item.setData(Qt.ItemDataRole.UserRole, entry.command)
         item.setToolTip(f"Raw: {entry.response.raw}")
-        from PyQt6.QtGui import QColor
-        item.setForeground(QColor(color))
         self._list.insertItem(0, item)
 
     def _clear(self) -> None:
