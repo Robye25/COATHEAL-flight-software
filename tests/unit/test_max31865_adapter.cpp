@@ -92,6 +92,21 @@ void TestCodeToOhmsExactCases() {
 }
 
 // ---------------------------------------------------------------------
+// Options{} defaults: pins the datasheet-minimum one-shot timing floors
+// (settle >=10 ms after VBIAS on, conversion >=65 ms). Every other test in
+// this file zeroes both fields via TestOptions() to keep the suite fast,
+// so nothing else here would notice a future edit that quietly shortened
+// a production default below the datasheet floor -- that failure mode
+// only manifests as invalid conversions on real hardware.
+// ---------------------------------------------------------------------
+
+void TestOptionsDefaultsMatchDatasheetTimingFloors() {
+  Max31865Adapter::Options defaults;
+  assert(defaults.settle_ms == 10);
+  assert(defaults.conversion_ms == 65);
+}
+
+// ---------------------------------------------------------------------
 // ReadOneShot: healthy sequence order + open-parameter assertions.
 // Mutation target: reordering the bias-off write before the RTD read --
 // the strict FIFO FakeSpiBus sends the RTD-read tx bytes against
@@ -329,6 +344,7 @@ void TestTransferFailureDuringBiasOnWriteAttemptsNoExtraTransfer() {
 
 int main() {
   TestCodeToOhmsExactCases();
+  TestOptionsDefaultsMatchDatasheetTimingFloors();
   TestOneShotHealthySequenceOrderAndOpenParams();
   TestFaultBitSetTriggersOutOfRangeAndFaultClear();
   TestNearFullScaleCodeTriggersOutOfRangeWithoutFaultBit();
