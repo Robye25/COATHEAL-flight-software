@@ -2,9 +2,11 @@
 
 #include <cassert>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "coatheal/hal/spi_bus.hpp"
+#include "coatheal/hal/spi_bus_lock.hpp"
 #include "fake_spi_bus.hpp"
 
 using namespace coatheal;
@@ -167,6 +169,104 @@ void TestFakeRecordsOpenParameters() {
   assert(bus.open_count() == 2);
 }
 
+// ---------------------------------------------------------------------
+// C1: settings re-application before EVERY data exchange.
+//
+// Three devices open /dev/spidev0.0 (motor0/motor1 at mode 3 | SPI_NO_CS,
+// MAX31865 click 2 at mode 1 with native CE0) and the kernel keeps ONE
+// struct spi_device per node, so whoever opened last owns the mode until
+// somebody re-asserts it. SpiBus::Transfer is non-virtual precisely so no
+// implementation can skip that re-assertion; these tests pin the contract
+// at the seam, where both the real bus and the fake inherit it.
+// ---------------------------------------------------------------------
+
+void TestTransferAppliesSettingsOncePerTransfer() {
+  FakeSpiBus bus;
+  assert(bus.Open("/dev/spidev0.0", 3, 4000000, true));
+  // Nothing has been transferred yet, so nothing has been re-applied.
+  assert(bus.settings_applications() == 0);
+
+  bus.Expect({0x01}, {0xAA});
+  bus.Expect({0x02}, {0xBB});
+  std::uint8_t tx[1] = {0x01};
+  std::uint8_t rx[1] = {};
+  assert(bus.Transfer(tx, rx, 1));
+  assert(bus.settings_applications() == 1);
+  tx[0] = 0x02;
+  assert(bus.Transfer(tx, rx, 1));
+  assert(bus.settings_applications() == 2);
+
+  // What gets re-applied is this opener's OWN settings, not whatever the
+  // node last saw — that is the whole point of the fix.
+  assert(bus.applied_mode() == 3);
+  assert(bus.applied_speed_hz() == 4000000u);
+  assert(bus.applied_no_cs() == true);
+}
+
+void TestTransferAppliesNothingWhenNotOpen() {
+  // Fail-closed: the re-application step is also the open-gate, so a bus
+  // that was never opened (or was closed) must neither apply nor exchange.
+  FakeSpiBus bus;
+  bus.Expect({0x01}, {0xAA});
+  std::uint8_t tx[1] = {0x01};
+  std::uint8_t rx[1] = {};
+  assert(!bus.Transfer(tx, rx, 1));
+  assert(bus.settings_applications() == 0);
+
+  assert(bus.Open("/dev/spidev0.1", 1, 500000, false));
+  assert(bus.Transfer(tx, rx, 1));
+  assert(bus.settings_applications() == 1);
+  assert(bus.applied_mode() == 1);
+  assert(bus.applied_no_cs() == false);
+
+  bus.Close();
+  bus.Expect({0x01}, {0xAA});
+  assert(!bus.Transfer(tx, rx, 1));
+  assert(bus.settings_applications() == 1);  // unchanged by the closed call
+}
+
+// ---------------------------------------------------------------------
+// C2(b): the lock is keyed per PHYSICAL CONTROLLER, not per device node.
+// /dev/spidev0.0 and /dev/spidev0.1 are two chip-select views of one set
+// of SCLK/MOSI/MISO wires; keying by string would give click 1 its own
+// mutex and let it clock the bus mid-motor-datagram.
+// ---------------------------------------------------------------------
+
+void TestControllerKeyCollapsesChipSelect() {
+  assert(SpiControllerKey("/dev/spidev0.0") == "spi0");
+  assert(SpiControllerKey("/dev/spidev0.1") == "spi0");
+  assert(SpiControllerKey("/dev/spidev1.0") == "spi1");
+  assert(SpiControllerKey("/dev/spidev10.2") == "spi10");
+  // Unrecognised transports serialise against themselves only, under a
+  // prefix that cannot alias a canonical "spiN" key.
+  assert(SpiControllerKey("fake-bus") == "raw:fake-bus");
+  assert(SpiControllerKey("/dev/spidev0") == "raw:/dev/spidev0");
+}
+
+void TestBusMutexIsSharedAcrossChipSelectsOfOneController() {
+  assert(&SpiBusMutex("/dev/spidev0.0") == &SpiBusMutex("/dev/spidev0.1"));
+  // Different controller, different wires, different mutex — the other
+  // direction of the same policy.
+  assert(&SpiBusMutex("/dev/spidev0.0") != &SpiBusMutex("/dev/spidev1.0"));
+}
+
+void TestSpiBusLockCountsHoldsPerController() {
+  const std::uint64_t spi0_before = SpiBusLockAcquireCount("/dev/spidev0.0");
+  const std::uint64_t spi1_before = SpiBusLockAcquireCount("/dev/spidev1.0");
+
+  { SpiBusLock hold("/dev/spidev0.0"); }
+  { SpiBusLock hold("/dev/spidev0.1"); }  // same controller, same counter
+
+  assert(SpiBusLockAcquireCount("/dev/spidev0.0") == spi0_before + 2);
+  assert(SpiBusLockAcquireCount("/dev/spidev0.1") == spi0_before + 2);
+  // A hold on a different controller must not show up on this one.
+  assert(SpiBusLockAcquireCount("/dev/spidev1.0") == spi1_before);
+
+  { SpiBusLock hold("/dev/spidev1.0"); }
+  assert(SpiBusLockAcquireCount("/dev/spidev1.0") == spi1_before + 1);
+  assert(SpiBusLockAcquireCount("/dev/spidev0.0") == spi0_before + 2);
+}
+
 void TestLinuxSpiBusReportsAvailabilityWithoutCrashing() {
   // On a non-Linux build host available() is false and Open() must fail
   // cleanly rather than trap.
@@ -191,6 +291,11 @@ int main() {
   TestFakeInjectsTransferFailures();
   TestFakeExhaustedQueueTransferFails();
   TestFakeRecordsOpenParameters();
+  TestTransferAppliesSettingsOncePerTransfer();
+  TestTransferAppliesNothingWhenNotOpen();
+  TestControllerKeyCollapsesChipSelect();
+  TestBusMutexIsSharedAcrossChipSelectsOfOneController();
+  TestSpiBusLockCountsHoldsPerController();
   TestLinuxSpiBusReportsAvailabilityWithoutCrashing();
   return 0;
 }

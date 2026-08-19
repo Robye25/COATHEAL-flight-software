@@ -3,6 +3,8 @@
 #include <chrono>
 #include <thread>
 
+#include "coatheal/hal/spi_bus_lock.hpp"
+
 namespace coatheal {
 
 namespace {
@@ -48,8 +50,17 @@ bool Max31865Adapter::EnsureOpen(std::string* error) {
   // Native CE (no_cs=false): CE0/CE1 are hard-wired to the MAX31865
   // clicks, unlike the TMC5160 steppers sharing this SPI0 bus on soft
   // GPIO chip-selects.
-  if (!bus_->Open(options_.spi_device, /*mode=*/1, options_.spi_speed_hz,
-                  /*no_cs=*/false)) {
+  //
+  // Under the controller lock: Open() programs the shared node's mode and
+  // must not land inside another driver's transfer unit. See
+  // hal/spi_bus_lock.hpp for the full rule.
+  bool opened = false;
+  {
+    SpiBusLock bus_lock(options_.spi_device);
+    opened = bus_->Open(options_.spi_device, /*mode=*/1, options_.spi_speed_hz,
+                        /*no_cs=*/false);
+  }
+  if (!opened) {
     SetError(error, "BUS_OPEN_FAILED");
     return false;
   }
@@ -57,17 +68,28 @@ bool Max31865Adapter::EnsureOpen(std::string* error) {
   return true;
 }
 
+// Each of the three helpers below is exactly ONE register conversation, and
+// each takes the per-controller bus lock for exactly that conversation --
+// the MAX31865 half of the locking rule in hal/spi_bus_lock.hpp. The lock is
+// deliberately NOT held by the callers across the one-shot's settle and
+// conversion sleeps: those gaps are CS-framed by the native CE line, so the
+// motors are free to use the bus during them.
+
 bool Max31865Adapter::WriteConfig(std::uint8_t value) {
   std::uint8_t tx[2] = {static_cast<std::uint8_t>(kRegConfig | kWriteBit),
                         value};
   std::uint8_t rx[2] = {0, 0};
+  SpiBusLock bus_lock(options_.spi_device);
   return bus_->Transfer(tx, rx, 2);
 }
 
 bool Max31865Adapter::ReadRegister(std::uint8_t addr, std::uint8_t* value) {
   std::uint8_t tx[2] = {static_cast<std::uint8_t>(addr & 0x7FU), 0};
   std::uint8_t rx[2] = {0, 0};
-  if (!bus_->Transfer(tx, rx, 2)) return false;
+  {
+    SpiBusLock bus_lock(options_.spi_device);
+    if (!bus_->Transfer(tx, rx, 2)) return false;
+  }
   *value = rx[1];
   return true;
 }
@@ -77,7 +99,10 @@ bool Max31865Adapter::ReadRtdCode(std::uint8_t* msb, std::uint8_t* lsb) {
   // (0x02) in a single time-coherent conversation.
   std::uint8_t tx[3] = {kRegRtdMsb, 0, 0};
   std::uint8_t rx[3] = {0, 0, 0};
-  if (!bus_->Transfer(tx, rx, 3)) return false;
+  {
+    SpiBusLock bus_lock(options_.spi_device);
+    if (!bus_->Transfer(tx, rx, 3)) return false;
+  }
   *msb = rx[1];
   *lsb = rx[2];
   return true;

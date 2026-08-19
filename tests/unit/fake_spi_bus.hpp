@@ -46,6 +46,18 @@ class FakeSpiBus : public SpiBus {
   int mismatch_count() const { return mismatch_count_; }
   std::size_t remaining_expectations() const { return expectations_.size(); }
 
+  // How many times SpiBus::Transfer re-applied this opener's own settings
+  // to the (shared) node, and what it re-applied the last time. On real
+  // hardware these are the SPI_IOC_WR_MODE/BITS/SPEED ioctls LinuxSpiBus
+  // replays before each data ioctl so that motors (mode 3 | SPI_NO_CS) and
+  // a click (mode 1, native CE0) can share /dev/spidev0.0 without one
+  // opener's Open() muting the other. Recorders only — nothing about the
+  // fake's strict tx/rx matching is relaxed by them.
+  int settings_applications() const { return settings_applications_; }
+  std::uint8_t applied_mode() const { return applied_mode_; }
+  std::uint32_t applied_speed_hz() const { return applied_speed_hz_; }
+  bool applied_no_cs() const { return applied_no_cs_; }
+
   bool Open(const std::string& device, std::uint8_t mode,
             std::uint32_t speed_hz, bool no_cs) override {
     ++open_count_;
@@ -57,8 +69,20 @@ class FakeSpiBus : public SpiBus {
     return open_;
   }
 
-  bool Transfer(const std::uint8_t* tx, std::uint8_t* rx,
-                std::size_t len) override {
+ protected:
+  bool ApplyBusSettings() override {
+    // Mirrors LinuxSpiBus: no fd, nothing to apply — and that is what makes
+    // Transfer() fail closed on an unopened or closed bus.
+    if (!open_) return false;
+    ++settings_applications_;
+    applied_mode_ = open_mode_;
+    applied_speed_hz_ = open_speed_hz_;
+    applied_no_cs_ = open_no_cs_;
+    return true;
+  }
+
+  bool TransferData(const std::uint8_t* tx, std::uint8_t* rx,
+                    std::size_t len) override {
     if (!open_ || tx == nullptr || rx == nullptr) return false;
 
     if (fail_transfers_ > 0) {
@@ -82,6 +106,7 @@ class FakeSpiBus : public SpiBus {
     return true;
   }
 
+ public:
   void Close() override { open_ = false; }
   bool available() const override { return true; }
 
@@ -101,6 +126,10 @@ class FakeSpiBus : public SpiBus {
   std::uint8_t open_mode_ = 0;
   std::uint32_t open_speed_hz_ = 0;
   bool open_no_cs_ = false;
+  int settings_applications_ = 0;
+  std::uint8_t applied_mode_ = 0xFF;
+  std::uint32_t applied_speed_hz_ = 0;
+  bool applied_no_cs_ = false;
 };
 
 }  // namespace coatheal

@@ -127,9 +127,31 @@ line on *every* motor SPI transfer — glitching whichever click sits on that
 chip-select mid-conversion — while the motor's own addressing is done
 entirely through the software CS toggled around each 5-byte TMC5160
 datagram. `LinuxSpiBus::Open(..., no_cs=true)` ORs `SPI_NO_CS` into the mode
-bits for exactly this reason. All four devices' transfers serialise through
-one process-wide `spi_bus_lock`; there is no concurrent SPI traffic on this
-bus by construction.
+bits for exactly this reason.
+
+**How the four devices actually share the bus.** Motors and clicks run on
+independent threads and *do* contend for SPI0 — there is no "one at a time by
+construction". Two mechanisms make that safe, both in
+`onboard/src/hal/spi_bus_lock.hpp` and `spi_bus.hpp`:
+
+1. **One lock per physical controller.** `SpiBusLock` is keyed by
+   `SpiControllerKey()`, which collapses `/dev/spidev0.0` and
+   `/dev/spidev0.1` to a single `spi0` key — they are two chip-select views
+   of one set of SCLK/MOSI/MISO wires. Each driver holds it for exactly one
+   indivisible bus unit: the motor's `cs-low → [settings re-apply + data
+   ioctl] → cs-high` triplet, or one complete MAX31865 register
+   conversation. The lock is deliberately **not** held across the MAX31865
+   one-shot's 10 ms settle and 65 ms conversion waits — those gaps are
+   CS-framed by the native CE line, and holding through them would starve
+   both motors for ~150 ms per specimen poll.
+2. **Per-transfer mode re-application.** The kernel keeps one
+   `struct spi_device` per node, so mode/speed set by *any* opener apply to
+   *every* opener of it. `SpiBus::Transfer` therefore re-asserts the calling
+   opener's own mode/speed/bits (three cheap ioctls, no bus traffic)
+   immediately before each data ioctl, inside the lock hold. Without it,
+   "last opener wins" would leave click 2 mute (its CE never asserts under
+   `SPI_NO_CS`) or run the motors at the wrong CPOL/CPHA with CE0 firing on
+   every datagram.
 
 Both motors sharing one device node (`/dev/spidev0.0`) alongside click 2 is
 correct and intentional: the device node only selects which kernel SPI
@@ -386,12 +408,28 @@ bus:
    between motor SPI activity and click faults means `SPI_NO_CS` did not
    take effect — check `LinuxSpiBus::Open`'s `no_cs` argument and the kernel
    SPI mode readback before proceeding.
+4. **Motor-side check (the direction step 3 cannot see).** Steps 1–3 only
+   catch corruption of the *clicks*. Interleaved click traffic can equally
+   corrupt a *motor* datagram — a garbage 40-bit word latched on CS rise
+   can carry bit 7 set and land as a WRITE to whatever register byte 0
+   happens to name. Before the burst, record `GCONF` (`0x00`), `CHOPCONF`
+   (`0x6C`) and `IHOLD_IRUN` (`0x10`) for both motors with
+   `scripts/spi_probe.py`. Immediately after the burst, read all three
+   again. **They must be bit-for-bit unchanged.** Any difference is a
+   corrupted motor write and fails this gate regardless of click health —
+   re-check that both drivers take `SpiBusLock` around every transfer and
+   that `SpiControllerKey()` collapses both device nodes to one key.
 
 **Record here:**
 
 - Click health before motor SPI burst: `____`
 - Click health during/after motor SPI burst: `____`
 - Any correlated fault/degradation observed: YES / NO *(must be NO to pass)*
+- motor0 GCONF / CHOPCONF / IHOLD_IRUN before: `____` / `____` / `____`
+- motor0 GCONF / CHOPCONF / IHOLD_IRUN after:  `____` / `____` / `____`
+- motor1 GCONF / CHOPCONF / IHOLD_IRUN before: `____` / `____` / `____`
+- motor1 GCONF / CHOPCONF / IHOLD_IRUN after:  `____` / `____` / `____`
+- All six register pairs identical: YES / NO *(must be YES to pass)*
 - Gate 3 result: PASS / FAIL *(fill in at bench)*
 
 ### Gate 6 — Heater Map Walk (BLOCKING)

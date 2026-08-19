@@ -261,8 +261,16 @@ bool Tmc5160Driver::OpenSpi() {
   if (spi_open_) return true;
   // no_cs=true: this device uses a soft GPIO chip-select. The kernel must
   // not assert CE0/CE1 -- they are wired to the MAX31865 clicks.
-  spi_open_ = bus_->Open(cfg_.spi_device, /*mode=*/3, cfg_.spi_speed_hz,
-                         /*no_cs=*/true);
+  //
+  // Open() programs the shared node's mode/speed, so it is a bus event, not
+  // a private one: take the controller lock so it cannot land between
+  // another driver's settings re-apply and its data ioctl. Never called
+  // from inside Transfer(), so this hold never nests.
+  {
+    SpiBusLock bus_lock(cfg_.spi_device);
+    spi_open_ = bus_->Open(cfg_.spi_device, /*mode=*/3, cfg_.spi_speed_hz,
+                           /*no_cs=*/true);
+  }
   if (!spi_open_) {
     std::cerr << "[tmc5160] SPI open failed on " << cfg_.spi_device << '\n';
   }
@@ -273,13 +281,12 @@ bool Tmc5160Driver::Transfer(const std::uint8_t tx[5], std::uint8_t rx[5]) {
   if (bus_ == nullptr || !spi_open_) return false;
   if (use_gpio_ && (!gpio_healthy_ || cs_handle_ == nullptr)) return false;
 
-  // Process-wide per-device SPI0 mutex (spi_bus_lock.hpp), shared with the
-  // MAX31865 clicks that sit on the same physical bus. Known test gap: no
-  // test here observes this lock being taken/released -- doing so would
-  // need a lock-spy seam (e.g. an instrumented mutex or a concurrent-access
-  // race test) that isn't worth building for this task; parked as a known
-  // limitation rather than attempted.
-  std::lock_guard<std::mutex> bus_lock(SpiBusMutex(cfg_.spi_device));
+  // ONE hold spans the whole cs-low -> [settings re-apply + data ioctl] ->
+  // cs-high triplet, and the lock is keyed per physical SPI0 controller,
+  // not per device node -- so the MAX31865 clicks (including click 1 on
+  // /dev/spidev0.1) cannot clock the shared bus while this soft CS is
+  // asserted. Full rule and rationale: hal/spi_bus_lock.hpp.
+  SpiBusLock bus_lock(cfg_.spi_device);
   if (use_gpio_) {
     if (!SetGpioOutput(cs_handle_, false)) {
       gpio_healthy_ = false;

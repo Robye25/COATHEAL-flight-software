@@ -12,6 +12,7 @@
 #include <memory>
 #include <vector>
 
+#include "coatheal/hal/spi_bus_lock.hpp"
 #include "coatheal/tmc5160_driver.hpp"
 #include "fake_spi_bus.hpp"
 
@@ -520,6 +521,58 @@ void TestTransferFailureMarksUnhealthyAndActiveCheckReprobes() {
 // SetMicrostep: invalid divisor
 // ---------------------------------------------------------------------
 
+// ---------------------------------------------------------------------
+// C1 + C2 (motor side): every 5-byte datagram must be ONE hold of the
+// per-CONTROLLER bus lock, with this driver's own mode/speed re-applied
+// inside that hold.
+//
+// Without the hold, a MAX31865 conversation can interleave between the
+// motor's cs-low, its data ioctl and its cs-high (three syscalls) — the
+// motor then latches a garbage datagram on CS rise, possibly as a WRITE
+// (bit 7 of byte 0), while both chips drive MISO.
+//
+// Hand-computed expectations, pinned before the assertions:
+//   * divisor 4 -> Delta = 256/4 = 64; one Step(true) from target 0 writes
+//     XTARGET = 64, which is exactly ONE Transfer() (one WriteRegister).
+//   * therefore: lock acquisitions +1, settings applications +1.
+//   * the click on /dev/spidev0.1 shares this controller, so reading the
+//     counter through THAT path must show the same value — that is the
+//     canonicalisation under test.
+// ---------------------------------------------------------------------
+
+void TestEachDatagramIsOneControllerLockHoldWithModeReapplied() {
+  FakeSpiBus bus;
+  Tmc5160Config cfg;
+  cfg.spi_device = "/dev/spidev0.0";
+  cfg.microstep = 4;
+  auto driver = MakeHealthyDriver(&bus, cfg);
+
+  ScriptEnableTrueChopconf(&bus, cfg);
+  assert(driver->Enable(true));
+
+  const std::uint64_t locks_before = SpiBusLockAcquireCount(cfg.spi_device);
+  const int applies_before = bus.settings_applications();
+
+  ExpectWrite(&bus, kRegXTARGET, 64U);
+  assert(driver->Step(true));
+
+  assert(SpiBusLockAcquireCount(cfg.spi_device) == locks_before + 1);
+  assert(bus.settings_applications() == applies_before + 1);
+
+  // The click's device node must reach the SAME counter: one controller,
+  // one lock. (Keying the mutex by raw device string breaks this line.)
+  assert(SpiBusLockAcquireCount("/dev/spidev0.1") == locks_before + 1);
+
+  // Re-applied settings are the motor's own, not a click's.
+  assert(bus.applied_mode() == 3);
+  assert(bus.applied_no_cs() == true);
+  assert(bus.applied_speed_hz() == cfg.spi_speed_hz);
+
+  assert(driver->target() == 64);
+  assert(bus.mismatch_count() == 0);
+  assert(bus.remaining_expectations() == 0);
+}
+
 void TestSetMicrostepRejectsInvalidDivisor() {
   FakeSpiBus bus;
   Tmc5160Config cfg;
@@ -567,6 +620,7 @@ int main() {
   TestStepHonoursInvertDirection();
   TestEnableFalseFreezesInOrder();
   TestTransferFailureMarksUnhealthyAndActiveCheckReprobes();
+  TestEachDatagramIsOneControllerLockHoldWithModeReapplied();
   TestSetMicrostepRejectsInvalidDivisor();
   return 0;
 }
