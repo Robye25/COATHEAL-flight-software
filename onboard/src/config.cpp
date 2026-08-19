@@ -744,9 +744,7 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
     // ceiling instead (below, once sense_resistor_ohm itself is known
     // valid).
     if (motor.gpio_chip.empty() || motor.spi_device.empty() ||
-        !std::isfinite(motor.run_current_a_rms) ||
         !std::isfinite(motor.hold_current_frac) ||
-        motor.run_current_a_rms <= 0.0 || motor.run_current_a_rms > 3.1 ||
         motor.hold_current_frac < 0.0 || motor.hold_current_frac > 1.0 ||
         motor.spi_speed_hz == 0U || motor.spi_speed_hz > 10000000U ||
         !std::isfinite(motor.sense_resistor_ohm) ||
@@ -754,6 +752,22 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
         motor.retry_ms < 100 || motor.samples.empty()) {
       if (error != nullptr) {
         *error = "invalid motor" + std::to_string(i) + " configuration";
+      }
+      return false;
+    }
+    // Flat absolute ceiling on run_current_a_rms, independent of
+    // sense_resistor_ohm (a hardware/enclosure/wiring limit backstop for
+    // configs with a very small sense resistor, where the sense-resistor
+    // ceiling below would otherwise never bind). Split out of the omnibus
+    // check above into its own dedicated message so it -- and the
+    // sense-resistor ceiling below -- can each be tested in isolation; the
+    // shared "invalid motorN configuration" message can't distinguish
+    // which of several unrelated conditions fired.
+    if (!std::isfinite(motor.run_current_a_rms) ||
+        motor.run_current_a_rms <= 0.0 || motor.run_current_a_rms > 3.1) {
+      if (error != nullptr) {
+        *error = "motor" + std::to_string(i) +
+                 ".run_current_a_rms must be in (0, 3.1]";
       }
       return false;
     }

@@ -235,6 +235,52 @@ class HardwareSetupTests(unittest.TestCase):
             "exceeds the sense resistor's deliverable current ceiling"
             in error for error in errors))
 
+    def test_motor_current_rejects_flat_bound(self) -> None:
+        # Isolates the flat (0, 3.1] absolute ceiling from the
+        # sense-resistor ceiling above: with sense_resistor_ohm=0.05 the
+        # sense-resistor ceiling is 0.325/0.05 = 6.5 A_peak, i.e.
+        # 6.5/sqrt(2) = 4.5962 A_rms. run_current_a_rms=3.5 is well under
+        # that (3.5*sqrt(2) = 4.9497 < 6.5 A_peak, so the sense-resistor
+        # rule does NOT fire) but exceeds the flat 3.1 bound -- so this test
+        # can only pass because the flat-bound rule specifically fired.
+        # Deleting only that rule (leaving the sense-resistor ceiling in
+        # place) must make this assertion fail, since 3.5/0.05 alone would
+        # then pass validation.
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        candidate = hardware_setup.replace_ini(
+            source,
+            {
+                "motor0.run_current_a_rms": "3.5",
+                "motor0.sense_resistor_ohm": "0.05",
+            },
+        )
+        errors = hardware_setup.validate_candidate(candidate)
+        self.assertIn(
+            "motor0.run_current_a_rms must be in (0, 3.1]", errors)
+        # Distinct from the sense-resistor ceiling's fragment: this case
+        # must NOT be rejected via that other mechanism.
+        self.assertFalse(any(
+            "exceeds the sense resistor's deliverable current ceiling"
+            in error for error in errors))
+
+    def test_motor_current_accepts_flat_bound_boundary(self) -> None:
+        # Both-directions companion to test_motor_current_rejects_flat_bound:
+        # the flat bound is inclusive, "(0, 3.1]", so exactly 3.1 A_rms must
+        # validate cleanly. sense_resistor_ohm=0.05 keeps the sense-resistor
+        # ceiling (6.5 A_peak, i.e. 4.5962 A_rms) well clear of 3.1 so only
+        # the flat bound's own edge is exercised. Catches a `>` -> `>=`
+        # mutation that the 3.5 A_rms rejection case cannot (3.5 is
+        # rejected either way).
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        candidate = hardware_setup.replace_ini(
+            source,
+            {
+                "motor0.run_current_a_rms": "3.1",
+                "motor0.sense_resistor_ohm": "0.05",
+            },
+        )
+        self.assertEqual(hardware_setup.validate_candidate(candidate), [])
+
     def test_example_configuration_mappings_are_valid(self) -> None:
         source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
         self.assertEqual(hardware_setup.validate_candidate(source), [])
