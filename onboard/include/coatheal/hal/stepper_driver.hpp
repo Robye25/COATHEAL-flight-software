@@ -6,10 +6,10 @@
 
 namespace coatheal {
 
-// Driver-agnostic stepper interface. The final TMC2240 path exposes
-// STEP/DIR/EN plus SPI configuration, but the controller only needs this small
-// motion surface. Real pulse timing is backend-specific; the simulated driver
-// just counts pulses.
+// Driver-agnostic stepper interface. The final SPI-motion path (schematic
+// v3, no STEP/DIR lines) exposes CS/EN plus SPI configuration, but the
+// controller only needs this small motion surface. Real pulse timing is
+// backend-specific; the simulated driver just counts pulses.
 class StepperDriver {
  public:
   virtual ~StepperDriver() = default;
@@ -41,41 +41,6 @@ class SimulatedStepperDriver : public StepperDriver {
   bool last_dir_ = true;
   int microstep_ = 1;
   std::uint64_t pulses_ = 0;
-};
-
-// Generic STEP/DIR/EN backend retained for isolated GPIO tests. Pulses are emitted
-// through libgpiod and still require waveform validation on the target Pi.
-class GpioStepDirStepperDriver : public StepperDriver {
- public:
-  GpioStepDirStepperDriver(std::string chip,
-                           std::size_t step_line,
-                           std::size_t dir_line,
-                           std::size_t enable_line,
-                           bool invert_direction,
-                           bool enable_active_low);
-  ~GpioStepDirStepperDriver() override;
-
-  bool Enable(bool enable) override;
-  bool Step(bool direction_forward) override;
-  void SetMicrostep(int divisor) override;
-  bool healthy() const override { return healthy_; }
-  std::uint64_t pulses_issued() const override { return pulses_; }
-
- private:
-  std::string chip_;
-  std::size_t step_line_;
-  std::size_t dir_line_;
-  std::size_t enable_line_;
-  bool invert_direction_;
-  bool enable_active_low_;
-  bool healthy_ = false;
-  bool enabled_ = false;
-  bool last_direction_forward_ = false;
-  int microstep_ = 1;
-  std::uint64_t pulses_ = 0;
-  void* step_handle_ = nullptr;
-  void* dir_handle_ = nullptr;
-  void* enable_handle_ = nullptr;
 };
 
 }  // namespace coatheal

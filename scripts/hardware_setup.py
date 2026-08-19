@@ -48,8 +48,6 @@ FINAL_PIN_VALUES = {
     "sensor.sequent_rtd_resistance_max_ohm": "390.0",
     "sensor.sequent_rtd_crosscheck_tol_c": "2.0",
     "sensor.resistance_source": "sequent_rtd",
-    "motor0.current_range_a_peak": "0",
-    "motor1.current_range_a_peak": "0",
 }
 OBSOLETE_CONFIG_KEYS = {
     "stepper.microstep",
@@ -72,6 +70,13 @@ OBSOLETE_CONFIG_KEYS = {
     "motor1.step_line",
     "motor1.dir_line",
     "motor1.pulse_high_us",
+    # v3: the TMC2240 range-select current model (current_range_a_peak ->
+    # one of four fixed peak-current ranges) is retired; the TMC5160
+    # driver's CalculateCurrent() derives GLOBALSCALER/IRUN/IHOLD directly
+    # from run_current_a_rms and sense_resistor_ohm with a continuous
+    # scaler, no range selection involved.
+    "motor0.current_range_a_peak",
+    "motor1.current_range_a_peak",
 }
 # v3 reserved GPIO lines (BCM), mirroring config.cpp's kReservedGpioLines:
 # Sequent RTD HAT lines plus the hardware SPI0 chip-selects, which are wired
@@ -291,30 +296,22 @@ def validate_candidate(text: str) -> list[str]:
         elif driver not in ("tmc5160", "simulated"):
             errors.append(f"motor{motor}.driver must be tmc5160 or simulated")
         try:
+            # v3: the TMC2240 range-select current model
+            # (current_range_a_peak -> one of four fixed peak-current
+            # ranges -> GLOBALSCALER) is retired; the TMC5160 driver's
+            # CalculateCurrent() derives GLOBALSCALER/IRUN/IHOLD directly
+            # from run_current_a_rms and sense_resistor_ohm with a
+            # continuous scaler, no range selection involved.
+            # run_current_a_rms gets a flat absolute ceiling plus a
+            # sense-resistor-derived physical ceiling instead (mirrors
+            # config.cpp's per-motor validation block).
             run_current = float(values[f"motor{motor}.run_current_a_rms"])
-            current_range = float(
-                values[f"motor{motor}.current_range_a_peak"])
             spi_speed = int(values[f"motor{motor}.spi_speed_hz"], 0)
             sense_resistor_ohm = float(
                 values[f"motor{motor}.sense_resistor_ohm"])
-            if not math.isfinite(run_current) or not 0.0 < run_current <= 2.1:
+            if not math.isfinite(run_current) or not 0.0 < run_current <= 3.1:
                 errors.append(
-                    f"motor{motor}.run_current_a_rms must be in (0, 2.1]")
-            if current_range not in (0.0, 1.0, 2.0, 3.0):
-                errors.append(
-                    f"motor{motor}.current_range_a_peak must be 0, 1, 2, or 3")
-            if current_range > 0.0 and run_current * math.sqrt(2.0) > current_range:
-                errors.append(
-                    f"motor{motor} current does not fit selected peak range")
-            requested_peak = run_current * math.sqrt(2.0)
-            selected_range = current_range or (
-                1.0 if requested_peak <= 1.0 else
-                2.0 if requested_peak <= 2.0 else 3.0)
-            global_scaler = math.floor(
-                requested_peak * 256.0 / selected_range + 0.5)
-            if not 32 <= global_scaler <= 256:
-                errors.append(
-                    f"motor{motor} current produces invalid GLOBALSCALER")
+                    f"motor{motor}.run_current_a_rms must be in (0, 3.1]")
             if not 0 < spi_speed <= 10_000_000:
                 errors.append(
                     f"motor{motor}.spi_speed_hz must be in [1, 10000000]")
@@ -322,6 +319,24 @@ def validate_candidate(text: str) -> list[str]:
                     0.0 < sense_resistor_ohm < 1.0):
                 errors.append(
                     f"motor{motor}.sense_resistor_ohm must be in (0, 1)")
+            elif math.isfinite(run_current):
+                # TMC5160 hardware ceiling: the chip's fixed full-scale
+                # sense voltage (Vfs = 0.325 V, see tmc5160_driver.cpp's
+                # kVfs) means peak deliverable current is
+                # Vfs/sense_resistor_ohm regardless of GLOBALSCALER/IRUN.
+                # The onboard binary's CalculateCurrent() already rejects
+                # an unreachable request, but that only surfaces as an
+                # unhealthy driver once the service is running; checking
+                # it here fails migration/validation loudly at the bench
+                # instead. sense_resistor_ohm is already known finite and
+                # in (0, 1) here, so the division below is safe.
+                max_peak = 0.325 / sense_resistor_ohm
+                if run_current * math.sqrt(2.0) > max_peak:
+                    errors.append(
+                        f"motor{motor}.run_current_a_rms exceeds the "
+                        "sense resistor's deliverable current ceiling "
+                        "(run_current_a_rms*sqrt(2) must be <= "
+                        "0.325/sense_resistor_ohm)")
         except (KeyError, ValueError):
             errors.append(f"invalid or missing motor{motor} electrical setting")
     for chip, owner, line in gpio_keys:
