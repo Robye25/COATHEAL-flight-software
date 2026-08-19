@@ -326,6 +326,59 @@ KNOWN_COMMANDS = {
 }
 
 
+DEFAULT_COMMAND_TIMEOUT_S = 3.0
+
+# Per-verb command timeout overrides, in seconds. Lives here (rather than in
+# command_client.py or gui/dispatch.py) because both the CLI and the GUI
+# dispatcher already import shared command semantics from this module
+# (KNOWN_COMMANDS, build_command, parse_command_response) -- putting the
+# timeout table anywhere else would mean picking one of the two callers to
+# import from the other, or a third duplicate copy.
+#
+# Most commands ACK almost immediately: measured PING ~0.01s, COMPONENTS
+# ~0.00s (both just format cached state -- see CommandType::kComponents in
+# onboard/src/system_controller.cpp, which reads sensor_manager_ /
+# stepper_ health flags with no I/O). CHECK is the one exception: it drives
+# a real, synchronous hardware conversation -- DPS310/ADS1115 I2C probes, a
+# full Sequent RTD Probe()+ReadAll() conversion, and two MAX31865 one-shot
+# conversions (SensorManager::ActiveCheck in onboard/src/sensor_manager.cpp,
+# called from CommandType::kCheck) -- and measured ~3.0s on a healthy Pi
+# with NO hardware attached; real sensors add conversion time on top of
+# that. The default 3.0s timeout races that exact duration, so CHECK (and
+# every "CHECK <component>" variant -- CHECK SEQUENT_RTD, CHECK MAX31865,
+# CHECK ALL, ...) gets a longer budget.
+#
+# Other candidates were checked and did NOT get an entry:
+#   - SHUTDOWN_SAFE: sets in-memory override flags, then
+#     StorageManager::FlushAndSync() -- a single fopen(ab)+fflush+fsync per
+#     log path, no sensor/motor I/O. No evidence it needs more than the
+#     default.
+#   - COMPONENTS: reads cached health state only (see above); measured 0.00s.
+#   - HEATER_TEST: validates args and sets a deferred override (the tick
+#     thread applies it later); returns immediately, no hardware wait.
+#   - BENDSEQ_LOAD/RUN/PAUSE/RESUME/STOP/STATUS/CLEAR: all just read/write
+#     in-memory sequence state under a mutex; the actual stepper motion runs
+#     asynchronously on the tick thread, not inline with the ACK.
+COMMAND_TIMEOUTS: Dict[str, float] = {
+    "CHECK": 15.0,
+}
+
+
+def timeout_for(command: str, default: float = DEFAULT_COMMAND_TIMEOUT_S) -> float:
+    """Resolve the timeout budget (seconds) for a command by its first word.
+
+    Lookup is by verb only, so "CHECK", "CHECK SEQUENT_RTD", and
+    "CHECK MAX31865" all resolve to the same COMMAND_TIMEOUTS entry.
+    Unknown/ordinary verbs (and an empty/blank command) fall back to
+    `default`.
+    """
+    stripped = command.strip()
+    if not stripped:
+        return default
+    verb = stripped.split()[0].upper()
+    return COMMAND_TIMEOUTS.get(verb, default)
+
+
 @dataclass
 class HeatingCycleEvent:
     session_id: str
