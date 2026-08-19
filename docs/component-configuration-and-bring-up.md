@@ -54,35 +54,28 @@ automated Pi checks remain in
 
 Configuration uses BCM GPIO numbers, not physical header numbers. This is
 the v3 GPIO map — see [hardware.md](hardware.md#final-pin-map) for the
-authoritative table including reserved lines.
+authoritative full table (fixed buses, SPI0 chip-selects, and reserved
+lines). The lines this guide configures directly, heaters and motors, are:
 
 | Function | BCM | Configuration |
 |---|---:|---|
-| I2C SDA | 2 | fixed I2C-1 |
-| I2C SCL | 3 | fixed I2C-1 |
 | Heater H1 | 19 | `heater.output_lines[0]` |
 | Heater H2 | 13 | `heater.output_lines[1]` |
 | Heater H3 | 6 | `heater.output_lines[2]` |
 | Heater H4 | 5 | `heater.output_lines[3]` |
 | Heater H5 | 24 | `heater.output_lines[4]` |
 | Heater H6 | 23 | `heater.output_lines[5]` |
-| SPI MOSI | 10 | fixed SPI0 |
-| SPI MISO | 9 | fixed SPI0 |
-| SPI SCLK | 11 | fixed SPI0 |
-| SPI0 CE1 (hard CS) | 7 | MAX31865 click 1/SAMPLE1, `/dev/spidev0.1`, reserved |
-| SPI0 CE0 (hard CS) | 8 | MAX31865 click 2/SAMPLE2, `/dev/spidev0.0`, reserved |
 | Motor 0 CS (soft) | 22 | `motor0.cs_line` |
 | Motor 0 EN | 20 | `motor0.enable_line` |
 | Motor 1 CS (soft) | 27 | `motor1.cs_line` |
 | Motor 1 EN | 21 | `motor1.enable_line` |
-| Sequent HAT UART TX / RX | 14 / 15 | reserved, unused by flight software |
-| Sequent HAT RS485 DIR | 17 | reserved, unused by flight software |
-| Sequent HAT INTN | 26 | reserved, unused by flight software |
+
+(SPI0 CE0/CE1 for the MAX31865 clicks are covered in §6b below.)
 
 **There is no STEP or DIR GPIO — the TMC5160 motors are SPI-only.** The
 Sequent RTD HAT itself is I2C-only and consumes no Pi header GPIO beyond the
-four reserved lines above (present on the stacked HAT, unused by flight
-software). BCM 16 and 25 (formerly RTD Click CS and DRDY, from the retired
+four reserved lines in [hardware.md](hardware.md#final-pin-map) (present on
+the stacked HAT, unused by flight software). BCM 16 and 25 (formerly RTD Click CS and DRDY, from the retired
 pre-v3 temperature path) are freed and deliberately unassigned; see
 [Sequent RTD Bench Bring-Up](sequent-rtd-bring-up.md#7-freed-pins).
 Status LEDs are disabled; their default line numbers (17, 27) now belong to
@@ -128,9 +121,9 @@ python3 scripts/hardware_setup.py wizard \
   --config config/onboard.local.ini
 ```
 
-The wizard writes `config/onboard.example.ini` with the final pin map and
-commissioning motor current applied, then validates it with
-`--check-config` before writing. Edit `sensor.sequent_rtd_*` keys afterward
+The wizard reads `config/onboard.example.ini` as a template, applies the
+final pin map and commissioning current, validates it, and writes the
+result to `--config`. Edit `sensor.sequent_rtd_*` keys afterward
 if the DIP-switch stack or channel wiring differs from the defaults (stack
 `0`, card channels `1..8` mapped 1:1 to software samples `S0..S7`).
 

@@ -18,7 +18,7 @@ ground-station/
 Plug the laptop into the Pi Ethernet link, then start:
 
 ```powershell
-cd D:\COATHEAL-flight-software\COATHEAL-flight-software\ground-station
+cd ground-station
 .\.venv\Scripts\Activate.ps1
 python gui_app.py
 ```
@@ -132,13 +132,9 @@ Bench-only commands require `runtime.bench_mode=true` and `ARM_DEBUG`. After deb
 | ACK | `build_ack` |
 | Command line | `build_command` |
 
-The parser keeps compatibility with the `RESISTANCE=` field. By default
-(`sensor.resistance_source=max31865_click`) it carries coating-specimen
-resistance from the two MAX31865 clicks, only in their two monitored slots;
-`sequent_rtd` carries the Sequent RTD HAT's per-channel PT100 element
-resistance in all eight slots instead; `sensor.resistance_source=disabled`
-on the onboard side is what makes the field serialize as `-` placeholders in
-every slot.
+The parser keeps compatibility with the `RESISTANCE=` field; which physical
+quantity and slots it carries depends on the onboard `sensor.resistance_source`
+setting — see [configuration.md#sensors](configuration.md#sensors).
 
 Invalid samples are not added to plots. Before a sensor has ever succeeded the
 readout is `N/A`; after a failure it shows the last good value and stale age.

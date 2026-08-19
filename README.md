@@ -74,7 +74,7 @@ docs/            Architecture, protocol, configuration, and hardware docs
 | [docs/onboard.md](docs/onboard.md) | Onboard C++ module reference |
 | [docs/ground-station.md](docs/ground-station.md) | Ground station GUI/CLI reference |
 | [docs/architecture.md](docs/architecture.md) | System architecture and data flow |
-| [docs/deployment.md](docs/deployment.md) | Pi service installation notes |
+| [deploy/README.md](deploy/README.md) | systemd units, one-command deploy, storage layout, ground-station firewall |
 | [docs/development.md](docs/development.md) | Build, test, and bench workflow |
 
 ## Quick Start: Ground Station

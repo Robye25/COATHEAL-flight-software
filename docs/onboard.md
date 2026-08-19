@@ -153,13 +153,9 @@ software zero established by `SET_POSITION_ZERO`; there are no limit switches.
 DATA,<session>,<seq>,<ts>,<rtc_valid>,<ambient_temp_c>,<ambient_pressure_mbar>,<uv>,<sample_0>..<sample_7>,HEATER_DUTY=..,RESISTANCE=..,PHASE=..,MODE=..,STATUS=..,SENSOR_VALID=..,SENSOR_AGE_MS=..,COMPONENT_STATE=..,STEPPER0=..,STEPPER1=..
 ```
 
-`RESISTANCE=` remains on the wire for parser compatibility. By default
-(`sensor.resistance_source=max31865_click`) only the two monitored
-`sensor.max31865_sample_indices` slots carry coating-specimen resistance from
-the MAX31865 clicks; every other slot serializes `-`. With
-`sensor.resistance_source=sequent_rtd`, all eight slots instead carry the
-Sequent RTD HAT's per-channel PT100 element resistance; with
-`sensor.resistance_source=disabled`, every slot serializes as `-`.
+`RESISTANCE=` remains on the wire for parser compatibility; which physical
+quantity and slots it carries depends on `sensor.resistance_source` — see
+[configuration.md#sensors](configuration.md#sensors).
 
 `SerializeTelemetryPullEventFrame` emits:
 

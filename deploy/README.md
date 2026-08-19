@@ -74,3 +74,31 @@ race for TCP port 5000.
 - `coatheal-link-watch.service` uses a `/run/coatheal-link-watch.cooldown`
   timestamp file to refuse to fire more than once per 10 s. This is what
   prevents a restart -> NIC churn -> path trigger -> restart loop.
+
+## Storage layout
+
+Default log paths (from `config/onboard.example.ini`, relative to the
+service's working directory, `/bexus/code/coatheal`):
+
+| Path | Purpose |
+|---|---|
+| `logs/onboard_primary.csv` | Primary telemetry CSV (SD card) |
+| `logs/onboard_usb_mirror.csv` | Secondary CSV mirror (USB drive) |
+| `logs/telemetry-queue/` | Durable disk queue (survives restarts) |
+
+For flight, point `storage.primary_log_path` at the SD card and
+`storage.secondary_log_path` at a USB drive. `StorageManager` writes both
+independently (`onboard/src/storage_manager.cpp`) — if one fails to open or
+write, logging continues on the other.
+
+## Ground-station firewall (Windows)
+
+Run `ground-station/scripts/configure_firewall.ps1` elevated (or use the
+ground station launcher's one-click firewall option — see the root
+README's *Deployment quickstart*). It is idempotent and:
+
+1. Flips any adapter holding a `169.254.x.x` link-local address from
+   Public to Private, so inbound traffic is allowed.
+2. Adds an inbound rule for TCP 4000 (telemetry, the Pi connects out to
+   this port).
+3. Adds an inbound rule for UDP 4100 (discovery beacons).

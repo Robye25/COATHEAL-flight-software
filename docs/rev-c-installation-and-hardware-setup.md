@@ -82,7 +82,7 @@ confirmation, and heater dummy-load behavior.
 Use Windows PowerShell from the repository root.
 
 ```powershell
-cd D:\COATHEAL-flight-software\COATHEAL-flight-software
+cd <path-to-repo>
 git switch main
 git pull --ff-only origin main
 cd ground-station
@@ -96,7 +96,7 @@ Allow inbound telemetry and discovery on the link-local Ethernet interface.
 Run PowerShell as Administrator:
 
 ```powershell
-cd D:\COATHEAL-flight-software\COATHEAL-flight-software
+cd <path-to-repo>
 Set-ExecutionPolicy -Scope Process Bypass
 .\ground-station\scripts\configure_firewall.ps1
 ```
@@ -104,7 +104,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 Start the GUI:
 
 ```powershell
-cd D:\COATHEAL-flight-software\COATHEAL-flight-software\ground-station
+cd <path-to-repo>\ground-station
 .\.venv\Scripts\Activate.ps1
 python gui_app.py
 ```
@@ -112,7 +112,7 @@ python gui_app.py
 CLI command examples:
 
 ```powershell
-cd D:\COATHEAL-flight-software\COATHEAL-flight-software\ground-station
+cd <path-to-repo>\ground-station
 .\.venv\Scripts\Activate.ps1
 python main.py command --cmd PING
 python main.py command --cmd STATUS
@@ -129,6 +129,14 @@ python main.py command --cmd HEATERS_OFF --yes
 ```
 
 ## Raspberry Pi Installation
+
+> **Supported path:** on a Pi already cloned to `/bexus/code/coatheal`, one
+> command handles cloning/pulling, dependencies, build, config migration,
+> and service install/start: `bash /bexus/code/coatheal/deploy_onboard.sh`
+> the first time, `coatheal-deploy` every time after (see the root
+> README's *Deployment quickstart*). The manual walkthrough below is the
+> advanced/fallback route — use it to understand or troubleshoot what the
+> script automates.
 
 Use Raspberry Pi OS 64-bit. Bookworm is preferred. The service file currently
 runs as user `coatheal`, so either create that user or update
@@ -302,7 +310,7 @@ Test-NetConnection 169.254.10.10 -Port 5000
 Ground station verification:
 
 ```powershell
-cd D:\COATHEAL-flight-software\COATHEAL-flight-software\ground-station
+cd <path-to-repo>\ground-station
 .\.venv\Scripts\Activate.ps1
 python main.py command --cmd STATUS
 ```
