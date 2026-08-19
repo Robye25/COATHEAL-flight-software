@@ -26,6 +26,7 @@ from ..protocol import (
     parse_command_response,
     parse_pull_event,
     parse_telemetry_csv,
+    timeout_for,
 )
 
 DEFAULT_COMMAND_HOST = "169.254.10.10"
@@ -371,8 +372,14 @@ class CommandDispatcher(QObject):
         self.host = self._normalize_host(host)
         self.port = port
 
-    def send(self, command: str, tag: Optional[object] = None, timeout: float = 3.0) -> None:
-        job = _SendJob(self.host, self.port, command, timeout, tag, self.response_received.emit)
+    def send(self, command: str, tag: Optional[object] = None,
+              timeout: Optional[float] = None) -> None:
+        # `timeout=None` (the default) resolves per-verb via
+        # protocol.timeout_for -- CHECK gets a longer budget than the plain
+        # 3.0s default (see protocol.COMMAND_TIMEOUTS for why). An
+        # explicitly-passed timeout always wins over the table.
+        resolved_timeout = timeout if timeout is not None else timeout_for(command)
+        job = _SendJob(self.host, self.port, command, resolved_timeout, tag, self.response_received.emit)
         self._pool.start(job)
 
     def _on_response(self, cmd: str, resp: CommandResponse, ms: float, _tag) -> None:
