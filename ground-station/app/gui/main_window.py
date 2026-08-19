@@ -23,6 +23,7 @@ from .panels_control import (
     CommandPanel, ConnectionPanel, EmergencyBar, HeaterPanel, ModePanel,
     StepperPanel,
 )
+from .panels_health import HealthPanel
 from .panels_info import (
     CmdHistoryPanel, LogPanel, MotorPanel, PreflightPanel, PullEventsPanel,
     TopStatusStrip, ValuesPanel,
@@ -100,6 +101,7 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, left_dock)
 
         # ── right dock: tabs ──
+        self._health = HealthPanel()
         self._values = ValuesPanel()
         self._preflight = PreflightPanel()
         self._history = CmdHistoryPanel()
@@ -108,10 +110,14 @@ class MainWindow(QMainWindow):
         self._motors = MotorPanel()
         self._history.reissue_requested.connect(lambda cmd: self._dispatcher.send(cmd, tag=self._history))
         right_tabs = QTabWidget()
+        # Health is the first tab and default-selected: it's the
+        # single-glance "is anything wrong" view an operator wants on open.
+        right_tabs.addTab(self._health,    "Health")
         right_tabs.addTab(self._values,    "Values")
         right_tabs.addTab(self._motors,    "Motors")
         right_tabs.addTab(self._preflight, "Preflight")
         right_tabs.addTab(self._history,   "Cmd History")
+        right_tabs.setCurrentIndex(0)
         right_dock = QDockWidget("Status", self)
         right_dock.setWidget(right_tabs)
         right_dock.setMinimumWidth(320)
@@ -333,6 +339,7 @@ class MainWindow(QMainWindow):
         # always a dead one that stops emitting almost immediately anyway.
         self._top.on_packet(pkt)
         self._plots.on_packet(pkt)
+        self._health.on_packet(pkt)
         self._values.on_packet(pkt)
         self._motors.on_packet(pkt)
         self._heater_panel.update_from_packet(pkt)

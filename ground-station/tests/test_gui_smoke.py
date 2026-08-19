@@ -71,7 +71,10 @@ class GuiSmoke(unittest.TestCase):
             self.assertIn("COMPONENTS", labels)
             self.assertIn("Target", labels)
             label_texts = {label.text() for label in win.findChildren(QLabel)}
-            self.assertIn("SEQUENT_RTD", label_texts)
+            # SEQUENT_RTD's component-state row now lives on the Health tab
+            # (panels_health.HealthPanel), labeled "SEQUENT_RTD (RTD HAT)"
+            # rather than the bare component key ValuesPanel used to show.
+            self.assertTrue(any("SEQUENT_RTD" in t for t in label_texts))
             self.assertNotIn("BEND ASCENT", labels)
             self.assertNotIn("BEND FLOAT", labels)
             self.assertNotIn("BEND DESCENT", labels)
