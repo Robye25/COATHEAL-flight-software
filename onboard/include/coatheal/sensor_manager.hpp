@@ -84,6 +84,15 @@ class SensorManager {
   void AdsLoop();
   void SequentRtdLoop();
   void Max31865Loop();
+  // Shared by Max31865Loop's poll pass and ActiveCheck's on-demand
+  // check_max31865, so a passing/failing CHECK MAX31865 updates
+  // max31865_health_/click_has_success_/click_last_success_ exactly the way
+  // a worker poll would, instead of leaving stale health until the next
+  // poll tick. Caller must already hold cache_mu_.
+  void UpdateClickHealth(int click, bool ok,
+                        const Max31865Adapter::Reading& reading,
+                        const std::string& error,
+                        const std::chrono::steady_clock::time_point& now);
   bool WaitForPoll(int milliseconds);
   std::int64_t AgeMs(
       const std::chrono::steady_clock::time_point& value,

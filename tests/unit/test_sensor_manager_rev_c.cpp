@@ -673,6 +673,64 @@ void TestMax31865SaturatedReadingKeepsClicksBusOkWhileIndexReadsZero() {
         0.001);
 }
 
+// ---------------------------------------------------------------------------
+// Fix-round 1 Important 3 + Important 4: click health surface coverage
+// (ComponentSummary()/ActiveCheck("MAX31865")), combined into one three-phase
+// test since all three states chain naturally through the same click1_bus.
+//
+// No sm.Start() anywhere in this test: ActiveCheck()/check_max31865 is a
+// synchronous, on-demand conversation independent of the worker poll loop
+// (see sensor_manager.cpp), so every phase can be driven directly with no
+// background thread to race or to wait out on a deadline.
+void TestMax31865ActiveCheckAndComponentSummaryReflectHealthTransitions() {
+  OnboardConfig config = MakeMax31865TestConfig();
+
+  FakeSpiBus click1_bus;  // driven through all three phases below.
+  FakeSpiBus click2_bus;  // stays healthy throughout -- isolates click1.
+
+  SpiAdapter spi;
+  I2cAdapter i2c;
+  RtcAdapter rtc;
+  SensorManager sm(config, &spi, &i2c, &rtc, /*ina=*/nullptr,
+                   /*rtd_bus_override=*/nullptr, &click1_bus, &click2_bus);
+
+  // Phase 1: click1's bus never opens -- a genuine call failure.
+  click1_bus.SetOpenFails(true);
+  ScriptHealthyOneShot(&click2_bus, 0x40, 0x00);
+  std::string details;
+  assert(!sm.ActiveCheck("MAX31865", &details));
+  assert(details.find("max31865_1=FAIL") != std::string::npos);
+  assert(sm.ComponentSummary().find("max31865_1=FAILED") != std::string::npos);
+
+  // Phase 2: click1 recovers. Important 4's load-bearing proof: health must
+  // reflect OK immediately after THIS ActiveCheck() call -- no worker poll
+  // has ever run in this test (Start() was never called), so if
+  // check_max31865 did not refresh max31865_health_ itself, this would
+  // still read FAILED from phase 1.
+  click1_bus.SetOpenFails(false);
+  ScriptHealthyOneShot(&click1_bus, 0x80, 0x00);
+  ScriptHealthyOneShot(&click2_bus, 0x40, 0x00);
+  assert(sm.ActiveCheck("MAX31865", &details));
+  assert(details.find("max31865_1=OK") != std::string::npos);
+  const std::string recovered = sm.ComponentSummary();
+  assert(recovered.find("max31865_1=OK") != std::string::npos);
+  assert(recovered.find("max31865_1_error=NONE") != std::string::npos);
+
+  // Phase 3: click1 answers but SATURATED (fault bit set). Important 3's
+  // coverage: ComponentSummary must show DEGRADED/OUT_OF_RANGE, while
+  // ActiveCheck must still report the CALL itself as OK -- the same
+  // call-result-vs-Reading.valid distinction the resistance-dispatch tests
+  // above prove, now proven on the on-demand CHECK path too.
+  ScriptSaturatedOneShot(&click1_bus, 0x40, 0x01, 0x04);
+  ScriptHealthyOneShot(&click2_bus, 0x40, 0x00);
+  assert(sm.ActiveCheck("MAX31865", &details));
+  assert(details.find("max31865_1=OK") != std::string::npos);
+  const std::string saturated_summary = sm.ComponentSummary();
+  assert(saturated_summary.find("max31865_1=DEGRADED") != std::string::npos);
+  assert(saturated_summary.find("max31865_1_error=OUT_OF_RANGE") !=
+        std::string::npos);
+}
+
 }  // namespace
 
 int main() {
@@ -690,5 +748,6 @@ int main() {
   TestMax31865HealthyClicksPopulateOnlyMonitoredIndices();
   TestMax31865OneClickBusFailureFailsResistanceOk();
   TestMax31865SaturatedReadingKeepsClicksBusOkWhileIndexReadsZero();
+  TestMax31865ActiveCheckAndComponentSummaryReflectHealthTransitions();
   return 0;
 }
