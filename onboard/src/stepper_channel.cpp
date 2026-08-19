@@ -449,16 +449,37 @@ bool StepperChannel::SetMicrostep(int divisor, std::string* error) {
 
 bool StepperChannel::SetEnabled(bool enable) {
   std::lock_guard<std::mutex> lock(mu_);
-  if (driver_ == nullptr || !driver_->Enable(enable)) {
-    return false;
-  }
-  enabled_ = enable;
+  if (driver_ == nullptr) return false;
+  const bool driver_ok = driver_->Enable(enable);
+
   if (!enable) {
+    // Tear the channel down even when the driver reports failure.
+    //
+    // A driver that could not disable itself is unhealthy either way, and
+    // that is not the failure worth optimising for. The one that is: the
+    // heater interlock and the MotionLock are both released from HERE.
+    // HeaterScheduler clamps every duty to 0 whenever MotionLock::is_active()
+    // (heater_scheduler.cpp), and the lock is only ever released by a motion
+    // path finishing. Returning early on an Enable(false) failure left
+    // enabled_ true and the lock latched with no motion left to release it:
+    // all six heaters forced off and the other motor locked out,
+    // indefinitely, because a driver we already know is broken said no.
+    //
+    // So the local state is cleared on both paths and only the return value
+    // carries the driver's verdict -- the caller still learns it failed.
+    enabled_ = false;
     moving_ = false;
     mode_ = Mode::kIdle;
     current_step_hz_ = 0.0;
     ReleaseLockIfHeld();
+    return driver_ok;
   }
+
+  // Enable(true) keeps the early return: a driver that could not energise
+  // must never be recorded as enabled -- that would let motion be commanded
+  // into a driver that is not driving.
+  if (!driver_ok) return false;
+  enabled_ = true;
   return true;
 }
 

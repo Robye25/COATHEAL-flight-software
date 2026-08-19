@@ -301,9 +301,13 @@ pull.microstep=4
 ```
 
 The onboard software performs pipelined IOIN readback, requires TMC5160
-`VERSION=0x30`, verifies configured registers, and reads GSTAT/DRV_STATUS. EN
-remains inactive if verification fails. `motor*.current_range_a_peak` and
-`motor*.pulse_high_us` no longer exist as keys.
+`VERSION=0x30`, and verifies the registers it configures (GCONF and CHOPCONF
+are read back and compared after every `Reinitialize()`). EN remains inactive
+if verification fails. GSTAT (`0x01`) and DRV_STATUS (`0x6F`) are **not** read
+by the flight software — they are diagnostics-only registers, read by
+`scripts/spi_probe.py` (`read_tmc5160_set`) when you run the bench probe.
+`motor*.current_range_a_peak` and `motor*.pulse_high_us` no longer exist as
+keys.
 
 See [TMC5160 Commissioning](tmc5160-commissioning.md) before applying motor
 power — it also covers the four-device SPI0 topology shared with the

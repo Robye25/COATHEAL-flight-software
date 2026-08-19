@@ -193,8 +193,11 @@ with the software-controlled chip selects.
 IRUN (0..31) directly — there is no TMC2240-style fixed peak-current range
 selector, and `current_range_a_peak` no longer exists as a key. At the
 assumed `sense_resistor_ohm=0.075`, the sense resistor can deliver at most
-about 3.06 A_rms; requests below roughly 1.5 % of that ceiling are rejected
-rather than silently overcurrenting the motor. See
+about 3.06 A_rms; very small requests are rejected rather than silently
+overcurrenting the motor. That low-current floor is ~1.5 % of `I_peak_max` =
+0.065 A **peak** (≈ 0.046 A_rms), and acceptance near it is ragged because
+IRUN is a 5-bit ladder — measured, the first crossover is ≈ 0.032–0.033 A_rms
+and everything above ≈ 0.055 A_rms is accepted. See
 [TMC5160 Commissioning §6](tmc5160-commissioning.md#6-current-model-globalscaler--irun-two-regimes)
 for the full derivation and the bench-confirmation blank for the real sense
 resistor value.

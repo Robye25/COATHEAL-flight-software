@@ -38,7 +38,7 @@ struct StepperChannelConfig {
   // ramp from 0 to 100 Hz, matching the Rev C mechanical envelope.
   double accel_steps_per_s2 = 200.0;
 
-  // TMC2240 MRES divisor. Must be a power of two from 1 through 256.
+  // TMC5160 MRES divisor. Must be a power of two from 1 through 256.
   int microstep = 4;
 
   // Absolute travel limit in *microsteps* (=full_steps × microstep). Any
