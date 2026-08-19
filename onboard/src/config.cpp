@@ -442,8 +442,6 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
         if (!parse_bool(key, value, &motor.enable_active_low, line_no)) return false;
       } else if (suffix == "run_current_a_rms") {
         if (!parse_double(key, value, &motor.run_current_a_rms, line_no)) return false;
-      } else if (suffix == "current_range_a_peak") {
-        if (!parse_double(key, value, &motor.current_range_a_peak, line_no)) return false;
       } else if (suffix == "hold_current_frac") {
         if (!parse_double(key, value, &motor.hold_current_frac, line_no)) return false;
       } else if (suffix == "stealth_chop") {
@@ -737,31 +735,18 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
       }
       return false;
     }
-    const double requested_peak = motor.run_current_a_rms * std::sqrt(2.0);
-    const bool valid_current_range =
-        motor.current_range_a_peak == 0.0 ||
-        motor.current_range_a_peak == 1.0 ||
-        motor.current_range_a_peak == 2.0 ||
-        motor.current_range_a_peak == 3.0;
-    const double selected_range =
-        motor.current_range_a_peak > 0.0
-            ? motor.current_range_a_peak
-            : (requested_peak <= 1.0 ? 1.0
-                                     : (requested_peak <= 2.0 ? 2.0 : 3.0));
-    const long global_scaler =
-        std::isfinite(requested_peak) && std::isfinite(selected_range) &&
-                selected_range > 0.0
-            ? std::lround(requested_peak * 256.0 / selected_range)
-            : 0L;
+    // v3: the TMC2240 range-select current model (current_range_a_peak ->
+    // one of four fixed peak-current ranges -> GLOBALSCALER) is retired;
+    // the TMC5160 driver's CalculateCurrent() derives GLOBALSCALER/IRUN/
+    // IHOLD directly from run_current_a_rms and sense_resistor_ohm with a
+    // continuous scaler, no range selection involved. run_current_a_rms
+    // gets a flat absolute ceiling plus a sense-resistor-derived physical
+    // ceiling instead (below, once sense_resistor_ohm itself is known
+    // valid).
     if (motor.gpio_chip.empty() || motor.spi_device.empty() ||
         !std::isfinite(motor.run_current_a_rms) ||
-        !std::isfinite(motor.current_range_a_peak) ||
         !std::isfinite(motor.hold_current_frac) ||
-        motor.run_current_a_rms <= 0.0 || motor.run_current_a_rms > 2.1 ||
-        !valid_current_range ||
-        (motor.current_range_a_peak > 0.0 &&
-         requested_peak > motor.current_range_a_peak) ||
-        global_scaler < 32 || global_scaler > 256 ||
+        motor.run_current_a_rms <= 0.0 || motor.run_current_a_rms > 3.1 ||
         motor.hold_current_frac < 0.0 || motor.hold_current_frac > 1.0 ||
         motor.spi_speed_hz == 0U || motor.spi_speed_hz > 10000000U ||
         !std::isfinite(motor.sense_resistor_ohm) ||
@@ -769,6 +754,27 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
         motor.retry_ms < 100 || motor.samples.empty()) {
       if (error != nullptr) {
         *error = "invalid motor" + std::to_string(i) + " configuration";
+      }
+      return false;
+    }
+    // TMC5160 hardware ceiling: the chip's fixed full-scale sense voltage
+    // (Vfs = 0.325 V, see tmc5160_driver.cpp's kVfs) means peak deliverable
+    // current is Vfs/sense_resistor_ohm regardless of GLOBALSCALER/IRUN.
+    // CalculateCurrent() already rejects an unreachable request, but that
+    // only surfaces as an unhealthy driver once the service is already
+    // running (SystemController::Initialize's build_tmc5160); checking it
+    // here fails config load loudly at the bench instead, before power-up.
+    // sense_resistor_ohm is already known finite and in (0, 1) from the
+    // check above, so the division below is safe.
+    constexpr double kTmc5160FullScaleSenseVoltage = 0.325;
+    const double max_peak_a =
+        kTmc5160FullScaleSenseVoltage / motor.sense_resistor_ohm;
+    if (motor.run_current_a_rms * std::sqrt(2.0) > max_peak_a) {
+      if (error != nullptr) {
+        *error = "motor" + std::to_string(i) +
+                 ".run_current_a_rms exceeds the sense resistor's "
+                 "deliverable current ceiling (run_current_a_rms*sqrt(2) "
+                 "must be <= 0.325/sense_resistor_ohm)";
       }
       return false;
     }

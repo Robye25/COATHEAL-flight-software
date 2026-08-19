@@ -185,8 +185,10 @@ struct MotorConfig {
   std::size_t enable_line = 20;
   bool invert_direction = false;
   bool enable_active_low = true;
+  // Validated at config load against both an absolute ceiling and the
+  // sense resistor's physical current limit -- see config.cpp's per-motor
+  // validation block.
   double run_current_a_rms = 0.8;
-  double current_range_a_peak = 0.0;
   double hold_current_frac = 0.30;
   bool stealth_chop = true;
   std::uint32_t spi_speed_hz = 1000000;

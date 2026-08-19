@@ -17,7 +17,6 @@
 #include "coatheal/telemetry_client.hpp"
 #include "coatheal/telemetry_queue.hpp"
 #include "coatheal/thermal_controller.hpp"
-#include "coatheal/tmc2240_driver.hpp"
 
 namespace {
 
@@ -33,25 +32,6 @@ void TestPidBoundsAndAntiWindup() {
   pid.Reset();
   const double settle = pid.Update(0.0, 0.0, 0.1);
   assert(std::fabs(settle) < 1e-6);
-}
-
-void TestTmc2240CurrentConfiguration() {
-  coatheal::Tmc2240CurrentSettings settings;
-  assert(coatheal::Tmc2240Driver::CalculateCurrentSettings(
-      0.8, 0.30, 0.0, &settings));
-  assert(settings.range_code == 1U);
-  assert(std::fabs(settings.range_a_peak - 2.0) < 1e-9);
-  assert(settings.global_scaler == 145U);
-  assert(((settings.ihold_irun >> 8U) & 0x1FU) == 31U);
-  assert((settings.ihold_irun & 0x1FU) == 9U);
-
-  assert(!coatheal::Tmc2240Driver::CalculateCurrentSettings(
-      0.8, 0.30, 1.0, &settings));
-  assert(!coatheal::Tmc2240Driver::CalculateCurrentSettings(
-      2.2, 0.30, 0.0, &settings));
-  assert(coatheal::Tmc2240Driver::CalculateCurrentSettings(
-      1.0 / std::sqrt(2.0), 0.30, 1.0, &settings));
-  assert(settings.global_scaler == 0U);
 }
 
 void TestHeaterSchedulerCap() {
@@ -412,7 +392,6 @@ std::string WriteTempConfig(const std::string& extra = "") {
   out << "motor0.cs_line=22\n";
   out << "motor0.enable_line=20\n";
   out << "motor0.run_current_a_rms=2.0\n";
-  out << "motor0.current_range_a_peak=0\n";
   out << "motor0.hold_current_frac=0.30\n";
   out << "motor0.stealth_chop=true\n";
   out << "motor0.spi_speed_hz=1000000\n";
@@ -424,7 +403,6 @@ std::string WriteTempConfig(const std::string& extra = "") {
   out << "motor1.cs_line=27\n";
   out << "motor1.enable_line=21\n";
   out << "motor1.run_current_a_rms=2.0\n";
-  out << "motor1.current_range_a_peak=0\n";
   out << "motor1.hold_current_frac=0.30\n";
   out << "motor1.stealth_chop=true\n";
   out << "motor1.spi_speed_hz=1000000\n";
@@ -573,6 +551,38 @@ void TestConfigRejectsRetiredMotorKeys() {
     std::error_code ec;
     std::filesystem::remove(path, ec);
   }
+  // current_range_a_peak (the retired TMC2240 range-select model) no
+  // longer has a parse branch either, same treatment as step_line above.
+  {
+    const std::string path =
+        WriteTempConfig("motor0.current_range_a_peak=0\n");
+    coatheal::OnboardConfig cfg;
+    std::string error;
+    assert(!coatheal::LoadConfigFromIni(path, &cfg, &error));
+    assert(error.find("unknown motor config key") != std::string::npos);
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+  }
+}
+
+void TestConfigRejectsOvercurrentCeiling() {
+  // TMC5160 hardware ceiling: at the default sense_resistor_ohm=0.075, the
+  // sense resistor's maximum deliverable current is 0.325/0.075 = 4.3333
+  // A_peak, i.e. 4.3333/sqrt(2) = 3.0641 A_rms. 3.08 A_rms sits just above
+  // that (3.08*sqrt(2) = 4.3558 A_peak > 4.3333) while staying under the
+  // *separate* flat (0, 3.1] ceiling -- deliberately chosen so this test
+  // isolates the sense-resistor-derived rule: deleting only that rule
+  // (leaving the flat bound in place) must make this assertion fail, since
+  // 3.08 alone would then load successfully.
+  const std::string path = WriteTempConfig("motor0.run_current_a_rms=3.08\n");
+  coatheal::OnboardConfig cfg;
+  std::string error;
+  assert(!coatheal::LoadConfigFromIni(path, &cfg, &error));
+  assert(error.find(
+             "exceeds the sense resistor's deliverable current ceiling") !=
+         std::string::npos);
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
 }
 
 void TestSequentRtdConfigDefaultsAndParsing() {
@@ -777,7 +787,6 @@ void TestCommandPeerCanSeedTelemetryTarget() {
 
 int main() {
   TestPidBoundsAndAntiWindup();
-  TestTmc2240CurrentConfiguration();
   TestHeaterSchedulerCap();
   TestHeaterSchedulerEnergyBudget();
   TestCommandParser();
@@ -787,6 +796,7 @@ int main() {
   TestConfigRejectsGpioCollisions();
   TestConfigRejectsReservedGpioCollisions();
   TestConfigRejectsRetiredMotorKeys();
+  TestConfigRejectsOvercurrentCeiling();
   TestSequentRtdConfigDefaultsAndParsing();
   TestSequentRtdConfigRejectsBadValues();
   TestLegacySensorKeysAreRejected();

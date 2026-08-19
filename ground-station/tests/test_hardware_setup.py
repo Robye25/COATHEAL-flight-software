@@ -217,26 +217,23 @@ class HardwareSetupTests(unittest.TestCase):
         )
         self.assertEqual(hardware_setup.validate_candidate(candidate), [])
 
-    def test_motor_current_must_fit_selected_range(self) -> None:
+    def test_motor_current_rejects_sense_resistor_ceiling(self) -> None:
+        # TMC5160 hardware ceiling: at the default motor0.sense_resistor_ohm
+        # (0.075, see EXAMPLE_CONFIG), the sense resistor's maximum
+        # deliverable current is 0.325/0.075 = 4.3333 A_peak, i.e.
+        # 4.3333/sqrt(2) = 3.0641 A_rms. 3.08 A_rms sits just above that
+        # (3.08*sqrt(2) = 4.3558 A_peak > 4.3333) while staying under the
+        # *separate* flat (0, 3.1] ceiling -- deliberately chosen so this
+        # test isolates the sense-resistor-derived rule: deleting only that
+        # rule (leaving the flat bound in place) must make this assertion
+        # fail, since 3.08 alone would then pass validation.
         source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
         candidate = hardware_setup.replace_ini(
-            source,
-            {
-                "motor0.run_current_a_rms": "0.8",
-                "motor0.current_range_a_peak": "1",
-            },
-        )
+            source, {"motor0.run_current_a_rms": "3.08"})
         errors = hardware_setup.validate_candidate(candidate)
-        self.assertTrue(any("does not fit selected peak range" in error
-                            for error in errors))
-
-    def test_motor_rejects_unusable_global_scaler(self) -> None:
-        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
-        candidate = hardware_setup.replace_ini(
-            source, {"motor0.run_current_a_rms": "0.01"})
-        errors = hardware_setup.validate_candidate(candidate)
-        self.assertTrue(any("invalid GLOBALSCALER" in error
-                            for error in errors))
+        self.assertTrue(any(
+            "exceeds the sense resistor's deliverable current ceiling"
+            in error for error in errors))
 
     def test_example_configuration_mappings_are_valid(self) -> None:
         source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
@@ -330,22 +327,28 @@ class HardwareSetupTests(unittest.TestCase):
         # Same pattern as test_migrate_config_drops_retired_sensor_keys:
         # step_line/dir_line/pulse_high_us no longer exist (v3 has no
         # STEP/DIR lines) and must never survive migration, through the
-        # OBSOLETE_CONFIG_KEYS blocklist extended for them.
+        # OBSOLETE_CONFIG_KEYS blocklist extended for them. current_range_a_
+        # peak (the retired TMC2240 range-select current model) gets the
+        # same treatment.
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "old.ini"
             source.write_text(
                 "motor0.step_line=19\n"
                 "motor0.dir_line=26\n"
                 "motor0.pulse_high_us=3\n"
+                "motor0.current_range_a_peak=0\n"
                 "motor1.step_line=24\n"
                 "motor1.dir_line=20\n"
-                "motor1.pulse_high_us=3\n",
+                "motor1.pulse_high_us=3\n"
+                "motor1.current_range_a_peak=0\n",
                 encoding="utf-8",
             )
             values = migrated_values(source)
             for retired in (
                 "motor0.step_line", "motor0.dir_line", "motor0.pulse_high_us",
+                "motor0.current_range_a_peak",
                 "motor1.step_line", "motor1.dir_line", "motor1.pulse_high_us",
+                "motor1.current_range_a_peak",
             ):
                 self.assertNotIn(retired, values)
             self.assertEqual(values["motor0.driver"], "tmc5160")
