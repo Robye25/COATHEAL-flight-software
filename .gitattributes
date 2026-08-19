@@ -1,0 +1,5 @@
+# Deployment entry points: line endings are load-bearing.
+# bash on the Pi rejects CRLF; cmd.exe wants CRLF for batch blocks.
+deploy_onboard.sh text eol=lf
+*.sh text eol=lf
+*.bat text eol=crlf
