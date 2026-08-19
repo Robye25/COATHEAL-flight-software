@@ -34,7 +34,7 @@ DATA,<session_id>,<seq>,<timestamp>,<rtc_valid>,<ambient_temp_c>,<ambient_pressu
 | `uv` | GUVA-S12SD analog output through ADS1115 |
 | `sample_0..sample_7` | PT100/PT1000 sample values, one per Sequent RTD HAT channel; disabled or missing channels serialize as `nan` |
 | `HEATER_DUTY` | Six polyimide heater duty values, H0..H5 |
-| `RESISTANCE` | Sample-resistance value in Ω, source selected by `sensor.resistance_source`. Default in v3, `max31865_click`: coating-specimen resistance measured directly by the two MAX31865 clicks, only in the two `sensor.max31865_sample_indices` slots — every other slot serializes `-`. `sequent_rtd`: per-channel PT100 **element** resistance read from the Sequent RTD card instead, all eight slots. `simulated`: the decaying bench model (sample *material* resistance, a different physical quantity on the same field). `disabled`: `-` in every slot. A `-` also appears for any individual channel with no positive value yet |
+| `RESISTANCE` | Sample-resistance value in Ω; which physical quantity and slots it carries depends on `sensor.resistance_source` — see [configuration.md#sensors](configuration.md#sensors). A `-` also appears for any individual slot with no positive value yet |
 | `SENSOR_VALID` | Current validity for ambient temperature (`AT`), pressure (`AP`), UV, and `S0..S7` |
 | `SENSOR_AGE_MS` | Monotonic age of each last successful reading; `-1` means never valid |
 | `COMPONENT_STATE` | Independent state for DPS310, ADS1115, SEQUENT_RTD, both motors, and PWM |
@@ -51,13 +51,13 @@ retained, its validity becomes `0`, and its age increases. Component states are
 ### Example
 
 ```text
-DATA,coatheal-1718000000-123456,42,2026-04-16T12:00:00Z,1,-10.23,140.12,0.00012,5.1,5.2,5.0,5.3,5.1,5.2,5.0,5.3,HEATER_DUTY=0.250|0.000|0.250|0.000|0.000|0.050,RESISTANCE=-|-|-|-|-|-|-|-,PHASE=FLOAT,MODE=RUN,STATUS=SD_OK|USB_OK|I2C_OK|SPI_OK|LINK_OK|T_AMBIENT_OK|P_AMBIENT_OK|UNIFORMITY_OK|OVERTEMP_OK|ENERGY_OK|HEATER_ACTIVE|RESISTANCE_OK,STEPPER0=pos:100|tgt:200|hz:100.00|us:4|en:1|mv:1|hold:0|hold_s:0.00|pulses:100|src:cmd:MOVE,STEPPER1=pos:0|tgt:0|hz:0.00|us:4|en:1|mv:0|hold:0|hold_s:0.00|pulses:0|src:init
+DATA,coatheal-1718000000-123456,42,2026-04-16T12:00:00Z,1,-10.23,140.12,0.00012,5.1,5.2,5.0,5.3,5.1,5.2,5.0,5.3,HEATER_DUTY=0.250|0.000|0.250|0.000|0.000|0.050,RESISTANCE=-|-|-|-|-|-|-|-,PHASE=FLOAT,MODE=RUN,STATUS=SD_OK|USB_OK|I2C_OK|SPI_OK|LINK_OK|T_AMBIENT_OK|P_AMBIENT_OK|UNIFORMITY_OK|OVERTEMP_OK|ENERGY_OK|PWM_OK|STEPPER_OK|SAMPLE_TEMP_OK|REAL_SENSORS|SEQ_READY|HEATER_ACTIVE|RESISTANCE_OK,STEPPER0=pos:100|tgt:200|hz:100.00|us:4|en:1|mv:1|hold:0|hold_s:0.00|pulses:100|src:cmd:MOVE,STEPPER1=pos:0|tgt:0|hz:0.00|us:4|en:1|mv:0|hold:0|hold_s:0.00|pulses:0|src:init
 ```
 
 ## Status Flags
 
 ```text
-STATUS=SD_OK|USB_OK|I2C_OK|SPI_OK|LINK_OK|T_AMBIENT_OK|P_AMBIENT_OK|UNIFORMITY_OK|OVERTEMP_OK|ENERGY_OK|HEATER_ACTIVE|RESISTANCE_OK
+STATUS=SD_OK|USB_OK|I2C_OK|SPI_OK|LINK_OK|T_AMBIENT_OK|P_AMBIENT_OK|UNIFORMITY_OK|OVERTEMP_OK|ENERGY_OK|PWM_OK|STEPPER_OK|SAMPLE_TEMP_OK|REAL_SENSORS|SEQ_READY|HEATER_ACTIVE|RESISTANCE_OK
 ```
 
 | Flag | Meaning |
