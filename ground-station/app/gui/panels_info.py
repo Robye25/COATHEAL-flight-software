@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
     QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
 )
 
-from ..protocol import CommandResponse, PullEvent, TelemetryPacket
+from ..protocol import PullEvent, TelemetryPacket
 from .dispatch import CommandHistoryEntry
 from .theme import mode_color, phase_color
 from .widgets import StatusDot
@@ -166,9 +166,11 @@ class ValuesPanel(QScrollArea):
                     reading(f"S{i}", pkt.sample_temps_c[i], 2))
             else:
                 f[f"sample_{i}"].setText("N/A")
-        # Compatibility resistance rows. A literal '-' on the wire surfaces
-        # as None here; show an em-dash so the operator knows it's an
-        # unmeasured channel rather than a broken sensor.
+        # Sample-resistance rows. Only the two MAX31865-monitored specimens
+        # (sensor.max31865_sample_indices) carry live ohms; every other slot
+        # legitimately dashes. A literal '-' on the wire surfaces as None
+        # here; show an em-dash so the operator knows it's an unmonitored
+        # channel rather than a broken sensor.
         for i in range(8):
             if i < len(pkt.sample_resistance_ohm):
                 v = pkt.sample_resistance_ohm[i]
@@ -239,7 +241,7 @@ class PreflightPanel(QWidget):
             ("rtc",        "RTC reporting valid"),
             ("ambient",    "Ambient sensors in-range"),
             ("heaters",    "6 heater duties reporting"),
-            ("stepper_en", "Stepper enabled"),
+            ("stepper_en", "Motors enabled"),
             ("link",       "Telemetry link healthy"),
             ("uniformity", "Specimen uniformity OK"),
             ("overtemp",   "No over-temperature latch"),
@@ -253,17 +255,34 @@ class PreflightPanel(QWidget):
         lay.addStretch()
 
     def on_packet(self, pkt: TelemetryPacket, link_ok: bool) -> None:
-        def mark(key: str, good: bool) -> None:
+        def mark(key: str, good) -> None:
+            """`good` is either a bool (green/red) or an explicit CSS
+            color string, for checklist items with a tri-state result."""
             dot, _ = self._items[key]
-            dot.set_color("#2ecc71" if good else "#e74c3c")
+            if isinstance(good, str):
+                dot.set_color(good)
+            else:
+                dot.set_color("#2ecc71" if good else "#e74c3c")
         mark("rtc", bool(pkt.rtc_valid))
         mark("ambient", pkt.sensor_valid.get("AT", True) and
              pkt.sensor_valid.get("AP", True))
         mark("heaters", len(pkt.heater_duty) >= 6)
-        mark("stepper_en", pkt.stepper is not None and pkt.stepper.enabled)
+        # Dual-motor frames never populate the legacy `pkt.stepper` field, so
+        # derive the checklist state from `pkt.steppers` instead: both
+        # motors enabled is green, exactly one is amber, none (or no motor
+        # telemetry at all) is red.
+        n_enabled = sum(1 for m in pkt.steppers if m.get("enabled"))
+        mark("stepper_en",
+             "#2ecc71" if n_enabled == 2 else
+             "#f39c12" if n_enabled == 1 else "#e74c3c")
         mark("link", link_ok)
         mark("uniformity", "UNIFORMITY_FAIL" not in pkt.status)
         mark("overtemp", "OVERTEMP_FAIL" not in pkt.status)
+
+    def dot_color(self, key: str) -> str:
+        """Current checklist dot color for `key` (e.g. "stepper_en"), as
+        ``#rrggbb``. Test-only accessor."""
+        return self._items[key][0].color()
 
 
 # ── Command history ───────────────────────────────────────────────────────────
@@ -293,11 +312,9 @@ class CmdHistoryPanel(QWidget):
         color = "#2ecc71" if entry.ok else "#e74c3c"
         body = entry.response.body if entry.ok else entry.response.error or entry.response.raw
         item = QListWidgetItem(f"{entry.ts}  {mark}  {entry.command}   ({entry.latency_ms:5.0f} ms)   {body}")
-        item.setForeground(Qt.GlobalColor.white)
+        item.setForeground(QColor(color))
         item.setData(Qt.ItemDataRole.UserRole, entry.command)
         item.setToolTip(f"Raw: {entry.response.raw}")
-        from PyQt6.QtGui import QColor
-        item.setForeground(QColor(color))
         self._list.insertItem(0, item)
 
     def _clear(self) -> None:
