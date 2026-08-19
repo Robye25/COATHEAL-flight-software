@@ -130,6 +130,14 @@ python main.py command --cmd HEATERS_OFF --yes
 
 ## Raspberry Pi Installation
 
+> **Supported path:** on a Pi already cloned to `/bexus/code/coatheal`, one
+> command handles cloning/pulling, dependencies, build, config migration,
+> and service install/start: `bash /bexus/code/coatheal/deploy_onboard.sh`
+> the first time, `coatheal-deploy` every time after (see the root
+> README's *Deployment quickstart*). The manual walkthrough below is the
+> advanced/fallback route — use it to understand or troubleshoot what the
+> script automates.
+
 Use Raspberry Pi OS 64-bit. Bookworm is preferred. The service file currently
 runs as user `coatheal`, so either create that user or update
 `deploy/coatheal-onboard.service` before installing the service.

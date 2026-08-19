@@ -76,14 +76,12 @@ ctest --test-dir build --output-on-failure
 ctest --test-dir build -V
 ```
 
-Test file: `tests/unit/test_suite.cpp`
-
-Tests cover:
-- `PidController` — output clamping, anti-windup, reset
-- `HeaterScheduler` — power budget enforcement, heater count limits
-- `CommandParser` — valid commands, aliases, argument validation, unknown commands
-- `TelemetrySerializer` — DATA frame format and field ordering
-- `TelemetryQueue` — enqueue, pending, acknowledge, disk persistence
+Tests span 17 ctest executables registered under `tests/` — see
+`tests/CMakeLists.txt` for the full list (state machine, safety interlocks,
+stepper/TMC5160, I2C/SPI transport seams, Sequent RTD and MAX31865
+adapters, PWM slicing, telemetry serialization/queueing, and more). The
+core `PidController`/`HeaterScheduler`/`CommandParser`/`TelemetrySerializer`/
+`TelemetryQueue` coverage lives in `tests/unit/test_suite.cpp`.
 
 ---
 
@@ -112,9 +110,12 @@ cd ground-station
 python -m unittest discover -s tests -p "test_*.py" -v
 ```
 
-Test file: `ground-station/tests/test_protocol.py`
-
-Tests cover `parse_telemetry_csv` — valid frames, variable sample counts, malformed inputs, duplicate detection logic.
+Tests span 9 modules under `ground-station/tests/` (discovery, firewall,
+GUI health/smoke/UI-UX, hardware setup, protocol, telemetry-server CSV,
+thermal profiles). `test_protocol.py` covers `parse_telemetry_csv` — valid
+frames, variable sample counts, malformed inputs, duplicate detection
+logic. Run the full suite with `python -m unittest discover -s tests` from
+`ground-station/`.
 
 ---
 

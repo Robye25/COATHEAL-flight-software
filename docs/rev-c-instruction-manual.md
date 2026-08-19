@@ -112,6 +112,12 @@ The `coatheal` account should be a member of `gpio`, `spi`, `i2c`, and
 
 ## 5. Update, Build, and Test
 
+> For routine updates, `coatheal-deploy` (see the root README's
+> *Deployment quickstart*) does all of the below in one idempotent command,
+> including config migration to the current schema — prefer it unless you
+> are diagnosing a specific step. The manual sequence below skips config
+> migration.
+
 Stop the service before replacing the executable:
 
 ```bash
@@ -747,16 +753,9 @@ motion lock is active.
 
 ## 21. Ground Station Installation and Startup
 
-From Windows PowerShell:
-
-```powershell
-cd D:\COATHEAL-flight-software\COATHEAL-flight-software\ground-station
-py -3 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-python gui_app.py
-```
+For installation steps, see the root [README.md](../README.md) *Quick
+Start: Ground Station* / *Deployment quickstart*, or
+[rev-c-installation-and-hardware-setup.md](rev-c-installation-and-hardware-setup.md#ground-station-installation).
 
 The default connection workflow:
 

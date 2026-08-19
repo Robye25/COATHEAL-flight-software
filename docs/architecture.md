@@ -90,7 +90,7 @@ where telemetry should be returned.
 |---|---|---|
 | TMC5160 SPI-only motion (position dribble) | Yes | Software-CS `SPI_NO_CS` SPI mode 3 register writes implemented; no STEP/DIR GPIO exists; current-model bench validation required, see [tmc5160-commissioning.md](tmc5160-commissioning.md) |
 | Heater MOSFET outputs | Yes | zero-safe 1 Hz software PWM implemented; dummy-load validation required |
-| Sequent RTD HAT I2C | Yes | 8-channel PT100/PT1000 read path implemented; register map derived from vendor source and gated on bench verification, see [sequent-rtd-bring-up.md](sequent-rtd-bring-up.md) |
+| Sequent RTD HAT I2C | Yes | 8-channel PT100 read path implemented (`pt1000` is recognised but rejected at config load — the CVD cross-check and resistance window are PT100-only, see [configuration.md#sensors](configuration.md#sensors)); register map derived from vendor source and gated on bench verification, see [sequent-rtd-bring-up.md](sequent-rtd-bring-up.md) |
 | MAX31865 dual-click SPI | Yes | native-CE one-shot read path implemented for both clicks; reference resistor and coating-resistance range gated on bench verification, see [sequent-rtd-bring-up.md](sequent-rtd-bring-up.md) |
 | DPS310 I2C | Yes | compensated `i2c-dev` reads implemented |
 | ADS1115 I2C | Yes | single-ended `i2c-dev` reads implemented |
@@ -103,8 +103,6 @@ where telemetry should be returned.
 DATA,<session>,<seq>,<timestamp>,<rtc_valid>,<ambient_temp_c>,<ambient_pressure_mbar>,<uv>,<sample_0>..<sample_7>,HEATER_DUTY=..,RESISTANCE=..,PHASE=..,MODE=..,STATUS=..,SENSOR_VALID=..,SENSOR_AGE_MS=..,COMPONENT_STATE=..,STEPPER0=..,STEPPER1=..
 ```
 
-The ground station accepts the compatibility `RESISTANCE=` field. By default
-(`sensor.resistance_source=max31865_click`) it carries coating-specimen
-resistance from the two MAX31865 clicks in their two monitored slots only;
-`sequent_rtd` carries the Sequent RTD HAT's per-channel PT100 element
-resistance in all eight slots instead; `disabled` emits `-` values.
+The ground station accepts the compatibility `RESISTANCE=` field; which
+physical quantity and slots it carries depends on `sensor.resistance_source`
+— see [configuration.md#sensors](configuration.md#sensors).
