@@ -298,16 +298,27 @@ def validate_candidate(text: str) -> list[str]:
             errors.append("sensor.max31865_poll_ms must be > 0")
 
     raw_max31865_indices = values.get("sensor.max31865_sample_indices", "")
-    max31865_indices = [
+    raw_max31865_pieces = [
         c.strip() for c in raw_max31865_indices.split(",") if c.strip()]
-    if len(max31865_indices) != 2:
+    if len(raw_max31865_pieces) != 2:
         errors.append(
             "sensor.max31865_sample_indices must have exactly two entries")
-    elif len(set(max31865_indices)) != len(max31865_indices):
-        errors.append("sensor.max31865_sample_indices entries must be distinct")
-    elif any(not c.isdigit() or int(c) >= samples for c in max31865_indices):
-        errors.append("sensor.max31865_sample_indices entries must be less "
-                      "than hardware.sample_count")
+    elif any(not c.isdigit() for c in raw_max31865_pieces):
+        # Mirrors config.cpp's ParseSizeList failure -- a non-numeric entry
+        # is a parse error, kept distinct from the range message below.
+        errors.append("sensor.max31865_sample_indices must be numeric")
+    else:
+        # Parse before comparing, matching config.cpp (which compares the
+        # parsed std::size_t values, not the raw INI text): a raw-string
+        # comparison would miss "0" vs "00" as a duplicate even though both
+        # parse to the same index.
+        max31865_indices = [int(c) for c in raw_max31865_pieces]
+        if len(set(max31865_indices)) != len(max31865_indices):
+            errors.append(
+                "sensor.max31865_sample_indices entries must be distinct")
+        elif any(index >= samples for index in max31865_indices):
+            errors.append("sensor.max31865_sample_indices entries must be "
+                          "less than hardware.sample_count")
 
     runtime_chip = values.get("runtime.gpio_chip", "/dev/gpiochip0")
     gpio_claims: dict[tuple[str, int], str] = {}

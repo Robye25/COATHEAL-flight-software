@@ -644,6 +644,31 @@ void SensorManager::SequentRtdLoop() {
 // CHECK MAX31865 and ComponentSummary stay live no matter which
 // resistance_source is selected, but only WRITES sample_resistance_ohm_
 // when max31865_click is actually the configured source.
+void SensorManager::UpdateClickHealth(
+    int click, bool ok, const Max31865Adapter::Reading& reading,
+    const std::string& error,
+    const std::chrono::steady_clock::time_point& now) {
+  ComponentHealth& health = max31865_health_[click];
+  if (ok) {
+    click_has_success_[click] = true;
+    click_last_success_[click] = now;
+    health.last_success_age_ms = 0;
+    if (reading.out_of_range) {
+      health.state = ComponentState::kDegraded;
+      health.error = "OUT_OF_RANGE";
+    } else {
+      health.state = ComponentState::kOk;
+      health.error = "NONE";
+    }
+  } else {
+    health.state =
+        FailedState(click_has_success_[click], click_last_success_[click]);
+    health.error = error.empty() ? "NO_RESPONSE" : error;
+    health.last_success_age_ms =
+        AgeMs(click_last_success_[click], click_has_success_[click]);
+  }
+}
+
 void SensorManager::Max31865Loop() {
   while (running_.load()) {
     Max31865Adapter::Reading readings[2];
@@ -672,41 +697,23 @@ void SensorManager::Max31865Loop() {
       const bool owns_resistance =
           config_.sensors.resistance_source == "max31865_click";
       for (int click = 0; click < 2; ++click) {
-        ComponentHealth& health = max31865_health_[click];
-        if (ok[click]) {
-          click_has_success_[click] = true;
-          click_last_success_[click] = now;
-          health.last_success_age_ms = 0;
-          if (readings[click].out_of_range) {
-            health.state = ComponentState::kDegraded;
-            health.error = "OUT_OF_RANGE";
-          } else {
-            health.state = ComponentState::kOk;
-            health.error = "NONE";
+        UpdateClickHealth(click, ok[click], readings[click], errors[click],
+                          now);
+        if (ok[click] && owns_resistance &&
+            static_cast<std::size_t>(click) <
+                config_.sensors.max31865_sample_indices.size()) {
+          const std::size_t index =
+              config_.sensors.max31865_sample_indices[
+                  static_cast<std::size_t>(click)];
+          // 0.0 is the existing wire dash convention for "not valid" (see
+          // the "disabled" branch in ReadSnapshot below): a saturated
+          // reading writes 0.0 here rather than the diagnostic
+          // resistance_ohm value, keeping an out-of-range specimen
+          // indistinguishable on the wire from an unmonitored index.
+          if (index < sample_resistance_ohm_.size()) {
+            sample_resistance_ohm_[index] =
+                readings[click].valid ? readings[click].resistance_ohm : 0.0;
           }
-          if (owns_resistance &&
-              static_cast<std::size_t>(click) <
-                  config_.sensors.max31865_sample_indices.size()) {
-            const std::size_t index =
-                config_.sensors.max31865_sample_indices[
-                    static_cast<std::size_t>(click)];
-            // 0.0 is the existing wire dash convention for "not valid" (see
-            // the "disabled" branch in ReadSnapshot below): a saturated
-            // reading writes 0.0 here rather than the diagnostic
-            // resistance_ohm value, keeping an out-of-range specimen
-            // indistinguishable on the wire from an unmonitored index.
-            if (index < sample_resistance_ohm_.size()) {
-              sample_resistance_ohm_[index] =
-                  readings[click].valid ? readings[click].resistance_ohm
-                                        : 0.0;
-            }
-          }
-        } else {
-          health.state =
-              FailedState(click_has_success_[click], click_last_success_[click]);
-          health.error = errors[click].empty() ? "NO_RESPONSE" : errors[click];
-          health.last_success_age_ms =
-              AgeMs(click_last_success_[click], click_has_success_[click]);
         }
       }
     }
@@ -970,14 +977,31 @@ bool SensorManager::ActiveCheck(const std::string& component,
   auto check_max31865 = [&]() {
     // A CHECK is an on-demand full conversation, same as check_rtd below:
     // a real one-shot conversion on each click, not a cached health read.
-    std::lock_guard<std::mutex> lock(clicks_io_mu_);
-    if (!click1_bus_active_->available() ||
-        !click2_bus_active_->available()) {
-      click_errors[0] = click_errors[1] = "SPI_UNAVAILABLE";
-      return false;
+    {
+      std::lock_guard<std::mutex> lock(clicks_io_mu_);
+      if (!click1_bus_active_->available() ||
+          !click2_bus_active_->available()) {
+        click_errors[0] = click_errors[1] = "SPI_UNAVAILABLE";
+        return false;
+      }
+      click_ok[0] = click1_.ReadOneShot(&click_readings[0], &click_errors[0]);
+      click_ok[1] = click2_.ReadOneShot(&click_readings[1], &click_errors[1]);
     }
-    click_ok[0] = click1_.ReadOneShot(&click_readings[0], &click_errors[0]);
-    click_ok[1] = click2_.ReadOneShot(&click_readings[1], &click_errors[1]);
+    // Keep max31865_health_ in sync with what this on-demand conversation
+    // just observed, exactly the way Max31865Loop's own poll pass would --
+    // otherwise a passing CHECK MAX31865 could leave ComponentSummary
+    // reporting stale FAILED health until the worker's next poll. Two
+    // separate lock scopes (clicks_io_mu_ above, cache_mu_ here), never
+    // nested, mirroring Max31865Loop's own shape so no code path here ever
+    // holds both mutexes at once.
+    const auto now = std::chrono::steady_clock::now();
+    {
+      std::lock_guard<std::mutex> cache_lock(cache_mu_);
+      UpdateClickHealth(0, click_ok[0], click_readings[0], click_errors[0],
+                        now);
+      UpdateClickHealth(1, click_ok[1], click_readings[1], click_errors[1],
+                        now);
+    }
     return click_ok[0] && click_ok[1];
   };
 

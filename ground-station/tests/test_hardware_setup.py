@@ -255,6 +255,22 @@ class HardwareSetupTests(unittest.TestCase):
             "sensor.max31865_sample_indices entries must be less than "
             "hardware.sample_count", errors)
 
+    def test_validate_candidate_detects_max31865_duplicate_after_parsing(
+            self) -> None:
+        # Fix-round 1 minor: "0" and "00" are different raw INI strings but
+        # the same parsed index -- a raw-string distinctness check (the
+        # pre-fix bug) would miss this entirely, unlike config.cpp, which
+        # compares the parsed std::size_t values. Distinct from
+        # test_validate_candidate_detects_duplicate_max31865_sample_indices
+        # above (which uses two textually-identical entries and would pass
+        # under either the buggy or fixed comparison).
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        broken = hardware_setup.replace_ini(
+            source, {"sensor.max31865_sample_indices": "0,00"})
+        errors = hardware_setup.validate_candidate(broken)
+        self.assertIn(
+            "sensor.max31865_sample_indices entries must be distinct", errors)
+
     def test_same_line_on_different_gpio_chips_is_valid(self) -> None:
         # BCM 17 is a v3-reserved line (Sequent HAT rs485_dir) on the default
         # gpio_chip, but motor0 is moved to a *different* chip here, so the
