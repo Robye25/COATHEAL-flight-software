@@ -20,11 +20,18 @@ coatheal_onboard                       gui_app.py / CLI
 
 ## Deployment quickstart (plug and play)
 
-**Onboard (Raspberry Pi)** — SSH in and run one command. It pulls the latest
-code, retires any previously installed COATHEAL iteration, migrates the
-existing config to the current schema (original backed up), rebuilds,
-validates the config with the flight binary, and installs + starts the
-service:
+**Onboard (Raspberry Pi)** — SSH in. On a brand-new Pi the repository isn't
+there yet, so clone it once (the repo is public — no credentials needed):
+
+```bash
+sudo mkdir -p /bexus/code && sudo chown -R $USER /bexus
+git clone https://github.com/Robye25/COATHEAL-flight-software.git /bexus/code/coatheal
+```
+
+Then run the deploy script. It pulls the latest code, retires any previously
+installed COATHEAL iteration, migrates the existing config to the current
+schema (original backed up), rebuilds, validates the config with the flight
+binary, and installs + starts the service:
 
 ```bash
 bash /bexus/code/coatheal/deploy_onboard.sh   # first time
