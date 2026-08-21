@@ -102,3 +102,21 @@ README's *Deployment quickstart*). It is idempotent and:
 2. Adds an inbound rule for TCP 4000 (telemetry, the Pi connects out to
    this port).
 3. Adds an inbound rule for UDP 4100 (discovery beacons).
+
+## Optional Pi service trims
+
+`deploy_onboard.sh` deliberately does not touch unrelated system services.
+On a dedicated flight Pi you may still want to stop background daemons the
+experiment never uses, which is all the retired `setup_coatheal.sh` bootstrap
+did beyond what the deploy script already handles:
+
+```bash
+sudo systemctl disable --now bluetooth
+sudo systemctl disable --now triggerhappy
+sudo systemctl disable --now avahi-daemon
+```
+
+Optional, not required. COATHEAL discovery is its own UDP beacon on 4100 and
+does not use mDNS, so disabling `avahi-daemon` does not affect it — but it
+does remove `.local` name resolution, so keep it if you reach the Pi by
+hostname rather than by IP.
