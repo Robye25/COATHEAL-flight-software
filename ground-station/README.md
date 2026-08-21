@@ -42,17 +42,28 @@ python gui_app.py [--host <onboard-ip>] [--tel-port 4000] [--cmd-port 5000]
 
 | Panel | Location | Description |
 |---|---|---|
-| **Connection** | Left dock | Onboard IP, telemetry port, command port; Start Telemetry button; connection status |
+| **Connection** | Left dock | Onboard IP, telemetry/command ports, Start Telemetry button, discovery and receiver status |
+| **Mode** | Left dock | `ARM`/`DISARM`, `FORCE START`/`FORCE STOP`, phase selection, SAFE mode, radio silence/resume |
 | **Heater Control** | Left dock | 6 duties, manual targets, PID tuning, and local JSON profiles |
-| **Motor Control** | Left dock | M0/M1 selection, jog/absolute commands, software zero, and bend sequence editor |
-| **Commands** | Left dock | Diagnostics including `CHECK`, plus arbitrary command entry |
-| **Temperature** | Center tab | Live PyQtGraph plot — up to 8 sample temps |
-| **Pressure** | Center tab | Live pressure trace |
-| **Heater Duties** | Center tab | All 6 heater duty traces over time |
-| **Resistance** | Center tab | Compatibility traces; final BOM normally emits `-` because no resistance instrument is carried |
-| **Values** | Right panel | Latest value for every telemetry field (status/component flags live on the Health tab, not here) |
-| **Log** | Bottom dock | Timestamped scrolling log; auto-scroll toggle; save to file |
-| **Status bar** | Bottom edge | Phase (color-coded), SEQ, pressure, hottest sample, LINK status, staleness |
+| **Motor Control** | Left dock | M0/M1 selection, jog and absolute moves, software zero, collapsible bend-sequence editor |
+| **Commands** | Left dock | Diagnostics (`PING`, `STATUS`, `CHECK`, `COMPONENTS`, `RESET_CTRL`), tick rate, arbitrary command entry |
+| **Temperature / Pressure / Heaters / Resistance / Stepper** | Center tabs | Live PyQtGraph traces |
+| **Health** | Right dock, first tab | Green/red dots for all 17 wire status flags plus the six `COMPONENT_STATE` entries; opens by default |
+| **Values** | Right dock | Latest value for every telemetry field (flag state lives on Health, not here) |
+| **Motors** | Right dock | Per-motor position, target, speed, and microstep detail |
+| **Preflight** | Right dock | Go/no-go checklist dots |
+| **Cmd History** | Right dock | Every command sent with its response and latency; double-click a row to re-issue it |
+| **Emergency bar** | Bottom dock, always visible | `HEATERS OFF` and `STOP MOTORS` fire immediately; `ENTER SAFE`, `SHUTDOWN SAFE`, `RADIO SILENCE` confirm first |
+| **Event log / Pull events** | Bottom dock tabs | Timestamped scrolling log with auto-scroll and save; pull-event table |
+| **Status strip** | Above the plots | MODE, PHASE, aggregate HEALTH dot, LINK staleness, session, sequence, discovery |
+
+The **Resistance** traces are the coating-specimen measurement from the two
+MAX31865 clicks (4-wire Kelvin per specimen). Blank `-` values are NOT normal:
+they mean the instrument is not reporting, the onboard raises `RESISTANCE_FAIL`,
+and the Health tab's RESISTANCE dot turns red. An absent or unpowered click
+reports `CLICK_NOT_DETECTED` in `CHECK`. See
+[docs/sequent-rtd-bring-up.md](../docs/sequent-rtd-bring-up.md) for the
+reference-resistor and range bring-up gates.
 
 ### Command Buttons
 
@@ -62,8 +73,18 @@ python gui_app.py [--host <onboard-ip>] [--tel-port 4000] [--cmd-port 5000]
 - Per-channel/all-channel PID tuning
 - Explicit motor selection, software zero, and runtime bend sequences
 
-**Safety-critical** (confirmation dialog):
-- `FORCE STOP`, `HEATERS OFF`, `RESET CTRL`, `SHUTDOWN SAFE`
+**Panic actions** (fire immediately, no confirmation dialog -- by design):
+- `HEATERS OFF` and `STOP MOTORS` in the emergency bar
+- `Esc` stops BOTH motors (`STEPPER_STOP 0` and `STEPPER_STOP 1`)
+
+**Confirm-gated** (a dialog appears first):
+- `ARM`, `SET PHASE`, `FORCE STOP`, `ENTER SAFE`, `RADIO SILENCE`, `RESET_CTRL`,
+  `SHUTDOWN SAFE`
+
+While a confirmation dialog is open, Qt blocks every keyboard shortcut,
+including `Esc` -- `Esc` dismisses the dialog first, so press it again to stop
+the motors. An open bend-sequence table-cell editor swallows the first `Esc`
+the same way. `F1` lists all shortcuts.
 
 Thermal profiles are saved to `profiles/thermal_profiles.json` and are applied
 by re-sending PID gains and targets to the Pi.
@@ -107,7 +128,7 @@ python main.py command --cmd "<COMMAND>" [OPTIONS]
 | `--host` | auto | Onboard IP. Omit for auto-discovery |
 | `--port` | `5000` | Command port |
 | `--cmd` | required | Command string, e.g. `"STATUS"` or `"SET_HEATER_DUTY 0 0.5"` |
-| `--timeout` | `3.0` | Socket timeout (seconds) |
+| `--timeout` | per command | Socket timeout (seconds). Omit it and the value comes from `protocol.COMMAND_TIMEOUTS`: `CHECK` gets 15.0 (it runs a full hardware conversation), everything else 3.0. Passing `--timeout` always wins. |
 | `--yes` | off | Skip safety confirmation for dangerous commands |
 | `--no-discovery-enabled` | — | Disable UDP discovery |
 | `--static-host` | `169.254.10.10` | Static fallback IP |
