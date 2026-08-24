@@ -17,7 +17,8 @@ from ..protocol import CommandResponse, TelemetryPacket
 from . import firewall
 from .dispatch import CommandDispatcher, TelemetryReceiver
 from .discovery import (
-    CommandProbe, GsBeacon, OnboardListener, DISCOVERY_PORT_DEFAULT,
+    CommandProbe, GsBeacon, OnboardListener, SentNonceRegistry,
+    DISCOVERY_PORT_DEFAULT,
 )
 from .panels_control import (
     CommandPanel, ConnectionPanel, EmergencyBar, HeaterPanel, ModePanel,
@@ -152,13 +153,19 @@ class MainWindow(QMainWindow):
         self._build_shortcuts()
 
         # ── discovery: beacon + passive listener start immediately ──
+        # Shared nonce registry so the listener can recognise (and drop)
+        # this GUI's own looped-back broadcasts instead of logging itself
+        # as a conflicting peer ground station every beacon interval.
+        self._sent_nonces = SentNonceRegistry()
         self._beacon = GsBeacon(
             tel_port=tel_port, cmd_port=cmd_port,
             priority=self._connection.current_priority(),
             discovery_port=DISCOVERY_PORT_DEFAULT,
+            sent_nonces=self._sent_nonces,
         )
         self._beacon.log_message.connect(self._log.append)
-        self._listener = OnboardListener(discovery_port=DISCOVERY_PORT_DEFAULT)
+        self._listener = OnboardListener(discovery_port=DISCOVERY_PORT_DEFAULT,
+                                         sent_nonces=self._sent_nonces)
         self._listener.log_message.connect(self._log.append)
         self._listener.onboard_discovered.connect(self._on_onboard_discovered)
         self._listener.peer_gs_seen.connect(self._on_peer_gs_seen)

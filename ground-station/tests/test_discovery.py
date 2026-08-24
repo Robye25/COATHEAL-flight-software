@@ -13,6 +13,8 @@ import unittest
 try:
     from app.gui.discovery import (
         STATIC_ONBOARD_HOST_DEFAULT,
+        PeerSightingThrottle,
+        SentNonceRegistry,
         parse_gs_beacon,
         parse_onboard_announcement,
         probe_host_candidates,
@@ -105,6 +107,69 @@ class CommandProbeHelperTests(unittest.TestCase):
             probe_host_candidates("127.0.0.1", include_static=False),
             ["127.0.0.1"],
         )
+
+
+@unittest.skipUnless(_IMPORT_OK, f"discovery module unavailable: {_IMPORT_ERR}")
+class SentNonceRegistryTests(unittest.TestCase):
+    """Broadcast loopback self-recognition: the listener drops GS_BEACONs
+    whose nonce this process itself sent."""
+
+    def test_recognises_sent_nonce(self) -> None:
+        reg = SentNonceRegistry()
+        reg.add("1724500000000")
+        self.assertTrue(reg.was_sent("1724500000000"))
+        self.assertFalse(reg.was_sent("1724500000001"))
+
+    def test_bounded_capacity_evicts_oldest(self) -> None:
+        reg = SentNonceRegistry(capacity=3)
+        for n in ("a", "b", "c", "d"):
+            reg.add(n)
+        self.assertFalse(reg.was_sent("a"))
+        for n in ("b", "c", "d"):
+            self.assertTrue(reg.was_sent(n))
+
+    def test_duplicate_add_is_idempotent(self) -> None:
+        reg = SentNonceRegistry(capacity=2)
+        reg.add("x")
+        reg.add("x")
+        reg.add("y")
+        self.assertTrue(reg.was_sent("x"))
+        self.assertTrue(reg.was_sent("y"))
+
+
+@unittest.skipUnless(_IMPORT_OK, f"discovery module unavailable: {_IMPORT_ERR}")
+class PeerSightingThrottleTests(unittest.TestCase):
+    """One event-log line per peer per window, not one per 2 s beacon."""
+
+    def test_first_sighting_emits(self) -> None:
+        throttle = PeerSightingThrottle(reseen_s=300.0)
+        self.assertTrue(throttle.should_emit("192.168.1.50", 100, now=0.0))
+
+    def test_unchanged_peer_suppressed_within_window(self) -> None:
+        throttle = PeerSightingThrottle(reseen_s=300.0)
+        self.assertTrue(throttle.should_emit("192.168.1.50", 100, now=0.0))
+        for t in (2.0, 4.0, 60.0, 299.9):
+            self.assertFalse(throttle.should_emit("192.168.1.50", 100, now=t))
+
+    def test_unchanged_peer_reported_after_window(self) -> None:
+        throttle = PeerSightingThrottle(reseen_s=300.0)
+        self.assertTrue(throttle.should_emit("192.168.1.50", 100, now=0.0))
+        self.assertTrue(throttle.should_emit("192.168.1.50", 100, now=300.0))
+
+    def test_priority_change_reports_immediately(self) -> None:
+        throttle = PeerSightingThrottle(reseen_s=300.0)
+        self.assertTrue(throttle.should_emit("192.168.1.50", 100, now=0.0))
+        self.assertTrue(throttle.should_emit("192.168.1.50", 200, now=2.0))
+
+    def test_second_peer_reports_independently(self) -> None:
+        # The old single-slot dedup reset on every alternation, so two
+        # peers beaconing A,B,A,B flooded the log; each key throttles on
+        # its own now.
+        throttle = PeerSightingThrottle(reseen_s=300.0)
+        self.assertTrue(throttle.should_emit("192.168.1.50", 100, now=0.0))
+        self.assertTrue(throttle.should_emit("192.168.1.60", 100, now=1.0))
+        self.assertFalse(throttle.should_emit("192.168.1.50", 100, now=2.0))
+        self.assertFalse(throttle.should_emit("192.168.1.60", 100, now=3.0))
 
 
 if __name__ == "__main__":
