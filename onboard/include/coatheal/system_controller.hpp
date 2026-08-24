@@ -93,6 +93,7 @@ class SystemController {
   double link_loss_s_ = 0.0;
   bool link_loss_fallback_active_ = false;
   bool link_loss_fallback_was_active_ = false;
+  bool drain_error_logged_ = false;
   bool tmc_spi_ok_ = true;
   SensorSnapshot last_sensor_snapshot_;
 
