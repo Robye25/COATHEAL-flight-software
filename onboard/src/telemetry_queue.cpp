@@ -23,10 +23,14 @@ std::int64_t CurrentUnixEpochSeconds() {
 
 TelemetryQueue::TelemetryQueue(std::string queue_dir,
                                double retention_hours,
-                               std::uint64_t max_bytes)
+                               std::uint64_t max_bytes,
+                               std::uint64_t compact_min_dead_bytes,
+                               std::uint64_t compact_max_live_bytes)
     : queue_dir_(std::move(queue_dir)),
       retention_hours_(retention_hours),
-      max_bytes_(max_bytes) {
+      max_bytes_(max_bytes),
+      compact_min_dead_bytes_(compact_min_dead_bytes),
+      compact_max_live_bytes_(compact_max_live_bytes) {
   std::filesystem::path p(queue_dir_);
   queue_file_ = (p / "pending.queue").string();
 }
@@ -45,6 +49,8 @@ bool TelemetryQueue::Initialize(std::string* error) {
   }
 
   frames_.clear();
+  live_bytes_ = 0;
+  dead_bytes_ = 0;
 
   std::ifstream in(queue_file_);
   if (!in.is_open()) {
@@ -59,94 +65,133 @@ bool TelemetryQueue::Initialize(std::string* error) {
     return true;
   }
 
+  // Load what parses, skip what doesn't. A SIGABRT/SIGKILL between the two
+  // halves of an appended line leaves a torn final line; treating any bad
+  // line as fatal (the old behaviour) turned one torn append into a
+  // permanently memory-only queue. The primary CSV log is the archival
+  // record -- the queue only owes retransmission of what it can still read.
+  const std::int64_t now = CurrentUnixEpochSeconds();
+  const std::int64_t retention_s =
+      static_cast<std::int64_t>(retention_hours_ * 3600.0);
+  std::size_t skipped_lines = 0;
+  std::size_t expired_frames = 0;
   std::string line;
-  int line_no = 0;
   while (std::getline(in, line)) {
-    ++line_no;
     if (line.empty()) {
       continue;
     }
-
     QueuedTelemetryFrame frame;
     if (!ParseLine(line, &frame)) {
-      persistence_enabled_ = false;
-      if (error != nullptr) {
-        *error = "failed to parse queue line " + std::to_string(line_no);
-      }
-      return false;
+      ++skipped_lines;
+      continue;
     }
+    if (retention_s > 0 && (now - frame.queued_epoch_s) > retention_s) {
+      ++expired_frames;
+      continue;
+    }
+    live_bytes_ += LineBytes(frame);
     frames_.push_back(std::move(frame));
   }
+  in.close();
 
+  // One startup compaction (before the systemd watchdog is armed) so the
+  // on-disk file starts exactly equal to the live set.
+  if (!CompactLocked(error)) {
+    persistence_enabled_ = false;
+    return false;
+  }
+  if ((skipped_lines > 0 || expired_frames > 0) && error != nullptr) {
+    std::ostringstream oss;
+    oss << "queue loaded with " << skipped_lines << " unparseable and "
+        << expired_frames << " expired line(s) dropped";
+    *error = oss.str();
+  }
   return true;
 }
 
 bool TelemetryQueue::Enqueue(const QueuedTelemetryFrame& frame, std::string* error) {
   std::lock_guard<std::mutex> lock(mu_);
   frames_.push_back(frame);
+  live_bytes_ += LineBytes(frame);
   PruneLocked();
   RetryPersistenceLocked();
   if (!persistence_enabled_) return true;
-  if (!PersistLocked(error)) {
+  if (!AppendLocked(frame)) {
+    if (error != nullptr) {
+      *error = "failed to persist queue frame";
+    }
     persistence_enabled_ = false;
     return true;
   }
+  MaybeCompactLocked();
   return true;
 }
 
 bool TelemetryQueue::Acknowledge(const std::string& session_id,
                                  std::uint64_t seq,
                                  std::string* error) {
+  (void)error;
   std::lock_guard<std::mutex> lock(mu_);
 
-  auto remove_from = std::remove_if(frames_.begin(),
-                                    frames_.end(),
-                                    [&](const QueuedTelemetryFrame& frame) {
-                                      return frame.session_id == session_id && frame.seq <= seq;
-                                    });
+  std::uint64_t removed_bytes = 0;
+  auto remove_from = std::remove_if(
+      frames_.begin(), frames_.end(),
+      [&](const QueuedTelemetryFrame& frame) {
+        const bool acked = frame.session_id == session_id && frame.seq <= seq;
+        if (acked) removed_bytes += LineBytes(frame);
+        return acked;
+      });
 
   if (remove_from == frames_.end()) {
     return true;
   }
 
   frames_.erase(remove_from, frames_.end());
+  live_bytes_ -= removed_bytes;
+  dead_bytes_ += removed_bytes;
   RetryPersistenceLocked();
-  if (!persistence_enabled_) return true;
-  if (!PersistLocked(error)) {
-    persistence_enabled_ = false;
-    return true;
-  }
+  MaybeCompactLocked();
   return true;
 }
 
 bool TelemetryQueue::AcknowledgeExact(const QueuedTelemetryFrame& frame,
                                       std::string* error) {
+  (void)error;
   std::lock_guard<std::mutex> lock(mu_);
 
-  auto remove_from = std::remove_if(frames_.begin(),
-                                    frames_.end(),
-                                    [&](const QueuedTelemetryFrame& pending) {
-                                      return pending.session_id == frame.session_id &&
-                                             pending.seq == frame.seq &&
-                                             pending.frame == frame.frame;
-                                    });
+  std::uint64_t removed_bytes = 0;
+  auto remove_from = std::remove_if(
+      frames_.begin(), frames_.end(),
+      [&](const QueuedTelemetryFrame& pending) {
+        const bool acked = pending.session_id == frame.session_id &&
+                           pending.seq == frame.seq &&
+                           pending.frame == frame.frame;
+        if (acked) removed_bytes += LineBytes(pending);
+        return acked;
+      });
   if (remove_from == frames_.end()) {
     return true;
   }
 
   frames_.erase(remove_from, frames_.end());
+  live_bytes_ -= removed_bytes;
+  dead_bytes_ += removed_bytes;
   RetryPersistenceLocked();
-  if (!persistence_enabled_) return true;
-  if (!PersistLocked(error)) {
-    persistence_enabled_ = false;
-    return true;
-  }
+  MaybeCompactLocked();
   return true;
+}
+
+std::vector<QueuedTelemetryFrame> TelemetryQueue::PendingFrames(
+    std::size_t max_frames) const {
+  std::lock_guard<std::mutex> lock(mu_);
+  const std::size_t count = std::min(max_frames, frames_.size());
+  return std::vector<QueuedTelemetryFrame>(frames_.begin(),
+                                           frames_.begin() + count);
 }
 
 std::vector<QueuedTelemetryFrame> TelemetryQueue::PendingFrames() const {
   std::lock_guard<std::mutex> lock(mu_);
-  return frames_;
+  return std::vector<QueuedTelemetryFrame>(frames_.begin(), frames_.end());
 }
 
 std::size_t TelemetryQueue::size() const {
@@ -154,7 +199,17 @@ std::size_t TelemetryQueue::size() const {
   return frames_.size();
 }
 
-bool TelemetryQueue::PersistLocked(std::string* error) {
+bool TelemetryQueue::AppendLocked(const QueuedTelemetryFrame& frame) {
+  std::ofstream out(queue_file_, std::ios::app);
+  if (!out.is_open()) {
+    return false;
+  }
+  out << FormatLine(frame) << '\n';
+  out.flush();
+  return out.good();
+}
+
+bool TelemetryQueue::CompactLocked(std::string* error) {
   const std::string tmp_file = queue_file_ + ".tmp";
   {
     std::ofstream out(tmp_file, std::ios::trunc);
@@ -191,7 +246,22 @@ bool TelemetryQueue::PersistLocked(std::string* error) {
     return false;
   }
 
+  dead_bytes_ = 0;
   return true;
+}
+
+void TelemetryQueue::MaybeCompactLocked() {
+  if (!persistence_enabled_) return;
+  if (dead_bytes_ < compact_min_dead_bytes_) return;
+  // A compaction rewrites every live frame in one go on the control-loop
+  // thread. Cap the live set it is allowed to do that for, so the stall
+  // stays well inside the systemd watchdog budget; a bigger live set keeps
+  // its dead weight on disk until it drains down (or until the next
+  // startup compaction), which only costs disk space.
+  if (live_bytes_ > compact_max_live_bytes_) return;
+  if (!CompactLocked(nullptr)) {
+    persistence_enabled_ = false;
+  }
 }
 
 void TelemetryQueue::RetryPersistenceLocked() {
@@ -206,23 +276,38 @@ void TelemetryQueue::RetryPersistenceLocked() {
   std::filesystem::create_directories(queue_dir_, ec);
   if (ec) return;
   persistence_enabled_ = true;
-  if (!PersistLocked(nullptr)) persistence_enabled_ = false;
+  if (!CompactLocked(nullptr)) persistence_enabled_ = false;
 }
 
 void TelemetryQueue::PruneLocked() {
+  const std::int64_t now = CurrentUnixEpochSeconds();
+  const std::int64_t retention_s =
+      static_cast<std::int64_t>(retention_hours_ * 3600.0);
+
+  auto drop_front = [&]() {
+    const std::uint64_t bytes = LineBytes(frames_.front());
+    live_bytes_ -= bytes;
+    // The dropped line may still be in the file until the next compaction.
+    dead_bytes_ += bytes;
+    frames_.pop_front();
+  };
+
+  // Frames past retention are dropped outright. The old code only pruned
+  // when the queue was over max_bytes AND the frame was stale, so a backlog
+  // under the (8 GB default) size cap was kept forever and replayed
+  // weeks-old frames at the ground station whenever the link came up.
+  if (retention_s > 0) {
+    while (!frames_.empty() &&
+           (now - frames_.front().queued_epoch_s) > retention_s) {
+      drop_front();
+    }
+  }
+
   if (max_bytes_ == 0U) {
     return;
   }
-
-  const std::int64_t now = CurrentUnixEpochSeconds();
-  const std::int64_t retention_s = static_cast<std::int64_t>(retention_hours_ * 3600.0);
-
-  while (!frames_.empty() && EstimatedBytesLocked() > max_bytes_) {
-    const QueuedTelemetryFrame& oldest = frames_.front();
-    if ((now - oldest.queued_epoch_s) <= retention_s) {
-      break;
-    }
-    frames_.erase(frames_.begin());
+  while (!frames_.empty() && live_bytes_ > max_bytes_) {
+    drop_front();
   }
 }
 
@@ -266,12 +351,8 @@ std::string TelemetryQueue::FormatLine(const QueuedTelemetryFrame& frame) {
   return oss.str();
 }
 
-std::uint64_t TelemetryQueue::EstimatedBytesLocked() const {
-  std::uint64_t total = 0;
-  for (const QueuedTelemetryFrame& frame : frames_) {
-    total += static_cast<std::uint64_t>(FormatLine(frame).size() + 1);
-  }
-  return total;
+std::uint64_t TelemetryQueue::LineBytes(const QueuedTelemetryFrame& frame) {
+  return static_cast<std::uint64_t>(FormatLine(frame).size() + 1);
 }
 
 }  // namespace coatheal

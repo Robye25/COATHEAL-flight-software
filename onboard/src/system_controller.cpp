@@ -722,7 +722,17 @@ int SystemController::Run() {
     std::string drain_error;
     if (!DrainTelemetryQueue(&last_link_ok, &drain_error)) {
       last_link_ok = false;
-      std::cerr << "[telemetry] drain error: " << drain_error << '\n';
+      // Log on transition only. While no ground station is reachable this
+      // fails every tick, and one journal line per tick for the steady
+      // state buries the lines that mark actual changes.
+      if (!drain_error_logged_) {
+        std::cerr << "[telemetry] drain error: " << drain_error
+                  << " (suppressing repeats until recovery)" << '\n';
+        drain_error_logged_ = true;
+      }
+    } else if (drain_error_logged_) {
+      std::cerr << "[telemetry] drain recovered" << '\n';
+      drain_error_logged_ = false;
     }
     COATHEAL_PERF_STAMP(perf_ts[9]);  // stage 8: queue enqueue + drain
 
@@ -864,7 +874,13 @@ bool SystemController::DrainTelemetryQueue(bool* link_ok, std::string* error) {
     *link_ok = false;
   }
 
-  std::vector<QueuedTelemetryFrame> pending = telemetry_queue_.PendingFrames();
+  // Rev C: limit drain to a small batch per tick so the control loop is not
+  // blocked by a large backlog (the Pi was accumulating 12k+ frames). The
+  // batch bound is applied inside PendingFrames too: copying the entire
+  // backlog out of the queue every tick is O(backlog) on the control loop.
+  constexpr std::size_t kMaxDrainPerTick = 10;
+  std::vector<QueuedTelemetryFrame> pending =
+      telemetry_queue_.PendingFrames(kMaxDrainPerTick);
   if (pending.empty()) {
     if (link_ok != nullptr) {
       *link_ok = telemetry_client_.is_connected();
@@ -872,9 +888,6 @@ bool SystemController::DrainTelemetryQueue(bool* link_ok, std::string* error) {
     return true;
   }
 
-  // Rev C: limit drain to a small batch per tick so the control loop is not
-  // blocked by a large backlog (the Pi was accumulating 12k+ frames).
-  constexpr std::size_t kMaxDrainPerTick = 10;
   std::size_t drained = 0;
 
   for (const QueuedTelemetryFrame& frame : pending) {

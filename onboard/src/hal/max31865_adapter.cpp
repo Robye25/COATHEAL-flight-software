@@ -159,7 +159,16 @@ bool Max31865Adapter::VerifyPresence(std::string* error) {
     open_ = false;  // I/O failure: force a re-open next attempt.
     return false;
   }
-  if (readback != kCfgProbe) {
+  // Mask the auto-clearing 1SHOT bit out of the comparison. If a previous
+  // process instance was killed between "write 1SHOT" and the conversion
+  // completing (systemd's watchdog SIGABRT did exactly this on the bench),
+  // the chip keeps the conversion pending -- and with VBIAS off it never
+  // completes, so bit 5 reads back as 1 indefinitely. That chip is present
+  // and healthy; an exact-equality check declared it CLICK_NOT_DETECTED on
+  // every boot until power cycle. Neither idle-line forgery level (0x00 /
+  // 0xFF) survives the masked comparison either, so the absent-click
+  // detection this check exists for is unchanged.
+  if ((readback & static_cast<std::uint8_t>(~kBit1Shot)) != kCfgProbe) {
     // The bus conversation itself succeeded; the click just isn't
     // answering as configured. Configuration rejection, not an I/O
     // failure -- open_ is left as-is (mirrors SequentRtdAdapter's
