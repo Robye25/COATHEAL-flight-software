@@ -624,19 +624,22 @@ bool TelemetryClient::SendFrameAwaitAck(const std::string& frame,
   }
 
   if (!connected_) {
-    if (!ConnectLocked()) {
-      // Exponential backoff 0.5s -> 1s -> 2s -> ... capped at reconnect_ms_.
-      static thread_local int backoff_ms = 500;
-      const int cap = std::max(500, reconnect_ms_);
-      const int wait_ms = std::min(backoff_ms, cap);
-      std::this_thread::sleep_for(std::chrono::milliseconds(wait_ms));
-      backoff_ms = std::min(backoff_ms * 2, cap);
+    // Exponential backoff 0.5s -> 1s -> 2s -> ... capped at reconnect_ms_,
+    // enforced as a deadline rather than a sleep so the caller (the control
+    // loop) returns immediately and keeps ticking at rate.
+    const auto now = std::chrono::steady_clock::now();
+    if (now < next_connect_attempt_) {
       return false;
     }
-    // Reset backoff on successful connect by re-reading the thread-local.
-    static thread_local int reset_backoff = 500;
-    reset_backoff = 500;
-    (void)reset_backoff;
+    if (!ConnectLocked()) {
+      const int cap = std::max(500, reconnect_ms_);
+      const int wait_ms = std::min(connect_backoff_ms_, cap);
+      next_connect_attempt_ = now + std::chrono::milliseconds(wait_ms);
+      connect_backoff_ms_ = std::min(connect_backoff_ms_ * 2, cap);
+      return false;
+    }
+    connect_backoff_ms_ = 500;
+    next_connect_attempt_ = {};
   }
 
   const std::string payload = frame + "\n";
@@ -699,6 +702,10 @@ void TelemetryClient::ObserveGroundStation(const std::string& host,
   if (!connected_) {
     active_host_ = host;
     current_priority_ = priority;
+    // A ground station just made itself known; don't make it wait out a
+    // backoff deadline accrued while nobody was there.
+    connect_backoff_ms_ = 500;
+    next_connect_attempt_ = {};
   }
 }
 

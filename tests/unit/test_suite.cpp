@@ -271,7 +271,10 @@ void TestTelemetryQueuePersistenceAndAck() {
 
   std::string error;
   {
-    coatheal::TelemetryQueue queue(queue_dir.string(), 72.0, 1024 * 1024);
+    // compact_min_dead_bytes=1: compact on every acknowledge, so this test
+    // keeps asserting the strict "acked frames are gone from disk" contract.
+    coatheal::TelemetryQueue queue(queue_dir.string(), 72.0, 1024 * 1024,
+                                   /*compact_min_dead_bytes=*/1);
     assert(queue.Initialize(&error));
 
     coatheal::QueuedTelemetryFrame f1;
@@ -306,6 +309,86 @@ void TestTelemetryQueuePersistenceAndAck() {
     const auto pending = queue.PendingFrames();
     assert(pending.size() == 1);
     assert(pending.front().seq == 2);
+  }
+
+  std::error_code ec;
+  std::filesystem::remove_all(queue_dir, ec);
+}
+
+// The queue no longer rewrites its whole backing file on every mutation
+// (that was O(backlog) disk I/O on the control loop and is what tripped the
+// systemd watchdog with a large backlog). These are the new observable
+// contracts: bounded PendingFrames, ack-then-crash re-delivery
+// (at-least-once), torn/garbage line tolerance, and unconditional
+// retention-age pruning at load.
+void TestTelemetryQueueDeferredCompactionRetentionAndTornLines() {
+  const std::filesystem::path queue_dir =
+      std::filesystem::temp_directory_path() /
+      ("coatheal_queue_test2_" +
+       std::to_string(coatheal::CurrentUnixEpochSeconds()));
+
+  auto make_frame = [](std::uint64_t seq) {
+    coatheal::QueuedTelemetryFrame f;
+    f.queued_epoch_s = coatheal::CurrentUnixEpochSeconds();
+    f.session_id = "s1";
+    f.seq = seq;
+    f.frame = "DATA,s1," + std::to_string(seq) + ",2026-01-01T00:00:01Z,1,0";
+    return f;
+  };
+
+  std::string error;
+  {
+    // Default thresholds: acknowledges must NOT rewrite the file.
+    coatheal::TelemetryQueue queue(queue_dir.string(), 72.0, 1024 * 1024);
+    assert(queue.Initialize(&error));
+    for (std::uint64_t seq = 1; seq <= 4; ++seq) {
+      assert(queue.Enqueue(make_frame(seq), &error));
+    }
+    assert(queue.Acknowledge("s1", 2, &error));
+    assert(queue.size() == 2);
+
+    // PendingFrames(max) returns the oldest frames, bounded.
+    const auto batch = queue.PendingFrames(1);
+    assert(batch.size() == 1);
+    assert(batch.front().seq == 3);
+  }
+
+  {
+    // Same directory reloaded: the acked frames were never compacted away,
+    // so they come back (at-least-once re-delivery after a crash). The
+    // ground station deduplicates; losing them here would be the bug.
+    coatheal::TelemetryQueue queue(queue_dir.string(), 72.0, 1024 * 1024);
+    assert(queue.Initialize(&error));
+    assert(queue.size() == 4);
+  }
+
+  {
+    // Garbage and a torn (partial) final line must not disable the queue.
+    std::ofstream out((queue_dir / "pending.queue").string(), std::ios::app);
+    out << "not a queue line\n";
+    out << "12345\ts1";  // torn append: no trailing separator/frame/newline
+    out.close();
+
+    coatheal::TelemetryQueue queue(queue_dir.string(), 72.0, 1024 * 1024);
+    assert(queue.Initialize(&error));
+    assert(queue.size() == 4);
+  }
+
+  {
+    // A frame older than retention is dropped at load, whatever the size cap.
+    std::ofstream out((queue_dir / "pending.queue").string(), std::ios::app);
+    const std::int64_t stale_epoch =
+        coatheal::CurrentUnixEpochSeconds() - 80 * 3600;
+    out << stale_epoch << "\told-session\t9\tDATA,old-session,9,stale\n";
+    out.close();
+
+    coatheal::TelemetryQueue queue(queue_dir.string(), 72.0, 1024 * 1024);
+    assert(queue.Initialize(&error));
+    const auto pending = queue.PendingFrames();
+    assert(pending.size() == 4);
+    for (const auto& frame : pending) {
+      assert(frame.session_id == "s1");
+    }
   }
 
   std::error_code ec;
@@ -961,6 +1044,7 @@ int main() {
   TestCommandParser();
   TestTelemetrySerializer();
   TestTelemetryQueuePersistenceAndAck();
+  TestTelemetryQueueDeferredCompactionRetentionAndTornLines();
   TestConfigParsesReliabilityFields();
   TestConfigRejectsGpioCollisions();
   TestConfigRejectsReservedGpioCollisions();

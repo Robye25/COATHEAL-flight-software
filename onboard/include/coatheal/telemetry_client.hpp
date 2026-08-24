@@ -130,6 +130,12 @@ class TelemetryClient {
   int socket_fd_ = -1;
   std::string recv_buffer_;
   std::string session_id_;
+  // Exponential connect backoff, expressed as a deadline instead of a
+  // sleep: SendFrameAwaitAck runs on the control-loop thread, and sleeping
+  // there stretched every tick by up to reconnect_ms_ whenever the ground
+  // station was away.
+  std::chrono::steady_clock::time_point next_connect_attempt_{};
+  int connect_backoff_ms_ = 500;
 
   // Currently-connected GS metadata (copy of latest_gs_ snapshot at
   // connect-time) so we can detect strictly-higher-priority beacons.
