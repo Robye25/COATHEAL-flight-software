@@ -108,6 +108,59 @@ def parse_onboard_announcement(line: str) -> Optional[dict]:
     return None
 
 
+class SentNonceRegistry:
+    """Thread-safe bounded record of beacon nonces this process has sent.
+
+    Broadcasts loop back to every listener on the sending machine, so the
+    OnboardListener receives our own GS_BEACON every cycle. Recognising our
+    own nonces is what lets it drop those instead of reporting this ground
+    station as a conflicting peer of itself. Bounded so a long-running GUI
+    never grows it: beacons go out every ~2 s and the loopback copy arrives
+    within milliseconds, so remembering the last few is already generous.
+    """
+
+    def __init__(self, capacity: int = 64):
+        self._capacity = max(1, int(capacity))
+        self._order: list[str] = []
+        self._known: set[str] = set()
+        self._lock = threading.Lock()
+
+    def add(self, nonce: str) -> None:
+        with self._lock:
+            if nonce in self._known:
+                return
+            self._order.append(nonce)
+            self._known.add(nonce)
+            while len(self._order) > self._capacity:
+                self._known.discard(self._order.pop(0))
+
+    def was_sent(self, nonce: str) -> bool:
+        with self._lock:
+            return nonce in self._known
+
+
+class PeerSightingThrottle:
+    """Decides when a peer-GS sighting is worth reporting again.
+
+    A healthy peer beacons every ~2 s; reporting each one floods the event
+    log. Report a (host, priority) pair when it is first seen and then at
+    most once per `reseen_s`; a *different* host or a priority change is
+    news and reports immediately.
+    """
+
+    def __init__(self, reseen_s: float = 300.0):
+        self._reseen_s = float(reseen_s)
+        self._last_emit: dict[tuple[str, int], float] = {}
+
+    def should_emit(self, host: str, priority: int, now: float) -> bool:
+        key = (host, int(priority))
+        last = self._last_emit.get(key)
+        if last is not None and (now - last) < self._reseen_s:
+            return False
+        self._last_emit[key] = now
+        return True
+
+
 def _enumerate_broadcasts() -> list[str]:
     """Best-effort list of IPv4 broadcast addresses on up interfaces."""
     addrs: list[str] = []
@@ -159,6 +212,7 @@ class GsBeacon(QThread):
                  priority: int = 100,
                  discovery_port: int = DISCOVERY_PORT_DEFAULT,
                  interval_s: float = 2.0,
+                 sent_nonces: Optional[SentNonceRegistry] = None,
                  parent=None):
         super().__init__(parent)
         self._tel_port = tel_port
@@ -166,6 +220,7 @@ class GsBeacon(QThread):
         self._priority = max(0, min(999, int(priority)))
         self._disc_port = discovery_port
         self._interval = float(interval_s)
+        self._sent_nonces = sent_nonces
         self._stop = threading.Event()
 
     def set_priority(self, priority: int) -> None:
@@ -191,6 +246,10 @@ class GsBeacon(QThread):
                     targets = _discovery_targets()
                     last_refresh = now
                 nonce = str(int(time.time() * 1000))
+                # Register before the first sendto: the loopback copy can
+                # reach our own listener before the send loop finishes.
+                if self._sent_nonces is not None:
+                    self._sent_nonces.add(nonce)
                 line = (
                     f"GS_BEACON,{nonce},{self._tel_port},"
                     f"{self._cmd_port},{self._priority}\n"
@@ -227,15 +286,21 @@ class OnboardListener(QThread):
     log_message = pyqtSignal(str)
 
     _DEDUP_WINDOW_S = 2.0
+    # A peer beacons every ~2 s; one log line per sighting floods the event
+    # log (the old dedup window equalled the beacon interval, so it never
+    # suppressed anything). Re-report an unchanged peer at most this often.
+    _PEER_RESEEN_S = 300.0
 
-    def __init__(self, discovery_port: int = DISCOVERY_PORT_DEFAULT, parent=None):
+    def __init__(self, discovery_port: int = DISCOVERY_PORT_DEFAULT,
+                 sent_nonces: Optional[SentNonceRegistry] = None,
+                 parent=None):
         super().__init__(parent)
         self._port = discovery_port
+        self._sent_nonces = sent_nonces
         self._stop = threading.Event()
         self._last_onboard: tuple = ()
         self._last_onboard_t: float = 0.0
-        self._last_peer: tuple = ()
-        self._last_peer_t: float = 0.0
+        self._peer_throttle = PeerSightingThrottle(self._PEER_RESEEN_S)
 
     def stop(self) -> None:
         self._stop.set()
@@ -285,12 +350,14 @@ class OnboardListener(QThread):
 
         peer = parse_gs_beacon(line)
         if peer is not None:
-            key = (src_host, peer["priority"])
-            now = time.monotonic()
-            if key == self._last_peer and (now - self._last_peer_t) < self._DEDUP_WINDOW_S:
+            # Our own broadcasts loop back to this listener; a ground
+            # station is not a conflicting peer of itself.
+            if self._sent_nonces is not None and \
+                    self._sent_nonces.was_sent(peer["nonce"]):
                 return
-            self._last_peer = key
-            self._last_peer_t = now
+            if not self._peer_throttle.should_emit(src_host, peer["priority"],
+                                                   time.monotonic()):
+                return
             self.peer_gs_seen.emit(src_host, peer["priority"])
 
 
