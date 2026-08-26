@@ -19,6 +19,16 @@ class StepperDriver {
   virtual void SetMicrostep(int divisor) = 0;
   virtual bool healthy() const = 0;
   virtual bool ActiveCheck() { return healthy(); }
+
+  // Transport health, deliberately separate from healthy().
+  //
+  // healthy() answers "can this motor be driven" -- a module strapped for
+  // STEP/DIR, or a wrong chip version, fails that while its SPI
+  // conversations succeed perfectly. This answers the narrower "did the
+  // last bus conversation get through", so the SPI_OK telemetry flag can
+  // describe the bus rather than the motor on it. Backends with no bus of
+  // their own have nothing to break and report true.
+  virtual bool spi_bus_ok() const { return true; }
   virtual std::uint64_t pulses_issued() const = 0;
 };
 

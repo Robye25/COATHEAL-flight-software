@@ -290,14 +290,23 @@ bool Tmc5160Driver::OpenSpi() {
                            /*no_cs=*/true);
   }
   if (!spi_open_) {
+    spi_bus_ok_ = false;
     std::cerr << "[tmc5160] SPI open failed on " << cfg_.spi_device << '\n';
   }
   return spi_open_;
 }
 
 bool Tmc5160Driver::Transfer(const std::uint8_t tx[5], std::uint8_t rx[5]) {
-  if (bus_ == nullptr || !spi_open_) return false;
-  if (use_gpio_ && (!gpio_healthy_ || cs_handle_ == nullptr)) return false;
+  // Every early return below is a datagram that could not be conducted at
+  // all -- that, and only that, is what spi_bus_ok_ reports.
+  if (bus_ == nullptr || !spi_open_) {
+    spi_bus_ok_ = false;
+    return false;
+  }
+  if (use_gpio_ && (!gpio_healthy_ || cs_handle_ == nullptr)) {
+    spi_bus_ok_ = false;
+    return false;
+  }
 
   // ONE hold spans the whole cs-low -> [settings re-apply + data ioctl] ->
   // cs-high triplet, and the lock is keyed per physical SPI0 controller,
@@ -308,16 +317,21 @@ bool Tmc5160Driver::Transfer(const std::uint8_t tx[5], std::uint8_t rx[5]) {
   if (use_gpio_) {
     if (!SetGpioOutput(cs_handle_, false)) {
       gpio_healthy_ = false;
+      spi_bus_ok_ = false;
       return false;
     }
   }
   const bool transferred = bus_->Transfer(tx, rx, 5);
   if (use_gpio_) {
     if (!SetGpioOutput(cs_handle_, true)) {
+      // The datagram may have clocked, but CS is now stuck: the
+      // conversation did not complete cleanly either way.
       gpio_healthy_ = false;
+      spi_bus_ok_ = false;
       return false;
     }
   }
+  spi_bus_ok_ = transferred;
   return transferred;
 }
 

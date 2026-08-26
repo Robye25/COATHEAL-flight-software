@@ -72,6 +72,11 @@ class Tmc5160Driver : public StepperDriver {
   bool healthy() const override { return healthy_; }
   bool ActiveCheck() override { return Reinitialize(); }
   std::uint64_t pulses_issued() const override { return pulses_; }
+  // True once a datagram has completed end to end, false the moment
+  // one cannot be conducted (device not open, CS line dead, ioctl
+  // failed). Independent of the version/strap gates, which reject a
+  // module the bus reached just fine.
+  bool spi_bus_ok() const override { return spi_bus_ok_; }
 
   // Full probe + register (re)configuration sequence: IOIN version gate,
   // GCONF/CHOPCONF/current/ramp register writes, XACTUAL=XTARGET=0, then a
@@ -154,6 +159,7 @@ class Tmc5160Driver : public StepperDriver {
   std::int32_t target_ = 0;
   std::uint64_t pulses_ = 0;
   std::string last_error_message_;
+  bool spi_bus_ok_ = false;
   mutable std::mutex io_mu_;
 };
 
