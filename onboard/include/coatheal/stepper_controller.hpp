@@ -104,6 +104,10 @@ class StepperController {
   bool Healthy(int motor_id) const;
   bool AllHealthy() const;
   bool ActiveCheck();
+  // True unless some channel's backend reports its bus unreachable.
+  // Unlike AllHealthy(), an empty controller reports true: no
+  // devices means no bus fault to report.
+  bool SpiBusOk() const;
   bool ActiveCheck(int motor_id);
 
   std::size_t channel_count() const;

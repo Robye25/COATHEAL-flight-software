@@ -472,9 +472,98 @@ void TestControllerMultiChannelDispatch() {
   assert(!ctl.MoveSteps(9, 100, &err));
 }
 
+// A module the bus reaches perfectly but that cannot drive its motor --
+// the shape of a TMC5160 strapped for STEP/DIR, or reporting a foreign
+// VERSION byte. Every datagram succeeds; the motor is unusable.
+class UnusableButReachableDriver : public StepperDriver {
+ public:
+  bool Enable(bool enable) override { (void)enable; return false; }
+  bool Step(bool direction_forward) override {
+    (void)direction_forward;
+    return false;
+  }
+  void SetMicrostep(int divisor) override { (void)divisor; }
+  bool healthy() const override { return false; }
+  bool spi_bus_ok() const override { return true; }
+  std::uint64_t pulses_issued() const override { return 0; }
+};
+
+// The other half: the bus itself is gone (device not open, CS line dead,
+// ioctl failing), so nothing can be said about the motor at all.
+class DeadBusDriver : public StepperDriver {
+ public:
+  bool Enable(bool enable) override { (void)enable; return false; }
+  bool Step(bool direction_forward) override {
+    (void)direction_forward;
+    return false;
+  }
+  void SetMicrostep(int divisor) override { (void)divisor; }
+  bool healthy() const override { return false; }
+  bool spi_bus_ok() const override { return false; }
+  std::uint64_t pulses_issued() const override { return 0; }
+};
+
+StepperChannelConfig BusTestChannelConfig() {
+  StepperChannelConfig cfg;
+  cfg.channel_id = 0;
+  cfg.full_steps_per_rev = 200;
+  cfg.microstep = 1;
+  cfg.max_step_hz = 1000.0;
+  cfg.default_step_hz = 100.0;
+  cfg.max_position_steps = 100000;
+  cfg.use_pulse_thread = false;
+  return cfg;
+}
+
+std::unique_ptr<StepperController> MakeBusTestController(
+    std::unique_ptr<StepperDriver> driver) {
+  std::vector<StepperChannelConfig> cfgs{BusTestChannelConfig()};
+  std::vector<std::unique_ptr<StepperDriver>> drivers;
+  drivers.push_back(std::move(driver));
+  return std::make_unique<StepperController>(std::move(cfgs),
+                                             std::move(drivers));
+}
+
+// SPI_OK must describe the bus, not the motors hanging off it.
+//
+// This is the exact confusion that cost a bench session: motor0's module
+// was strapped for STEP/DIR, so bring-up failed -- and because the SPI
+// flag was wired to TMC bring-up, a perfectly working bus reported
+// SPI_FAIL and sent debugging after the wiring. The motor fault has its
+// own reporting (AllHealthy -> STEPPER_FAIL, motorN=FAILED); the bus flag
+// must stay green while every datagram still gets through.
+void TestUnusableMotorDoesNotReportBusFailure() {
+  auto ctl = MakeBusTestController(
+      std::make_unique<UnusableButReachableDriver>());
+
+  assert(!ctl->AllHealthy());  // the motor is reported broken...
+  assert(ctl->SpiBusOk());     // ...but the bus is not blamed for it
+}
+
+void TestDeadBusReportsBusFailure() {
+  // The mirror case, and what makes the test above load-bearing: a genuine
+  // transport failure must still turn SPI_FAIL red.
+  auto ctl = MakeBusTestController(std::make_unique<DeadBusDriver>());
+
+  assert(!ctl->AllHealthy());
+  assert(!ctl->SpiBusOk());
+}
+
+// A simulated backend has no bus of its own to break.
+void TestSimulatedBackendReportsBusHealthy() {
+  auto ctl = MakeBusTestController(
+      std::make_unique<SimulatedStepperDriver>());
+
+  assert(ctl->AllHealthy());
+  assert(ctl->SpiBusOk());
+}
+
 }  // namespace
 
 int main() {
+  TestUnusableMotorDoesNotReportBusFailure();
+  TestDeadBusReportsBusFailure();
+  TestSimulatedBackendReportsBusHealthy();
   TestTrapezoidalRamp();
   TestParserIdArgument();
   TestParserLegacyDefault();

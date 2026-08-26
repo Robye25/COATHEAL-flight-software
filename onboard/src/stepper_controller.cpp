@@ -219,6 +219,13 @@ bool StepperController::AllHealthy() const {
   return true;
 }
 
+bool StepperController::SpiBusOk() const {
+  for (const auto& ch : channels_) {
+    if (ch != nullptr && !ch->SpiBusOk()) return false;
+  }
+  return true;
+}
+
 bool StepperController::ActiveCheck() {
   if (channels_.empty()) return false;
   bool healthy = true;
