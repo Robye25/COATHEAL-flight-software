@@ -90,7 +90,8 @@ std::uint32_t Chopconf(int microstep, std::uint8_t toff) {
 // healthy; a driver with the gate intact must stop at IOIN and leave
 // everything after it unconsumed.
 void ScriptReinitSequence(FakeSpiBus* bus, const Tmc5160Config& cfg,
-                          std::uint8_t ioin_version_byte) {
+                          std::uint8_t ioin_version_byte,
+                          std::uint8_t ioin_pin_bits = 0) {
   std::uint32_t globalscaler = 0;
   std::uint8_t irun = 0;
   std::uint8_t ihold = 0;
@@ -111,7 +112,8 @@ void ScriptReinitSequence(FakeSpiBus* bus, const Tmc5160Config& cfg,
       ((static_cast<std::uint32_t>(irun) & 0x1FU) << 8) | (6U << 16);
 
   ExpectRead(bus, kRegIOIN,
-            static_cast<std::uint32_t>(ioin_version_byte) << 24);
+            (static_cast<std::uint32_t>(ioin_version_byte) << 24) |
+                static_cast<std::uint32_t>(ioin_pin_bits));
   ExpectWrite(bus, kRegGCONF, gconf);
   ExpectWrite(bus, kRegCHOPCONF, chopconf_run);
   ExpectWrite(bus, kRegGLOBALSCALER, gs_reg);
@@ -646,6 +648,67 @@ void TestSetMicrostepRejectsInvalidDivisor() {
   assert(bus.mismatch_count() == 0);
 }
 
+// ---------------------------------------------------------------------
+// IOIN pin-state gates
+// ---------------------------------------------------------------------
+
+void TestIoinDecodersMatchDatasheetBitPositions() {
+  // TMC5160 IOIN (0x04): DRV_ENN is bit 4, SD_MODE is bit 6. Getting these
+  // positions wrong would either wave a dead motor through or ground a
+  // working one, so pin them explicitly against neighbouring bits.
+  assert(Tmc5160Driver::IoinDriverDisabled(0x30000010U));
+  assert(!Tmc5160Driver::IoinDriverDisabled(0x30000000U));
+  assert(!Tmc5160Driver::IoinDriverDisabled(0x300000EFU & ~0x10U));
+
+  assert(Tmc5160Driver::IoinStepDirMode(0x30000040U));
+  assert(!Tmc5160Driver::IoinStepDirMode(0x30000000U));
+  assert(!Tmc5160Driver::IoinStepDirMode(0x300000BFU & ~0x40U));
+
+  // The exact bench readings this gate was written from: motor0 strapped
+  // for STEP/DIR with its driver disabled, motor1 strapped correctly.
+  assert(Tmc5160Driver::IoinStepDirMode(0x30000050U));
+  assert(Tmc5160Driver::IoinDriverDisabled(0x30000050U));
+  assert(!Tmc5160Driver::IoinStepDirMode(0x30000012U));
+}
+
+void TestSdModeGateRejectsStepDirStrappedModule() {
+  // A module strapped SD_MODE=1 takes motion from its STEP/DIR pins, which
+  // the v3 pinout does not wire. Every SPI conversation still succeeds and
+  // XACTUAL still tracks XTARGET, so without this gate the driver comes up
+  // healthy and silently never moves the motor -- exactly what the bench
+  // saw. The FULL healthy sequence is scripted (as for the version gate):
+  // nothing after IOIN depends on the pin bits, so a driver missing the
+  // gate would consume the whole script and report healthy().
+  FakeSpiBus bus;
+  Tmc5160Config cfg;
+  ScriptReinitSequence(&bus, cfg, /*ioin_version_byte=*/0x30,
+                       /*ioin_pin_bits=*/0x40);
+
+  Tmc5160Driver driver(cfg, &bus, /*use_gpio=*/false);
+
+  assert(!driver.healthy());
+  assert(bus.mismatch_count() == 0);
+  // Only IOIN's 2 phases were consumed: the gate stopped Reinitialize()
+  // before it programmed a single register.
+  assert(bus.remaining_expectations() == kFullReinitExpectationCount - 2);
+}
+
+void TestSdModeGateAcceptsCorrectlyStrappedModule() {
+  // The mirror of the test above, and the reason it is load-bearing: the
+  // other IOIN pin bits must not trip the gate. DRV_ENN high here (0x10)
+  // is normal -- the driver is constructed before anything enables it.
+  FakeSpiBus bus;
+  Tmc5160Config cfg;
+  ScriptReinitSequence(&bus, cfg, /*ioin_version_byte=*/0x30,
+                       /*ioin_pin_bits=*/0x10);
+
+  Tmc5160Driver driver(cfg, &bus, /*use_gpio=*/false);
+
+  assert(driver.healthy());
+  assert(bus.mismatch_count() == 0);
+  assert(bus.remaining_expectations() == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -663,6 +726,9 @@ int main() {
   TestCalculateCurrentLowCurrentSweepReconstructsWithinTolerance();
   TestVersionGateAcceptsTmc5160Version();
   TestVersionGateRejectsTmc2240Version();
+  TestIoinDecodersMatchDatasheetBitPositions();
+  TestSdModeGateRejectsStepDirStrappedModule();
+  TestSdModeGateAcceptsCorrectlyStrappedModule();
   TestStepForwardThenReverseAtDivisor4();
   TestStepHonoursInvertDirection();
   TestEnableFalseFreezesInOrder();
