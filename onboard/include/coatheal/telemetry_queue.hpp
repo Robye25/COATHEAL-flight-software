@@ -31,9 +31,13 @@ std::int64_t CurrentUnixEpochSeconds();
 //     bytes they occupied as dead; the file is compacted (rewritten without
 //     dead lines) only when enough dead bytes accumulate AND the live set is
 //     small enough for the rewrite to be a bounded stall.
-//   - A crash between an ACK and the next compaction re-delivers those
-//     frames on restart (at-least-once); the ground station already
-//     deduplicates by (session, seq) / (session, pull_id).
+//   - Whenever the live set is small enough for the rewrite to be free,
+//     compaction happens immediately, so the healthy steady state leaves
+//     nothing acked on disk.
+//   - Only with a backlog too large to rewrite cheaply does a crash
+//     between an ACK and the next compaction re-deliver those frames on
+//     restart (at-least-once); the ground station already deduplicates by
+//     (session, seq) / (session, pull_id).
 //   - Initialize drops frames older than retention_hours outright and
 //     compacts once, so a stale backlog can never accrete across reboots.
 class TelemetryQueue {
@@ -41,13 +45,22 @@ class TelemetryQueue {
   static constexpr std::uint64_t kDefaultCompactMinDeadBytes = 512ULL * 1024;
   static constexpr std::uint64_t kDefaultCompactMaxLiveBytes =
       16ULL * 1024 * 1024;
+  // Below this much live data a compaction rewrite is trivially cheap --
+  // and the healthy steady state sits far below it, because every frame
+  // enqueued on a tick is acked on the same tick and the queue drains to
+  // empty. Compacting there costs microseconds and is what keeps an
+  // unclean shutdown from replaying hundreds of already-acked frames.
+  static constexpr std::uint64_t kDefaultCompactCheapLiveBytes =
+      64ULL * 1024;
 
   TelemetryQueue(std::string queue_dir, double retention_hours,
                  std::uint64_t max_bytes,
                  std::uint64_t compact_min_dead_bytes =
                      kDefaultCompactMinDeadBytes,
                  std::uint64_t compact_max_live_bytes =
-                     kDefaultCompactMaxLiveBytes);
+                     kDefaultCompactMaxLiveBytes,
+                 std::uint64_t compact_cheap_live_bytes =
+                     kDefaultCompactCheapLiveBytes);
 
   bool Initialize(std::string* error);
   bool Enqueue(const QueuedTelemetryFrame& frame, std::string* error);
@@ -79,6 +92,7 @@ class TelemetryQueue {
   std::uint64_t max_bytes_ = 0;
   std::uint64_t compact_min_dead_bytes_ = kDefaultCompactMinDeadBytes;
   std::uint64_t compact_max_live_bytes_ = kDefaultCompactMaxLiveBytes;
+  std::uint64_t compact_cheap_live_bytes_ = kDefaultCompactCheapLiveBytes;
 
   mutable std::mutex mu_;
   std::deque<QueuedTelemetryFrame> frames_;
