@@ -108,6 +108,8 @@ class StepperController {
   // Unlike AllHealthy(), an empty controller reports true: no
   // devices means no bus fault to report.
   bool SpiBusOk() const;
+  // The reason this motor's backend last refused, or empty.
+  std::string LastDriverError(int motor_id) const;
   bool ActiveCheck(int motor_id);
 
   std::size_t channel_count() const;

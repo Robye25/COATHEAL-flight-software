@@ -77,6 +77,7 @@ class Tmc5160Driver : public StepperDriver {
   // failed). Independent of the version/strap gates, which reject a
   // module the bus reached just fine.
   bool spi_bus_ok() const override { return spi_bus_ok_; }
+  std::string last_error() const override { return last_error_message_; }
 
   // Full probe + register (re)configuration sequence: IOIN version gate,
   // GCONF/CHOPCONF/current/ramp register writes, XACTUAL=XTARGET=0, then a

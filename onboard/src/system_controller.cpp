@@ -63,6 +63,16 @@ bool ParseIndex(const std::string& text, std::size_t* out) {
   }
 }
 
+// Driver diagnoses are free text, but CHECK bodies are ';'-delimited k=v
+// pairs inside a comma-framed reply. Flatten the delimiters rather than
+// constrain how the drivers word themselves.
+std::string SanitizeForReply(std::string text) {
+  for (char& c : text) {
+    if (c == ';' || c == ',' || c == '\n' || c == '\r') c = ' ';
+  }
+  return text;
+}
+
 bool IsLoopbackPeer(const std::string& ip) {
   return ip == "127.0.0.1" || ip == "::1";
 }
@@ -87,6 +97,7 @@ class OwnedBusTmc5160Driver : public StepperDriver {
   void SetMicrostep(int divisor) override { driver_.SetMicrostep(divisor); }
   bool healthy() const override { return driver_.healthy(); }
   bool spi_bus_ok() const override { return driver_.spi_bus_ok(); }
+  std::string last_error() const override { return driver_.last_error(); }
   bool ActiveCheck() override { return driver_.ActiveCheck(); }
   std::uint64_t pulses_issued() const override {
     return driver_.pulses_issued();
@@ -1171,6 +1182,17 @@ std::string SystemController::HandleCommandLine(const std::string& line,
              << ";motor1=" << (motor1_ok ? "OK" : "FAIL")
              << ";spi=" << (spi_ok ? "OK" : "FAIL")
              << ";comms=" << (comms_ok ? "OK" : "FAIL");
+      // Same "<component>_error=" convention the sensor entries above use.
+      if (stepper_ != nullptr) {
+        if (check_motor0 && !motor0_ok) {
+          result << ";motor0_error="
+                 << SanitizeForReply(stepper_->LastDriverError(0));
+        }
+        if (check_motor1 && !motor1_ok) {
+          result << ";motor1_error="
+                 << SanitizeForReply(stepper_->LastDriverError(1));
+        }
+      }
       return Ack(cmd_name, result.str());
     }
 
@@ -1916,7 +1938,8 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       }
       std::string err;
       if (!stepper_->SetEnabled(command.motor_id, true, &err)) {
-        return Nack(cmd_name, err.empty() ? "enable failed" : err);
+        return Nack(cmd_name,
+                    err.empty() ? "enable failed" : SanitizeForReply(err));
       }
       return Ack(cmd_name, "stepper enabled");
     }

@@ -477,7 +477,11 @@ void TestControllerMultiChannelDispatch() {
 // VERSION byte. Every datagram succeeds; the motor is unusable.
 class UnusableButReachableDriver : public StepperDriver {
  public:
+  static constexpr const char* kReason =
+      "SD_MODE strapped HIGH -- driver is in STEP/DIR mode";
+
   bool Enable(bool enable) override { (void)enable; return false; }
+  std::string last_error() const override { return kReason; }
   bool Step(bool direction_forward) override {
     (void)direction_forward;
     return false;
@@ -549,6 +553,33 @@ void TestDeadBusReportsBusFailure() {
   assert(!ctl->SpiBusOk());
 }
 
+// A refused enable must arrive at the operator with the driver's own
+// diagnosis attached.
+//
+// The bench hit this the slow way: motor0's module is strapped for
+// STEP/DIR, the driver identified that precisely and wrote it to the
+// journal -- and the ground station still showed a bare "enable failed",
+// so the cause was only discoverable by SSH-ing into the Pi.
+void TestRefusedEnableCarriesDriverReason() {
+  auto ctl = MakeBusTestController(
+      std::make_unique<UnusableButReachableDriver>());
+  std::string err;
+
+  assert(!ctl->SetEnabled(0, true, &err));
+  assert(err == UnusableButReachableDriver::kReason);
+  assert(ctl->LastDriverError(0) == UnusableButReachableDriver::kReason);
+}
+
+// A backend with nothing to say must not invent a reason -- the caller's
+// own fallback wording has to survive.
+void TestRefusedEnableWithoutReasonLeavesErrorUntouched() {
+  auto ctl = MakeBusTestController(std::make_unique<DeadBusDriver>());
+  std::string err;
+
+  assert(!ctl->SetEnabled(0, true, &err));
+  assert(err.empty());
+}
+
 // A simulated backend has no bus of its own to break.
 void TestSimulatedBackendReportsBusHealthy() {
   auto ctl = MakeBusTestController(
@@ -564,6 +595,8 @@ int main() {
   TestUnusableMotorDoesNotReportBusFailure();
   TestDeadBusReportsBusFailure();
   TestSimulatedBackendReportsBusHealthy();
+  TestRefusedEnableCarriesDriverReason();
+  TestRefusedEnableWithoutReasonLeavesErrorUntouched();
   TestTrapezoidalRamp();
   TestParserIdArgument();
   TestParserLegacyDefault();
