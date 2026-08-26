@@ -120,6 +120,9 @@ class StepperChannel {
   bool SpiBusOk() const {
     return driver_ == nullptr || driver_->spi_bus_ok();
   }
+  std::string LastDriverError() const {
+    return driver_ != nullptr ? driver_->last_error() : std::string();
+  }
 
   // "[pull] cycle complete id=<id> samples=0,1,2,3"
   std::string FormatPullCompleteLog() const;
