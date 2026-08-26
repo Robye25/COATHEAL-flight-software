@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <sstream>
+#include <string>
 
 #include "coatheal/hal/spi_bus_lock.hpp"
 
@@ -30,6 +32,13 @@ constexpr std::uint8_t kRegCHOPCONF = 0x6C;
 constexpr std::uint8_t kWriteBit = 0x80;
 
 constexpr std::uint8_t kExpectedVersion = 0x30;
+
+// IOIN (0x04) input-pin readback bits. DRV_ENN (bit 4) is the enable input,
+// active LOW: a HIGH readback means the power stage is disabled. SD_MODE
+// (bit 6) selects the motion source: LOW = internal ramp generator over
+// SPI, HIGH = external STEP/DIR pins.
+constexpr std::uint32_t kIoinDrvEnn = 1U << 4;
+constexpr std::uint32_t kIoinSdMode = 1U << 6;
 
 // GCONF bit2 (en_pwm_mode / StealthChop): quiet low-speed operation, at the
 // cost of torque headroom. Driven by Tmc5160Config::stealth_chop, which the
@@ -110,6 +119,14 @@ std::uint8_t Tmc5160Driver::EncodeMres(int divisor) {
     case 1: return 8;
     default: return kInvalidMres;
   }
+}
+
+bool Tmc5160Driver::IoinStepDirMode(std::uint32_t ioin) {
+  return (ioin & kIoinSdMode) != 0U;
+}
+
+bool Tmc5160Driver::IoinDriverDisabled(std::uint32_t ioin) {
+  return (ioin & kIoinDrvEnn) != 0U;
 }
 
 std::uint32_t Tmc5160Driver::DeltaXtarget(int divisor) {
@@ -364,17 +381,41 @@ bool Tmc5160Driver::ReinitializeUnlocked() {
 
   std::uint32_t ioin = 0;
   if (!ReadRegister(kRegIOIN, &ioin)) {
-    std::cerr << "[tmc5160] IOIN read failed on " << cfg_.spi_device
-              << " cs=" << cfg_.cs_line << '\n';
+    ReportError("IOIN read failed on " + cfg_.spi_device + " cs=" +
+                std::to_string(cfg_.cs_line));
     healthy_ = false;
     return false;
   }
   const auto version = static_cast<std::uint8_t>(ioin >> 24);
   if (version != kExpectedVersion) {
-    std::cerr << "[tmc5160] TMC5160_VERSION mismatch on " << cfg_.spi_device
-              << " cs=" << cfg_.cs_line << " got=0x" << std::hex
-              << static_cast<int>(version) << " expected=0x"
-              << static_cast<int>(kExpectedVersion) << std::dec << '\n';
+    std::ostringstream msg;
+    msg << "TMC5160_VERSION mismatch on " << cfg_.spi_device
+        << " cs=" << cfg_.cs_line << " got=0x" << std::hex
+        << static_cast<int>(version) << " expected=0x"
+        << static_cast<int>(kExpectedVersion);
+    ReportError(msg.str());
+    healthy_ = false;
+    return false;
+  }
+
+  // SD_MODE strap gate. With SD_MODE tied HIGH the chip takes its motion
+  // from the STEP/DIR pins and the internal ramp generator this driver
+  // steers is bypassed. That failure is invisible from the SPI side unless
+  // it is checked for: XACTUAL still tracks every XTARGET write, so each
+  // Step() returns true, pulses_issued() climbs, the position telemetry
+  // advances and CHECK MOTORn reports OK -- while the microstep sequencer
+  // never advances and the motor only ever holds its last position. The
+  // v3 pinout has no STEP/DIR lines, so a module strapped this way can
+  // never pull a specimen; refuse it here rather than report a healthy
+  // motor that silently does nothing. (Bench, 2026-08-24: motor0's module
+  // was strapped SD_MODE=1 while motor1's was SD_MODE=0 -- proven by
+  // MSCNT staying frozen on motor0 and advancing on motor1 for the
+  // identical commanded move.)
+  if (IoinStepDirMode(ioin)) {
+    ReportError(cfg_.spi_device + " cs=" + std::to_string(cfg_.cs_line) +
+                ": SD_MODE strapped HIGH -- driver is in STEP/DIR mode and"
+                " ignores SPI ramp-generator motion. Tie SD_MODE low to use"
+                " this firmware; the motor cannot move as wired.");
     healthy_ = false;
     return false;
   }
@@ -483,7 +524,14 @@ bool Tmc5160Driver::ReinitializeUnlocked() {
   }
 
   healthy_ = true;
+  last_error_message_.clear();
   return true;
+}
+
+void Tmc5160Driver::ReportError(const std::string& message) {
+  if (message == last_error_message_) return;
+  last_error_message_ = message;
+  std::cerr << "[tmc5160] " << message << '\n';
 }
 
 bool Tmc5160Driver::Enable(bool enable) {
@@ -537,6 +585,31 @@ bool Tmc5160Driver::EnableUnlocked(bool enable) {
   }
   if (!healthy_ && !ReinitializeUnlocked()) {
     return false;
+  }
+  // Prove the enable line actually reached the chip. DRV_ENN is mirrored
+  // in IOIN, so a broken or unrouted enable trace is detectable over SPI
+  // -- and it has to be, because it presents exactly like a healthy motor
+  // that never moves. Only checked when this driver owns the GPIO: with
+  // use_gpio_=false nothing here drives the pin and its level says nothing
+  // about us. (Bench, 2026-08-24: motor1's DRV_ENN never followed its
+  // enable GPIO.)
+  if (use_gpio_) {
+    std::uint32_t enable_ioin = 0;
+    if (!ReadRegister(kRegIOIN, &enable_ioin)) {
+      ReportError(cfg_.spi_device + " cs=" + std::to_string(cfg_.cs_line) +
+                  ": IOIN read failed while verifying enable");
+      healthy_ = false;
+      return false;
+    }
+    if (IoinDriverDisabled(enable_ioin)) {
+      ReportError(cfg_.spi_device + " cs=" + std::to_string(cfg_.cs_line) +
+                  ": DRV_ENN still HIGH after driving enable line " +
+                  std::to_string(cfg_.enable_line) +
+                  " -- enable signal is not reaching the driver; the power"
+                  " stage stays off and the motor cannot move.");
+      healthy_ = false;
+      return false;
+    }
   }
   if (!WriteRegister(kRegCHOPCONF, EncodeChopconf(/*toff=*/3))) {
     healthy_ = false;
