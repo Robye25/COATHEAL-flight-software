@@ -203,6 +203,11 @@ std::string StepperController::DriverWarning(int motor_id) const {
   return ch != nullptr ? ch->DriverWarning() : std::string();
 }
 
+std::string StepperController::DebugRegisters(int motor_id) {
+  StepperChannel* ch = ChannelById(motor_id);
+  return ch != nullptr ? ch->DriverDebugRegisters() : std::string();
+}
+
 bool StepperController::ArmPull(int motor_id, std::string* error) {
   StepperChannel* ch = ChannelById(motor_id);
   if (!ch) { if (error) *error = "unknown motor id"; return false; }

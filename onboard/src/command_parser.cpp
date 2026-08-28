@@ -140,6 +140,8 @@ std::string CommandTypeToString(CommandType type) {
       return "FALLBACK_DISARM";
     case CommandType::kFallbackStatus:
       return "FALLBACK_STATUS";
+    case CommandType::kMotorDebug:
+      return "MOTOR_DEBUG";
     case CommandType::kUnknown:
       return "UNKNOWN";
   }
@@ -237,6 +239,7 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
       {"FALLBACK_ARM", CommandType::kFallbackArm},
       {"FALLBACK_DISARM", CommandType::kFallbackDisarm},
       {"FALLBACK_STATUS", CommandType::kFallbackStatus},
+      {"MOTOR_DEBUG", CommandType::kMotorDebug},
   };
 
   std::string cmd;
@@ -369,6 +372,7 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
     case CommandType::kBendSeqResume:
     case CommandType::kBendSeqStop:
     case CommandType::kBendSeqStatus:
+    case CommandType::kMotorDebug:
       if (!require_args(1)) {
         return result;
       }

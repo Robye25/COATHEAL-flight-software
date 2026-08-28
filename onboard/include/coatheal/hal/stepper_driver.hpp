@@ -40,6 +40,11 @@ class StepperDriver {
   // (today: the enable line has no effect on the chip, so STEPPER_DISABLE
   // cannot de-energise the power stage through EN). Empty when all clear.
   virtual std::string warning() const { return {}; }
+  // Live read of the chip's motion-truth registers for MOTOR_DEBUG, as a
+  // `key=value;` string (empty when the backend has no chip to ask or the
+  // bus failed). The software position counters can advance while a motor
+  // never turns (bench, 2026-08-26); these registers cannot lie about it.
+  virtual std::string DebugRegisters() { return {}; }
   virtual std::uint64_t pulses_issued() const = 0;
 };
 

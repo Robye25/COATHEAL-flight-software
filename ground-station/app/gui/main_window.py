@@ -42,6 +42,7 @@ from .replay import ReplayClassifier, ReplayVerdict, parse_onboard_timestamp
 from .scale import UiScale
 from .state import OnboardState, state_from_packet
 from .tab_advanced import AdvancedTab
+from .tab_debug import DebugTab
 from .tab_motion import MotionTab
 from .tab_system import SystemTab
 from .tab_thermal import ThermalTab
@@ -113,9 +114,10 @@ class MainWindow(QMainWindow):
         self._advanced.gains_changed.connect(self._thermal.set_gains)
         self._advanced.priority_changed.connect(self._on_priority_changed)
         self._advanced.host_override_changed.connect(self._on_host_override)
+        self._debug = DebugTab(self._dispatcher, self._settings)
         self._left_tabs = QTabWidget(); self._left_tabs.setObjectName("leftTabs")
         for widget, title in ((self._system, "System"), (self._thermal, "Thermal"),
-                              (self._motion, "Motion"), (self._advanced, "Advanced")):
+                              (self._motion, "Motion"), (self._advanced, "Advanced"), (self._debug, "Debug")):
             self._left_tabs.addTab(widget, title)
         self._left_tabs.setMinimumWidth(410)
 
@@ -342,6 +344,7 @@ class MainWindow(QMainWindow):
         self._thermal.update_state(state)
         self._motion.update_state(state)
         self._advanced.update_state(state)
+        self._debug.update_state(state)
         self._checkout.update_state(state, link_ok=self._link_ok, unacked_alarms=self._alarms.unacked_count)
 
     def _tick(self) -> None:
@@ -475,7 +478,7 @@ class MainWindow(QMainWindow):
         ("Esc", "STEPPER_STOP 0 + STEPPER_STOP 1 (panic, no confirm)"),
         ("Ctrl+Shift+H", "HEATERS_OFF (panic, no confirm)"),
         ("Ctrl+L", "focus the console entry"),
-        ("Ctrl+1 … Ctrl+4", "System / Thermal / Motion / Advanced"),
+        ("Ctrl+1 … Ctrl+5", "System / Thermal / Motion / Advanced / Debug"),
         ("Alt+1 … Alt+5", "plot tabs"),
         ("P", "pause / resume plots (ignored while typing)"),
         ("F5", "send STATUS"),
@@ -499,7 +502,7 @@ class MainWindow(QMainWindow):
         sc("Esc", self._motion.stop_all)
         sc("Ctrl+Shift+H", lambda: self._dispatcher.send("HEATERS_OFF", tag=self._top))
         sc("Ctrl+L", self._console.focus_entry)
-        for i in range(4):
+        for i in range(5):
             sc(f"Ctrl+{i + 1}", lambda idx=i: self._left_tabs.setCurrentIndex(idx))
         for i in range(5):
             sc(f"Alt+{i + 1}", lambda idx=i: self._plots.tabs.setCurrentIndex(idx))

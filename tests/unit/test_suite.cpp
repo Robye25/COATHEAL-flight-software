@@ -148,6 +148,15 @@ void TestCommandParser() {
   assert(heater_test.command.type == coatheal::CommandType::kHeaterTest);
   assert(heater_test.command.args.size() == 3);
   assert(!parser.ParseLine("HEATER_TEST 0 0.1").ok);
+  {
+    // MOTOR_DEBUG <id>: exactly one argument, the motor id.
+    const auto dbg = parser.ParseLine("MOTOR_DEBUG 1");
+    assert(dbg.ok);
+    assert(dbg.command.type == coatheal::CommandType::kMotorDebug);
+    assert(dbg.command.args.size() == 1 && dbg.command.args[0] == "1");
+    assert(!parser.ParseLine("MOTOR_DEBUG").ok);
+    assert(!parser.ParseLine("MOTOR_DEBUG 1 2").ok);
+  }
 }
 
 void TestHeaterSchedulerEnergyBudget() {

@@ -45,7 +45,8 @@ class LayoutTests(unittest.TestCase):
             self.assertEqual((self.win.width(), self.win.height()), (w, h),
                              f"window minimum {self.win.minimumSizeHint()} exceeds {w}x{h}")
             for name, tab in (("System", self.win._system), ("Thermal", self.win._thermal),
-                              ("Motion", self.win._motion), ("Advanced", self.win._advanced)):
+                              ("Motion", self.win._motion), ("Advanced", self.win._advanced),
+                              ("Debug", self.win._debug)):
                 self.win._left_tabs.setCurrentWidget(tab); self._app.processEvents()
                 inner = tab.widget().minimumSizeHint().width()
                 self.assertLessEqual(inner, tab.viewport().width(),

@@ -79,6 +79,10 @@ class Tmc5160Driver : public StepperDriver {
   bool spi_bus_ok() const override { return spi_bus_ok_; }
   std::string last_error() const override { return last_error_message_; }
   std::string warning() const override;
+  // XACTUAL, XTARGET, VACTUAL, MSCNT, DRV_STATUS, RAMPSTAT, TSTEP, IOIN,
+  // GSTAT, CHOPCONF -- raw and decoded. Read-only (RAMPSTAT's read-clear
+  // event bits are not used by this driver).
+  std::string DebugRegisters() override;
 
   // Whether driving the EN GPIO was last seen to move DRV_ENN in IOIN.
   // Enable(true) already refuses a line that leaves DRV_ENN HIGH; the

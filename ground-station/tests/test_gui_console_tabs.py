@@ -220,6 +220,36 @@ class ConsoleTabTests(unittest.TestCase):
     # frames too and confirm test_replayed_frames_do_not_drive_state_or_gating
     # fails on "a replayed frame must not overwrite the live state".
 
+    # ── Debug tab ──
+    def test_debug_probe_polls_quietly_and_renders_a_verdict(self) -> None:
+        from app.protocol import CommandResponse
+        sent = []
+        self.win._dispatcher.send = lambda cmd, tag=None, timeout=None, quiet=False: sent.append((cmd, quiet))
+        debug = self.win._debug
+        debug.selector.set_value(1)
+        debug.read_once()
+        self.assertEqual(sent, [("MOTOR_DEBUG 1", True)], "the probe must use the quiet path")
+        body = ("motor=1;sw_pos=312;sw_tgt=800;sw_hz=100;us=4;enabled=1;moving=1;holding=0;pulses=312;missed=0;"
+                "xactual=0;xtarget=204800;vactual=35000;mscnt=0;tstep=120;drv_status=0x0;stst=0;cs_actual=9;sg_result=18;"
+                "stallguard=0;ot=0;otpw=0;s2ga=0;s2gb=0;ola=0;olb=0;s2vsa=0;s2vsb=0;stealth=1;fsactive=0;rampstat=0x0;"
+                "vzero=0;pos_reached=0;vel_reached=1;status_sg=0;ioin=0x30000000;drv_enn=0;sd_mode=0;version=0x30;"
+                "gstat=0x0;chopconf=0x06010043;toff=3;mres=6;usteps=4")
+        rows_before = self.win._console.row_count()
+        clock = [100.0]
+        debug._clock = lambda: clock[0]
+        for k, mscnt in enumerate((0, 256, 512, 768)):
+            clock[0] = 100.0 + 0.5 * k
+            resp = CommandResponse(ok=True, command="MOTOR_DEBUG", body=body.replace("mscnt=0", f"mscnt={mscnt}"), raw="")
+            self.win._dispatcher.quiet_response.emit("MOTOR_DEBUG 1", resp, 3.0, debug)
+        est = debug.last_estimate
+        self.assertIsNotNone(est)
+        self.assertAlmostEqual(est.sequencer_full_steps_s, 2.0, places=3)
+        self.assertEqual(est.color, "green", est.verdict)
+        self.assertIn("MOVING", debug.verdict.text())
+        self.assertEqual(self.win._console.row_count(), rows_before, "quiet replies must not land in the console")
+        self.assertIn("full-steps/s", debug._derived["seq"].text())
+        self.assertEqual(debug._regs["sd_mode"].text(), "0")
+
     # ── alarms ──
     def test_alarm_strip_and_ack(self) -> None:
         self.feed(status="SD_OK|OVERTEMP_FAIL|SAMPLE_TEMP_OK")
