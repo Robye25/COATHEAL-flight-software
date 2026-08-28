@@ -18,6 +18,12 @@ class StepperSnapshot:
     pulses: int = 0
     missed_deadlines: int = 0
     source: str = ""
+    # Added 2026-08-28 (redesign spec §8). `zeroed` is None, and the two
+    # sequence fields empty, when the onboard predates them -- the GUI
+    # shows "unknown" rather than guessing.
+    zeroed: Optional[bool] = None
+    seq_name: str = ""
+    seq_state: str = ""
 
 
 @dataclass
@@ -48,6 +54,66 @@ class TelemetryPacket:
     steppers: List[Dict] = field(default_factory=list)
     # Legacy accessor. Mirrors `steppers[0]` when present.
     stepper: Optional[StepperSnapshot] = None
+    # `CTRL=` block (redesign spec §8): raw key -> value strings. Empty when
+    # the onboard predates it; every typed accessor below then returns None.
+    ctrl: Dict[str, str] = field(default_factory=dict)
+
+    # -- typed CTRL accessors ------------------------------------------------
+    def _ctrl_bool(self, key: str) -> Optional[bool]:
+        raw = self.ctrl.get(key)
+        if raw is None:
+            return None
+        return raw not in ("0", "false", "False")
+
+    def _ctrl_float(self, key: str) -> Optional[float]:
+        raw = self.ctrl.get(key)
+        if raw is None:
+            return None
+        try:
+            return float(raw)
+        except ValueError:
+            return None
+
+    def _ctrl_int(self, key: str) -> Optional[int]:
+        raw = self.ctrl.get(key)
+        if raw is None:
+            return None
+        try:
+            return int(float(raw))
+        except ValueError:
+            return None
+
+    @property
+    def fallback_active(self) -> Optional[bool]:
+        return self._ctrl_bool("fallback")
+
+    @property
+    def link_loss_s(self) -> Optional[float]:
+        return self._ctrl_float("link_loss_s")
+
+    @property
+    def energy_wh(self) -> Optional[float]:
+        return self._ctrl_float("energy_wh")
+
+    @property
+    def budget_wh(self) -> Optional[float]:
+        return self._ctrl_float("budget_wh")
+
+    @property
+    def budget_exhausted(self) -> Optional[bool]:
+        return self._ctrl_bool("budget_exhausted")
+
+    @property
+    def heaters_active(self) -> Optional[int]:
+        return self._ctrl_int("heaters_active")
+
+    @property
+    def queue_depth(self) -> Optional[int]:
+        return self._ctrl_int("queue")
+
+    @property
+    def plan_state(self) -> Optional[str]:
+        return self.ctrl.get("plan")
 
 
 class TelemetryParseError(ValueError):
@@ -87,6 +153,12 @@ def _parse_stepper_segment(value: str) -> StepperSnapshot:
                 s.missed_deadlines = int(raw)
             elif key == "src":
                 s.source = raw
+            elif key == "zeroed":
+                s.zeroed = raw not in ("0", "false", "False")
+            elif key == "seq":
+                s.seq_name = "" if raw == "-" else raw
+            elif key == "seqst":
+                s.seq_state = raw
             # unknown keys silently ignored (forward-compat)
         except ValueError as exc:
             raise TelemetryParseError(f"invalid STEPPER {key}={raw!r}: {exc}") from exc
@@ -108,6 +180,9 @@ def _snapshot_to_dict(snap: StepperSnapshot, motor_id: int) -> Dict:
         "pulses": snap.pulses,
         "missed_deadlines": snap.missed_deadlines,
         "source": snap.source,
+        "zeroed": snap.zeroed,
+        "seq_name": snap.seq_name,
+        "seq_state": snap.seq_state,
     }
 
 
@@ -159,6 +234,7 @@ def parse_telemetry_csv(line: str) -> TelemetryPacket:
     }
     sensor_age_ms: Dict[str, int] = {}
     component_state: Dict[str, str] = {}
+    ctrl: Dict[str, str] = {}
     for token in parts[heater_field_index + 1 :]:
         if token.startswith("PHASE="):
             phase = token.split('=', 1)[1]
@@ -208,6 +284,13 @@ def parse_telemetry_csv(line: str) -> TelemetryPacket:
                     continue
                 key, state = piece.split(":", 1)
                 component_state[key] = state
+        elif token.startswith("CTRL="):
+            ctrl = {}
+            for piece in token.split("=", 1)[1].split("|"):
+                if ":" not in piece:
+                    continue
+                key, value = piece.split(":", 1)
+                ctrl[key] = value
         elif token.startswith("STEPPER="):
             legacy_stepper = _parse_stepper_segment(token.split('=', 1)[1])
         elif token.startswith("STEPPER"):
@@ -255,6 +338,7 @@ def parse_telemetry_csv(line: str) -> TelemetryPacket:
         component_state=component_state,
         steppers=steppers_list,
         stepper=primary_snapshot,
+        ctrl=ctrl,
     )
 
 
@@ -546,7 +630,14 @@ def validate_tick_hz(hz: float) -> Tuple[bool, str]:
     return True, f"{v:.3f}"
 
 
-def validate_speed_hz(hz: float, max_hz: float = 5000.0) -> Tuple[bool, str]:
+def validate_speed_hz(hz: float, max_hz: float = 100.0) -> Tuple[bool, str]:
+    """Validate a motor speed in full-step Hz.
+
+    The onboard clamps `STEPPER_SET_SPEED` to `pull.max_step_hz` (100 Hz in
+    the flight config) and NACKs `BENDSEQ_LOAD` speeds above it, so the
+    ground station refuses anything above that bound up front instead of
+    letting a 400 Hz request silently become 100 Hz.
+    """
     try:
         v = float(hz)
     except (TypeError, ValueError):
