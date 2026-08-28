@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..protocol import CommandResponse, TelemetryPacket
+from ..telemetry_log import LogManager
 from . import firewall
 from .dispatch import CommandDispatcher, TelemetryReceiver
 from .discovery import (
@@ -41,12 +42,20 @@ class MainWindow(QMainWindow):
         self.resize(1500, 920)
 
         self._settings = QSettings("COATHEAL", "GroundStation")
-        self._log_path = log_path
+        # `log_path` is the log ROOT (`logs/`); a legacy file path such as
+        # `logs/x.csv` resolves to its parent so old launch commands and
+        # tests keep working. Every session gets its own directory under
+        # <root>/sessions/ (redesign spec §7).
+        self._log_root = log_path if log_path.suffix == "" else log_path.parent
+        self._logs = LogManager(self._log_root, gs_info={
+            "component": "gui", "bind": bind, "tel_port": tel_port, "cmd_port": cmd_port,
+        })
         self._receiver: Optional[TelemetryReceiver] = None
         self._link_ok = False
 
-        self._dispatcher = CommandDispatcher(cmd_host, cmd_port)
+        self._dispatcher = CommandDispatcher(cmd_host, cmd_port, log_manager=self._logs)
         self._dispatcher.response_received.connect(self._on_response)
+        self._dispatcher.silence_changed.connect(self._on_silence_changed)
 
         pg.setConfigOption("background", "#0d0d0d")
         pg.setConfigOption("foreground", "#cccccc")
@@ -131,6 +140,7 @@ class MainWindow(QMainWindow):
         bv = QVBoxLayout(bottom_container); bv.setContentsMargins(0, 0, 0, 0); bv.setSpacing(0)
         self._emergency = EmergencyBar(self._dispatcher)
         self._log = LogPanel()
+        self._log.set_sink(self._logs.log_event)
         self._pull_events = PullEventsPanel()
         bottom_tabs = QTabWidget()
         bottom_tabs.addTab(self._log,         "Event log")
@@ -231,13 +241,26 @@ class MainWindow(QMainWindow):
         if self._receiver is not None and self._receiver.isRunning():
             self._log.append("[telemetry] receiver already running — ignoring")
             return
-        self._receiver = TelemetryReceiver(bind, tel_port, self._log_path)
+        self._receiver = TelemetryReceiver(bind, tel_port, self._logs)
         self._receiver.packet_received.connect(self._on_packet)
         self._receiver.pull_event.connect(self._on_pull_event)
         self._receiver.log_message.connect(self._log.append)
         self._receiver.connection_changed.connect(self._on_connection_changed)
         self._receiver.status_changed.connect(self._on_receiver_status)
+        self._receiver.session_opened.connect(self._on_session_opened)
         self._receiver.start()
+
+    def _on_session_opened(self, session_id: str, directory: str) -> None:
+        self.statusBar().showMessage(f"Logging session {session_id} to {directory}")
+
+    def _on_silence_changed(self, active: bool) -> None:
+        # Spec §9: the ground station goes quiet with the onboard -- no
+        # beacons, no probes -- and comes back on RADIO_RESUME.
+        for worker in (getattr(self, "_beacon", None), getattr(self, "_probe", None)):
+            if worker is not None:
+                worker.set_quiet(active)
+        self._log.append("[radio] silence ACTIVE — beacons/probes paused, only RADIO_RESUME is sent"
+                         if active else "[radio] silence lifted — discovery resumed")
 
     def _on_receiver_status(self, state: str) -> None:
         if self.sender() is not self._receiver:
@@ -485,6 +508,7 @@ class MainWindow(QMainWindow):
             self._listener.stop(); self._listener.wait(2000)
         if getattr(self, "_probe", None) is not None:
             self._probe.stop(); self._probe.wait(2000)
+        self._logs.close()
         super().closeEvent(event)
 
 
@@ -494,7 +518,8 @@ def run_gui(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--tel-port", type=int, default=4000)
     parser.add_argument("--cmd-port", type=int, default=5000)
     parser.add_argument("--host", default="")
-    parser.add_argument("--log", type=Path, default=Path("logs/ground_telemetry.csv"))
+    parser.add_argument("--log", type=Path, default=Path("logs"),
+                        help="Log root; each onboard session gets its own directory under <root>/sessions/.")
     parser.add_argument("--no-firewall-check", action="store_true",
                         help="Skip the Windows firewall / network-profile auto-check at startup.")
     args = parser.parse_args(argv)
