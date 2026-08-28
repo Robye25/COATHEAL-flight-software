@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
+from .series_store import format_elapsed
 from .state import OnboardState
 
 RED = "red"
@@ -35,6 +36,10 @@ class Alarm:
 def evaluate(state: OnboardState) -> List[Alarm]:
     """Raw active alarms for `state`, in display order."""
     alarms: List[Alarm] = []
+    if state.replay:
+        eta = f", ETA {format_elapsed(state.replay_eta_s)}" if state.replay_eta_s else ""
+        alarms.append(Alarm("REPLAY", f"REPLAY — onboard backlog {format_elapsed(state.replay_behind_s)} behind{eta}; "
+                                      "panels show the last LIVE frame, not the replay", AMBER))
     if state.have_packet:
         if state.flag("OVERTEMP_FAIL"):
             alarms.append(Alarm("OVERTEMP", "OVERTEMP latched — heaters forced off until RESET_CTRL"))

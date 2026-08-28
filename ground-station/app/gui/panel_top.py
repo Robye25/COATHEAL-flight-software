@@ -90,6 +90,8 @@ class TopStrip(QWidget):
         self._sess_box, self._sess = _field("SESSION")
         self._tplus_box, self._tplus = _field("T+")
         self._utc_box, self._utc = _field("UTC")
+        self._replay_box, self._replay = _field("REPLAY")
+        self._replay_box.hide()
         self._radio_box, self._radio = _field("RADIO")
         self._radio_dot = StatusDot(9); self._radio_dot.set_color(GRAY)
         self._radio_box.layout().insertWidget(1, self._radio_dot)
@@ -107,7 +109,7 @@ class TopStrip(QWidget):
             lay.addWidget(box)
         lay.addWidget(self._target_box, 3)
         lay.addWidget(self._sess_box, 2)
-        for box in (self._tplus_box, self._utc_box, self._radio_box):
+        for box in (self._tplus_box, self._utc_box, self._replay_box, self._radio_box):
             lay.addWidget(box)
 
         # Panic group: unconfirmed HEATERS OFF / STOP MOTORS, confirmed ENTER SAFE.
@@ -194,6 +196,20 @@ class TopStrip(QWidget):
         self.btn_stop_motors.set_reason("radio silence active" if active else None)
         self.btn_enter_safe.set_reason("radio silence active" if active else None)
         self.refresh()
+
+    def set_replay(self, behind_s: Optional[float], eta_s: Optional[float] = None) -> None:
+        """Show how far behind the arriving frames are (None = live)."""
+        if behind_s is None:
+            self._replay_box.hide()
+            return
+        text = f"−{format_elapsed(behind_s)}" + (f" · ETA {format_elapsed(eta_s)}" if eta_s else "")
+        self._replay.setText(text)
+        self._replay.setStyleSheet(f"{MONO_CSS} font-weight: bold; color: {AMBER}; border: none;")
+        self._replay_box.setToolTip("The onboard is replaying its queued backlog; the panels keep showing the last live frame.")
+        self._replay_box.show()
+
+    def replay_visible(self) -> bool:
+        return not self._replay_box.isHidden()
 
     def set_target(self, text: str, color: str = GREEN) -> None:
         self._target_full = text

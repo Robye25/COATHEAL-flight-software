@@ -1193,10 +1193,16 @@ bool SystemController::DrainTelemetryQueue(bool* link_ok, std::string* error) {
 std::string SystemController::HandleCommandLine(const std::string& line,
                                                 const std::string& peer_ip) {
   if (!peer_ip.empty() && (config_.runtime.bench_mode || !IsLoopbackPeer(peer_ip))) {
+    // A loopback command peer (bench: `nc 127.0.0.1 5000` on the Pi) is a
+    // ground station of last resort only. At priority 1000 it used to
+    // hijack the telemetry target from a real, connected ground station on
+    // every local diagnostic command (bench, 2026-08-28), stalling the
+    // backlog drain; at priority 0 it is dialled only when nothing better
+    // has ever been heard.
     telemetry_client_.ObserveGroundStation(peer_ip,
                                            config_.comms.telemetry_port,
                                            config_.comms.command_port,
-                                           1000);
+                                           IsLoopbackPeer(peer_ip) ? 0 : 1000);
   }
 
   const CommandParseResult parsed = parser_.ParseLine(line);

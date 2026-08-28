@@ -43,6 +43,7 @@ def capture_sends(dispatcher) -> list:
 
 
 def frame(*, seq: int = 1, session: str = "coatheal-1787760547-1", mode: str = "RUN", phase: str = "ASCENT",
+          ts: str = "2026-08-28T00:00:00Z",
           status: str = "SD_OK|USB_OK|I2C_OK|SPI_OK|LINK_OK|T_AMBIENT_OK|P_AMBIENT_OK|UNIFORMITY_OK|OVERTEMP_OK"
                         "|ENERGY_OK|PWM_OK|STEPPER_OK|SAMPLE_TEMP_OK|REAL_SENSORS|SEQ_READY|HEATER_ACTIVE|RESISTANCE_OK",
           samples: str = "1,2,3,4,5,6,7,8",
@@ -51,7 +52,7 @@ def frame(*, seq: int = 1, session: str = "coatheal-1787760547-1", mode: str = "
           ctrl: str = "fallback:0|link_loss_s:0.0|energy_wh:1.0|budget_wh:130.0|budget_exhausted:0|heaters_active:0|queue:0|plan:none",
           m0: str = "en:1|ok:1|mv:0|hold:0|zeroed:1", m1: str = "en:0|ok:1|mv:0|hold:0|zeroed:0",
           resistance: str = "118|-|-|-|121|-|-|-", duties: str = "0|0|0|0|0|0") -> str:
-    return (f"DATA,{session},{seq},2026-08-28T00:00:00Z,1,20,1000,0.1,{samples},"
+    return (f"DATA,{session},{seq},{ts},1,20,1000,0.1,{samples},"
             f"HEATER_DUTY={duties},RESISTANCE={resistance},PHASE={phase},MODE={mode},STATUS={status},"
             f"SENSOR_VALID={valid},SENSOR_AGE_MS=AT:1|AP:1|UV:1|S0:1|S1:1|S2:1|S3:1|S4:1|S5:1|S6:1|S7:1,"
             f"COMPONENT_STATE={comps},CTRL={ctrl},"

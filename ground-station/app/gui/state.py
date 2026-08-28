@@ -73,6 +73,11 @@ class OnboardState:
     # Ground-side facts.
     silence: bool = False
     link_age_s: Optional[float] = None
+    # Replay of the onboard backlog in progress (frames arriving are hours
+    # old): the live snapshot above is the last LIVE frame, or empty.
+    replay: bool = False
+    replay_behind_s: float = 0.0
+    replay_eta_s: Optional[float] = None
 
     # -- derived -------------------------------------------------------------
     def flag(self, token: str) -> bool:

@@ -38,6 +38,7 @@ from .panel_top import AlarmStrip, TopStrip
 from .panel_values import ValuesPanel
 from .panels_health import HealthPanel
 from .plots import PlotArea
+from .replay import ReplayClassifier, ReplayVerdict, parse_onboard_timestamp
 from .scale import UiScale
 from .state import OnboardState, state_from_packet
 from .tab_advanced import AdvancedTab
@@ -82,6 +83,10 @@ class MainWindow(QMainWindow):
         self._parse_errors = 0
         self._state = OnboardState()
         self._alarms = AlarmModel()
+        self._replay = ReplayClassifier()
+        self._verdict = ReplayVerdict(False, 0.0, None)
+        self._session_seen = ""
+        self._replayed = 0
         self._beep = bool(self._settings.value("alarms/beep", False, type=bool))
 
         self._dispatcher = CommandDispatcher(cmd_host, cmd_port, log_manager=self._logs)
@@ -258,22 +263,39 @@ class MainWindow(QMainWindow):
     def _on_packet(self, pkt: TelemetryPacket) -> None:
         now_mono = time.monotonic()
         rx_time = time.time()
-        self._last_pkt = pkt
+        if pkt.session_id != self._session_seen:
+            self._session_seen = pkt.session_id
+            self._replay.reset()
+        onboard_ts = parse_onboard_timestamp(pkt.timestamp)
+        self._verdict = self._replay.classify(onboard_ts, rx_time)
         self._last_rx_mono = now_mono
         self._frames += 1
         self._top.on_packet_received(pkt.session_id, now_mono)
-        self._top.set_health(pkt)
-        self._plots.on_packet(pkt, rx_time)
-        self._health.on_packet(pkt)
-        self._apply_state()
-        self._values.on_packet(pkt, self._state)
+        # Plots and logs take every frame, at its onboard time; the live
+        # panels (state, gating, alarms, health, values) take only frames
+        # that are not a replay of the onboard backlog (replay.py).
+        self._plots.on_packet(pkt, onboard_ts if onboard_ts is not None else rx_time)
+        if self._verdict.is_replay:
+            self._replayed += 1
+            if self._replayed == 1:
+                self._events.append("[replay] onboard backlog replay detected — panels keep the last live frame", "WARN")
+            self._apply_state()
+        else:
+            if self._replayed and self._last_pkt is not None:
+                self._events.append(f"[replay] caught up after {self._replayed} replayed frames")
+            self._replayed = 0
+            self._last_pkt = pkt
+            self._top.set_health(pkt)
+            self._health.on_packet(pkt)
+            self._apply_state()
+            self._values.on_packet(pkt, self._state)
         if self._frames % 20 == 0:
             self._update_status_bar()
 
     def _on_pull_event(self, ev: PullEvent) -> None:
         self._pulls.on_pull_event(ev)
         self._motion.on_pull_event(ev)
-        self._plots.on_pull_event(ev, time.time())
+        self._plots.on_pull_event(ev, parse_onboard_timestamp(ev.start_ts) or time.time())
 
     def _on_response(self, cmd: str, resp: CommandResponse, ms: float, tag) -> None:
         body = resp.body if resp.ok else (resp.error or resp.raw)
@@ -302,6 +324,11 @@ class MainWindow(QMainWindow):
             state = state_from_packet(self._last_pkt, silence=silence, link_age_s=age)
         else:
             state = dataclasses.replace(OnboardState(), silence=silence, link_age_s=age)
+        replaying = self._verdict.is_replay and age is not None and age < 10.0
+        state = dataclasses.replace(state, replay=replaying,
+                                    replay_behind_s=self._verdict.behind_s if replaying else 0.0,
+                                    replay_eta_s=self._verdict.eta_s if replaying else None)
+        self._top.set_replay(state.replay_behind_s if replaying else None, state.replay_eta_s)
         self._state = state
         alarms = self._alarms.update(state)
         if self._alarms.new_keys:

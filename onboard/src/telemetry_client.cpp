@@ -703,7 +703,10 @@ void TelemetryClient::ObserveGroundStation(const std::string& host,
   if (connected_ && host != active_host_ && priority >= current_priority_) {
     CloseLocked();
   }
-  if (!connected_) {
+  // A lower-priority peer never displaces a known target, connected or not
+  // -- a transient send failure must not let a loopback bench command
+  // redirect telemetry away from the real ground station.
+  if (!connected_ && (active_host_.empty() || priority >= current_priority_)) {
     active_host_ = host;
     current_priority_ = priority;
     // A ground station just made itself known; don't make it wait out a
