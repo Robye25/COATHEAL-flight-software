@@ -660,6 +660,8 @@ void TestDebugRegistersDecodeMotionTruth() {
   ExpectRead(&bus, 0x04, 0x30000010U);   // IOIN: version 0x30, DRV_ENN=1
   ExpectRead(&bus, 0x01, 0x5U);          // GSTAT reset + uv_cp
   ExpectRead(&bus, 0x6C, 0x06010040U);   // CHOPCONF toff=0, mres=6 (µ4)
+  ExpectRead(&bus, 0x71, (0x1F0U << 16) | 0xFFU);  // PWM_SCALE: sum saturated, auto=-16
+  ExpectRead(&bus, 0x72, (0x0CU << 16) | 0x1EU);   // PWM_AUTO: grad 12, ofs 30
   const std::string kv = driver->DebugRegisters();
   assert(bus.mismatch_count() == 0);
   assert(bus.remaining_expectations() == 0);
@@ -683,6 +685,7 @@ void TestDebugRegistersDecodeMotionTruth() {
   assert(has(";gstat=0x5;"));
   assert(has(";toff=0;"));
   assert(has(";mres=6;usteps=4"));
+  assert(has(";pwm_scale_sum=255;pwm_scale_auto=-16;pwm_ofs_auto=30;pwm_grad_auto=12"));
   // A bus failure mid-read yields nothing rather than a half-decoded lie.
   bus.FailNextTransfers(1);
   assert(driver->DebugRegisters().empty());

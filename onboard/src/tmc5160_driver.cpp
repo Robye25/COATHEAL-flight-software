@@ -20,6 +20,8 @@ constexpr std::uint8_t kRegVACTUAL = 0x22;
 constexpr std::uint8_t kRegRAMPSTAT = 0x35;
 constexpr std::uint8_t kRegMSCNT = 0x6A;
 constexpr std::uint8_t kRegDRV_STATUS = 0x6F;
+constexpr std::uint8_t kRegPWM_SCALE = 0x71;
+constexpr std::uint8_t kRegPWM_AUTO = 0x72;
 constexpr std::uint8_t kRegGLOBALSCALER = 0x0B;
 constexpr std::uint8_t kRegIHOLD_IRUN = 0x10;
 constexpr std::uint8_t kRegTPOWERDOWN = 0x11;
@@ -703,6 +705,11 @@ std::string Tmc5160Driver::DebugRegisters() {
       {"drv_status", kRegDRV_STATUS, 0}, {"rampstat", kRegRAMPSTAT, 0},
       {"tstep", kRegTSTEP, 0}, {"ioin", kRegIOIN, 0},
       {"gstat", kRegGSTAT, 0}, {"chopconf", kRegCHOPCONF, 0},
+      // stealthChop's own view of the coils: PWM_SCALE_SUM is the PWM
+      // amplitude the current regulator needs to reach the target. Pinned
+      // at 255 = it cannot get there (VM too low, coil open/too resistive,
+      // wrong sense resistor); a moderate value = current really flows.
+      {"pwm_scale", kRegPWM_SCALE, 0}, {"pwm_auto", kRegPWM_AUTO, 0},
   };
   for (Reg& reg : regs) {
     if (!ReadRegister(reg.addr, &reg.value)) return {};
@@ -711,7 +718,10 @@ std::string Tmc5160Driver::DebugRegisters() {
                       vactual = regs[2].value, mscnt = regs[3].value,
                       drv = regs[4].value, ramp = regs[5].value,
                       tstep = regs[6].value, ioin = regs[7].value,
-                      gstat = regs[8].value, chop = regs[9].value;
+                      gstat = regs[8].value, chop = regs[9].value,
+                      pwm_scale = regs[10].value, pwm_auto = regs[11].value;
+  std::int32_t pwm_scale_auto = static_cast<std::int32_t>((pwm_scale >> 16) & 0x1FFU);
+  if (pwm_scale_auto & 0x100) pwm_scale_auto -= 0x200;  // 9-bit signed
   // VACTUAL is a 24-bit two's-complement value in 1/256-step units per
   // 2^24/fCLK seconds; XACTUAL/XTARGET are 32-bit signed 1/256-step counts.
   std::int32_t v24 = static_cast<std::int32_t>(vactual & 0xFFFFFFU);
@@ -746,7 +756,11 @@ std::string Tmc5160Driver::DebugRegisters() {
       << ";chopconf=0x" << std::hex << chop << std::dec
       << ";toff=" << (chop & 0xFU)
       << ";mres=" << mres << ";usteps=" << (256U >> mres)
-      << ";resets=" << reset_count_;
+      << ";resets=" << reset_count_
+      << ";pwm_scale_sum=" << (pwm_scale & 0xFFU)
+      << ";pwm_scale_auto=" << pwm_scale_auto
+      << ";pwm_ofs_auto=" << (pwm_auto & 0xFFU)
+      << ";pwm_grad_auto=" << ((pwm_auto >> 16) & 0xFFU);
   return out.str();
 }
 
