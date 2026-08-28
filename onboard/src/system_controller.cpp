@@ -259,7 +259,8 @@ bool SystemController::Initialize(std::string* error) {
       if (!driver->healthy()) {
         std::cerr << "[system] " << motor_label
                   << ": TMC5160 bring-up on " << motor.spi_device
-                  << " failed; motor remains unavailable until CHECK or restart"
+                  << " failed; motor unavailable until a re-probe (automatic every"
+                  << " retry_ms while idle, or CHECK MOTORn)"
                   << " completes SPI setup." << '\n';
       }
       return driver;
@@ -1439,6 +1440,15 @@ std::string SystemController::HandleCommandLine(const std::string& line,
         if (check_motor1 && !motor1_ok) {
           result << ";motor1_error="
                  << SanitizeForReply(stepper_->LastDriverError(1));
+        }
+        // Non-fatal driver warnings (e.g. an enable line that never reaches
+        // DRV_ENN): the motor is usable, the operator must still know.
+        for (int motor = 0; motor < 2; ++motor) {
+          if (!(motor == 0 ? check_motor0 : check_motor1)) continue;
+          const std::string warn = stepper_->DriverWarning(motor);
+          if (!warn.empty()) {
+            result << ";motor" << motor << "_warn=" << SanitizeForReply(warn);
+          }
         }
       }
       return Ack(cmd_name, result.str());

@@ -116,6 +116,8 @@ class StepperController {
   bool SpiBusOk() const;
   // The reason this motor's backend last refused, or empty.
   std::string LastDriverError(int motor_id) const;
+  // Non-fatal driver warning for CHECK (empty when all clear).
+  std::string DriverWarning(int motor_id) const;
   bool ActiveCheck(int motor_id);
 
   std::size_t channel_count() const;

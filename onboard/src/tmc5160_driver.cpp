@@ -90,7 +90,8 @@ Tmc5160Driver::Tmc5160Driver(Tmc5160Config cfg, SpiBus* bus, bool use_gpio)
     : cfg_(std::move(cfg)),
       bus_(bus),
       use_gpio_(use_gpio),
-      microstep_(cfg_.microstep) {
+      microstep_(cfg_.microstep),
+      verify_enable_line_(use_gpio) {
   if (bus_ == nullptr) return;
   const bool gpio_ok = OpenGpio();
   const bool spi_ok = OpenSpi() && ReinitializeUnlocked();
@@ -583,6 +584,34 @@ bool Tmc5160Driver::EnableUnlocked(bool enable) {
       }
     }
     enabled_ = false;
+    // Prove the enable line can also DISABLE the chip. A module whose EN
+    // pin is not routed to DRV_ENN (bench, 2026-08-28: motor1's DRV_ENN
+    // read 0 whatever GPIO 21 did) passes the Enable(true) check -- the
+    // pin already reads enabled -- and moves fine, but STEPPER_DISABLE
+    // then only stops the chopper (TOFF=0); the power stage is never
+    // de-energised through EN. That is a warning, not a fault: the motor
+    // still works, the operator must know.
+    if (ok && verify_enable_line_) {
+      std::uint32_t ioin = 0;
+      if (!ReadRegister(kRegIOIN, &ioin)) {
+        ReportError(cfg_.spi_device + " cs=" + std::to_string(cfg_.cs_line) +
+                    ": IOIN read failed while verifying disable");
+        healthy_ = false;
+        return false;
+      }
+      const bool effective = IoinDriverDisabled(ioin);
+      if (!effective && !enable_warning_logged_) {
+        std::cerr << "[tmc5160] " << cfg_.spi_device << " cs=" << cfg_.cs_line
+                  << ": DRV_ENN still LOW after driving enable line "
+                  << cfg_.enable_line << " to disable -- the enable line does"
+                  << " not reach the driver (module EN not routed to DRV_ENN?);"
+                  << " STEPPER_DISABLE can only stop the chopper, the power"
+                  << " stage stays energised through EN.\n";
+        enable_warning_logged_ = true;
+      }
+      if (effective) enable_warning_logged_ = false;
+      enable_line_effective_ = effective;
+    }
     return ok;
   }
 
@@ -607,7 +636,7 @@ bool Tmc5160Driver::EnableUnlocked(bool enable) {
   // use_gpio_=false nothing here drives the pin and its level says nothing
   // about us. (Bench, 2026-08-24: motor1's DRV_ENN never followed its
   // enable GPIO.)
-  if (use_gpio_) {
+  if (verify_enable_line_) {
     std::uint32_t enable_ioin = 0;
     if (!ReadRegister(kRegIOIN, &enable_ioin)) {
       ReportError(cfg_.spi_device + " cs=" + std::to_string(cfg_.cs_line) +
@@ -631,6 +660,14 @@ bool Tmc5160Driver::EnableUnlocked(bool enable) {
   }
   enabled_ = true;
   return true;
+}
+
+std::string Tmc5160Driver::warning() const {
+  if (enable_line_effective_) return {};
+  return "enable line " + std::to_string(cfg_.enable_line) +
+         " has no effect on DRV_ENN (cs=" + std::to_string(cfg_.cs_line) +
+         "): the power stage cannot be de-energised through EN; STEPPER_DISABLE"
+         " stops the chopper only";
 }
 
 bool Tmc5160Driver::Step(bool direction_forward) {

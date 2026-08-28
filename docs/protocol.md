@@ -196,7 +196,7 @@ NACK,<COMMAND>,<reason>
 | `PING` | none | Liveness check |
 | `STATUS` | none | Lightweight live state: phase/mode, fallback, `plan=<state>` (failsafe plan), queue, tick rate, `silence=<0\|1>` (radio silence in force), current hardware flags, and sequence state |
 | `COMPONENTS` | none | Non-invasive cached component state, error, and channel summary |
-| `CHECK` | `[ALL\|DPS310\|ADS1115\|SEQUENT_RTD\|DAQ132M\|RTD_CLICK\|MAX31865\|PWM\|MOTOR0\|MOTOR1\|STORAGE\|COMMS]` | Active probe of all or one selected component. `DAQ132M`/`RTD_CLICK` are accepted as legacy aliases for `SEQUENT_RTD` (the retired temperature path). `MAX31865` selects the two v3 sample-resistance clicks — a command-argument addition only, no `COMPONENT_STATE`/frame-format change |
+| `CHECK` | `[ALL\|DPS310\|ADS1115\|SEQUENT_RTD\|DAQ132M\|RTD_CLICK\|MAX31865\|PWM\|MOTOR0\|MOTOR1\|STORAGE\|COMMS]` | Active probe of all or one selected component. `DAQ132M`/`RTD_CLICK` are accepted as legacy aliases for `SEQUENT_RTD` (the retired temperature path). `MAX31865` selects the two v3 sample-resistance clicks — a command-argument addition only, no `COMPONENT_STATE`/frame-format change. Non-fatal driver warnings are appended as `motorN_warn=` (e.g. an enable line that never reaches `DRV_ENN`) |
 | `ARM` | none | Enable manual flight outputs |
 | `DISARM` | none | Disable outputs, clear heater overrides, stop steppers |
 | `SET_PHASE` | `<phase>` | Set `BOOT`, `ASCENT`, `PRE_FLOAT`, `FLOAT`, `DESCENT`, `LANDED`, or `STOPPED` |
