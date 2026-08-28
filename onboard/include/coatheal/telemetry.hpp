@@ -36,6 +36,20 @@ struct SensorSnapshot {
   std::vector<double> sample_resistance_ohm;
 };
 
+// Controller-level state the ground station cannot derive from the other
+// fields (redesign spec §8). Emitted as one `CTRL=k:v|...` token placed
+// after COMPONENT_STATE and before STEPPER0.
+struct CtrlStatus {
+  bool fallback_active = false;      // link-loss fallback policy engaged
+  double link_loss_s = 0.0;          // seconds since the established link died
+  double energy_wh = 0.0;            // cumulative heater energy
+  double budget_wh = 0.0;            // power.energy_budget_wh (0 = unlimited)
+  bool budget_exhausted = false;     // heater energy latch tripped
+  int heaters_active = 0;            // scheduled duties > 0 this tick
+  std::uint64_t queue_depth = 0;     // frames waiting in the durable queue
+  std::string plan = "none";         // fallback bend plan state (Phase C)
+};
+
 struct TelemetryRecord {
   std::uint64_t seq = 0;
   MissionPhase phase = MissionPhase::kBoot;
@@ -44,6 +58,7 @@ struct TelemetryRecord {
   std::vector<double> heater_duty;
   StatusFlags status;
   ComponentState pwm_state = ComponentState::kFailed;
+  CtrlStatus ctrl;
   // Vector of motor snapshots. `steppers[0]` = M0, `steppers[1]` = M1.
   // Each motor is emitted as a `STEPPER<n>=...` segment on the wire.
   std::vector<StepperStatus> steppers;

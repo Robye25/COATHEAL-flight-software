@@ -255,6 +255,7 @@ void TelemetryClient::SendOnboardBeacon(int fd) {
   sendto(fd, payload.c_str(), payload.size(), 0,
          reinterpret_cast<const sockaddr*>(&to), sizeof(to));
 #endif
+  beacons_sent_.fetch_add(1);
 }
 
 void TelemetryClient::SendOnboardHelloReply(int fd, const sockaddr_in& to,
@@ -272,6 +273,7 @@ void TelemetryClient::SendOnboardHelloReply(int fd, const sockaddr_in& to,
   sendto(fd, payload.c_str(), payload.size(), 0,
          reinterpret_cast<const sockaddr*>(&to), static_cast<socklen_t>(to_len));
 #endif
+  hello_replies_sent_.fetch_add(1);
 }
 
 bool TelemetryClient::ProcessIncomingDiscoveryLine(const std::string& raw_line,
@@ -381,7 +383,11 @@ void TelemetryClient::DiscoveryListenerLoop() {
         // at priority 0 so the connect path has something to dial if this
         // is the only thing we ever hear.
         const std::string& nonce = tokens[1];
-        SendOnboardHelloReply(fd, sender, static_cast<int>(sender_len), nonce);
+        // Radio silence (redesign spec §9): never answer while silent, but
+        // still remember who asked so RADIO_RESUME can dial them.
+        if (hello_reply_allowed()) {
+          SendOnboardHelloReply(fd, sender, static_cast<int>(sender_len), nonce);
+        }
         try {
           const int tel = std::stoi(tokens[2]);
           const int cmd = std::stoi(tokens[3]);
@@ -414,12 +420,10 @@ void TelemetryClient::BeaconSenderLoop() {
     return;
   }
   while (running_.load()) {
-    bool connected_now;
-    {
-      std::lock_guard<std::mutex> lock(mu_);
-      connected_now = connected_;
-    }
-    if (!connected_now) {
+    // Radio silence (redesign spec §9): a silent onboard must not announce
+    // itself either. beacon_allowed() folds transmit_enabled_ into the
+    // "not connected" condition this loop used to check on its own.
+    if (beacon_allowed()) {
       SendOnboardBeacon(fd);
     }
     std::unique_lock<std::mutex> lock(beacon_mu_);
@@ -710,6 +714,16 @@ void TelemetryClient::ObserveGroundStation(const std::string& host,
 }
 
 bool TelemetryClient::transmit_enabled() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return transmit_enabled_;
+}
+
+bool TelemetryClient::beacon_allowed() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return transmit_enabled_ && !connected_;
+}
+
+bool TelemetryClient::hello_reply_allowed() const {
   std::lock_guard<std::mutex> lock(mu_);
   return transmit_enabled_;
 }

@@ -106,6 +106,39 @@ Only one sequence runs per motor and `MotionLock` still prevents simultaneous
 motion. A motor/backend/overtemperature fault pauses the sequence and reports
 `SEQ_PAUSED` plus fault detail in `BENDSEQ_STATUS`.
 
+## Radio Silence
+
+`RADIO_SILENCE` stops every transmission the onboard originates until the
+operator lifts it with `RADIO_RESUME`:
+
+- the telemetry TCP client closes and makes no reconnect attempts;
+- the UDP `ONBOARD_BEACON` broadcast stops;
+- `GS_HELLO` datagrams are not answered (the sender is still remembered so
+  `RADIO_RESUME` can dial it);
+- every command except `RADIO_RESUME`, `RADIO_SILENCE`, `STATUS` and `PING`
+  is refused with `NACK,<COMMAND>,radio silence active` before it has any
+  effect, so a mis-sent command cannot start anything while silent.
+
+The command server keeps listening — that is the only way to resume — and
+the reply to one of the four allowed commands is the only packet the onboard
+will send. `STATUS` reports `silence=1` while silent. The state is persisted
+in `<storage.queue_dir>/radio_silence`, so an onboard restart during a
+mandated silence comes back silent; `RADIO_RESUME` removes the file.
+
+Telemetry frames produced during silence stay in the durable queue and are
+delivered, in order, after `RADIO_RESUME` (the ground station shows the
+backlog draining through the `CTRL` `queue` field).
+
+```powershell
+python main.py command --cmd RADIO_SILENCE --yes
+python main.py command --cmd STATUS            # ...;silence=1;...
+python main.py command --cmd RADIO_RESUME
+```
+
+The ground station pauses its own discovery beacons and command probes while
+silent and sends nothing but `RADIO_RESUME` (and, from its console, `STATUS`
+or `PING`).
+
 ## Link-Loss Fallback
 
 Fallback begins only after a link has been established and then remains lost

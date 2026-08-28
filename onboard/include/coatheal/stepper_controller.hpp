@@ -28,6 +28,12 @@ struct StepperStatus {
   std::uint64_t pulses_total = 0;       // driver.pulses_issued() mirror
   std::uint64_t missed_deadlines = 0;
   std::string last_source;              // "phase:FLOAT_HOLD", "cmd:MOVE", ...
+  // Filled by SystemController (the channel does not know them): whether
+  // SET_POSITION_ZERO has run since boot, and the bend-sequence state.
+  // Wire: `|zeroed:<0|1>|seq:<name or ->|seqst:<idle|run|pause>`.
+  bool zeroed = false;
+  std::string seq_name;                 // empty => "-" on the wire
+  std::string seq_state = "idle";       // "idle" | "run" | "pause"
 };
 
 // Forward-declared so we can hold channels without a circular include. The

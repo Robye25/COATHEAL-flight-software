@@ -39,10 +39,15 @@ class SystemController {
   bool Initialize(std::string* error);
   int Run();
 
- private:
-  bool DrainTelemetryQueue(bool* link_ok, std::string* error);
+  // The command surface. Public so tests can drive it without a socket;
+  // the command server calls it through this same signature.
   std::string HandleCommandLine(const std::string& line,
                                 const std::string& peer_ip);
+  // True while RADIO_SILENCE is in force (redesign spec §9).
+  bool radio_silent() const { return !telemetry_client_.transmit_enabled(); }
+
+ private:
+  bool DrainTelemetryQueue(bool* link_ok, std::string* error);
   void TickBendSequences();
   // Whether the SPI transport itself is working, as opposed to whether
   // the motors on it are usable. See the comment at its definition.
@@ -51,6 +56,12 @@ class SystemController {
   std::string SequenceStatus(int motor_id) const;
   void StopNonSequenceMotionOnFallback();
   void InhibitHeatersForMotion();
+  // Radio-silence persistence: an empty flag file under storage.queue_dir
+  // that outlives the process, so a restart during a mandated silence comes
+  // back silent (redesign spec §9, owner decision D2).
+  std::string RadioSilenceFlagPath() const;
+  void PersistRadioSilence(bool silent);
+  void RestoreRadioSilence();
 
   OnboardConfig config_;
   CommandParser parser_;
