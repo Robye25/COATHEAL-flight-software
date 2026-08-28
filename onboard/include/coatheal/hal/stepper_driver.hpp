@@ -36,6 +36,10 @@ class StepperDriver {
   // reach only the journal, leaving the ground station with a bare
   // "enable failed" for a fault whose cause is already known.
   virtual std::string last_error() const { return {}; }
+  // A fault that does not stop the motor but the operator must know about
+  // (today: the enable line has no effect on the chip, so STEPPER_DISABLE
+  // cannot de-energise the power stage through EN). Empty when all clear.
+  virtual std::string warning() const { return {}; }
   virtual std::uint64_t pulses_issued() const = 0;
 };
 

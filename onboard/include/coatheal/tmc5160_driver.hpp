@@ -78,6 +78,19 @@ class Tmc5160Driver : public StepperDriver {
   // module the bus reached just fine.
   bool spi_bus_ok() const override { return spi_bus_ok_; }
   std::string last_error() const override { return last_error_message_; }
+  std::string warning() const override;
+
+  // Whether driving the EN GPIO was last seen to move DRV_ENN in IOIN.
+  // Enable(true) already refuses a line that leaves DRV_ENN HIGH; the
+  // opposite failure -- DRV_ENN stuck LOW, i.e. a module whose enable pin
+  // is not routed to the chip -- lets the motor run but makes
+  // STEPPER_DISABLE unable to cut the power stage through EN. Enable(false)
+  // detects it and reports it here and through warning().
+  bool enable_line_effective() const { return enable_line_effective_; }
+  // Test hook: the IOIN verification after driving EN normally runs only
+  // when this driver owns the GPIO (use_gpio=true); FakeSpiBus tests run
+  // with use_gpio=false and turn it on explicitly.
+  void set_verify_enable_line(bool verify) { verify_enable_line_ = verify; }
 
   // Full probe + register (re)configuration sequence: IOIN version gate,
   // GCONF/CHOPCONF/current/ramp register writes, XACTUAL=XTARGET=0, then a
@@ -161,6 +174,9 @@ class Tmc5160Driver : public StepperDriver {
   std::uint64_t pulses_ = 0;
   std::string last_error_message_;
   bool spi_bus_ok_ = false;
+  bool verify_enable_line_ = false;
+  bool enable_line_effective_ = true;
+  bool enable_warning_logged_ = false;
   mutable std::mutex io_mu_;
 };
 
