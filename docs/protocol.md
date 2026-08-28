@@ -24,7 +24,7 @@ a revival of the retired temperature path.
 Sent by the onboard to the ground station over TCP port `4000`.
 
 ```text
-DATA,<session_id>,<seq>,<timestamp>,<rtc_valid>,<ambient_temp_c>,<ambient_pressure_mbar>,<uv>,<sample_0>,...,<sample_7>,HEATER_DUTY=<d0>|...|<d5>,RESISTANCE=<r0>|...|<r7>,PHASE=<phase>,MODE=<mode>,STATUS=<flags>,SENSOR_VALID=<kv>,SENSOR_AGE_MS=<kv>,COMPONENT_STATE=<kv>,STEPPER0=<kv>,STEPPER1=<kv>
+DATA,<session_id>,<seq>,<timestamp>,<rtc_valid>,<ambient_temp_c>,<ambient_pressure_mbar>,<uv>,<sample_0>,...,<sample_7>,HEATER_DUTY=<d0>|...|<d5>,RESISTANCE=<r0>|...|<r7>,PHASE=<phase>,MODE=<mode>,STATUS=<flags>,SENSOR_VALID=<kv>,SENSOR_AGE_MS=<kv>,COMPONENT_STATE=<kv>,CTRL=<kv>,STEPPER0=<kv>,STEPPER1=<kv>
 ```
 
 | Field | Meaning |
@@ -38,11 +38,50 @@ DATA,<session_id>,<seq>,<timestamp>,<rtc_valid>,<ambient_temp_c>,<ambient_pressu
 | `SENSOR_VALID` | Current validity for ambient temperature (`AT`), pressure (`AP`), UV, and `S0..S7` |
 | `SENSOR_AGE_MS` | Monotonic age of each last successful reading; `-1` means never valid |
 | `COMPONENT_STATE` | Independent state for DPS310, ADS1115, SEQUENT_RTD, both motors, and PWM |
-| `STEPPER0`, `STEPPER1` | TMC5160-driven NEMA 17 ball-screw motor snapshots (SPI-only position dribble; no STEP/DIR) |
+| `CTRL` | Controller state the ground station cannot derive from the other fields (added 2026-08-28, see below) |
+| `STEPPER0`, `STEPPER1` | TMC5160-driven NEMA 17 ball-screw motor snapshots (SPI-only position dribble; no STEP/DIR); keys below |
 
 The parser locates `HEATER_DUTY=` by token name, so sample count is inferred
 from the position of that token. Frames with any number of sample columns parse
-as long as every column before `HEATER_DUTY=` is numeric.
+as long as every column before `HEATER_DUTY=` is numeric. Every `<kv>` field
+is pipe-separated `key:value` pairs; parsers must ignore keys they do not
+know, which is how additions stay backward compatible.
+
+### `STEPPERn` keys
+
+| Key | Meaning |
+|---|---|
+| `pos`, `tgt` | Current and target position, absolute microsteps |
+| `hz` | Configured step rate, full-step Hz (2 decimals) |
+| `us` | Microstep divisor |
+| `ok`, `en`, `mv`, `hold` | Driver healthy / power stage enabled / pulses being issued / at target with a hold countdown running (`0`/`1`) |
+| `hold_s` | Remaining hold time, seconds |
+| `pulses`, `missed` | Pulses issued since boot, missed pulse deadlines |
+| `src` | Origin of the last motion: `init`, `cmd:MOVE`, `cmd:BEND`, `cmd:HOME`, `cmd:ZERO`, `cmd:STOP`, `cmd:PULL`; `-` when empty |
+| `zeroed` | `1` once `SET_POSITION_ZERO <id>` has run since the onboard started (absolute moves, homing, pulls and sequences need it) — added 2026-08-28 |
+| `seq` | Name of the bend sequence active on this motor, `-` when none — added 2026-08-28 |
+| `seqst` | `idle`, `run`, or `pause` — added 2026-08-28 |
+
+### `CTRL` keys (added 2026-08-28)
+
+Emitted after `COMPONENT_STATE` and before `STEPPER0`, every frame.
+
+| Key | Meaning |
+|---|---|
+| `fallback` | `1` while link-loss fallback is active (`manual.link_loss_fallback_*`) |
+| `link_loss_s` | Seconds since an established link was last seen (1 decimal; `0.0` while healthy) |
+| `energy_wh` | Cumulative heater energy this session (2 decimals) |
+| `budget_wh` | `power.energy_budget_wh` (1 decimal; `0.0` means unlimited) |
+| `budget_exhausted` | `1` once the energy latch has tripped (heaters stay off until `RESET_CTRL`) |
+| `heaters_active` | Number of heaters with a non-zero scheduled duty this tick (owner cap: 3) |
+| `queue` | Frames waiting in the durable telemetry queue before this one was enqueued (a backlog draining after a link outage) |
+| `plan` | Fallback bend-plan state: `none` until the plan feature ships, then `armed`, `running`, `done`, `failed`, or `disarmed` |
+
+Example:
+
+```text
+CTRL=fallback:0|link_loss_s:0.0|energy_wh:12.40|budget_wh:130.0|budget_exhausted:0|heaters_active:2|queue:0|plan:none
+```
 
 Never-valid values serialize as `nan`. After a failure, the last good value is
 retained, its validity becomes `0`, and its age increases. Component states are
@@ -51,7 +90,7 @@ retained, its validity becomes `0`, and its age increases. Component states are
 ### Example
 
 ```text
-DATA,coatheal-1718000000-123456,42,2026-04-16T12:00:00Z,1,-10.23,140.12,0.00012,5.1,5.2,5.0,5.3,5.1,5.2,5.0,5.3,HEATER_DUTY=0.250|0.000|0.250|0.000|0.000|0.050,RESISTANCE=-|-|-|-|-|-|-|-,PHASE=FLOAT,MODE=RUN,STATUS=SD_OK|USB_OK|I2C_OK|SPI_OK|LINK_OK|T_AMBIENT_OK|P_AMBIENT_OK|UNIFORMITY_OK|OVERTEMP_OK|ENERGY_OK|PWM_OK|STEPPER_OK|SAMPLE_TEMP_OK|REAL_SENSORS|SEQ_READY|HEATER_ACTIVE|RESISTANCE_OK,STEPPER0=pos:100|tgt:200|hz:100.00|us:4|en:1|mv:1|hold:0|hold_s:0.00|pulses:100|src:cmd:MOVE,STEPPER1=pos:0|tgt:0|hz:0.00|us:4|en:1|mv:0|hold:0|hold_s:0.00|pulses:0|src:init
+DATA,coatheal-1718000000-123456,42,2026-04-16T12:00:00Z,1,-10.23,140.12,0.00012,5.1,5.2,5.0,5.3,5.1,5.2,5.0,5.3,HEATER_DUTY=0.250|0.000|0.250|0.000|0.000|0.050,RESISTANCE=-|-|-|-|-|-|-|-,PHASE=FLOAT,MODE=RUN,STATUS=SD_OK|USB_OK|I2C_OK|SPI_OK|LINK_OK|T_AMBIENT_OK|P_AMBIENT_OK|UNIFORMITY_OK|OVERTEMP_OK|ENERGY_OK|PWM_OK|STEPPER_OK|SAMPLE_TEMP_OK|REAL_SENSORS|SEQ_READY|HEATER_ACTIVE|RESISTANCE_OK,SENSOR_VALID=AT:1|AP:1|UV:1|S0:1|S1:1|S2:1|S3:1|S4:1|S5:1|S6:1|S7:1,SENSOR_AGE_MS=AT:120|AP:120|UV:250|S0:900|S1:900|S2:900|S3:900|S4:900|S5:900|S6:900|S7:900,COMPONENT_STATE=DPS310:OK|ADS1115:OK|SEQUENT_RTD:OK|MOTOR0:OK|MOTOR1:OK|PWM:OK,CTRL=fallback:0|link_loss_s:0.0|energy_wh:12.40|budget_wh:130.0|budget_exhausted:0|heaters_active:3|queue:0|plan:none,STEPPER0=pos:100|tgt:200|hz:100.00|us:4|ok:1|en:1|mv:1|hold:0|hold_s:0.00|pulses:100|missed:0|src:cmd:MOVE|zeroed:1|seq:-|seqst:idle,STEPPER1=pos:0|tgt:0|hz:0.00|us:4|ok:1|en:1|mv:0|hold:0|hold_s:0.00|pulses:0|missed:0|src:init|zeroed:0|seq:-|seqst:idle
 ```
 
 ## Status Flags

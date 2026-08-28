@@ -185,6 +185,41 @@ void TestComponentStateUsesSequentRtdToken() {
   assert(frame.find("DAQ132M") == std::string::npos);
 }
 
+void TestCtrlBlockAndStepperExtrasTokenOrder() {
+  // Redesign spec §8: `CTRL=` sits between COMPONENT_STATE and STEPPER0,
+  // and the three new stepper keys trail `src:` so older ground parsers
+  // (which ignore unknown keys) keep working. The exact strings are the
+  // contract the ground station's parser and CSV writer are built on.
+  TelemetryRecord r = MakeBaseRecord();
+  r.ctrl.fallback_active = true;
+  r.ctrl.link_loss_s = 12.5;
+  r.ctrl.energy_wh = 3.25;
+  r.ctrl.budget_wh = 130.0;
+  r.ctrl.budget_exhausted = false;
+  r.ctrl.heaters_active = 2;
+  r.ctrl.queue_depth = 7;
+  StepperStatus m0;
+  m0.position_steps = 100;
+  m0.last_source = "cmd:MOVE";
+  m0.zeroed = true;
+  m0.seq_name = "flex";
+  m0.seq_state = "run";
+  StepperStatus m1;  // defaults: never zeroed, no sequence, no source
+  r.steppers = {m0, m1};
+
+  const std::string line = SerializeTelemetryDataFrame(r, "sess-b");
+  assert(Contains(line,
+                  ",CTRL=fallback:1|link_loss_s:12.5|energy_wh:3.25|budget_wh:130.0"
+                  "|budget_exhausted:0|heaters_active:2|queue:7|plan:none,STEPPER0="));
+  assert(Contains(line, "|src:cmd:MOVE|zeroed:1|seq:flex|seqst:run,STEPPER1="));
+  assert(Contains(line, "|src:-|zeroed:0|seq:-|seqst:idle"));
+  assert(line.find("COMPONENT_STATE=") < line.find(",CTRL="));
+
+  // An empty plan string still serialises as the documented default word.
+  r.ctrl.plan.clear();
+  assert(Contains(SerializeTelemetryDataFrame(r, "sess-b"), "|plan:none,STEPPER0="));
+}
+
 void TestStatusFlagsDropRs485() {
   // RS485 hardware leaves with the DAQ-132M. A flag that can only ever read
   // OK is worse than no flag, so it must be gone from the wire, and its
@@ -208,6 +243,7 @@ int main() {
   TestPullEventFrameSerialization();
   TestPullEventEmptySamplesRendersDash();
   TestComponentStateUsesSequentRtdToken();
+  TestCtrlBlockAndStepperExtrasTokenOrder();
   TestStatusFlagsDropRs485();
   return 0;
 }
