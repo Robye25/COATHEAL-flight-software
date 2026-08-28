@@ -8,12 +8,14 @@ from datetime import datetime, timezone
 from typing import Deque, List, Optional
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
+from PyQt6.QtGui import QFontMetrics
+from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSizePolicy, QWidget
 
 from ..protocol import TelemetryPacket
 from .alarms import Alarm
 from .dispatch import CommandDispatcher
 from .panels_health import health_summary
+from ..session_dir import session_epoch
 from .series_store import format_elapsed
 from .state import OnboardState
 from .theme import mode_color, phase_color
@@ -57,6 +59,7 @@ class TopStrip(QWidget):
         self._rx_times: Deque[float] = deque()
         self._session = ""
         self._t0_mono: Optional[float] = None
+        self._t0_wall: Optional[float] = None   # onboard boot epoch from the session id
         self._silence_since: Optional[float] = None
         self._receiver_state = "idle"
 
@@ -91,10 +94,21 @@ class TopStrip(QWidget):
         self._radio_dot = StatusDot(9); self._radio_dot.set_color(GRAY)
         self._radio_box.layout().insertWidget(1, self._radio_dot)
         self._radio_box.setStyleSheet("border: none;")
-        for box in (self._phase_box, self._health_box, self._link_box, self._rx_box, self._target_box,
-                    self._sess_box, self._tplus_box, self._utc_box, self._radio_box):
+        # TARGET and SESSION absorb whatever width is left (and elide when
+        # squeezed); everything else keeps its natural width so the
+        # safety-relevant readouts are never clipped.
+        self._target_full = "—"
+        self._sess_full = "—"
+        for label in (self._target, self._sess):
+            label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            label.setMinimumWidth(96)
+            label.setMaximumWidth(360)
+        for box in (self._phase_box, self._health_box, self._link_box, self._rx_box):
             lay.addWidget(box)
-        lay.addStretch()
+        lay.addWidget(self._target_box, 3)
+        lay.addWidget(self._sess_box, 2)
+        for box in (self._tplus_box, self._utc_box, self._radio_box):
+            lay.addWidget(box)
 
         # Panic group: unconfirmed HEATERS OFF / STOP MOTORS, confirmed ENTER SAFE.
         self.btn_heaters_off = make_button("HEATERS OFF", "panic", sends="HEATERS_OFF", min_height=32,
@@ -104,7 +118,7 @@ class TopStrip(QWidget):
         self.btn_enter_safe = make_button("ENTER SAFE", "danger", sends="ENTER_SAFE", min_height=32,
                                           slot=self.enter_safe)
         for btn in (self.btn_heaters_off, self.btn_stop_motors, self.btn_enter_safe):
-            btn.setMinimumWidth(110)
+            btn.setMinimumWidth(96)
             lay.addWidget(btn)
             lay.addSpacing(6)
 
@@ -143,6 +157,8 @@ class TopStrip(QWidget):
         if session_id != self._session:
             self._session = session_id
             self._t0_mono = rx_mono
+            epoch = session_epoch(session_id)
+            self._t0_wall = float(epoch) if epoch is not None else None
             self._rx_times.clear()
             self._rx_times.append(rx_mono)
 
@@ -163,7 +179,7 @@ class TopStrip(QWidget):
             self._paint_mode(state.mode, mode_color(state.mode))
             self._phase.setText(state.phase or "—")
             self._phase.setStyleSheet(f"{MONO_CSS} font-weight: bold; color: {phase_color(state.phase)}; border: none;")
-            self._sess.setText(f"{state.session_id[-14:]} · seq {state.seq}")
+            self._sess_full = f"{state.session_id} · seq {state.seq}"
         self.set_silence(state.silence)
 
     def set_silence(self, active: bool) -> None:
@@ -180,8 +196,20 @@ class TopStrip(QWidget):
         self.refresh()
 
     def set_target(self, text: str, color: str = GREEN) -> None:
-        self._target.setText(text)
+        self._target_full = text
         self._target.setStyleSheet(f"{MONO_CSS} font-weight: bold; color: {color}; border: none;")
+        self._elide()
+
+    def _elide(self) -> None:
+        for label, full in ((self._target, self._target_full), (self._sess, self._sess_full)):
+            metrics = QFontMetrics(label.font())
+            width = max(20, label.width() - 4)
+            label.setText(metrics.elidedText(full, Qt.TextElideMode.ElideMiddle, width))
+            label.setToolTip(full if label.text() != full else "")
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._elide()
 
     def set_receiver_state(self, state: str) -> None:
         self._receiver_state = state
@@ -195,6 +223,7 @@ class TopStrip(QWidget):
 
     def refresh(self) -> None:
         now = time.monotonic()
+        self._elide()
         self._utc.setText(datetime.now(timezone.utc).strftime("%H:%M:%S"))
         if self._silence_since is not None:
             self._radio.setText(f"SILENT {format_elapsed(now - self._silence_since)}")
@@ -223,7 +252,12 @@ class TopStrip(QWidget):
             self._rx.setText("—")
         else:
             self._rx.setText(f"{len(self._rx_times) / self.RATE_WINDOW_S:.1f} Hz")
-        if self._t0_mono is not None:
+        # T+ counts from the onboard session start (its boot epoch, embedded
+        # in the session id) so it survives a ground-station restart; a
+        # session id without an epoch falls back to the first frame seen.
+        if self._t0_wall is not None:
+            self._tplus.setText(format_elapsed(time.time() - self._t0_wall))
+        elif self._t0_mono is not None:
             self._tplus.setText(format_elapsed(now - self._t0_mono))
 
     # -- test accessors ---------------------------------------------------------
@@ -235,6 +269,9 @@ class TopStrip(QWidget):
 
     def radio_text(self) -> str:
         return self._radio.text()
+
+    def session_text(self) -> str:
+        return self._sess_full
 
 
 class AlarmStrip(QWidget):

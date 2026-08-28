@@ -388,11 +388,12 @@ class MainWindow(QMainWindow):
     # ── status bar ──
     def _update_status_bar(self) -> None:
         directory = self._logs.current_dir
-        where = str(directory) if directory else f"{self._log_root} (no session yet)"
+        where = f"sessions/{directory.name}" if directory else "no session yet"
         scale = f" · UI {self._scale.percent} %" if self._scale else ""
         self.statusBar().showMessage(
-            f"{where} · {self._frames} frames · {self._parse_errors} parse errors{self._status_disk}{scale}"
-            " · Esc = STOP MOTORS · F1 shortcuts")
+            f"{self._log_root} · {where} · {self._frames} frames · {self._parse_errors} parse errors"
+            f"{self._status_disk}{scale} · Esc = STOP MOTORS · F1 shortcuts")
+        self.statusBar().setToolTip(str(directory) if directory else str(self._log_root))
 
     def _refresh_disk(self) -> None:
         directory = self._logs.current_dir
