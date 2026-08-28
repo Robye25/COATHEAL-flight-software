@@ -27,6 +27,19 @@ at load time.
 | `manual.link_loss_fallback_enabled` | `true` | Enables fallback after link loss. |
 | `manual.link_loss_fallback_s` | `10.0` | Seconds before fallback activates. |
 
+## Link-Loss Failsafe Plan
+
+The operator-armed bend plan (`FALLBACK_PLAN` / `FALLBACK_ARM`, see
+[protocol.md](protocol.md#link-loss-failsafe-plan)) runs only during link-loss
+fallback at `PRE_FLOAT`/`FLOAT`.
+
+| Key | Default | Description |
+|---|---:|---|
+| `fallback.bend_min_c` | `-40.0` | Lower bound of the sample-group temperature window that lets a motor's bend start. |
+| `fallback.bend_max_c` | `40.0` | Upper bound of that window; must be greater than `fallback.bend_min_c`. |
+| `fallback.bend_deadline_s` | `1800.0` | Seconds after fallback first holds at `PRE_FLOAT`/`FLOAT` beyond which the bend starts regardless of temperature (a motor still not enabled/zeroed/healthy is skipped instead). Must be `>= 0`; the clock restarts after an onboard restart. |
+| `fallback.landed_safe` | `true` | Heaters off and both motors disabled the first time fallback is active at `LANDED`. |
+
 ## Communications
 
 | Key | Default | Description |

@@ -151,13 +151,57 @@ On fallback entry:
 - Non-sequence manual motion stops and new manual motion is rejected.
 - Existing PID targets continue.
 - Untargeted channels use `phase.sample_floor_c`.
-- No queued fatigue sequence or phase-bend action starts automatically.
+- No sequence starts automatically; the only autonomous motion is the
+  operator-armed failsafe plan below.
 
 Inspect fallback state with:
 
 ```powershell
 python main.py command --cmd STATUS
 ```
+
+## Link-Loss Failsafe Plan
+
+If the link is lost right when the samples should be bent (ascent, just
+before float), the onboard can bend them on its own — but only with a plan
+the operator loaded and armed beforehand. Load one bend per motor (absolute
+microsteps, hold seconds, optional full-step Hz), then arm:
+
+```powershell
+python main.py command --cmd "FALLBACK_PLAN 0 800 5 50"
+python main.py command --cmd "FALLBACK_PLAN 1 800 5 50"
+python main.py command --cmd FALLBACK_ARM
+python main.py command --cmd FALLBACK_STATUS
+```
+
+`FALLBACK_STATUS` answers
+`state=armed;armed=1;deadline_s=1800;deadline_started=0;m0=800/5/50/pending;m1=800/5/50/pending`.
+The same state is in every telemetry frame (`CTRL` `plan`) and in `STATUS`
+(`plan=`). Arming works in any mode; the plan only ever runs during
+link-loss fallback, which requires RUN. Do it after the motors are enabled
+and zeroed — a motor that is not enabled, zeroed and healthy when its turn
+comes is skipped once the deadline passes.
+
+What the onboard does, and only while fallback is active at `PRE_FLOAT` or
+`FLOAT`: M0 bends first, then M1, one at a time, each when its sample
+group's mean valid temperature is inside `fallback.bend_min_c..bend_max_c`
+(default −40…+40 °C) or, unconditionally, once `fallback.bend_deadline_s`
+(default 30 min) have passed since fallback first held there. Each bend is a
+normal absolute move with hold and produces an `EVT,PULL`. UV and specimen
+resistance are logged for the post-flight analysis but never gate the plan.
+A completed or failed plan never re-runs (restarts included); if the link
+returns while a bend is in motion the bend finishes.
+
+Disarm at any time (the loaded targets stay, so `FALLBACK_ARM` re-arms them):
+
+```powershell
+python main.py command --cmd FALLBACK_DISARM
+python main.py command --cmd "STEPPER_STOP 0"      # disarming never stops motion
+```
+
+At `LANDED` in fallback (`fallback.landed_safe=true`) the onboard turns the
+heaters off and disables both motors once. Keys: `docs/configuration.md`
+(*Link-Loss Failsafe Plan*).
 
 ## Stop and Safe State
 
