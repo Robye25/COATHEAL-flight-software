@@ -505,6 +505,7 @@ def add_subparser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
 
 
 def _handle(args: argparse.Namespace) -> int:
+    import signal
     server = TelemetryServer(
         bind=args.bind,
         port=args.port,
@@ -518,6 +519,12 @@ def _handle(args: argparse.Namespace) -> int:
         cursor_path=args.cursor,
         discovered_path=args.discovered,
     )
+    # SIGTERM (systemd stop, `timeout`, a supervisor) must close the session
+    # files as cleanly as Ctrl+C does.
+    try:
+        signal.signal(signal.SIGTERM, lambda _signum, _frame: server.stop())
+    except (ValueError, OSError):
+        pass
     try:
         server.run()
         return 0
