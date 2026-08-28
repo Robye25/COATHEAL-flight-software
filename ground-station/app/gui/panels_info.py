@@ -438,10 +438,22 @@ class LogPanel(QWidget):
         self._text = QTextEdit(); self._text.setReadOnly(True)
         self._text.setStyleSheet("font-family: monospace; font-size: 10pt; background: #0a0a0a; color: #cccccc;")
         lay.addWidget(self._text, 1)
+        # Optional persistence sink `(level, message)` -- the session's
+        # events.log via telemetry_log.LogManager.log_event.
+        self._sink = None
+
+    def set_sink(self, sink) -> None:
+        self._sink = sink
 
     def append(self, line: str) -> None:
         ts = time.strftime("%H:%M:%S")
         self._text.append(f"[{ts}] {line}")
+        if self._sink is not None:
+            level = "ERROR" if "[error]" in line or "NACK" in line else "INFO"
+            try:
+                self._sink(level, line)
+            except Exception:
+                pass
 
     def _save(self) -> None:
         path, _ = QFileDialog.getSaveFileName(self, "Save log", "coatheal_log.txt", "Text (*.txt)")

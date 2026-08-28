@@ -302,7 +302,7 @@ class GuiSmoke(unittest.TestCase):
             # A stand-in for a superseded receiver -- never started, only
             # used for its QObject identity so its signal has a genuine,
             # distinct sender.
-            stale = TelemetryReceiver("127.0.0.1", 44010, Path("logs/smoke_stale2.csv"))
+            stale = TelemetryReceiver("127.0.0.1", 44010, win._logs)
             stale.status_changed.connect(win._on_receiver_status)
             stale.connection_changed.connect(win._on_connection_changed)
             try:
