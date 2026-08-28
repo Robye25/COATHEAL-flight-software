@@ -228,6 +228,15 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
     } else if (key == "manual.link_loss_fallback_s") {
       if (!parse_double(key, value, &config->manual.link_loss_fallback_s, line_no)) return false;
 
+    } else if (key == "fallback.bend_min_c") {
+      if (!parse_double(key, value, &config->fallback.bend_min_c, line_no)) return false;
+    } else if (key == "fallback.bend_max_c") {
+      if (!parse_double(key, value, &config->fallback.bend_max_c, line_no)) return false;
+    } else if (key == "fallback.bend_deadline_s") {
+      if (!parse_double(key, value, &config->fallback.bend_deadline_s, line_no)) return false;
+    } else if (key == "fallback.landed_safe") {
+      if (!parse_bool(key, value, &config->fallback.landed_safe, line_no)) return false;
+
     } else if (key == "comms.telemetry_host") {
       config->comms.telemetry_host = value;
     } else if (key == "comms.static_ground_ip") {
@@ -498,6 +507,20 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
   if (config->manual.link_loss_fallback_s < 0.0) {
     if (error != nullptr) {
       *error = "manual.link_loss_fallback_s must be >= 0";
+    }
+    return false;
+  }
+
+  if (!(config->fallback.bend_max_c > config->fallback.bend_min_c)) {
+    if (error != nullptr) {
+      *error = "fallback.bend_max_c must be > fallback.bend_min_c";
+    }
+    return false;
+  }
+
+  if (config->fallback.bend_deadline_s < 0.0) {
+    if (error != nullptr) {
+      *error = "fallback.bend_deadline_s must be >= 0";
     }
     return false;
   }
