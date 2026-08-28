@@ -26,11 +26,12 @@ fallback.
 5. Compute requested heater duties.
 6. Apply `HeaterScheduler` limits: max active heaters, thermal power, energy, and `MotionLock`.
 7. Apply duties to `PwmController`.
-8. Tick both `StepperChannel` instances.
-9. Serialize telemetry and write it to CSV plus durable queue.
-10. Drain queued telemetry to the ground station and process ACKs.
-11. Emit `EVT,PULL` after a motor finishes a pull.
-12. Toggle status LEDs and feed the systemd watchdog.
+8. Feed the `FallbackPlanner` (link-loss failsafe plan): starts an armed bend only while fallback is active at `PRE_FLOAT`/`FLOAT`; applies `fallback.landed_safe` at `LANDED`.
+9. Tick the bend sequences and both `StepperChannel` instances.
+10. Serialize telemetry and write it to CSV plus durable queue.
+11. Drain queued telemetry to the ground station and process ACKs.
+12. Emit `EVT,PULL` after a motor finishes a pull.
+13. Toggle status LEDs and feed the systemd watchdog.
 
 ## Manual-First Behavior
 
@@ -41,8 +42,23 @@ When `manual.manual_first=true`:
 | Ground link healthy | Operator commands phase, heaters, and pulls |
 | Link not yet seen | System stays conservative; no fallback automation |
 | Established link lost past timeout | Continue active bend sequences and manual PID targets; stop non-sequence motion; apply +5 C floor only to channels without targets |
+| Link lost at `PRE_FLOAT`/`FLOAT` with an armed failsafe plan | Execute the plan's bends once, M0 then M1, when the motor's sample group is inside the configured temperature window or the deadline has passed; `fallback.landed_safe` turns heaters off and disables both motors at `LANDED` |
 Rev C configuration requires `manual.manual_first=true`. Phase changes never
 start motor motion. Operators use explicit jog, pull, or `BENDSEQ_*` commands.
+
+## Link-Loss Failsafe Plan
+
+`FallbackPlanner` (`onboard/include/coatheal/fallback_planner.hpp`,
+`onboard/src/fallback_planner.cpp`) is a pure state machine: `SystemController`
+feeds it one input per tick (fallback flag, tracked phase, clock, and per motor
+enabled/zeroed/healthy/moving plus the mean valid sample temperature) and
+applies the bend it returns through the same `MoveToSteps` path a manual
+`STEPPER_MOVETO` uses, so the motion lock, heater inhibit and `EVT,PULL`
+emission behave identically. Plan and per-motor states are persisted as
+plain `key=value` text in `<storage.queue_dir>/fallback_plan.txt` and
+restored at start-up; a completed or failed plan stays inert until
+`FALLBACK_DISARM`. Commands and states: [protocol.md](protocol.md#link-loss-failsafe-plan);
+keys: [configuration.md](configuration.md#link-loss-failsafe-plan).
 
 ## Final Hardware Model
 
@@ -193,6 +209,9 @@ SET_POSITION_ZERO <id>
 BENDSEQ_LOAD <id> <name> <target>:<hold>[:<speed>] ...
 BENDSEQ_RUN <id> <name>
 STEPPER_STOP <id>
+FALLBACK_PLAN <id> <target_usteps> <hold_s> [speed_hz]
+FALLBACK_ARM
+FALLBACK_STATUS
 SHUTDOWN_SAFE
 ```
 

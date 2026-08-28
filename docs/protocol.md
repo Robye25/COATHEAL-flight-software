@@ -75,7 +75,7 @@ Emitted after `COMPONENT_STATE` and before `STEPPER0`, every frame.
 | `budget_exhausted` | `1` once the energy latch has tripped (heaters stay off until `RESET_CTRL`) |
 | `heaters_active` | Number of heaters with a non-zero scheduled duty this tick (owner cap: 3) |
 | `queue` | Frames waiting in the durable telemetry queue before this one was enqueued (a backlog draining after a link outage) |
-| `plan` | Fallback bend-plan state: `none` until the plan feature ships, then `armed`, `running`, `done`, `failed`, or `disarmed` |
+| `plan` | Link-loss failsafe plan state: `none` (nothing loaded, or disarmed), `armed`, `running`, `done`, `failed` — see [Link-loss failsafe plan](#link-loss-failsafe-plan) |
 
 Example:
 
@@ -194,7 +194,7 @@ NACK,<COMMAND>,<reason>
 | Command | Args | Description |
 |---|---|---|
 | `PING` | none | Liveness check |
-| `STATUS` | none | Lightweight live state: phase/mode, fallback, queue, tick rate, `silence=<0\|1>` (radio silence in force), current hardware flags, and sequence state |
+| `STATUS` | none | Lightweight live state: phase/mode, fallback, `plan=<state>` (failsafe plan), queue, tick rate, `silence=<0\|1>` (radio silence in force), current hardware flags, and sequence state |
 | `COMPONENTS` | none | Non-invasive cached component state, error, and channel summary |
 | `CHECK` | `[ALL\|DPS310\|ADS1115\|SEQUENT_RTD\|DAQ132M\|RTD_CLICK\|MAX31865\|PWM\|MOTOR0\|MOTOR1\|STORAGE\|COMMS]` | Active probe of all or one selected component. `DAQ132M`/`RTD_CLICK` are accepted as legacy aliases for `SEQUENT_RTD` (the retired temperature path). `MAX31865` selects the two v3 sample-resistance clicks — a command-argument addition only, no `COMPONENT_STATE`/frame-format change |
 | `ARM` | none | Enable manual flight outputs |
@@ -234,6 +234,10 @@ NACK,<COMMAND>,<reason>
 | `BENDSEQ_PAUSE` / `BENDSEQ_RESUME` | `<id>` | Pause or resume the active sequence |
 | `BENDSEQ_STOP` / `BENDSEQ_STATUS` | `<id>` | Stop or inspect sequence state |
 | `BENDSEQ_CLEAR` | `<id> [name]` | Clear one or all stored definitions for a motor |
+| `FALLBACK_PLAN` | `<id> <target_usteps> <hold_s> [speed_hz]` | Load the failsafe bend for one motor (validated like a `BENDSEQ_LOAD` step; refused with `plan running` while the plan executes) — see [Link-loss failsafe plan](#link-loss-failsafe-plan) |
+| `FALLBACK_ARM` | none | Arm the loaded plan. Allowed in any mode: the plan only ever runs during link-loss fallback, which itself requires RUN. `NACK,FALLBACK_ARM,no plan loaded` when nothing is loaded |
+| `FALLBACK_DISARM` | none | Clear the plan state to `none` (motor targets are kept, ready to re-arm). Does not stop a bend already in motion — `STEPPER_STOP <id>` does |
+| `FALLBACK_STATUS` | none | `state=<plan>;armed=<0\|1>;deadline_s=<cfg>;deadline_started=<0\|1>;m0=<target>/<hold_s>/<speed_hz>/<motor state>;m1=...` (`-` = not loaded; `;error=...` after a failure) |
 
 `ON`, `OFF`, and `RESET` remain aliases for `FORCE_START`, `FORCE_STOP`, and
 `RESET_CTRL`.
@@ -258,6 +262,46 @@ by `RADIO_SILENCE` and removed by `RADIO_RESUME`, so an onboard restart during
 a mandated silence starts silent. Frames produced while silent stay in the
 durable queue and are delivered in order after `RADIO_RESUME` (`CTRL` `queue`
 shows the backlog draining).
+
+### Link-loss failsafe plan
+
+The failsafe plan is the only motion the onboard ever starts on its own
+(redesign spec §10, owner decisions D3–D6). The operator loads one bend per
+motor with `FALLBACK_PLAN` and arms it with `FALLBACK_ARM` before launch;
+the onboard executes it only while **link-loss fallback is active** and the
+tracked phase is `PRE_FLOAT` or `FLOAT`. A motor's bend starts when all of
+these hold: the plan is armed, the motor is loaded and still pending,
+enabled, zeroed (`SET_POSITION_ZERO`) and healthy, no other plan motor is
+moving, and the mean of the motor's **valid** sample temperatures is inside
+`[fallback.bend_min_c, fallback.bend_max_c]` — or `fallback.bend_deadline_s`
+have passed since fallback first held at `PRE_FLOAT`/`FLOAT`, in which case
+the bend goes ahead regardless of temperature. Motors run in id order (M0
+then M1, one at a time); a motor still not enabled/zeroed/healthy when the
+deadline has passed is `skipped`. The bend is an absolute move with hold
+(`STEPPER_MOVETO` semantics, `speed_hz` applied first when non-zero) and
+emits `EVT,PULL` like any other motion. UV and specimen resistance are
+logged only; they never gate the plan.
+
+States (`CTRL` `plan`, `STATUS` `plan=`, `FALLBACK_STATUS`): `none` →
+`armed` → `running` (from the first start until the last motor settles) →
+`done`; a start the stepper refuses makes the motor and the plan `failed`
+and no further motor is attempted (a transient "motion lock held by another
+motor" is retried instead). Per-motor states are `pending`, `running`,
+`done`, `skipped`, `failed`. A `done` or `failed` plan never runs again —
+across restarts included — until `FALLBACK_DISARM`; a new `FALLBACK_PLAN`
+after that starts a fresh, unarmed plan. If the link returns while a bend is
+in motion the bend finishes. The deadline clock is never persisted: after an
+onboard restart it starts again at the next fallback tick in
+`PRE_FLOAT`/`FLOAT`.
+
+Persistence: `<storage.queue_dir>/fallback_plan.txt`, plain `key=value`
+lines (`armed=`, `state=`, `deadline_s=`, `m0=<target>,<hold_s>,<speed_hz>,<state>`,
+`m1=...`), rewritten on every state change and read at start-up. A missing or
+corrupt file means no plan.
+
+With `fallback.landed_safe=true` the first tick in which fallback is active
+at `LANDED` turns every heater off (same overrides as `HEATERS_OFF`) and
+disables both motors, once.
 
 Setting a duty clears that channel's temperature target. Setting a temperature
 target clears that channel's duty override. `HEATERS_OFF` clears all duties and
