@@ -66,6 +66,8 @@ class MotorDebugSample:
     toff: Optional[int]
     gstat: Optional[int]
     resets: Optional[int]
+    stealth: Optional[bool]
+    pwm_scale_sum: Optional[int]
     faults: Tuple[str, ...]
     raw: Dict[str, str] = field(default_factory=dict)
 
@@ -89,6 +91,7 @@ class MotorDebugSample:
             stst=_flag(kv, "stst"), cs_actual=_int(kv, "cs_actual"), sg_result=_int(kv, "sg_result"),
             drv_enn=_flag(kv, "drv_enn"), sd_mode=_flag(kv, "sd_mode"), toff=_int(kv, "toff"),
             gstat=_int(kv, "gstat"), resets=_int(kv, "resets"),
+            stealth=_flag(kv, "stealth"), pwm_scale_sum=_int(kv, "pwm_scale_sum"),
             faults=faults, raw=kv,
         )
 
@@ -156,6 +159,13 @@ class MotionEstimator:
 
     def _verdict(self, last: Optional[MotorDebugSample], seq_rate: float, ramp_rate: float) -> Tuple[str, str]:
         text, color = self._verdict_core(last, seq_rate, ramp_rate)
+        if (last is not None and last.stealth and last.pwm_scale_sum is not None
+                and last.pwm_scale_sum >= 255 and color == "green"):
+            # stealthChop's regulator at 100 % PWM: the coil is not reaching
+            # its current (bench 2026-08-29: the 12 V rail sagging under
+            # 0.8 A; 0.3 A cured it). Torque is falling, a reset may follow.
+            text += " · current regulator SATURATED (PWM 255): motor rail sagging or impedance too high for 12 V"
+            color = "amber"
         if last is not None and last.resets:
             text += f" · chip reset ×{last.resets} since boot — check the 12 V motor supply"
             if color == "green":

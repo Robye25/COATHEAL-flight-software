@@ -92,6 +92,18 @@ class EstimatorTests(unittest.TestCase):
         e = est.add(MotorDebugSample.parse(body(mscnt=0) + ";resets=2", t=0.0))
         self.assertIn("reset ×2", e.verdict)
 
+    def test_saturated_current_regulator_is_flagged(self) -> None:
+        est = MotionEstimator()
+        e = None
+        for i in range(6):
+            e = est.add(MotorDebugSample.parse(body(mscnt=(i * 256) % 1024) + ";pwm_scale_sum=255", t=i * 0.5))
+        self.assertEqual(e.color, "amber")
+        self.assertIn("SATURATED", e.verdict)
+        est.reset()
+        for i in range(6):
+            e = est.add(MotorDebugSample.parse(body(mscnt=(i * 256) % 1024) + ";pwm_scale_sum=60", t=i * 0.5))
+        self.assertEqual(e.color, "green")
+
     def test_fault_flags(self) -> None:
         est = MotionEstimator()
         e = est.add(MotorDebugSample.parse(body().replace("ola=0", "ola=1"), t=0.0))
