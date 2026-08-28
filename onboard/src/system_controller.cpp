@@ -101,6 +101,7 @@ class OwnedBusTmc5160Driver : public StepperDriver {
   bool spi_bus_ok() const override { return driver_.spi_bus_ok(); }
   std::string last_error() const override { return driver_.last_error(); }
   std::string warning() const override { return driver_.warning(); }
+  std::string DebugRegisters() override { return driver_.DebugRegisters(); }
   bool ActiveCheck() override { return driver_.ActiveCheck(); }
   std::uint64_t pulses_issued() const override {
     return driver_.pulses_issued();
@@ -2169,6 +2170,29 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       InhibitHeatersForMotion();
       if (!stepper_->Home(command.motor_id, &err)) return Nack(cmd_name, err);
       return Ack(cmd_name, "homing");
+    }
+
+    case CommandType::kMotorDebug: {
+      if (!stepper_) return Nack(cmd_name, "stepper unavailable");
+      std::size_t motor = 0;
+      if (!ParseIndex(command.args[0], &motor) ||
+          !valid_motor(static_cast<int>(motor))) {
+        return Nack(cmd_name, "invalid motor id");
+      }
+      const StepperStatus st = stepper_->Snapshot(static_cast<int>(motor));
+      const std::string regs = stepper_->DebugRegisters(static_cast<int>(motor));
+      if (regs.empty()) {
+        return Nack(cmd_name, "debug registers unavailable (no SPI driver or bus error)");
+      }
+      std::ostringstream out;
+      out << "motor=" << motor << ";sw_pos=" << st.position_steps
+          << ";sw_tgt=" << st.target_steps << ";sw_hz=" << st.step_hz
+          << ";us=" << st.microstep << ";enabled=" << (st.enabled ? 1 : 0)
+          << ";moving=" << (st.moving ? 1 : 0)
+          << ";holding=" << (st.holding ? 1 : 0)
+          << ";pulses=" << st.pulses_total << ";missed=" << st.missed_deadlines
+          << ';' << regs;
+      return Ack(cmd_name, out.str());
     }
 
     case CommandType::kStepperStop: {

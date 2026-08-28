@@ -558,6 +558,54 @@ void TestEnableFalseDetectsIneffectiveEnableLine() {
 }
 
 // ---------------------------------------------------------------------
+// MOTOR_DEBUG register read-out
+// ---------------------------------------------------------------------
+
+void TestDebugRegistersDecodeMotionTruth() {
+  FakeSpiBus bus;
+  Tmc5160Config cfg;
+  auto driver = MakeHealthyDriver(&bus, cfg);
+  // The ten reads, in the order DebugRegisters() issues them.
+  ExpectRead(&bus, 0x21, 0xFFFFFFFBU);   // XACTUAL = -5
+  ExpectRead(&bus, 0x2D, 800U);          // XTARGET
+  ExpectRead(&bus, 0x22, 0x00FFFFFDU);   // VACTUAL 24-bit = -3
+  ExpectRead(&bus, 0x6A, 544U);          // MSCNT
+  // DRV_STATUS: stst=1, ola=1, cs_actual=9, stealth=1, sg_result=0x12
+  ExpectRead(&bus, 0x6F, (1U << 31) | (1U << 29) | (9U << 16) | (1U << 14) | 0x12U);
+  ExpectRead(&bus, 0x35, (1U << 10) | (1U << 9));  // RAMPSTAT vzero + position_reached
+  ExpectRead(&bus, 0x12, 1234U);         // TSTEP
+  ExpectRead(&bus, 0x04, 0x30000010U);   // IOIN: version 0x30, DRV_ENN=1
+  ExpectRead(&bus, 0x01, 0x5U);          // GSTAT reset + uv_cp
+  ExpectRead(&bus, 0x6C, 0x06010040U);   // CHOPCONF toff=0, mres=6 (µ4)
+  const std::string kv = driver->DebugRegisters();
+  assert(bus.mismatch_count() == 0);
+  assert(bus.remaining_expectations() == 0);
+  auto has = [&](const char* needle) { return kv.find(needle) != std::string::npos; };
+  assert(has("xactual=-5;"));
+  assert(has(";xtarget=800;"));
+  assert(has(";vactual=-3;"));
+  assert(has(";mscnt=544;"));
+  assert(has(";stst=1;"));
+  assert(has(";cs_actual=9;"));
+  assert(has(";sg_result=18;"));
+  assert(has(";ola=1;"));
+  assert(has(";olb=0;"));
+  assert(has(";stealth=1;"));
+  assert(has(";vzero=1;"));
+  assert(has(";pos_reached=1;"));
+  assert(has(";tstep=1234;"));
+  assert(has(";drv_enn=1;"));
+  assert(has(";sd_mode=0;"));
+  assert(has(";version=0x30;"));
+  assert(has(";gstat=0x5;"));
+  assert(has(";toff=0;"));
+  assert(has(";mres=6;usteps=4"));
+  // A bus failure mid-read yields nothing rather than a half-decoded lie.
+  bus.FailNextTransfers(1);
+  assert(driver->DebugRegisters().empty());
+}
+
+// ---------------------------------------------------------------------
 // Transfer failure -> unhealthy; ActiveCheck() re-probes
 // ---------------------------------------------------------------------
 
@@ -793,6 +841,7 @@ int main() {
   TestStepHonoursInvertDirection();
   TestEnableFalseFreezesInOrder();
   TestEnableFalseDetectsIneffectiveEnableLine();
+  TestDebugRegistersDecodeMotionTruth();
   TestTransferFailureMarksUnhealthyAndActiveCheckReprobes();
   TestEachDatagramIsOneControllerLockHoldWithModeReapplied();
   TestStealthChopSelectsGconfEnPwmModeBit();

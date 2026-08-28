@@ -61,6 +61,7 @@ enum class CommandType {
   kFallbackArm,
   kFallbackDisarm,
   kFallbackStatus,
+  kMotorDebug,
   kUnknown,
 };
 

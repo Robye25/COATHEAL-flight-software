@@ -13,7 +13,13 @@ namespace coatheal {
 namespace {
 
 constexpr std::uint8_t kRegGCONF = 0x00;
+constexpr std::uint8_t kRegGSTAT = 0x01;
 constexpr std::uint8_t kRegIOIN = 0x04;
+constexpr std::uint8_t kRegTSTEP = 0x12;
+constexpr std::uint8_t kRegVACTUAL = 0x22;
+constexpr std::uint8_t kRegRAMPSTAT = 0x35;
+constexpr std::uint8_t kRegMSCNT = 0x6A;
+constexpr std::uint8_t kRegDRV_STATUS = 0x6F;
 constexpr std::uint8_t kRegGLOBALSCALER = 0x0B;
 constexpr std::uint8_t kRegIHOLD_IRUN = 0x10;
 constexpr std::uint8_t kRegTPOWERDOWN = 0x11;
@@ -660,6 +666,62 @@ bool Tmc5160Driver::EnableUnlocked(bool enable) {
   }
   enabled_ = true;
   return true;
+}
+
+std::string Tmc5160Driver::DebugRegisters() {
+  std::lock_guard<std::mutex> lock(io_mu_);
+  if (bus_ == nullptr || !spi_open_) return {};
+  struct Reg { const char* name; std::uint8_t addr; std::uint32_t value; };
+  Reg regs[] = {
+      {"xactual", kRegXACTUAL, 0}, {"xtarget", kRegXTARGET, 0},
+      {"vactual", kRegVACTUAL, 0}, {"mscnt", kRegMSCNT, 0},
+      {"drv_status", kRegDRV_STATUS, 0}, {"rampstat", kRegRAMPSTAT, 0},
+      {"tstep", kRegTSTEP, 0}, {"ioin", kRegIOIN, 0},
+      {"gstat", kRegGSTAT, 0}, {"chopconf", kRegCHOPCONF, 0},
+  };
+  for (Reg& reg : regs) {
+    if (!ReadRegister(reg.addr, &reg.value)) return {};
+  }
+  const std::uint32_t xactual = regs[0].value, xtarget = regs[1].value,
+                      vactual = regs[2].value, mscnt = regs[3].value,
+                      drv = regs[4].value, ramp = regs[5].value,
+                      tstep = regs[6].value, ioin = regs[7].value,
+                      gstat = regs[8].value, chop = regs[9].value;
+  // VACTUAL is a 24-bit two's-complement value in 1/256-step units per
+  // 2^24/fCLK seconds; XACTUAL/XTARGET are 32-bit signed 1/256-step counts.
+  std::int32_t v24 = static_cast<std::int32_t>(vactual & 0xFFFFFFU);
+  if (v24 & 0x800000) v24 -= 0x1000000;
+  const unsigned mres = (chop >> 24) & 0xFU;
+  std::ostringstream out;
+  out << "xactual=" << static_cast<std::int32_t>(xactual)
+      << ";xtarget=" << static_cast<std::int32_t>(xtarget)
+      << ";vactual=" << v24
+      << ";mscnt=" << (mscnt & 0x3FFU)
+      << ";tstep=" << (tstep & 0xFFFFFU)
+      << ";drv_status=0x" << std::hex << drv << std::dec
+      << ";stst=" << ((drv >> 31) & 1U)
+      << ";cs_actual=" << ((drv >> 16) & 0x1FU)
+      << ";sg_result=" << (drv & 0x3FFU)
+      << ";stallguard=" << ((drv >> 24) & 1U)
+      << ";ot=" << ((drv >> 25) & 1U) << ";otpw=" << ((drv >> 26) & 1U)
+      << ";s2ga=" << ((drv >> 27) & 1U) << ";s2gb=" << ((drv >> 28) & 1U)
+      << ";ola=" << ((drv >> 29) & 1U) << ";olb=" << ((drv >> 30) & 1U)
+      << ";s2vsa=" << ((drv >> 12) & 1U) << ";s2vsb=" << ((drv >> 13) & 1U)
+      << ";stealth=" << ((drv >> 14) & 1U) << ";fsactive=" << ((drv >> 15) & 1U)
+      << ";rampstat=0x" << std::hex << (ramp & 0x3FFFU) << std::dec
+      << ";vzero=" << ((ramp >> 10) & 1U)
+      << ";pos_reached=" << ((ramp >> 9) & 1U)
+      << ";vel_reached=" << ((ramp >> 8) & 1U)
+      << ";status_sg=" << ((ramp >> 13) & 1U)
+      << ";ioin=0x" << std::hex << ioin << std::dec
+      << ";drv_enn=" << ((ioin & kIoinDrvEnn) ? 1 : 0)
+      << ";sd_mode=" << ((ioin & kIoinSdMode) ? 1 : 0)
+      << ";version=0x" << std::hex << (ioin >> 24) << std::dec
+      << ";gstat=0x" << std::hex << (gstat & 0x7U) << std::dec
+      << ";chopconf=0x" << std::hex << chop << std::dec
+      << ";toff=" << (chop & 0xFU)
+      << ";mres=" << mres << ";usteps=" << (256U >> mres);
+  return out.str();
 }
 
 std::string Tmc5160Driver::warning() const {

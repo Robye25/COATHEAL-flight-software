@@ -118,6 +118,8 @@ class StepperController {
   std::string LastDriverError(int motor_id) const;
   // Non-fatal driver warning for CHECK (empty when all clear).
   std::string DriverWarning(int motor_id) const;
+  // MOTOR_DEBUG: live chip registers, empty when unavailable.
+  std::string DebugRegisters(int motor_id);
   bool ActiveCheck(int motor_id);
 
   std::size_t channel_count() const;

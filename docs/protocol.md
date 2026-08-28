@@ -233,6 +233,7 @@ NACK,<COMMAND>,<reason>
 | `BENDSEQ_RUN` | `<id> <name>` | Run a loaded sequence |
 | `BENDSEQ_PAUSE` / `BENDSEQ_RESUME` | `<id>` | Pause or resume the active sequence |
 | `BENDSEQ_STOP` / `BENDSEQ_STATUS` | `<id>` | Stop or inspect sequence state |
+| `MOTOR_DEBUG` | `<id>` | Read-only live read of the TMC5160's motion-truth registers for the console's Debug tab: `motor=;sw_pos=;sw_tgt=;sw_hz=;us=;enabled=;moving=;holding=;pulses=;missed=;xactual=;xtarget=;vactual=;mscnt=;tstep=;drv_status=0x…;stst=;cs_actual=;sg_result=;stallguard=;ot=;otpw=;s2ga=;s2gb=;ola=;olb=;s2vsa=;s2vsb=;stealth=;fsactive=;rampstat=0x…;vzero=;pos_reached=;vel_reached=;status_sg=;ioin=0x…;drv_enn=;sd_mode=;version=0x30;gstat=0x…;chopconf=0x…;toff=;mres=;usteps=`. `sw_*` are the firmware's own counters; everything after them comes from the chip (`MSCNT` is the sine-table index that actually drives the coils). NACK `debug registers unavailable` on the simulated backend or a bus error |
 | `BENDSEQ_CLEAR` | `<id> [name]` | Clear one or all stored definitions for a motor |
 | `FALLBACK_PLAN` | `<id> <target_usteps> <hold_s> [speed_hz]` | Load the failsafe bend for one motor (validated like a `BENDSEQ_LOAD` step; refused with `plan running` while the plan executes) — see [Link-loss failsafe plan](#link-loss-failsafe-plan) |
 | `FALLBACK_ARM` | none | Arm the loaded plan. Allowed in any mode: the plan only ever runs during link-loss fallback, which itself requires RUN. `NACK,FALLBACK_ARM,no plan loaded` when nothing is loaded |

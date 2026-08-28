@@ -306,6 +306,10 @@ class CommandDispatcher(QObject):
     """
 
     response_received = pyqtSignal(str, object, float, object)  # cmd, CommandResponse, ms, tag
+    # Replies to `quiet` sends (high-rate polls such as the Debug tab's
+    # MOTOR_DEBUG): delivered here only -- not to the console, the history
+    # or commands.csv -- so a 2 Hz probe does not bury the operator's record.
+    quiet_response = pyqtSignal(str, object, float, object)
     silence_changed = pyqtSignal(bool)
 
     def __init__(self, host: str, port: int, history_size: int = 200,
@@ -350,21 +354,22 @@ class CommandDispatcher(QObject):
         return None
 
     def send(self, command: str, tag: Optional[object] = None,
-             timeout: Optional[float] = None) -> None:
+             timeout: Optional[float] = None, quiet: bool = False) -> None:
+        emit = self.quiet_response.emit if quiet else self.response_received.emit
         reason = self.blocked_reason(command)
         if reason is not None:
             resp = CommandResponse(ok=False, command=command.strip(), error=reason, raw="")
             # Delivered synchronously: a refusal is not a network event and
             # every consumer (history, log, response line) must see it in
             # the same order as the click that caused it.
-            self.response_received.emit(command, resp, 0.0, tag)
+            emit(command, resp, 0.0, tag)
             return
         # `timeout=None` (the default) resolves per-verb via
         # protocol.timeout_for -- CHECK gets a longer budget than the plain
         # 3.0s default (see protocol.COMMAND_TIMEOUTS for why). An
         # explicitly-passed timeout always wins over the table.
         resolved_timeout = timeout if timeout is not None else timeout_for(command)
-        job = _SendJob(self.host, self.port, command, resolved_timeout, tag, self.response_received.emit)
+        job = _SendJob(self.host, self.port, command, resolved_timeout, tag, emit)
         self._pool.start(job)
 
     def _on_response(self, cmd: str, resp: CommandResponse, ms: float, _tag) -> None:

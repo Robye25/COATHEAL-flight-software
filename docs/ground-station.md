@@ -28,6 +28,8 @@ ground-station/
   app/gui/tab_thermal.py      Thermal tab
   app/gui/tab_motion.py       Motion tab (bend, standard pull, resistance before/after)
   app/gui/tab_advanced.py     Advanced tab (sequences, PID, open-loop duty, microstep, presets, network, fallback plan)
+  app/gui/tab_debug.py        Debug tab (MOTOR_DEBUG probe: live TMC5160 registers, rates, verdict)
+  app/gui/motor_debug.py      MOTOR_DEBUG parsing + motion estimator (no Qt)
   app/gui/plots.py            time-axis plots over series_store.py
   app/gui/panels_health.py    Health tab and the aggregate health summary
   app/gui/panel_checkout.py   live go/no-go checklist + RUN CHECK
@@ -141,6 +143,36 @@ during link-loss fallback — see the redesign spec §10) · network (beacon
 priority, manual host override). Bench-only commands (`ARM_DEBUG`,
 `HEATER_TEST`, `SET_BENCH_MODE`) are console-only.
 
+### Debug tab
+
+Answers "is the motor really moving?" when the camera cannot. The
+telemetry position is the firmware's own counter and advances even when
+nothing turns (a module strapped for STEP/DIR, a power stage that is off).
+The tab polls `MOTOR_DEBUG <id>` (START PROBE, default every 500 ms; READ
+ONCE for a single sample) through the dispatcher's quiet path -- the replies
+never reach the console, the command history or `commands.csv` -- and
+decodes the TMC5160's own registers:
+
+- **MSCNT** is the chip's microstep sine-table index: 256 counts per full
+  step whatever the microstep setting, so ΔMSCNT is the coil-driving truth.
+  **XACTUAL / VACTUAL** are the ramp generator's position and velocity;
+  **stst** standstill; **DRV_ENN=1** or **TOFF=0** means the power stage is
+  off; **SD_MODE=1** is the STEP/DIR strap; **ola/olb/s2ga/s2gb/ot/otpw**
+  are the driver's fault flags (open-load is only valid at standstill).
+- Derived over a 3 s window: sequencer rate (full-steps/s from ΔMSCNT),
+  ramp rate (from ΔXACTUAL), rev/s and rpm (200 full steps per revolution),
+  mm/s using the *ball-screw lead* you enter (persisted; default 1.5 mm/rev
+  -- the mechanism does ~1–2 mm per revolution), and travel since the probe
+  started.
+- A verdict line: MOVING; COMMANDED BUT NOT STEPPING (ramp moves, MSCNT
+  frozen); firmware says moving but the chip is at standstill; power stage
+  off; SD_MODE strap; DRIVER FAULT.
+- A plot of MSCNT and XACTUAL against seconds since the probe started.
+
+At the default 100 Hz a BEND of 800 µsteps at µ4 is one revolution in 2 s,
+about 1.5 mm -- invisible on a remote camera, unmistakable in MSCNT. The
+probe stops itself when radio silence starts or the link is lost.
+
 ### Plots
 x-axis is mission elapsed time (`T+hh:mm:ss`; the crosshair readout also
 shows UTC). Window 5 m / 30 m / 2 h / all; `FOLLOW` re-engages live
@@ -205,7 +237,7 @@ is learned from the live frames.
 | `Esc` | `STEPPER_STOP 0` + `STEPPER_STOP 1` (panic, no confirm) |
 | `Ctrl+Shift+H` | `HEATERS_OFF` (panic, no confirm) |
 | `Ctrl+L` | focus the console entry |
-| `Ctrl+1 … Ctrl+4` | System / Thermal / Motion / Advanced |
+| `Ctrl+1 … Ctrl+5` | System / Thermal / Motion / Advanced / Debug |
 | `Alt+1 … Alt+5` | plot pages |
 | `P` | pause / resume plots (ignored while typing) |
 | `F5` | send `STATUS` |
