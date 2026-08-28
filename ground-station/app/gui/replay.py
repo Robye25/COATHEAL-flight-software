@@ -5,10 +5,17 @@ frames per second, before any live frame arrives. Every one of those frames
 carries the state the onboard had *hours ago*; taking the newest as "now"
 paints stale modes, stale flags and wrong gating (bench, 2026-08-28: ARM
 acknowledged, yet ENABLE stayed greyed because the replay still said
-STANDBY). A frame is a replay when its onboard timestamp lags the ground
-clock by clearly more than the smallest lag ever seen this session -- the
-smallest lag is the clock offset between the two machines plus one tick,
-so this needs no synchronised clocks.
+STANDBY). Two signs, either is enough:
+
+* the frame's onboard timestamp lags the ground clock by clearly more
+  than the smallest lag ever seen this session (the smallest lag is the
+  clock offset between the two machines plus one tick, so no synchronised
+  clocks are needed) -- catches a replay that starts after live frames;
+* onboard time is advancing much faster than wall time across the last
+  few seconds of frames (a drain pushes several onboard-seconds per real
+  second; live telemetry advances at 1x whatever the tick rate) -- catches
+  the console starting in the middle of a drain, when every frame is newer
+  than the one before and the first sign never fires.
 """
 from __future__ import annotations
 
@@ -19,6 +26,9 @@ from typing import Deque, Optional, Tuple
 
 REPLAY_THRESHOLD_S = 30.0
 RATE_WINDOW_S = 5.0
+RATE_RATIO_THRESHOLD = 1.5   # onboard seconds per wall second
+RATE_MIN_SPAN_S = 2.0
+RATE_MIN_FRAMES = 4
 
 
 def parse_onboard_timestamp(text: str) -> Optional[float]:
@@ -63,13 +73,22 @@ class ReplayClassifier:
         self._recent.append((rx, onboard_ts))
         while self._recent and (rx - self._recent[0][0]) > RATE_WINDOW_S:
             self._recent.popleft()
-        is_replay = behind > self.threshold_s
-        eta = None
-        if is_replay and len(self._recent) >= 2:
+        ratio = None
+        if len(self._recent) >= RATE_MIN_FRAMES:
             rx0, ts0 = self._recent[0]
             d_rx = rx - rx0
-            d_ts = onboard_ts - ts0
-            catch_up = d_ts / d_rx - 1.0 if d_rx > 0 else 0.0   # backlog seconds cleared per second
+            if d_rx >= RATE_MIN_SPAN_S:
+                ratio = (onboard_ts - ts0) / d_rx
+        fast = ratio is not None and ratio > RATE_RATIO_THRESHOLD
+        is_replay = behind > self.threshold_s or fast
+        if is_replay and behind <= self.threshold_s:
+            # Started mid-drain: no live frame has fixed the clock offset yet,
+            # so the lag itself is the best estimate of how far behind we are
+            # (exact when the two clocks agree).
+            behind = max(0.0, lag)
+        eta = None
+        if is_replay and ratio is not None:
+            catch_up = ratio - 1.0   # backlog seconds cleared per wall second
             if catch_up > 0.05:
                 eta = behind / catch_up
         return ReplayVerdict(is_replay, behind, eta)
