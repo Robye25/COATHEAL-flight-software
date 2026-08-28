@@ -109,6 +109,8 @@ def checkout_items(state: OnboardState, *, link_ok: bool, unacked_alarms: int = 
     if last_check:
         overall = last_check.get("overall", "")
         failing = [k for k, v in last_check.items() if v == "FAIL" and k != "overall"]
-        items.append(CheckItem("check", "Last CHECK", GREEN if overall == "OK" else RED,
-                               overall + (" — " + " ".join(failing) if failing else "")))
+        warnings = [k for k, v in last_check.items() if k.endswith("_warn") and v]
+        color = RED if overall != "OK" else (AMBER if warnings else GREEN)
+        note = overall + (" — " + " ".join(failing) if failing else "") + (" — " + " ".join(warnings) if warnings else "")
+        items.append(CheckItem("check", "Last CHECK", color, note))
     return items

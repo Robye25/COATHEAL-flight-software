@@ -62,6 +62,11 @@ class CheckoutTests(unittest.TestCase):
         self.assertEqual(it["check"].color, "red")
         self.assertIn("motor0", it["check"].note)
         self.assertNotIn("check", items())
+        # A non-fatal driver warning (bench 2026-08-28: motor 1's enable line
+        # never reaches DRV_ENN) keeps overall=OK but must not read as green.
+        warned = items(last_check={"overall": "OK", "motor1": "OK", "motor1_warn": "enable line 21 has no effect"})
+        self.assertEqual(warned["check"].color, "amber")
+        self.assertIn("motor1_warn", warned["check"].note)
 
     def test_no_packet(self) -> None:
         rows = checkout_items(OnboardState(), link_ok=True)
