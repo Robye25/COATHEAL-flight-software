@@ -70,14 +70,18 @@ class CheckoutPanel(QScrollArea):
             self.last_check = parse_kv_body(resp.body)
             failing = [k for k, v in self.last_check.items() if v == "FAIL" and k != "overall"]
             errors = [f"{k}={v}" for k, v in self.last_check.items() if k.endswith("_error") and v not in ("NONE", "SKIPPED", "")]
+            warnings = [f"{k}={v}" for k, v in self.last_check.items() if k.endswith("_warn") and v]
             text = f"last CHECK: overall={self.last_check.get('overall', '?')}"
             if failing:
                 text += " · FAIL: " + " ".join(failing)
             if errors:
                 text += " · " + " ".join(errors)
+            if warnings:
+                text += " · WARN: " + " ".join(warnings)
             self.summary.setText(soft_breaks(text))
-            self.summary.setStyleSheet(f"{MONO_CSS} font-size: 8pt; color: "
-                                       f"{GREEN if self.last_check.get('overall') == 'OK' else RED};")
+            overall_ok = self.last_check.get("overall") == "OK"
+            color = RED if not overall_ok else (AMBER if warnings else GREEN)
+            self.summary.setStyleSheet(f"{MONO_CSS} font-size: 8pt; color: {color};")
         if tag is self:
             self.resp.show_response(cmd, resp, ms)
 
