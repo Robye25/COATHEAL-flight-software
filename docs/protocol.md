@@ -194,7 +194,7 @@ NACK,<COMMAND>,<reason>
 | Command | Args | Description |
 |---|---|---|
 | `PING` | none | Liveness check |
-| `STATUS` | none | Lightweight live state: phase/mode, fallback, queue, current hardware flags, and sequence state |
+| `STATUS` | none | Lightweight live state: phase/mode, fallback, queue, tick rate, `silence=<0\|1>` (radio silence in force), current hardware flags, and sequence state |
 | `COMPONENTS` | none | Non-invasive cached component state, error, and channel summary |
 | `CHECK` | `[ALL\|DPS310\|ADS1115\|SEQUENT_RTD\|DAQ132M\|RTD_CLICK\|MAX31865\|PWM\|MOTOR0\|MOTOR1\|STORAGE\|COMMS]` | Active probe of all or one selected component. `DAQ132M`/`RTD_CLICK` are accepted as legacy aliases for `SEQUENT_RTD` (the retired temperature path). `MAX31865` selects the two v3 sample-resistance clicks — a command-argument addition only, no `COMPONENT_STATE`/frame-format change |
 | `ARM` | none | Enable manual flight outputs |
@@ -206,8 +206,8 @@ NACK,<COMMAND>,<reason>
 | `RESET_CTRL` | none | Reset PID integrators |
 | `SHUTDOWN_SAFE` | none | Flush logs and stop process |
 | `SET_TICK_HZ` | `<hz>` | Runtime tick/downlink rate, `0.1..5.0` Hz |
-| `RADIO_SILENCE` | none | Stop telemetry transmission while keeping the queue |
-| `RADIO_RESUME` | none | Resume telemetry transmission |
+| `RADIO_SILENCE` | none | Stop every onboard-originated transmission while keeping the queue — see [Radio silence](#radio-silence) |
+| `RADIO_RESUME` | none | Resume transmission and drain the queued frames |
 | `SET_HEATER_DUTY` | `<index> <duty>` | Set one heater duty, index `0..5`. Normal mode requires valid mapped temperature feedback; bench/debug arm allows open-loop duty on channels without feedback or scheduler clamping. |
 | `SET_ALL_DUTY` | `<duty>` | Set all heater duties. Normal mode requires valid temperature feedback for every heater; bench/debug arm allows open-loop duty on all channels without feedback or scheduler clamping. |
 | `SET_TEMP_TARGET` | `<index> <temp_c>` | Set one closed-loop target within configured limits |
@@ -237,6 +237,27 @@ NACK,<COMMAND>,<reason>
 
 `ON`, `OFF`, and `RESET` remain aliases for `FORCE_START`, `FORCE_STOP`, and
 `RESET_CTRL`.
+
+### Radio silence
+
+After `RADIO_SILENCE` the onboard originates no traffic at all until
+`RADIO_RESUME`: the telemetry client closes and does not reconnect, the
+`ONBOARD_BEACON` broadcast stops, and `GS_HELLO` is not answered (the sender
+is still recorded so a later resume can dial it). The command server keeps
+listening because it is the only way back, but while silent it accepts only
+`RADIO_RESUME`, `RADIO_SILENCE`, `STATUS` and `PING`; every other command —
+including panic commands — is refused with
+
+```text
+NACK,<COMMAND>,radio silence active
+```
+
+before it has any effect. `STATUS` reports `silence=1`. The state is
+persisted as an empty flag file `<storage.queue_dir>/radio_silence`, created
+by `RADIO_SILENCE` and removed by `RADIO_RESUME`, so an onboard restart during
+a mandated silence starts silent. Frames produced while silent stay in the
+durable queue and are delivered in order after `RADIO_RESUME` (`CTRL` `queue`
+shows the backlog draining).
 
 Setting a duty clears that channel's temperature target. Setting a temperature
 target clears that channel's duty override. `HEATERS_OFF` clears all duties and

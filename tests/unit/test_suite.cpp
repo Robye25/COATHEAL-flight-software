@@ -13,6 +13,7 @@
 #include "coatheal/pid_controller.hpp"
 #include "coatheal/sensor_manager.hpp"
 #include "coatheal/state_manager.hpp"
+#include "coatheal/system_controller.hpp"
 #include "coatheal/telemetry.hpp"
 #include "coatheal/telemetry_client.hpp"
 #include "coatheal/telemetry_queue.hpp"
@@ -1138,6 +1139,117 @@ void TestCommandPeerCanSeedTelemetryTarget() {
   assert(client.current_host() == "169.254.10.11");
 }
 
+// ---------------------------------------------------------------------------
+// Radio silence (redesign spec §9). A bare SystemController -- constructed
+// but never Initialize()d -- drives the command surface without sockets,
+// threads, or hardware; that is exactly the seam HandleCommandLine exposes.
+
+bool ContainsText(const std::string& hay, const std::string& needle) {
+  return hay.find(needle) != std::string::npos;
+}
+
+std::filesystem::path FreshQueueDir(const std::string& tag) {
+  const std::filesystem::path dir =
+      std::filesystem::temp_directory_path() /
+      ("coatheal_radio_" + tag + "_" +
+       std::to_string(coatheal::CurrentUnixEpochSeconds()));
+  std::filesystem::remove_all(dir);
+  std::filesystem::create_directories(dir);
+  return dir;
+}
+
+coatheal::OnboardConfig LoadRadioTestConfig(const std::filesystem::path& queue_dir) {
+  coatheal::OnboardConfig cfg;
+  std::string error;
+  assert(coatheal::LoadConfigFromIni(WriteTempConfig(), &cfg, &error));
+  // The flag file lives under storage.queue_dir; point it at a private
+  // temp directory so tests never touch a real queue.
+  cfg.storage.queue_dir = queue_dir.string();
+  return cfg;
+}
+
+void TestRadioSilenceBlocksEverythingButResume() {
+  const std::filesystem::path queue_dir = FreshQueueDir("whitelist");
+  coatheal::SystemController controller(LoadRadioTestConfig(queue_dir));
+  assert(!controller.radio_silent());
+
+  const std::string silenced = controller.HandleCommandLine("RADIO_SILENCE", "");
+  assert(silenced.rfind("ACK,RADIO_SILENCE", 0) == 0);
+  assert(controller.radio_silent());
+  assert(std::filesystem::exists(queue_dir / "radio_silence"));
+
+  // Refused before any handler runs: the reason must be the silence, not
+  // the (also true) "stepper unavailable" a bare controller would give.
+  const std::string move = controller.HandleCommandLine("STEPPER_MOVE 0 100", "");
+  assert(move.rfind("NACK,STEPPER_MOVE", 0) == 0);
+  assert(ContainsText(move, "radio silence active"));
+  assert(!ContainsText(move, "stepper unavailable"));
+
+  // No side effect: ARM is refused and the mode stays STANDBY.
+  const std::string arm = controller.HandleCommandLine("ARM", "");
+  assert(arm.rfind("NACK,ARM", 0) == 0);
+  assert(ContainsText(arm, "radio silence active"));
+  const std::string status = controller.HandleCommandLine("STATUS", "");
+  assert(status.rfind("ACK,STATUS", 0) == 0);
+  assert(ContainsText(status, ";silence=1"));
+  assert(ContainsText(status, ";mode=STANDBY"));
+  assert(controller.HandleCommandLine("PING", "") == "ACK,PING,pong");
+
+  const std::string resumed = controller.HandleCommandLine("RADIO_RESUME", "");
+  assert(resumed.rfind("ACK,RADIO_RESUME", 0) == 0);
+  assert(!controller.radio_silent());
+  assert(!std::filesystem::exists(queue_dir / "radio_silence"));
+  assert(ContainsText(controller.HandleCommandLine("STATUS", ""), ";silence=0"));
+  // After resume the whitelist is gone: a move is judged on its own merits
+  // (no stepper here, so a different NACK), and ARM goes through.
+  const std::string move_after = controller.HandleCommandLine("STEPPER_MOVE 0 100", "");
+  assert(!ContainsText(move_after, "radio silence active"));
+  const std::string arm_after = controller.HandleCommandLine("ARM", "");
+  assert(arm_after.rfind("ACK,ARM", 0) == 0);
+  assert(ContainsText(controller.HandleCommandLine("STATUS", ""), ";mode=RUN"));
+
+  std::filesystem::remove_all(queue_dir);
+}
+
+void TestRadioSilencePersistsAcrossRestart() {
+  const std::filesystem::path queue_dir = FreshQueueDir("persist");
+  {
+    coatheal::SystemController first(LoadRadioTestConfig(queue_dir));
+    assert(first.HandleCommandLine("RADIO_SILENCE", "").rfind("ACK,", 0) == 0);
+  }  // process "exit" with the flag file left behind
+
+  coatheal::SystemController second(LoadRadioTestConfig(queue_dir));
+  assert(second.radio_silent());
+  assert(ContainsText(second.HandleCommandLine("STATUS", ""), ";silence=1"));
+  assert(ContainsText(second.HandleCommandLine("ARM", ""), "radio silence active"));
+  assert(second.HandleCommandLine("RADIO_RESUME", "").rfind("ACK,", 0) == 0);
+
+  coatheal::SystemController third(LoadRadioTestConfig(queue_dir));
+  assert(!third.radio_silent());
+  assert(ContainsText(third.HandleCommandLine("STATUS", ""), ";silence=0"));
+
+  std::filesystem::remove_all(queue_dir);
+}
+
+void TestRadioSilenceGatesBeaconAndHelloReply() {
+  coatheal::TelemetryClient client("", 4000, 5000, 2000, false, 4100, "", "",
+                                   2000, 30, 5, 100);
+  // Transmitting and not connected: the beacon loop may broadcast and the
+  // listener may answer a GS_HELLO.
+  assert(client.beacon_allowed());
+  assert(client.hello_reply_allowed());
+
+  client.SetTransmitEnabled(false);
+  assert(!client.beacon_allowed());
+  assert(!client.hello_reply_allowed());
+  assert(client.beacons_sent() == 0);
+  assert(client.hello_replies_sent() == 0);
+
+  client.SetTransmitEnabled(true);
+  assert(client.beacon_allowed());
+  assert(client.hello_reply_allowed());
+}
+
 }  // namespace
 
 int main() {
@@ -1169,6 +1281,9 @@ int main() {
   TestVacuumRegime();
   TestDiscoveryBeaconParser();
   TestCommandPeerCanSeedTelemetryTarget();
+  TestRadioSilenceBlocksEverythingButResume();
+  TestRadioSilencePersistsAcrossRestart();
+  TestRadioSilenceGatesBeaconAndHelloReply();
 
   std::cout << "All unit tests passed.\n";
   return 0;
