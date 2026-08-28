@@ -189,6 +189,37 @@ class ConsoleTabTests(unittest.TestCase):
     # MUTATION: comment out `worker.set_quiet(active)` in
     # MainWindow._on_silence_changed and confirm the beacon quiet assertion fails.
 
+    # ── replay of the onboard backlog ──
+    def test_replayed_frames_do_not_drive_state_or_gating(self) -> None:
+        import time
+        from datetime import datetime, timezone
+        now = time.time()
+        live_ts = datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        old_ts = datetime.fromtimestamp(now - 3 * 3600, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.feed(mode="RUN", ts=live_ts)
+        self.assertIsNone(self.win._motion.btn_enable.reason())
+        # The backlog replays: hours-old frames that still say STANDBY.
+        for seq in range(2, 8):
+            self.feed(seq=seq, mode="STANDBY", ts=old_ts)
+        self.assertEqual(self.win._state.mode, "RUN", "a replayed frame must not overwrite the live state")
+        self.assertIsNone(self.win._motion.btn_enable.reason(), "gating must follow the live state")
+        self.assertTrue(self.win._state.replay)
+        self.assertTrue(self.win._top.replay_visible())
+        self.assertIn("REPLAY", [a.key for a in self.win._alarms.active])
+        self.assertEqual(self.win._motion.motor_note.text(), "")
+        # Live again, now genuinely STANDBY: state and gating follow, badge clears.
+        self.feed(seq=9, mode="STANDBY", ts=live_ts)
+        self.assertEqual(self.win._state.mode, "STANDBY")
+        self.assertIn("ARM", self.win._motion.btn_enable.reason() or "")
+        self.assertIn("ARM", self.win._motion.motor_note.text())
+        self.assertFalse(self.win._state.replay)
+        self.assertFalse(self.win._top.replay_visible())
+        self.assertNotIn("REPLAY", [a.key for a in self.win._alarms.active])
+
+    # MUTATION: in MainWindow._on_packet set `self._last_pkt = pkt` for replayed
+    # frames too and confirm test_replayed_frames_do_not_drive_state_or_gating
+    # fails on "a replayed frame must not overwrite the live state".
+
     # ── alarms ──
     def test_alarm_strip_and_ack(self) -> None:
         self.feed(status="SD_OK|OVERTEMP_FAIL|SAMPLE_TEMP_OK")

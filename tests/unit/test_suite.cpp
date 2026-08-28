@@ -1137,6 +1137,16 @@ void TestCommandPeerCanSeedTelemetryTarget() {
   assert(latest.command_port == 5000);
   assert(latest.priority == 1000);
   assert(client.current_host() == "169.254.10.11");
+
+  // A loopback bench command (priority 0, see HandleCommandLine) must not
+  // displace the known ground station even while disconnected...
+  client.ObserveGroundStation("127.0.0.1", 4000, 5000, 0);
+  assert(client.current_host() == "169.254.10.11");
+  // ...but is accepted when nothing better was ever heard.
+  coatheal::TelemetryClient bare("", 4000, 5000, 2000, false, 4100, "", "",
+                                 2000, 30, 5, 100);
+  bare.ObserveGroundStation("127.0.0.1", 4000, 5000, 0);
+  assert(bare.current_host() == "127.0.0.1");
 }
 
 // ---------------------------------------------------------------------------

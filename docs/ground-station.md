@@ -168,6 +168,21 @@ Tab and keeps ↑/↓ history. Events shows the log with level colouring and a
 filter; Pulls lists every `EVT,PULL`. All three are written to the session
 directory automatically.
 
+### Backlog replay
+
+After a link outage the onboard replays its durable queue in order, at
+many frames per second, before any live frame arrives — every one of those
+frames carries the state the onboard had hours ago. The console tells them
+apart (`app/gui/replay.py`: a frame whose onboard timestamp lags the
+ground clock by more than 30 s beyond the smallest lag seen this session)
+and treats them differently: plots and logs take every frame at its
+onboard time; the state, gating, alarms, Health and Values panels take
+**live frames only**. While a replay is running the top strip shows
+`REPLAY −hh:mm:ss · ETA m:ss`, an amber `REPLAY` alarm is raised, and the
+panels keep the last live frame (or stay empty until the first one). No
+synchronised clocks are needed — the clock offset between the two machines
+is learned from the live frames.
+
 ## Interaction rules
 
 - **Confirmation dialogs**: `ARM`, `SET_PHASE`, `ENTER_SAFE`, `SHUTDOWN_SAFE`,
