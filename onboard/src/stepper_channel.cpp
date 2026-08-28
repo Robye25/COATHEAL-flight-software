@@ -158,6 +158,12 @@ void StepperChannel::Tick(double dt_s) {
         }
       }
     }
+  } else if (driver_ != nullptr && enabled_ &&
+             (mode_ == Mode::kIdle || mode_ == Mode::kHolding)) {
+    // Once per tick while energised but not stepping: lets the driver
+    // notice a chip that lost its configuration (supply dip) and restore
+    // it, so an "enabled" motor really holds and the next move works.
+    driver_->Poll();
   }
 
   if (mode_ == Mode::kHolding) {

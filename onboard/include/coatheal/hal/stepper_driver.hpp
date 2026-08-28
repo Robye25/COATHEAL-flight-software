@@ -45,6 +45,10 @@ class StepperDriver {
   // bus failed). The software position counters can advance while a motor
   // never turns (bench, 2026-08-26); these registers cannot lie about it.
   virtual std::string DebugRegisters() { return {}; }
+  // Called about once a second while the motor is enabled and idle: a
+  // chance to notice that the chip lost its configuration (TMC5160 reset
+  // on a supply dip) while nothing was stepping. Default: nothing to do.
+  virtual bool Poll() { return true; }
   virtual std::uint64_t pulses_issued() const = 0;
 };
 
