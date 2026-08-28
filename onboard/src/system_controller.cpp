@@ -63,6 +63,16 @@ bool ParseIndex(const std::string& text, std::size_t* out) {
   }
 }
 
+// Driver diagnoses are free text, but CHECK bodies are ';'-delimited k=v
+// pairs inside a comma-framed reply. Flatten the delimiters rather than
+// constrain how the drivers word themselves.
+std::string SanitizeForReply(std::string text) {
+  for (char& c : text) {
+    if (c == ';' || c == ',' || c == '\n' || c == '\r') c = ' ';
+  }
+  return text;
+}
+
 bool IsLoopbackPeer(const std::string& ip) {
   return ip == "127.0.0.1" || ip == "::1";
 }
@@ -86,6 +96,8 @@ class OwnedBusTmc5160Driver : public StepperDriver {
   }
   void SetMicrostep(int divisor) override { driver_.SetMicrostep(divisor); }
   bool healthy() const override { return driver_.healthy(); }
+  bool spi_bus_ok() const override { return driver_.spi_bus_ok(); }
+  std::string last_error() const override { return driver_.last_error(); }
   bool ActiveCheck() override { return driver_.ActiveCheck(); }
   std::uint64_t pulses_issued() const override {
     return driver_.pulses_issued();
@@ -237,7 +249,6 @@ bool SystemController::Initialize(std::string* error) {
       auto driver = std::make_unique<OwnedBusTmc5160Driver>(
           std::move(bus), tcfg);
       if (!driver->healthy()) {
-        tmc_spi_ok_ = false;
         std::cerr << "[system] " << motor_label
                   << ": TMC5160 bring-up on " << motor.spi_device
                   << " failed; motor remains unavailable until CHECK or restart"
@@ -250,10 +261,16 @@ bool SystemController::Initialize(std::string* error) {
     drivers.emplace_back(build_tmc5160(
         "motor1", config_.motors[1]));
   }
-  spi_.set_healthy(config_.runtime.use_simulated_pwm || tmc_spi_ok_);
-
   stepper_ = std::make_unique<StepperController>(
       std::move(channel_cfgs), std::move(drivers));
+
+  // SPI_OK describes the BUS, not the motors on it. A module that answers
+  // every datagram but is unusable (wrong TMC5160 version, SD_MODE
+  // strapped for STEP/DIR, enable line not reaching the chip) is a motor
+  // fault: it belongs to STEPPER_OK and motorN=FAILED, both of which
+  // already report it. Conflating the two made a perfectly healthy bus
+  // read SPI_FAIL and sent bench debugging after the wiring.
+  spi_.set_healthy(SpiBusHealthy());
 
   // Routing fix (Agent C, 2026-04-17): StepperController owns its own
   // MotionLock, and that is the one every StepperChannel actually takes on
@@ -295,6 +312,11 @@ bool SystemController::Initialize(std::string* error) {
   SdNotify("STATUS=initialised");
 
   return true;
+}
+
+bool SystemController::SpiBusHealthy() const {
+  if (config_.runtime.use_simulated_pwm) return true;
+  return stepper_ == nullptr || stepper_->SpiBusOk();
 }
 
 bool SystemController::AnySequencePaused() const {
@@ -667,6 +689,7 @@ int SystemController::Run() {
     record.sensors = snapshot;
     record.heater_duty = scheduled_duty;
     record.status = storage_manager_.status();
+    spi_.set_healthy(SpiBusHealthy());
     record.status.spi_ok = spi_.healthy();
     record.status.i2c_ok = sensor_manager_.i2c_ok();
     record.status.link_ok = last_link_ok;
@@ -1139,11 +1162,11 @@ std::string SystemController::HandleCommandLine(const std::string& line,
           (stepper_ != nullptr && stepper_->ActiveCheck(1));
       const bool stepper_ok = motor0_ok && motor1_ok;
       if (check_motor0 || check_motor1) {
-        tmc_spi_ok_ = config_.runtime.use_simulated_pwm || stepper_ok;
-        spi_.set_healthy(tmc_spi_ok_);
+        spi_.set_healthy(SpiBusHealthy());
       }
-      const bool spi_ok =
-          !(check_motor0 || check_motor1) || tmc_spi_ok_;
+      // Reported independently of motor0=/motor1= above: an unusable
+      // module on a working bus must not read as a bus failure.
+      const bool spi_ok = SpiBusHealthy();
       const bool sensor_ok = sensor_probe_ok;
       const bool comms_ok =
           !check_comms || telemetry_client_.is_connected();
@@ -1159,6 +1182,17 @@ std::string SystemController::HandleCommandLine(const std::string& line,
              << ";motor1=" << (motor1_ok ? "OK" : "FAIL")
              << ";spi=" << (spi_ok ? "OK" : "FAIL")
              << ";comms=" << (comms_ok ? "OK" : "FAIL");
+      // Same "<component>_error=" convention the sensor entries above use.
+      if (stepper_ != nullptr) {
+        if (check_motor0 && !motor0_ok) {
+          result << ";motor0_error="
+                 << SanitizeForReply(stepper_->LastDriverError(0));
+        }
+        if (check_motor1 && !motor1_ok) {
+          result << ";motor1_error="
+                 << SanitizeForReply(stepper_->LastDriverError(1));
+        }
+      }
       return Ack(cmd_name, result.str());
     }
 
@@ -1904,7 +1938,8 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       }
       std::string err;
       if (!stepper_->SetEnabled(command.motor_id, true, &err)) {
-        return Nack(cmd_name, err.empty() ? "enable failed" : err);
+        return Nack(cmd_name,
+                    err.empty() ? "enable failed" : SanitizeForReply(err));
       }
       return Ack(cmd_name, "stepper enabled");
     }

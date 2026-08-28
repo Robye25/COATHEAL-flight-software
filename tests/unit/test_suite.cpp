@@ -338,8 +338,16 @@ void TestTelemetryQueueDeferredCompactionRetentionAndTornLines() {
 
   std::string error;
   {
-    // Default thresholds: acknowledges must NOT rewrite the file.
-    coatheal::TelemetryQueue queue(queue_dir.string(), 72.0, 1024 * 1024);
+    // compact_cheap_live_bytes=0 pins the deferred regime: with it at its
+    // default these frames would be small enough to rewrite for free and
+    // would be compacted away immediately. At-least-once redelivery only
+    // survives for a backlog too large to rewrite cheaply, and that is
+    // what these assertions cover.
+    coatheal::TelemetryQueue queue(
+        queue_dir.string(), 72.0, 1024 * 1024,
+        coatheal::TelemetryQueue::kDefaultCompactMinDeadBytes,
+        coatheal::TelemetryQueue::kDefaultCompactMaxLiveBytes,
+        /*compact_cheap_live_bytes=*/0);
     assert(queue.Initialize(&error));
     for (std::uint64_t seq = 1; seq <= 4; ++seq) {
       assert(queue.Enqueue(make_frame(seq), &error));
@@ -357,7 +365,11 @@ void TestTelemetryQueueDeferredCompactionRetentionAndTornLines() {
     // Same directory reloaded: the acked frames were never compacted away,
     // so they come back (at-least-once re-delivery after a crash). The
     // ground station deduplicates; losing them here would be the bug.
-    coatheal::TelemetryQueue queue(queue_dir.string(), 72.0, 1024 * 1024);
+    coatheal::TelemetryQueue queue(
+        queue_dir.string(), 72.0, 1024 * 1024,
+        coatheal::TelemetryQueue::kDefaultCompactMinDeadBytes,
+        coatheal::TelemetryQueue::kDefaultCompactMaxLiveBytes,
+        /*compact_cheap_live_bytes=*/0);
     assert(queue.Initialize(&error));
     assert(queue.size() == 4);
   }
@@ -369,7 +381,11 @@ void TestTelemetryQueueDeferredCompactionRetentionAndTornLines() {
     out << "12345\ts1";  // torn append: no trailing separator/frame/newline
     out.close();
 
-    coatheal::TelemetryQueue queue(queue_dir.string(), 72.0, 1024 * 1024);
+    coatheal::TelemetryQueue queue(
+        queue_dir.string(), 72.0, 1024 * 1024,
+        coatheal::TelemetryQueue::kDefaultCompactMinDeadBytes,
+        coatheal::TelemetryQueue::kDefaultCompactMaxLiveBytes,
+        /*compact_cheap_live_bytes=*/0);
     assert(queue.Initialize(&error));
     assert(queue.size() == 4);
   }
@@ -382,13 +398,100 @@ void TestTelemetryQueueDeferredCompactionRetentionAndTornLines() {
     out << stale_epoch << "\told-session\t9\tDATA,old-session,9,stale\n";
     out.close();
 
-    coatheal::TelemetryQueue queue(queue_dir.string(), 72.0, 1024 * 1024);
+    coatheal::TelemetryQueue queue(
+        queue_dir.string(), 72.0, 1024 * 1024,
+        coatheal::TelemetryQueue::kDefaultCompactMinDeadBytes,
+        coatheal::TelemetryQueue::kDefaultCompactMaxLiveBytes,
+        /*compact_cheap_live_bytes=*/0);
     assert(queue.Initialize(&error));
     const auto pending = queue.PendingFrames();
     assert(pending.size() == 4);
     for (const auto& frame : pending) {
       assert(frame.session_id == "s1");
     }
+  }
+
+  std::error_code ec;
+  std::filesystem::remove_all(queue_dir, ec);
+}
+
+// The healthy steady state must leave nothing already-acked on disk.
+//
+// Deferred compaction traded disk cleanliness for control-loop latency,
+// and on the bench that trade surfaced as the ground station logging
+// "[dup] dropped" for hundreds of frames after every hard power cut: the
+// acked frames were still sitting in pending.queue and got re-sent on
+// restart. Nothing is lost -- the ground deduplicates -- but it spends
+// downlink re-sending frames that already landed. When the live set is
+// small the rewrite is free, so there is no reason to carry them.
+void TestDrainedQueueLeavesNothingToReplay() {
+  const std::filesystem::path queue_dir =
+      std::filesystem::temp_directory_path() /
+      ("coatheal_queue_test3_" +
+       std::to_string(coatheal::CurrentUnixEpochSeconds()));
+
+  std::string error;
+  {
+    coatheal::TelemetryQueue queue(queue_dir.string(), 72.0, 1024 * 1024);
+    assert(queue.Initialize(&error));
+    // One frame enqueued and acked per tick, exactly like the control loop
+    // does with a healthy link.
+    for (std::uint64_t seq = 1; seq <= 50; ++seq) {
+      coatheal::QueuedTelemetryFrame f;
+      f.queued_epoch_s = coatheal::CurrentUnixEpochSeconds();
+      f.session_id = "s1";
+      f.seq = seq;
+      f.frame = "DATA,s1," + std::to_string(seq) +
+                ",2026-01-01T00:00:01Z,1,0,0,0,HEATER_DUTY=0.0,STATUS=SD_OK";
+      assert(queue.Enqueue(f, &error));
+      assert(queue.Acknowledge("s1", seq, &error));
+    }
+    assert(queue.size() == 0);
+  }
+
+  {
+    // The power cut: reopen the same directory with no clean shutdown in
+    // between. Nothing acked may come back.
+    coatheal::TelemetryQueue queue(queue_dir.string(), 72.0, 1024 * 1024);
+    assert(queue.Initialize(&error));
+    assert(queue.size() == 0);
+  }
+
+  std::error_code ec;
+  std::filesystem::remove_all(queue_dir, ec);
+}
+
+// Unacked frames are still durable -- the point of the queue. Compacting a
+// drained queue must not be confused with discarding a backlog.
+void TestUnackedFramesStillSurviveRestart() {
+  const std::filesystem::path queue_dir =
+      std::filesystem::temp_directory_path() /
+      ("coatheal_queue_test4_" +
+       std::to_string(coatheal::CurrentUnixEpochSeconds()));
+
+  std::string error;
+  {
+    coatheal::TelemetryQueue queue(queue_dir.string(), 72.0, 1024 * 1024);
+    assert(queue.Initialize(&error));
+    for (std::uint64_t seq = 1; seq <= 5; ++seq) {
+      coatheal::QueuedTelemetryFrame f;
+      f.queued_epoch_s = coatheal::CurrentUnixEpochSeconds();
+      f.session_id = "s2";
+      f.seq = seq;
+      f.frame = "DATA,s2," + std::to_string(seq) + ",unacked";
+      assert(queue.Enqueue(f, &error));
+    }
+    assert(queue.Acknowledge("s2", 2, &error));  // link died after seq 2
+    assert(queue.size() == 3);
+  }
+
+  {
+    coatheal::TelemetryQueue queue(queue_dir.string(), 72.0, 1024 * 1024);
+    assert(queue.Initialize(&error));
+    const auto pending = queue.PendingFrames();
+    assert(pending.size() == 3);
+    assert(pending.front().seq == 3);
+    assert(pending.back().seq == 5);
   }
 
   std::error_code ec;
@@ -1045,6 +1148,8 @@ int main() {
   TestTelemetrySerializer();
   TestTelemetryQueuePersistenceAndAck();
   TestTelemetryQueueDeferredCompactionRetentionAndTornLines();
+  TestDrainedQueueLeavesNothingToReplay();
+  TestUnackedFramesStillSurviveRestart();
   TestConfigParsesReliabilityFields();
   TestConfigRejectsGpioCollisions();
   TestConfigRejectsReservedGpioCollisions();

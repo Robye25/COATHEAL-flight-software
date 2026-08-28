@@ -72,6 +72,12 @@ class Tmc5160Driver : public StepperDriver {
   bool healthy() const override { return healthy_; }
   bool ActiveCheck() override { return Reinitialize(); }
   std::uint64_t pulses_issued() const override { return pulses_; }
+  // True once a datagram has completed end to end, false the moment
+  // one cannot be conducted (device not open, CS line dead, ioctl
+  // failed). Independent of the version/strap gates, which reject a
+  // module the bus reached just fine.
+  bool spi_bus_ok() const override { return spi_bus_ok_; }
+  std::string last_error() const override { return last_error_message_; }
 
   // Full probe + register (re)configuration sequence: IOIN version gate,
   // GCONF/CHOPCONF/current/ramp register writes, XACTUAL=XTARGET=0, then a
@@ -97,6 +103,20 @@ class Tmc5160Driver : public StepperDriver {
   // unsupported divisor.
   static std::uint32_t DeltaXtarget(int divisor);
 
+  // IOIN (0x04) pin-state decoders. The TMC5160 mirrors the physical
+  // state of its mode/enable pins in the same register the version gate
+  // already reads, so validating them costs no extra bus traffic. Shared
+  // by the health gates and the unit tests so one definition of these bit
+  // positions exists.
+  //
+  // SD_MODE (bit 6) selects the chip's motion source: 0 = internal ramp
+  // generator driven over SPI (what this driver steers via
+  // RAMPMODE/XTARGET), 1 = external STEP/DIR pins. DRV_ENN (bit 4) is the
+  // enable input, active LOW -- a HIGH readback means the power stage is
+  // disabled.
+  static bool IoinStepDirMode(std::uint32_t ioin);
+  static bool IoinDriverDisabled(std::uint32_t ioin);
+
   // Derives GLOBALSCALER (32..256), IRUN (0..31) and IHOLD (0..31) from a
   // desired RMS run current, the sense resistor, and the hold-current
   // fraction. See tmc5160_driver.cpp for the derivation and the two-regime
@@ -120,6 +140,13 @@ class Tmc5160Driver : public StepperDriver {
   bool ReinitializeUnlocked();
   std::uint32_t EncodeChopconf(std::uint8_t toff) const;
 
+  // Bring-up failures are re-probed every driver_retry_ms (2 s by default)
+  // for as long as they persist, and a strap/wiring fault persists until
+  // someone opens the box. Emitting the diagnosis on every retry buries
+  // the rest of the journal, so it is latched: printed when the message
+  // changes, and re-armed once the driver comes back healthy.
+  void ReportError(const std::string& message);
+
   Tmc5160Config cfg_;
   SpiBus* bus_;
   bool use_gpio_;
@@ -132,6 +159,8 @@ class Tmc5160Driver : public StepperDriver {
   int microstep_ = 1;
   std::int32_t target_ = 0;
   std::uint64_t pulses_ = 0;
+  std::string last_error_message_;
+  bool spi_bus_ok_ = false;
   mutable std::mutex io_mu_;
 };
 

@@ -114,6 +114,15 @@ class StepperChannel {
   StepperStatus Snapshot() const;
   bool healthy() const { return driver_ != nullptr && driver_->healthy(); }
   bool ActiveCheck() { return driver_ != nullptr && driver_->ActiveCheck(); }
+  // Transport health of this channel's backend. See
+  // StepperDriver::spi_bus_ok(): a motor that cannot be driven is
+  // not the same fault as a bus that cannot be talked to.
+  bool SpiBusOk() const {
+    return driver_ == nullptr || driver_->spi_bus_ok();
+  }
+  std::string LastDriverError() const {
+    return driver_ != nullptr ? driver_->last_error() : std::string();
+  }
 
   // "[pull] cycle complete id=<id> samples=0,1,2,3"
   std::string FormatPullCompleteLog() const;

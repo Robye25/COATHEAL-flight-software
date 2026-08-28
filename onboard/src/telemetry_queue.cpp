@@ -25,12 +25,14 @@ TelemetryQueue::TelemetryQueue(std::string queue_dir,
                                double retention_hours,
                                std::uint64_t max_bytes,
                                std::uint64_t compact_min_dead_bytes,
-                               std::uint64_t compact_max_live_bytes)
+                               std::uint64_t compact_max_live_bytes,
+                               std::uint64_t compact_cheap_live_bytes)
     : queue_dir_(std::move(queue_dir)),
       retention_hours_(retention_hours),
       max_bytes_(max_bytes),
       compact_min_dead_bytes_(compact_min_dead_bytes),
-      compact_max_live_bytes_(compact_max_live_bytes) {
+      compact_max_live_bytes_(compact_max_live_bytes),
+      compact_cheap_live_bytes_(compact_cheap_live_bytes) {
   std::filesystem::path p(queue_dir_);
   queue_file_ = (p / "pending.queue").string();
 }
@@ -252,13 +254,35 @@ bool TelemetryQueue::CompactLocked(std::string* error) {
 
 void TelemetryQueue::MaybeCompactLocked() {
   if (!persistence_enabled_) return;
-  if (dead_bytes_ < compact_min_dead_bytes_) return;
+  if (dead_bytes_ == 0U) return;
+
   // A compaction rewrites every live frame in one go on the control-loop
-  // thread. Cap the live set it is allowed to do that for, so the stall
-  // stays well inside the systemd watchdog budget; a bigger live set keeps
-  // its dead weight on disk until it drains down (or until the next
-  // startup compaction), which only costs disk space.
-  if (live_bytes_ > compact_max_live_bytes_) return;
+  // thread, so what governs is how much LIVE data has to be written --
+  // dead bytes cost nothing to drop. Two independent reasons to do it:
+  //
+  //  (a) The live set is small enough that the rewrite is free. This is
+  //      the healthy steady state: each tick enqueues one frame and the
+  //      drain acks it, so the queue sits at or near empty. Compacting
+  //      here costs microseconds and leaves nothing already-acked on
+  //      disk -- which is what stops an unclean shutdown (power cut, or a
+  //      watchdog kill) from replaying every frame acked since the last
+  //      compaction. The ground station deduplicates those, so nothing is
+  //      lost, but it spends downlink re-sending frames that already
+  //      landed and fills the operator's event log with "[dup] dropped".
+  //
+  //  (b) Dead weight has built up past the point worth carrying, and the
+  //      live set is still small enough for the stall to stay bounded.
+  //
+  // Above compact_max_live_bytes_ neither applies: the backlog keeps its
+  // dead weight until it drains (or until the next startup compaction),
+  // which only costs disk space. That is the case the watchdog budget
+  // cares about, and the one where at-least-once redelivery survives.
+  const bool rewrite_is_cheap = live_bytes_ <= compact_cheap_live_bytes_;
+  const bool dead_weight_worth_dropping =
+      dead_bytes_ >= compact_min_dead_bytes_ &&
+      live_bytes_ <= compact_max_live_bytes_;
+  if (!rewrite_is_cheap && !dead_weight_worth_dropping) return;
+
   if (!CompactLocked(nullptr)) {
     persistence_enabled_ = false;
   }

@@ -44,6 +44,9 @@ class SystemController {
   std::string HandleCommandLine(const std::string& line,
                                 const std::string& peer_ip);
   void TickBendSequences();
+  // Whether the SPI transport itself is working, as opposed to whether
+  // the motors on it are usable. See the comment at its definition.
+  bool SpiBusHealthy() const;
   bool AnySequencePaused() const;
   std::string SequenceStatus(int motor_id) const;
   void StopNonSequenceMotionOnFallback();
@@ -94,7 +97,6 @@ class SystemController {
   bool link_loss_fallback_active_ = false;
   bool link_loss_fallback_was_active_ = false;
   bool drain_error_logged_ = false;
-  bool tmc_spi_ok_ = true;
   SensorSnapshot last_sensor_snapshot_;
 
   struct BendSequenceStep {
