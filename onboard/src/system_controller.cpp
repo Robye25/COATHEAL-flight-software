@@ -6,6 +6,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <numeric>
@@ -98,6 +100,7 @@ class OwnedBusTmc5160Driver : public StepperDriver {
   bool healthy() const override { return driver_.healthy(); }
   bool spi_bus_ok() const override { return driver_.spi_bus_ok(); }
   std::string last_error() const override { return driver_.last_error(); }
+  std::string warning() const override { return driver_.warning(); }
   bool ActiveCheck() override { return driver_.ActiveCheck(); }
   std::uint64_t pulses_issued() const override {
     return driver_.pulses_issued();
@@ -134,6 +137,10 @@ SystemController::SystemController(OnboardConfig config)
                         config_.comms.rediscover_period_s,
                         config_.comms.failover_grace_s,
                         config_.comms.priority),
+      fallback_planner_(FallbackPlannerConfig{config_.fallback.bend_min_c,
+                                              config_.fallback.bend_max_c,
+                                              config_.fallback.bend_deadline_s},
+                        config_.motors.size()),
       last_heater_duty_(config_.hardware.heater_count, 0.0) {
   live_tick_hz_.store(std::max(0.1, config_.runtime.tick_hz));
   control_overrides_.heater_duty_overrides.resize(config_.hardware.heater_count);
@@ -141,6 +148,8 @@ SystemController::SystemController(OnboardConfig config)
   control_overrides_.pid_overrides.resize(config_.hardware.heater_count);
   bend_sequences_.resize(config_.motors.size());
   motor_zeroed_.assign(config_.motors.size(), false);
+  RestoreRadioSilence();
+  RestoreFallbackPlan();
 }
 
 bool ParseInt64(const std::string& text, std::int64_t* out) {
@@ -251,7 +260,8 @@ bool SystemController::Initialize(std::string* error) {
       if (!driver->healthy()) {
         std::cerr << "[system] " << motor_label
                   << ": TMC5160 bring-up on " << motor.spi_device
-                  << " failed; motor remains unavailable until CHECK or restart"
+                  << " failed; motor unavailable until a re-probe (automatic every"
+                  << " retry_ms while idle, or CHECK MOTORn)"
                   << " completes SPI setup." << '\n';
       }
       return driver;
@@ -353,6 +363,201 @@ void SystemController::InhibitHeatersForMotion() {
   }
   std::lock_guard<std::mutex> lock(overrides_mu_);
   last_heater_duty_.assign(config_.hardware.heater_count, 0.0);
+}
+
+std::string SystemController::RadioSilenceFlagPath() const {
+  return (std::filesystem::path(config_.storage.queue_dir) / "radio_silence")
+      .string();
+}
+
+void SystemController::PersistRadioSilence(bool silent) {
+  const std::filesystem::path path(RadioSilenceFlagPath());
+  std::error_code ec;
+  if (silent) {
+    std::filesystem::create_directories(path.parent_path(), ec);
+    std::ofstream flag(path, std::ios::out | std::ios::trunc);
+    if (!flag) {
+      std::cerr << "[radio] could not persist the silence flag at " << path
+                << '\n';
+    }
+  } else {
+    std::filesystem::remove(path, ec);
+  }
+}
+
+void SystemController::RestoreRadioSilence() {
+  const std::string path = RadioSilenceFlagPath();
+  std::error_code ec;
+  if (std::filesystem::exists(path, ec)) {
+    telemetry_client_.SetTransmitEnabled(false);
+    std::cerr << "[radio] silence restored from " << path << '\n';
+  }
+}
+
+std::string SystemController::FallbackPlanPath() const {
+  return (std::filesystem::path(config_.storage.queue_dir) / "fallback_plan.txt")
+      .string();
+}
+
+void SystemController::PersistFallbackPlanIfDirty() {
+  std::string text;
+  {
+    std::lock_guard<std::mutex> lock(fallback_mu_);
+    if (!fallback_planner_.TakeDirty()) return;
+    text = fallback_planner_.Serialize();
+  }
+  const std::filesystem::path path(FallbackPlanPath());
+  std::error_code ec;
+  std::filesystem::create_directories(path.parent_path(), ec);
+  std::ofstream out(path, std::ios::out | std::ios::trunc);
+  if (!out || !(out << text)) {
+    std::cerr << "[fallback] could not persist the plan at " << path << '\n';
+  }
+}
+
+void SystemController::RestoreFallbackPlan() {
+  const std::string path = FallbackPlanPath();
+  std::error_code ec;
+  if (!std::filesystem::exists(path, ec)) return;
+  std::lock_guard<std::mutex> lock(fallback_mu_);
+  if (fallback_planner_.LoadFrom(path)) {
+    std::cerr << "[fallback] plan restored from " << path << ": "
+              << fallback_planner_.StatusBody() << '\n';
+  } else {
+    std::cerr << "[fallback] plan file " << path
+              << " is unreadable; ignored (no plan)" << '\n';
+  }
+  // A restore is not a change: nothing to write back.
+  fallback_planner_.TakeDirty();
+}
+
+std::string SystemController::FallbackPlanStateName() const {
+  std::lock_guard<std::mutex> lock(fallback_mu_);
+  return ToString(fallback_planner_.state());
+}
+
+std::optional<double> SystemController::MotorGroupTemperature(
+    std::size_t motor, const SensorSnapshot& snapshot) const {
+  if (motor >= config_.motors.size()) return std::nullopt;
+  double sum = 0.0;
+  std::size_t count = 0;
+  for (std::size_t sample : config_.motors[motor].samples) {
+    if (sample >= snapshot.sample_temps_c.size()) continue;
+    const bool valid =
+        snapshot.sample_temp_valid.empty() ||
+        (sample < snapshot.sample_temp_valid.size() &&
+         snapshot.sample_temp_valid[sample]);
+    const double value = snapshot.sample_temps_c[sample];
+    if (!valid || !std::isfinite(value)) continue;
+    sum += value;
+    ++count;
+  }
+  if (count == 0) return std::nullopt;
+  return sum / static_cast<double>(count);
+}
+
+void SystemController::TickFallbackPlan(MissionPhase phase,
+                                        const SensorSnapshot& snapshot) {
+  if (!stepper_) return;
+
+  FallbackTickInput in;
+  in.fallback_active = link_loss_fallback_active_;
+  in.phase = phase;
+  in.now = std::chrono::steady_clock::now();
+  std::vector<bool> zeroed;
+  {
+    std::lock_guard<std::mutex> lock(sequence_mu_);
+    zeroed = motor_zeroed_;
+  }
+  const std::size_t n_channels = stepper_->channel_count();
+  in.motors.reserve(n_channels);
+  for (std::size_t i = 0; i < n_channels; ++i) {
+    const StepperStatus st = stepper_->Snapshot(static_cast<int>(i));
+    FallbackMotorInput motor;
+    motor.enabled = st.enabled;
+    motor.zeroed = i < zeroed.size() && zeroed[i];
+    motor.healthy = st.healthy;
+    motor.moving_or_holding = st.moving || st.holding;
+    motor.group_temp_c = MotorGroupTemperature(i, snapshot);
+    in.motors.push_back(motor);
+  }
+
+  std::optional<FallbackAction> action;
+  {
+    std::lock_guard<std::mutex> lock(fallback_mu_);
+    action = fallback_planner_.Tick(in);
+  }
+  if (action.has_value()) {
+    // Same path as the operator's STEPPER_MOVETO: heaters inhibited first,
+    // then the absolute move with its hold. The EVT,PULL edge detector sees
+    // the MotionLock this acquires exactly as it would a manual bend.
+    std::string err;
+    bool accepted = true;
+    bool retry_later = false;
+    if (action->speed_hz > 0.0 &&
+        !stepper_->SetSpeed(action->motor_id, action->speed_hz, &err)) {
+      accepted = false;
+    }
+    if (accepted) {
+      InhibitHeatersForMotion();
+      if (!stepper_->MoveToSteps(action->motor_id, action->target_usteps,
+                                 action->hold_s, &err)) {
+        accepted = false;
+        retry_later = (err == "motion lock held by another motor");
+      }
+    }
+    {
+      std::lock_guard<std::mutex> lock(fallback_mu_);
+      fallback_planner_.ReportStartResult(action->motor_id, accepted,
+                                          retry_later, err);
+    }
+    if (accepted) {
+      std::cerr << "[fallback] plan: M" << action->motor_id << " bend started"
+                << " target=" << action->target_usteps
+                << " hold_s=" << action->hold_s
+                << " speed_hz=" << action->speed_hz << '\n';
+    } else if (retry_later) {
+      std::cerr << "[fallback] plan: M" << action->motor_id
+                << " waiting for the motion lock" << '\n';
+    } else {
+      std::cerr << "[fallback] plan FAILED: M" << action->motor_id
+                << " refused the bend: " << err << '\n';
+    }
+  }
+
+  if (link_loss_fallback_active_ && phase == MissionPhase::kLanded &&
+      config_.fallback.landed_safe && !landed_safed_) {
+    ApplyLandedSafing();
+  }
+
+  PersistFallbackPlanIfDirty();
+}
+
+void SystemController::ApplyLandedSafing() {
+  // Owner decision D6: on the ground with no link, nothing should stay
+  // energised. Same override set HEATERS_OFF applies, plus every motor's
+  // power stage off. Once per process; the operator can re-enable.
+  landed_safed_ = true;
+  {
+    std::lock_guard<std::mutex> lock(overrides_mu_);
+    control_overrides_.heaters_off = true;
+    heater_test_.active = false;
+    control_overrides_.bench_open_loop_heaters = false;
+    control_overrides_.single_heater_override.reset();
+    control_overrides_.all_heaters_override.reset();
+    std::fill(control_overrides_.heater_duty_overrides.begin(),
+              control_overrides_.heater_duty_overrides.end(), std::nullopt);
+    std::fill(control_overrides_.temp_targets_c.begin(),
+              control_overrides_.temp_targets_c.end(), std::nullopt);
+  }
+  if (stepper_) {
+    for (std::size_t i = 0; i < stepper_->channel_count(); ++i) {
+      std::string err;
+      stepper_->Stop(static_cast<int>(i), &err);
+      stepper_->SetEnabled(static_cast<int>(i), false, &err);
+    }
+  }
+  std::cerr << "[fallback] landed: heaters off, motors disabled" << '\n';
 }
 
 void SystemController::TickBendSequences() {
@@ -661,6 +866,10 @@ int SystemController::Run() {
     }
 
     if (stepper_) {
+      // Link-loss failsafe first: its bend goes through the same MoveToSteps
+      // path as a sequence step, so it must claim the MotionLock before the
+      // sequence ticker and the channel tick of this same iteration.
+      TickFallbackPlan(phase, snapshot);
       TickBendSequences();
       stepper_->Tick(phase, tick_duration.count());
       const bool sequence_fault =
@@ -722,7 +931,30 @@ int SystemController::Run() {
       for (std::size_t i = 0; i < n_channels; ++i) {
         record.steppers.push_back(stepper_->Snapshot(static_cast<int>(i)));
       }
+      // The channel does not know about zeroing or sequences; both live
+      // here under sequence_mu_ (redesign spec §8).
+      std::lock_guard<std::mutex> lock(sequence_mu_);
+      for (std::size_t i = 0; i < record.steppers.size(); ++i) {
+        StepperStatus& st = record.steppers[i];
+        st.zeroed = i < motor_zeroed_.size() && motor_zeroed_[i];
+        if (i < bend_sequences_.size()) {
+          const BendSequenceRuntime& runtime = bend_sequences_[i];
+          st.seq_name = runtime.active_name;
+          st.seq_state = !runtime.running ? "idle"
+                         : (runtime.paused ? "pause" : "run");
+        }
+      }
     }
+    record.ctrl.fallback_active = link_loss_fallback_active_;
+    record.ctrl.link_loss_s = link_loss_s_;
+    record.ctrl.energy_wh = scheduler_.energy_consumed_wh();
+    record.ctrl.budget_wh = config_.power.energy_budget_wh;
+    record.ctrl.budget_exhausted = scheduler_.is_budget_exhausted();
+    record.ctrl.heaters_active = static_cast<int>(std::count_if(
+        scheduled_duty.begin(), scheduled_duty.end(),
+        [](double duty) { return duty > 0.0; }));
+    record.ctrl.queue_depth = telemetry_queue_.size();
+    record.ctrl.plan = FallbackPlanStateName();
 
     const std::string line = SerializeTelemetryDataFrame(record, telemetry_client_.session_id());
     COATHEAL_PERF_STAMP(perf_ts[7]);  // stage 6: build+serialize telemetry
@@ -975,6 +1207,22 @@ std::string SystemController::HandleCommandLine(const std::string& line,
   const Command& command = parsed.command;
   const std::string cmd_name = command.name;
 
+  // Radio silence (redesign spec §9): while transmit is disabled the only
+  // commands that may do anything are the ones needed to lift the silence
+  // or to ask about it. Everything else is refused here, before any of the
+  // handlers below can have a side effect.
+  if (!telemetry_client_.transmit_enabled()) {
+    switch (command.type) {
+      case CommandType::kRadioResume:
+      case CommandType::kRadioSilence:
+      case CommandType::kStatus:
+      case CommandType::kPing:
+        break;
+      default:
+        return Nack(cmd_name, "radio silence active");
+    }
+  }
+
   auto require_debug_arm = [&]() -> bool {
     return config_.runtime.bench_mode && debug_armed_.load();
   };
@@ -1069,11 +1317,13 @@ std::string SystemController::HandleCommandLine(const std::string& line,
              << ";link_seen=" << (link_seen_ ? "1" : "0")
              << ";link_loss_s=" << link_loss_s_
              << ";fallback_active=" << (link_loss_fallback_active_ ? "1" : "0")
+             << ";plan=" << FallbackPlanStateName()
              << ";bench_mode=" << (config_.runtime.bench_mode ? "1" : "0")
              << ";debug_armed=" << (debug_armed_.load() ? "1" : "0")
              << ";telemetry_target=" << telemetry_client_.current_host()
              << ";queue_depth=" << telemetry_queue_.size()
              << ";tick_hz=" << live_tick_hz_.load()
+             << ";silence=" << (telemetry_client_.transmit_enabled() ? "0" : "1")
              << ";simulated=" << (sensor_manager_.simulated() ? "1" : "0")
              << ";i2c_ok=" << (sensor_manager_.i2c_ok() ? "1" : "0")
              << ";sample_temp_ok=" << (sensor_manager_.sample_temp_ok() ? "1" : "0")
@@ -1191,6 +1441,15 @@ std::string SystemController::HandleCommandLine(const std::string& line,
         if (check_motor1 && !motor1_ok) {
           result << ";motor1_error="
                  << SanitizeForReply(stepper_->LastDriverError(1));
+        }
+        // Non-fatal driver warnings (e.g. an enable line that never reaches
+        // DRV_ENN): the motor is usable, the operator must still know.
+        for (int motor = 0; motor < 2; ++motor) {
+          if (!(motor == 0 ? check_motor0 : check_motor1)) continue;
+          const std::string warn = stepper_->DriverWarning(motor);
+          if (!warn.empty()) {
+            result << ";motor" << motor << "_warn=" << SanitizeForReply(warn);
+          }
         }
       }
       return Ack(cmd_name, result.str());
@@ -1630,10 +1889,12 @@ std::string SystemController::HandleCommandLine(const std::string& line,
 
     case CommandType::kRadioSilence:
       telemetry_client_.SetTransmitEnabled(false);
+      PersistRadioSilence(true);
       return Ack(cmd_name, "radio silent");
 
     case CommandType::kRadioResume:
       telemetry_client_.SetTransmitEnabled(true);
+      PersistRadioSilence(false);
       return Ack(cmd_name, "radio resumed");
 
     case CommandType::kSetPhase: {
@@ -1995,6 +2256,73 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       InhibitHeatersForMotion();
       if (!stepper_->ArmPull(command.motor_id, &err)) return Nack(cmd_name, err);
       return Ack(cmd_name, "pull executed");
+    }
+
+    case CommandType::kFallbackPlan: {
+      // FALLBACK_PLAN <motor> <target_usteps> <hold_s> [speed_hz]. Validated
+      // like a BENDSEQ_LOAD step; motor ids come from the config so a bare
+      // controller (no stepper yet) can still be pre-loaded on the bench.
+      std::size_t motor = 0;
+      if (!ParseIndex(command.args[0], &motor) || motor >= config_.motors.size()) {
+        return Nack(cmd_name, "invalid motor id");
+      }
+      std::int64_t target = 0;
+      if (!ParseInt64(command.args[1], &target) ||
+          std::abs(target) > config_.stepper.max_position_steps) {
+        return Nack(cmd_name, "invalid target (|usteps| must be <= stepper.max_position_steps)");
+      }
+      double hold_s = 0.0;
+      if (!ParseDouble(command.args[2], &hold_s) || hold_s < 0.0 || hold_s > 86400.0) {
+        return Nack(cmd_name, "invalid hold_s (0..86400)");
+      }
+      double speed_hz = 0.0;
+      if (command.args.size() == 4) {
+        if (!ParseDouble(command.args[3], &speed_hz) || speed_hz <= 0.0 ||
+            speed_hz > config_.pull.max_step_hz) {
+          return Nack(cmd_name, "invalid speed_hz (0 < hz <= pull.max_step_hz)");
+        }
+      }
+      std::string error;
+      {
+        std::lock_guard<std::mutex> lock(fallback_mu_);
+        if (!fallback_planner_.SetMotorPlan(static_cast<int>(motor), target,
+                                            hold_s, speed_hz, &error)) {
+          return Nack(cmd_name, error);
+        }
+      }
+      PersistFallbackPlanIfDirty();
+      std::ostringstream msg;
+      msg << "motor=" << motor << ";target=" << target << ";hold_s=" << hold_s
+          << ";speed_hz=" << speed_hz;
+      return Ack(cmd_name, msg.str());
+    }
+
+    case CommandType::kFallbackArm: {
+      // Arming is allowed in any mode: the plan only ever runs during
+      // link-loss fallback, which itself requires RUN.
+      std::string error;
+      {
+        std::lock_guard<std::mutex> lock(fallback_mu_);
+        if (!fallback_planner_.Arm(&error)) {
+          return Nack(cmd_name, error);
+        }
+      }
+      PersistFallbackPlanIfDirty();
+      return Ack(cmd_name, "plan=armed");
+    }
+
+    case CommandType::kFallbackDisarm: {
+      {
+        std::lock_guard<std::mutex> lock(fallback_mu_);
+        fallback_planner_.Disarm();
+      }
+      PersistFallbackPlanIfDirty();
+      return Ack(cmd_name, "plan=none");
+    }
+
+    case CommandType::kFallbackStatus: {
+      std::lock_guard<std::mutex> lock(fallback_mu_);
+      return Ack(cmd_name, fallback_planner_.StatusBody());
     }
 
     case CommandType::kUnknown:

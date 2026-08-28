@@ -106,6 +106,39 @@ Only one sequence runs per motor and `MotionLock` still prevents simultaneous
 motion. A motor/backend/overtemperature fault pauses the sequence and reports
 `SEQ_PAUSED` plus fault detail in `BENDSEQ_STATUS`.
 
+## Radio Silence
+
+`RADIO_SILENCE` stops every transmission the onboard originates until the
+operator lifts it with `RADIO_RESUME`:
+
+- the telemetry TCP client closes and makes no reconnect attempts;
+- the UDP `ONBOARD_BEACON` broadcast stops;
+- `GS_HELLO` datagrams are not answered (the sender is still remembered so
+  `RADIO_RESUME` can dial it);
+- every command except `RADIO_RESUME`, `RADIO_SILENCE`, `STATUS` and `PING`
+  is refused with `NACK,<COMMAND>,radio silence active` before it has any
+  effect, so a mis-sent command cannot start anything while silent.
+
+The command server keeps listening — that is the only way to resume — and
+the reply to one of the four allowed commands is the only packet the onboard
+will send. `STATUS` reports `silence=1` while silent. The state is persisted
+in `<storage.queue_dir>/radio_silence`, so an onboard restart during a
+mandated silence comes back silent; `RADIO_RESUME` removes the file.
+
+Telemetry frames produced during silence stay in the durable queue and are
+delivered, in order, after `RADIO_RESUME` (the ground station shows the
+backlog draining through the `CTRL` `queue` field).
+
+```powershell
+python main.py command --cmd RADIO_SILENCE --yes
+python main.py command --cmd STATUS            # ...;silence=1;...
+python main.py command --cmd RADIO_RESUME
+```
+
+The ground station pauses its own discovery beacons and command probes while
+silent and sends nothing but `RADIO_RESUME` (and, from its console, `STATUS`
+or `PING`).
+
 ## Link-Loss Fallback
 
 Fallback begins only after a link has been established and then remains lost
@@ -118,13 +151,57 @@ On fallback entry:
 - Non-sequence manual motion stops and new manual motion is rejected.
 - Existing PID targets continue.
 - Untargeted channels use `phase.sample_floor_c`.
-- No queued fatigue sequence or phase-bend action starts automatically.
+- No sequence starts automatically; the only autonomous motion is the
+  operator-armed failsafe plan below.
 
 Inspect fallback state with:
 
 ```powershell
 python main.py command --cmd STATUS
 ```
+
+## Link-Loss Failsafe Plan
+
+If the link is lost right when the samples should be bent (ascent, just
+before float), the onboard can bend them on its own — but only with a plan
+the operator loaded and armed beforehand. Load one bend per motor (absolute
+microsteps, hold seconds, optional full-step Hz), then arm:
+
+```powershell
+python main.py command --cmd "FALLBACK_PLAN 0 800 5 50"
+python main.py command --cmd "FALLBACK_PLAN 1 800 5 50"
+python main.py command --cmd FALLBACK_ARM
+python main.py command --cmd FALLBACK_STATUS
+```
+
+`FALLBACK_STATUS` answers
+`state=armed;armed=1;deadline_s=1800;deadline_started=0;m0=800/5/50/pending;m1=800/5/50/pending`.
+The same state is in every telemetry frame (`CTRL` `plan`) and in `STATUS`
+(`plan=`). Arming works in any mode; the plan only ever runs during
+link-loss fallback, which requires RUN. Do it after the motors are enabled
+and zeroed — a motor that is not enabled, zeroed and healthy when its turn
+comes is skipped once the deadline passes.
+
+What the onboard does, and only while fallback is active at `PRE_FLOAT` or
+`FLOAT`: M0 bends first, then M1, one at a time, each when its sample
+group's mean valid temperature is inside `fallback.bend_min_c..bend_max_c`
+(default −40…+40 °C) or, unconditionally, once `fallback.bend_deadline_s`
+(default 30 min) have passed since fallback first held there. Each bend is a
+normal absolute move with hold and produces an `EVT,PULL`. UV and specimen
+resistance are logged for the post-flight analysis but never gate the plan.
+A completed or failed plan never re-runs (restarts included); if the link
+returns while a bend is in motion the bend finishes.
+
+Disarm at any time (the loaded targets stay, so `FALLBACK_ARM` re-arms them):
+
+```powershell
+python main.py command --cmd FALLBACK_DISARM
+python main.py command --cmd "STEPPER_STOP 0"      # disarming never stops motion
+```
+
+At `LANDED` in fallback (`fallback.landed_safe=true`) the onboard turns the
+heaters off and disables both motors once. Keys: `docs/configuration.md`
+(*Link-Loss Failsafe Plan*).
 
 ## Stop and Safe State
 

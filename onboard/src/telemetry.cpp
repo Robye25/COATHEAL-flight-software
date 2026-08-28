@@ -24,7 +24,25 @@ void AppendStepperSegment(std::ostringstream& oss, const StepperStatus& st,
       << "|hold_s:" << std::setprecision(2) << st.hold_remaining_s
       << "|pulses:" << st.pulses_total
       << "|missed:" << st.missed_deadlines
-      << "|src:" << (st.last_source.empty() ? std::string("-") : st.last_source);
+      << "|src:" << (st.last_source.empty() ? std::string("-") : st.last_source)
+      // Redesign spec §8: appended after src so older ground parsers, which
+      // ignore unknown keys, keep working.
+      << "|zeroed:" << (st.zeroed ? 1 : 0)
+      << "|seq:" << (st.seq_name.empty() ? std::string("-") : st.seq_name)
+      << "|seqst:" << (st.seq_state.empty() ? std::string("idle") : st.seq_state);
+}
+
+void AppendCtrlSegment(std::ostringstream& oss, const CtrlStatus& ctrl) {
+  // Redesign spec §8: `CTRL=` sits between COMPONENT_STATE and STEPPER0.
+  // Precision is fixed per key so the ground CSV round-trips byte-for-byte.
+  oss << ",CTRL=fallback:" << (ctrl.fallback_active ? 1 : 0)
+      << "|link_loss_s:" << std::fixed << std::setprecision(1) << ctrl.link_loss_s
+      << "|energy_wh:" << std::setprecision(2) << ctrl.energy_wh
+      << "|budget_wh:" << std::setprecision(1) << ctrl.budget_wh
+      << "|budget_exhausted:" << (ctrl.budget_exhausted ? 1 : 0)
+      << "|heaters_active:" << ctrl.heaters_active
+      << "|queue:" << ctrl.queue_depth
+      << "|plan:" << (ctrl.plan.empty() ? std::string("none") : ctrl.plan);
 }
 
 }  // namespace
@@ -34,7 +52,8 @@ void AppendStepperSegment(std::ostringstream& oss, const StepperStatus& st,
 //        <ambient_pressure_mbar>,<uv>,<sample_0>...<sample_N>,
 //        HEATER_DUTY=d0|d1|...,
 //        RESISTANCE=r0|r1|...   (- for unmeasured samples),
-//        PHASE=...,MODE=...,STATUS=...,
+//        PHASE=...,MODE=...,STATUS=...,SENSOR_VALID=...,SENSOR_AGE_MS=...,
+//        COMPONENT_STATE=...,CTRL=...,
 //        STEPPER0=...,STEPPER1=...
 // Humidity and box_temp are not emitted. RESISTANCE's meaning follows
 // sensor.resistance_source, whose v3 default is max31865_click: the two
@@ -117,6 +136,8 @@ std::string SerializeTelemetryDataFrame(const TelemetryRecord& record,
       << "|MOTOR0:" << (motor0_ok ? "OK" : "FAILED")
       << "|MOTOR1:" << (motor1_ok ? "OK" : "FAILED")
       << "|PWM:" << ToString(record.pwm_state);
+
+  AppendCtrlSegment(oss, record.ctrl);
 
   // Dual-stepper telemetry: one STEPPER<n>= segment per motor.
   for (std::size_t i = 0; i < record.steppers.size(); ++i) {

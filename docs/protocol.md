@@ -24,7 +24,7 @@ a revival of the retired temperature path.
 Sent by the onboard to the ground station over TCP port `4000`.
 
 ```text
-DATA,<session_id>,<seq>,<timestamp>,<rtc_valid>,<ambient_temp_c>,<ambient_pressure_mbar>,<uv>,<sample_0>,...,<sample_7>,HEATER_DUTY=<d0>|...|<d5>,RESISTANCE=<r0>|...|<r7>,PHASE=<phase>,MODE=<mode>,STATUS=<flags>,SENSOR_VALID=<kv>,SENSOR_AGE_MS=<kv>,COMPONENT_STATE=<kv>,STEPPER0=<kv>,STEPPER1=<kv>
+DATA,<session_id>,<seq>,<timestamp>,<rtc_valid>,<ambient_temp_c>,<ambient_pressure_mbar>,<uv>,<sample_0>,...,<sample_7>,HEATER_DUTY=<d0>|...|<d5>,RESISTANCE=<r0>|...|<r7>,PHASE=<phase>,MODE=<mode>,STATUS=<flags>,SENSOR_VALID=<kv>,SENSOR_AGE_MS=<kv>,COMPONENT_STATE=<kv>,CTRL=<kv>,STEPPER0=<kv>,STEPPER1=<kv>
 ```
 
 | Field | Meaning |
@@ -38,11 +38,50 @@ DATA,<session_id>,<seq>,<timestamp>,<rtc_valid>,<ambient_temp_c>,<ambient_pressu
 | `SENSOR_VALID` | Current validity for ambient temperature (`AT`), pressure (`AP`), UV, and `S0..S7` |
 | `SENSOR_AGE_MS` | Monotonic age of each last successful reading; `-1` means never valid |
 | `COMPONENT_STATE` | Independent state for DPS310, ADS1115, SEQUENT_RTD, both motors, and PWM |
-| `STEPPER0`, `STEPPER1` | TMC5160-driven NEMA 17 ball-screw motor snapshots (SPI-only position dribble; no STEP/DIR) |
+| `CTRL` | Controller state the ground station cannot derive from the other fields (added 2026-08-28, see below) |
+| `STEPPER0`, `STEPPER1` | TMC5160-driven NEMA 17 ball-screw motor snapshots (SPI-only position dribble; no STEP/DIR); keys below |
 
 The parser locates `HEATER_DUTY=` by token name, so sample count is inferred
 from the position of that token. Frames with any number of sample columns parse
-as long as every column before `HEATER_DUTY=` is numeric.
+as long as every column before `HEATER_DUTY=` is numeric. Every `<kv>` field
+is pipe-separated `key:value` pairs; parsers must ignore keys they do not
+know, which is how additions stay backward compatible.
+
+### `STEPPERn` keys
+
+| Key | Meaning |
+|---|---|
+| `pos`, `tgt` | Current and target position, absolute microsteps |
+| `hz` | Configured step rate, full-step Hz (2 decimals) |
+| `us` | Microstep divisor |
+| `ok`, `en`, `mv`, `hold` | Driver healthy / power stage enabled / pulses being issued / at target with a hold countdown running (`0`/`1`) |
+| `hold_s` | Remaining hold time, seconds |
+| `pulses`, `missed` | Pulses issued since boot, missed pulse deadlines |
+| `src` | Origin of the last motion: `init`, `cmd:MOVE`, `cmd:BEND`, `cmd:HOME`, `cmd:ZERO`, `cmd:STOP`, `cmd:PULL`; `-` when empty |
+| `zeroed` | `1` once `SET_POSITION_ZERO <id>` has run since the onboard started (absolute moves, homing, pulls and sequences need it) — added 2026-08-28 |
+| `seq` | Name of the bend sequence active on this motor, `-` when none — added 2026-08-28 |
+| `seqst` | `idle`, `run`, or `pause` — added 2026-08-28 |
+
+### `CTRL` keys (added 2026-08-28)
+
+Emitted after `COMPONENT_STATE` and before `STEPPER0`, every frame.
+
+| Key | Meaning |
+|---|---|
+| `fallback` | `1` while link-loss fallback is active (`manual.link_loss_fallback_*`) |
+| `link_loss_s` | Seconds since an established link was last seen (1 decimal; `0.0` while healthy) |
+| `energy_wh` | Cumulative heater energy this session (2 decimals) |
+| `budget_wh` | `power.energy_budget_wh` (1 decimal; `0.0` means unlimited) |
+| `budget_exhausted` | `1` once the energy latch has tripped (heaters stay off until `RESET_CTRL`) |
+| `heaters_active` | Number of heaters with a non-zero scheduled duty this tick (owner cap: 3) |
+| `queue` | Frames waiting in the durable telemetry queue before this one was enqueued (a backlog draining after a link outage) |
+| `plan` | Link-loss failsafe plan state: `none` (nothing loaded, or disarmed), `armed`, `running`, `done`, `failed` — see [Link-loss failsafe plan](#link-loss-failsafe-plan) |
+
+Example:
+
+```text
+CTRL=fallback:0|link_loss_s:0.0|energy_wh:12.40|budget_wh:130.0|budget_exhausted:0|heaters_active:2|queue:0|plan:none
+```
 
 Never-valid values serialize as `nan`. After a failure, the last good value is
 retained, its validity becomes `0`, and its age increases. Component states are
@@ -51,7 +90,7 @@ retained, its validity becomes `0`, and its age increases. Component states are
 ### Example
 
 ```text
-DATA,coatheal-1718000000-123456,42,2026-04-16T12:00:00Z,1,-10.23,140.12,0.00012,5.1,5.2,5.0,5.3,5.1,5.2,5.0,5.3,HEATER_DUTY=0.250|0.000|0.250|0.000|0.000|0.050,RESISTANCE=-|-|-|-|-|-|-|-,PHASE=FLOAT,MODE=RUN,STATUS=SD_OK|USB_OK|I2C_OK|SPI_OK|LINK_OK|T_AMBIENT_OK|P_AMBIENT_OK|UNIFORMITY_OK|OVERTEMP_OK|ENERGY_OK|PWM_OK|STEPPER_OK|SAMPLE_TEMP_OK|REAL_SENSORS|SEQ_READY|HEATER_ACTIVE|RESISTANCE_OK,STEPPER0=pos:100|tgt:200|hz:100.00|us:4|en:1|mv:1|hold:0|hold_s:0.00|pulses:100|src:cmd:MOVE,STEPPER1=pos:0|tgt:0|hz:0.00|us:4|en:1|mv:0|hold:0|hold_s:0.00|pulses:0|src:init
+DATA,coatheal-1718000000-123456,42,2026-04-16T12:00:00Z,1,-10.23,140.12,0.00012,5.1,5.2,5.0,5.3,5.1,5.2,5.0,5.3,HEATER_DUTY=0.250|0.000|0.250|0.000|0.000|0.050,RESISTANCE=-|-|-|-|-|-|-|-,PHASE=FLOAT,MODE=RUN,STATUS=SD_OK|USB_OK|I2C_OK|SPI_OK|LINK_OK|T_AMBIENT_OK|P_AMBIENT_OK|UNIFORMITY_OK|OVERTEMP_OK|ENERGY_OK|PWM_OK|STEPPER_OK|SAMPLE_TEMP_OK|REAL_SENSORS|SEQ_READY|HEATER_ACTIVE|RESISTANCE_OK,SENSOR_VALID=AT:1|AP:1|UV:1|S0:1|S1:1|S2:1|S3:1|S4:1|S5:1|S6:1|S7:1,SENSOR_AGE_MS=AT:120|AP:120|UV:250|S0:900|S1:900|S2:900|S3:900|S4:900|S5:900|S6:900|S7:900,COMPONENT_STATE=DPS310:OK|ADS1115:OK|SEQUENT_RTD:OK|MOTOR0:OK|MOTOR1:OK|PWM:OK,CTRL=fallback:0|link_loss_s:0.0|energy_wh:12.40|budget_wh:130.0|budget_exhausted:0|heaters_active:3|queue:0|plan:none,STEPPER0=pos:100|tgt:200|hz:100.00|us:4|ok:1|en:1|mv:1|hold:0|hold_s:0.00|pulses:100|missed:0|src:cmd:MOVE|zeroed:1|seq:-|seqst:idle,STEPPER1=pos:0|tgt:0|hz:0.00|us:4|ok:1|en:1|mv:0|hold:0|hold_s:0.00|pulses:0|missed:0|src:init|zeroed:0|seq:-|seqst:idle
 ```
 
 ## Status Flags
@@ -155,9 +194,9 @@ NACK,<COMMAND>,<reason>
 | Command | Args | Description |
 |---|---|---|
 | `PING` | none | Liveness check |
-| `STATUS` | none | Lightweight live state: phase/mode, fallback, queue, current hardware flags, and sequence state |
+| `STATUS` | none | Lightweight live state: phase/mode, fallback, `plan=<state>` (failsafe plan), queue, tick rate, `silence=<0\|1>` (radio silence in force), current hardware flags, and sequence state |
 | `COMPONENTS` | none | Non-invasive cached component state, error, and channel summary |
-| `CHECK` | `[ALL\|DPS310\|ADS1115\|SEQUENT_RTD\|DAQ132M\|RTD_CLICK\|MAX31865\|PWM\|MOTOR0\|MOTOR1\|STORAGE\|COMMS]` | Active probe of all or one selected component. `DAQ132M`/`RTD_CLICK` are accepted as legacy aliases for `SEQUENT_RTD` (the retired temperature path). `MAX31865` selects the two v3 sample-resistance clicks — a command-argument addition only, no `COMPONENT_STATE`/frame-format change |
+| `CHECK` | `[ALL\|DPS310\|ADS1115\|SEQUENT_RTD\|DAQ132M\|RTD_CLICK\|MAX31865\|PWM\|MOTOR0\|MOTOR1\|STORAGE\|COMMS]` | Active probe of all or one selected component. `DAQ132M`/`RTD_CLICK` are accepted as legacy aliases for `SEQUENT_RTD` (the retired temperature path). `MAX31865` selects the two v3 sample-resistance clicks — a command-argument addition only, no `COMPONENT_STATE`/frame-format change. Non-fatal driver warnings are appended as `motorN_warn=` (e.g. an enable line that never reaches `DRV_ENN`) |
 | `ARM` | none | Enable manual flight outputs |
 | `DISARM` | none | Disable outputs, clear heater overrides, stop steppers |
 | `SET_PHASE` | `<phase>` | Set `BOOT`, `ASCENT`, `PRE_FLOAT`, `FLOAT`, `DESCENT`, `LANDED`, or `STOPPED` |
@@ -167,8 +206,8 @@ NACK,<COMMAND>,<reason>
 | `RESET_CTRL` | none | Reset PID integrators |
 | `SHUTDOWN_SAFE` | none | Flush logs and stop process |
 | `SET_TICK_HZ` | `<hz>` | Runtime tick/downlink rate, `0.1..5.0` Hz |
-| `RADIO_SILENCE` | none | Stop telemetry transmission while keeping the queue |
-| `RADIO_RESUME` | none | Resume telemetry transmission |
+| `RADIO_SILENCE` | none | Stop every onboard-originated transmission while keeping the queue — see [Radio silence](#radio-silence) |
+| `RADIO_RESUME` | none | Resume transmission and drain the queued frames |
 | `SET_HEATER_DUTY` | `<index> <duty>` | Set one heater duty, index `0..5`. Normal mode requires valid mapped temperature feedback; bench/debug arm allows open-loop duty on channels without feedback or scheduler clamping. |
 | `SET_ALL_DUTY` | `<duty>` | Set all heater duties. Normal mode requires valid temperature feedback for every heater; bench/debug arm allows open-loop duty on all channels without feedback or scheduler clamping. |
 | `SET_TEMP_TARGET` | `<index> <temp_c>` | Set one closed-loop target within configured limits |
@@ -195,9 +234,74 @@ NACK,<COMMAND>,<reason>
 | `BENDSEQ_PAUSE` / `BENDSEQ_RESUME` | `<id>` | Pause or resume the active sequence |
 | `BENDSEQ_STOP` / `BENDSEQ_STATUS` | `<id>` | Stop or inspect sequence state |
 | `BENDSEQ_CLEAR` | `<id> [name]` | Clear one or all stored definitions for a motor |
+| `FALLBACK_PLAN` | `<id> <target_usteps> <hold_s> [speed_hz]` | Load the failsafe bend for one motor (validated like a `BENDSEQ_LOAD` step; refused with `plan running` while the plan executes) — see [Link-loss failsafe plan](#link-loss-failsafe-plan) |
+| `FALLBACK_ARM` | none | Arm the loaded plan. Allowed in any mode: the plan only ever runs during link-loss fallback, which itself requires RUN. `NACK,FALLBACK_ARM,no plan loaded` when nothing is loaded |
+| `FALLBACK_DISARM` | none | Clear the plan state to `none` (motor targets are kept, ready to re-arm). Does not stop a bend already in motion — `STEPPER_STOP <id>` does |
+| `FALLBACK_STATUS` | none | `state=<plan>;armed=<0\|1>;deadline_s=<cfg>;deadline_started=<0\|1>;m0=<target>/<hold_s>/<speed_hz>/<motor state>;m1=...` (`-` = not loaded; `;error=...` after a failure) |
 
 `ON`, `OFF`, and `RESET` remain aliases for `FORCE_START`, `FORCE_STOP`, and
 `RESET_CTRL`.
+
+### Radio silence
+
+After `RADIO_SILENCE` the onboard originates no traffic at all until
+`RADIO_RESUME`: the telemetry client closes and does not reconnect, the
+`ONBOARD_BEACON` broadcast stops, and `GS_HELLO` is not answered (the sender
+is still recorded so a later resume can dial it). The command server keeps
+listening because it is the only way back, but while silent it accepts only
+`RADIO_RESUME`, `RADIO_SILENCE`, `STATUS` and `PING`; every other command —
+including panic commands — is refused with
+
+```text
+NACK,<COMMAND>,radio silence active
+```
+
+before it has any effect. `STATUS` reports `silence=1`. The state is
+persisted as an empty flag file `<storage.queue_dir>/radio_silence`, created
+by `RADIO_SILENCE` and removed by `RADIO_RESUME`, so an onboard restart during
+a mandated silence starts silent. Frames produced while silent stay in the
+durable queue and are delivered in order after `RADIO_RESUME` (`CTRL` `queue`
+shows the backlog draining).
+
+### Link-loss failsafe plan
+
+The failsafe plan is the only motion the onboard ever starts on its own
+(redesign spec §10, owner decisions D3–D6). The operator loads one bend per
+motor with `FALLBACK_PLAN` and arms it with `FALLBACK_ARM` before launch;
+the onboard executes it only while **link-loss fallback is active** and the
+tracked phase is `PRE_FLOAT` or `FLOAT`. A motor's bend starts when all of
+these hold: the plan is armed, the motor is loaded and still pending,
+enabled, zeroed (`SET_POSITION_ZERO`) and healthy, no other plan motor is
+moving, and the mean of the motor's **valid** sample temperatures is inside
+`[fallback.bend_min_c, fallback.bend_max_c]` — or `fallback.bend_deadline_s`
+have passed since fallback first held at `PRE_FLOAT`/`FLOAT`, in which case
+the bend goes ahead regardless of temperature. Motors run in id order (M0
+then M1, one at a time); a motor still not enabled/zeroed/healthy when the
+deadline has passed is `skipped`. The bend is an absolute move with hold
+(`STEPPER_MOVETO` semantics, `speed_hz` applied first when non-zero) and
+emits `EVT,PULL` like any other motion. UV and specimen resistance are
+logged only; they never gate the plan.
+
+States (`CTRL` `plan`, `STATUS` `plan=`, `FALLBACK_STATUS`): `none` →
+`armed` → `running` (from the first start until the last motor settles) →
+`done`; a start the stepper refuses makes the motor and the plan `failed`
+and no further motor is attempted (a transient "motion lock held by another
+motor" is retried instead). Per-motor states are `pending`, `running`,
+`done`, `skipped`, `failed`. A `done` or `failed` plan never runs again —
+across restarts included — until `FALLBACK_DISARM`; a new `FALLBACK_PLAN`
+after that starts a fresh, unarmed plan. If the link returns while a bend is
+in motion the bend finishes. The deadline clock is never persisted: after an
+onboard restart it starts again at the next fallback tick in
+`PRE_FLOAT`/`FLOAT`.
+
+Persistence: `<storage.queue_dir>/fallback_plan.txt`, plain `key=value`
+lines (`armed=`, `state=`, `deadline_s=`, `m0=<target>,<hold_s>,<speed_hz>,<state>`,
+`m1=...`), rewritten on every state change and read at start-up. A missing or
+corrupt file means no plan.
+
+With `fallback.landed_safe=true` the first tick in which fallback is active
+at `LANDED` turns every heater off (same overrides as `HEATERS_OFF`) and
+disables both motors, once.
 
 Setting a duty clears that channel's temperature target. Setting a temperature
 target clears that channel's duty override. `HEATERS_OFF` clears all duties and

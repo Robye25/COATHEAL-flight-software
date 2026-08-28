@@ -62,6 +62,20 @@ target_include_directories(coatheal_phase_rev_c_tests PRIVATE
 
 add_test(NAME coatheal_phase_rev_c_tests COMMAND coatheal_phase_rev_c_tests)
 
+# Link-loss fallback plan state machine (redesign spec §10). Pure: links
+# only the planner so the scripted timelines run without hardware or a
+# SystemController.
+add_executable(coatheal_fallback_planner_tests
+  unit/test_fallback_planner.cpp
+  ${CMAKE_SOURCE_DIR}/onboard/src/fallback_planner.cpp
+)
+
+target_include_directories(coatheal_fallback_planner_tests PRIVATE
+  ${CMAKE_SOURCE_DIR}/onboard/include
+)
+
+add_test(NAME coatheal_fallback_planner_tests COMMAND coatheal_fallback_planner_tests)
+
 # Rev C safety interlock tests.
 add_executable(coatheal_safety_rev_c_tests
   unit/test_safety_rev_c.cpp
