@@ -51,6 +51,13 @@ class EvaluateTests(unittest.TestCase):
         self.assertIn("M1", alarms["HEATERS_INHIBITED"].text)
         self.assertEqual(alarms["HEATERS_INHIBITED"].severity, "amber")
 
+    def test_plan_states_raise_plan_alarm(self) -> None:
+        running = {a.key: a for a in evaluate(state(ctrl="fallback:1|queue:0|plan:running"))}
+        self.assertEqual(running["PLAN"].severity, "amber")
+        failed = {a.key: a for a in evaluate(state(ctrl="fallback:0|queue:0|plan:failed"))}
+        self.assertEqual(failed["PLAN"].severity, "red")
+        self.assertNotIn("PLAN", {a.key for a in evaluate(state(ctrl="fallback:0|queue:0|plan:armed"))})
+
     def test_link_alarm_suppressed_during_silence(self) -> None:
         self.assertIn("LINK", {a.key for a in evaluate(state(link_age=30.0))})
         self.assertNotIn("LINK", {a.key for a in evaluate(state(link_age=30.0, silence=True))})
