@@ -33,6 +33,7 @@ from ..protocol import (
     timeout_for,
 )
 from ..reply_format import parse_kv_body
+from ..seqset import SeqSet
 from ..telemetry_log import LogManager, utc_now_iso
 
 DEFAULT_COMMAND_HOST = "169.254.10.10"
@@ -77,7 +78,10 @@ class TelemetryReceiver(QThread):
         self._port = port
         self._logs = log_manager
         self._stop_flag = threading.Event()
-        self._last_seq_by_session: dict[str, int] = {}
+        # Received (session -> SeqSet). Frames arrive out of order (the
+        # onboard sends this tick's frame before its backlog), so "seq <=
+        # last seen" would drop a whole backlog as duplicates.
+        self._received_by_session: dict[str, SeqSet] = {}
         self._cursor_dirty = False
         self._cursor_last_persist = 0.0
         self._load_cursor()
@@ -95,8 +99,8 @@ class TelemetryReceiver(QThread):
             return
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
-            self._last_seq_by_session = {
-                str(k): int(v) for k, v in data.get("sessions", {}).items()
+            self._received_by_session = {
+                str(k): SeqSet.from_json(v) for k, v in data.get("sessions", {}).items()
             }
         except Exception:
             pass
@@ -109,7 +113,7 @@ class TelemetryReceiver(QThread):
             return
         payload = {
             "updated_utc": datetime.now(timezone.utc).isoformat(),
-            "sessions": self._last_seq_by_session,
+            "sessions": {sid: seen.to_json() for sid, seen in self._received_by_session.items()},
         }
         try:
             self._cursor_path().write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -232,10 +236,11 @@ class TelemetryReceiver(QThread):
                     self.log_message.emit(f"[parse-error] {exc}")
                     continue
 
-                last_seq = self._last_seq_by_session.get(pkt.session_id, -1)
-                is_dup = pkt.seq <= last_seq
+                seen = self._received_by_session.get(pkt.session_id)
+                if seen is None:
+                    seen = self._received_by_session[pkt.session_id] = SeqSet()
+                is_dup = not seen.add(pkt.seq)
                 if not is_dup:
-                    self._last_seq_by_session[pkt.session_id] = pkt.seq
                     self._cursor_dirty = True
                     self._persist_cursor()
 
@@ -251,7 +256,7 @@ class TelemetryReceiver(QThread):
                     continue
 
                 if self._logs.on_packet(pkt, rx_utc):
-                    directory = self._logs.current_dir
+                    directory = self._logs.dir_for(pkt.session_id) or self._logs.current_dir
                     self.log_message.emit(
                         f"[log] session {pkt.session_id} -> {directory}")
                     self.session_opened.emit(pkt.session_id, str(directory))

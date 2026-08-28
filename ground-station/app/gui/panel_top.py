@@ -197,15 +197,24 @@ class TopStrip(QWidget):
         self.btn_enter_safe.set_reason("radio silence active" if active else None)
         self.refresh()
 
-    def set_replay(self, behind_s: Optional[float], eta_s: Optional[float] = None) -> None:
-        """Show how far behind the arriving frames are (None = live)."""
+    def set_replay(self, behind_s: Optional[float], eta_s: Optional[float] = None, *,
+                   live_panels: bool = False, backlog_frames: Optional[int] = None) -> None:
+        """Show the backlog replay (None = nothing replaying). With
+        `live_panels` the panels are current and only the queue depth
+        matters; without it the arriving frames are `behind_s` old."""
         if behind_s is None:
             self._replay_box.hide()
             return
-        text = f"−{format_elapsed(behind_s)}" + (f" · ETA {format_elapsed(eta_s)}" if eta_s else "")
+        eta = f" · ETA {format_elapsed(eta_s)}" if eta_s else ""
+        if live_panels:
+            text = (f"{backlog_frames} queued" if backlog_frames is not None else "draining") + eta
+            tip = "The onboard is replaying its queued backlog into the plots and logs; the panels are live."
+        else:
+            text = f"−{format_elapsed(behind_s)}" + eta
+            tip = "The onboard is replaying its queued backlog; the panels keep showing the last live frame."
         self._replay.setText(text)
         self._replay.setStyleSheet(f"{MONO_CSS} font-weight: bold; color: {AMBER}; border: none;")
-        self._replay_box.setToolTip("The onboard is replaying its queued backlog; the panels keep showing the last live frame.")
+        self._replay_box.setToolTip(tip)
         self._replay_box.show()
 
     def replay_visible(self) -> bool:

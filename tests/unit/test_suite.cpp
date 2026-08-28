@@ -508,6 +508,54 @@ void TestUnackedFramesStillSurviveRestart() {
   std::filesystem::remove_all(queue_dir, ec);
 }
 
+// The drain sends this tick's frame before the backlog, and the ground
+// station must be able to tell the two apart from the wire alone.
+void TestDrainBatchSendsTheNewestFrameFirst() {
+  const std::filesystem::path queue_dir =
+      std::filesystem::temp_directory_path() /
+      ("coatheal_queue_test5_" +
+       std::to_string(coatheal::CurrentUnixEpochSeconds()));
+  std::string error;
+  coatheal::TelemetryQueue queue(queue_dir.string(), 72.0, 1024 * 1024);
+  assert(queue.Initialize(&error));
+  assert(queue.DrainBatch(10).empty());
+  for (std::uint64_t seq = 1; seq <= 6; ++seq) {
+    coatheal::QueuedTelemetryFrame f;
+    // Retention pruning is relative to now: a 1970 timestamp would be dropped.
+    f.queued_epoch_s = coatheal::CurrentUnixEpochSeconds();
+    f.session_id = "s3";
+    f.seq = seq;
+    f.frame = "DATA,s3," + std::to_string(seq) + ",frame";
+    assert(queue.Enqueue(f, &error));
+  }
+  const auto batch = queue.DrainBatch(4);
+  assert(batch.size() == 4);
+  assert(batch[0].seq == 6);  // this tick's frame goes first
+  assert(batch[1].seq == 1 && batch[2].seq == 2 && batch[3].seq == 3);
+  // MUTATION: make DrainBatch return PendingFrames(max) and confirm the
+  // batch[0].seq == 6 assertion fails.
+
+  // Exactly the newest is acked; the backlog is untouched and the next
+  // batch again leads with the newest remaining frame.
+  assert(queue.AcknowledgeExact(batch[0], &error));
+  assert(queue.size() == 5);
+  assert(queue.DrainBatch(10).front().seq == 5);
+  // A cumulative ack of a backlog frame never reaches newer frames.
+  assert(queue.Acknowledge("s3", 3, &error));
+  assert(queue.size() == 2);
+  // Healthy steady state: one pending frame is the whole batch.
+  assert(queue.Acknowledge("s3", 4, &error));
+  assert(queue.DrainBatch(10).size() == 1);
+
+  // The wire stamp: age in seconds, clamped, DATA frames only.
+  assert(coatheal::TagFrameForTransmit("DATA,s3,1,x", 100, 130) == "DATA,s3,1,x,TX=30");
+  assert(coatheal::TagFrameForTransmit("DATA,s3,1,x", 100, 90) == "DATA,s3,1,x,TX=0");
+  assert(coatheal::TagFrameForTransmit("EVT,PULL,s3,1", 100, 130) == "EVT,PULL,s3,1");
+
+  std::error_code ec;
+  std::filesystem::remove_all(queue_dir, ec);
+}
+
 // Writes a complete, valid baseline config to a unique temp path, with
 // `extra` appended so a test can override or add individual keys. Returns
 // the path. The INI parser is last-assignment-wins, so an appended line
@@ -1404,6 +1452,7 @@ int main() {
   TestTelemetryQueueDeferredCompactionRetentionAndTornLines();
   TestDrainedQueueLeavesNothingToReplay();
   TestUnackedFramesStillSurviveRestart();
+  TestDrainBatchSendsTheNewestFrameFirst();
   TestConfigParsesReliabilityFields();
   TestConfigRejectsGpioCollisions();
   TestConfigRejectsReservedGpioCollisions();

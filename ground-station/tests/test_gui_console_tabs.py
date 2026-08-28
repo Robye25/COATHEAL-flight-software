@@ -220,6 +220,63 @@ class ConsoleTabTests(unittest.TestCase):
     # frames too and confirm test_replayed_frames_do_not_drive_state_or_gating
     # fails on "a replayed frame must not overwrite the live state".
 
+    def test_tagged_live_first_drain_keeps_panels_live(self) -> None:
+        from app.protocol import parse_telemetry_csv
+        ctrl = "fallback:0|link_loss_s:0.0|energy_wh:1.0|budget_wh:130.0|budget_exhausted:0|heaters_active:0|queue:{q}|plan:none"
+        # Live-first firmware: this tick's frame (TX=0) arrives before the
+        # previous session's backlog (TX=1800, a different session id).
+        self.win._on_packet(parse_telemetry_csv(frame(seq=3000, mode="RUN", ctrl=ctrl.format(q=2400)) + ",TX=0"))
+        self.assertEqual(self.win._state.mode, "RUN")
+        for k in range(5):
+            self.win._on_packet(parse_telemetry_csv(
+                frame(seq=100 + k, session="coatheal-1787700000-9", mode="STANDBY",
+                      ts="2026-08-27T00:00:00Z", ctrl=ctrl.format(q=2400)) + ",TX=1800"))
+            self.win._on_packet(parse_telemetry_csv(frame(seq=3001 + k, mode="RUN", ctrl=ctrl.format(q=2395 - 5 * k)) + ",TX=0"))
+        self.assertEqual(self.win._state.mode, "RUN", "old-session backlog frames must not touch the panels")
+        self.assertIsNone(self.win._motion.btn_enable.reason())
+        self.assertTrue(self.win._state.replay)
+        self.assertTrue(self.win._state.replay_live_panels)
+        self.assertEqual(self.win._state.replay_backlog_frames, 2375)
+        self.assertTrue(self.win._top.replay_visible())
+        texts = {a.key: a.text for a in self.win._alarms.active}
+        self.assertIn("panels are LIVE", texts.get("REPLAY", ""))
+        self.assertNotIn("RX_QUEUE", texts, "one alarm for the backlog, not two")
+        # The queue empties: replay condition clears once no replay frame has
+        # arrived for a while and the reported depth is back to normal.
+        self.win._last_replay_mono -= 10.0
+        self.win._on_packet(parse_telemetry_csv(frame(seq=3010, mode="RUN", ctrl=ctrl.format(q=0)) + ",TX=0"))
+        self.assertFalse(self.win._state.replay)
+        self.assertFalse(self.win._top.replay_visible())
+
+    # MUTATION: in _on_packet, ignore pkt.tx_age_s when calling classify() and
+    # confirm test_tagged_live_first_drain_keeps_panels_live fails: the
+    # untagged path takes the first 2026-08-27 frame as a clock baseline.
+
+    def test_ack_mode_is_applied_before_the_next_live_frame(self) -> None:
+        import time
+        from datetime import datetime, timezone
+        from app.protocol import CommandResponse
+        now = time.time()
+        live_ts = datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        old_ts = datetime.fromtimestamp(now - 3 * 3600, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.feed(mode="STANDBY", ts=live_ts)
+        self.assertIn("ARM", self.win._motion.btn_enable.reason() or "")
+        self.win._on_response("ARM", CommandResponse(ok=True, command="ARM", body="mode=RUN;manual_control=1", raw=""), 1.0, None)
+        self.assertEqual(self.win._state.mode, "RUN", "the ACK is the onboard's word on its mode")
+        self.assertIsNone(self.win._motion.btn_enable.reason())
+        self.assertIn("now RUN", self.win._system.btn_arm.reason() or "")
+        # A replayed STANDBY frame (untagged firmware) must not undo it...
+        for seq in range(2, 8):
+            self.feed(seq=seq, mode="STANDBY", ts=old_ts)
+        self.assertEqual(self.win._state.mode, "RUN")
+        # ...and the next live frame is authoritative again.
+        self.feed(seq=9, mode="STANDBY", ts=live_ts)
+        self.assertEqual(self.win._state.mode, "STANDBY")
+
+    # MUTATION: delete the `mode=` handling in _on_response and confirm
+    # test_ack_mode_is_applied_before_the_next_live_frame fails on "the ACK is
+    # the onboard's word on its mode".
+
     # ── Debug tab ──
     def test_debug_probe_polls_quietly_and_renders_a_verdict(self) -> None:
         from app.protocol import CommandResponse

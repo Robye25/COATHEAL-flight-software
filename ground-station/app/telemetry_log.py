@@ -24,10 +24,10 @@ import time
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Deque, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 from .protocol import PullEvent, TelemetryPacket
-from .session_dir import SessionDirectory
+from .session_dir import SessionDirectory, session_epoch
 
 TELEMETRY_SCHEMA_VERSION = 6
 SAMPLE_COUNT = 8
@@ -314,7 +314,9 @@ class LogManager:
         self.root = Path(root)
         self._gs_info = dict(gs_info or {})
         self._lock = threading.RLock()
-        self._logs: Optional[SessionLogs] = None
+        self._logs: Optional[SessionLogs] = None      # the live (newest) session
+        self._open: Dict[str, SessionLogs] = {}        # every session with files open
+        self.last_opened: Optional[Tuple[str, Path]] = None
         self._pending_commands: Deque[Dict[str, Any]] = deque(maxlen=buffer_limit)
         self._pending_events: Deque[Dict[str, Any]] = deque(maxlen=buffer_limit)
         self._started = time.time()
@@ -337,13 +339,35 @@ class LogManager:
             return self._logs._meta["frames"] if self._logs is not None else 0
 
     # -- routing -------------------------------------------------------------
-    def _switch_to(self, session_id: str) -> SessionLogs:
-        if self._logs is not None:
-            self._logs.close()
+    def _logs_for(self, session_id: str) -> Tuple[SessionLogs, bool]:
+        """Session logs for `session_id`, opening them if needed. Returns
+        (logs, opened). The live-first drain interleaves the previous
+        session's backlog with the current session's live frames, so more
+        than one session can be open; commands and events go to the newest
+        one (by boot epoch), which is the one the operator is talking to."""
+        logs = self._open.get(session_id)
+        if logs is not None:
+            return logs, False
         logs = SessionLogs(SessionDirectory(self.root, session_id), self._gs_info)
-        self._logs = logs
-        self._flush_pending(logs)
-        return logs
+        self._open[session_id] = logs
+        self.last_opened = (session_id, logs.dir)
+        first = self._logs is None
+        if first or (session_epoch(session_id) or 0) >= (session_epoch(self._logs.session_id) or 0):
+            self._logs = logs
+        if first:
+            self._flush_pending(logs)
+        # Anything older than the previous session is finished: close it.
+        while len(self._open) > 2:
+            oldest = min(self._open, key=lambda sid: (session_epoch(sid) or 0, sid))
+            if oldest == self._logs.session_id:
+                break
+            self._open.pop(oldest).close()
+        return logs, True
+
+    def dir_for(self, session_id: str) -> Optional[Path]:
+        with self._lock:
+            logs = self._open.get(session_id)
+            return logs.dir if logs is not None else None
 
     def _flush_pending(self, logs: SessionLogs) -> None:
         while self._pending_events:
@@ -359,20 +383,16 @@ class LogManager:
         with self._lock:
             if self._closed:
                 return False
-            opened = False
-            if self._logs is None or self._logs.session_id != pkt.session_id:
-                self._switch_to(pkt.session_id)
-                opened = True
-            self._logs.write_packet(pkt, rx_utc)
+            logs, opened = self._logs_for(pkt.session_id)
+            logs.write_packet(pkt, rx_utc)
             return opened
 
     def on_pull(self, ev: PullEvent, rx_utc: Optional[str] = None) -> None:
         with self._lock:
             if self._closed:
                 return
-            if self._logs is None or self._logs.session_id != ev.session_id:
-                self._switch_to(ev.session_id)
-            self._logs.write_pull(ev, rx_utc)
+            logs, _opened = self._logs_for(ev.session_id)
+            logs.write_pull(ev, rx_utc)
 
     def log_command(self, command: str, ok: bool, latency_ms: float,
                     body: str = "", raw: str = "", ts_utc: Optional[str] = None) -> None:
@@ -397,6 +417,11 @@ class LogManager:
                 self._logs.write_event(**record)
 
     def close(self) -> None:
+        with self._lock:
+            for sid, logs in list(self._open.items()):
+                if logs is not self._logs:
+                    logs.close()
+                    self._open.pop(sid, None)
         with self._lock:
             if self._closed:
                 return

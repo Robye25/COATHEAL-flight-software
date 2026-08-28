@@ -57,6 +57,11 @@ class TelemetryPacket:
     # `CTRL=` block (redesign spec §8): raw key -> value strings. Empty when
     # the onboard predates it; every typed accessor below then returns None.
     ctrl: Dict[str, str] = field(default_factory=dict)
+    # `TX=<seconds>` is appended on the wire by the onboard drain (it is not
+    # part of the stored frame): how old the frame was when it was sent.
+    # 0-1 s means live; anything larger is the backlog being replayed. None
+    # when the onboard predates the stamp.
+    tx_age_s: Optional[float] = None
 
     # -- typed CTRL accessors ------------------------------------------------
     def _ctrl_bool(self, key: str) -> Optional[bool]:
@@ -235,6 +240,7 @@ def parse_telemetry_csv(line: str) -> TelemetryPacket:
     sensor_age_ms: Dict[str, int] = {}
     component_state: Dict[str, str] = {}
     ctrl: Dict[str, str] = {}
+    tx_age_s: Optional[float] = None
     for token in parts[heater_field_index + 1 :]:
         if token.startswith("PHASE="):
             phase = token.split('=', 1)[1]
@@ -291,6 +297,11 @@ def parse_telemetry_csv(line: str) -> TelemetryPacket:
                     continue
                 key, value = piece.split(":", 1)
                 ctrl[key] = value
+        elif token.startswith("TX="):
+            try:
+                tx_age_s = max(0.0, float(token[3:]))
+            except ValueError:
+                tx_age_s = None
         elif token.startswith("STEPPER="):
             legacy_stepper = _parse_stepper_segment(token.split('=', 1)[1])
         elif token.startswith("STEPPER"):
@@ -339,6 +350,7 @@ def parse_telemetry_csv(line: str) -> TelemetryPacket:
         steppers=steppers_list,
         stepper=primary_snapshot,
         ctrl=ctrl,
+        tx_age_s=tx_age_s,
     )
 
 

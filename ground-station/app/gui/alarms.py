@@ -38,8 +38,13 @@ def evaluate(state: OnboardState) -> List[Alarm]:
     alarms: List[Alarm] = []
     if state.replay:
         eta = f", ETA {format_elapsed(state.replay_eta_s)}" if state.replay_eta_s else ""
-        alarms.append(Alarm("REPLAY", f"REPLAY — onboard backlog {format_elapsed(state.replay_behind_s)} behind{eta}; "
-                                      "panels show the last LIVE frame, not the replay", AMBER))
+        if state.replay_live_panels:
+            count = f"{state.replay_backlog_frames} queued frames" if state.replay_backlog_frames else "queued frames"
+            alarms.append(Alarm("REPLAY", f"BACKLOG — onboard replaying {count}{eta}; "
+                                          "panels are LIVE, the replay fills plots and logs", AMBER))
+        else:
+            alarms.append(Alarm("REPLAY", f"REPLAY — onboard backlog {format_elapsed(state.replay_behind_s)} behind{eta}; "
+                                          "panels show the last LIVE frame, not the replay", AMBER))
     if state.have_packet:
         if state.flag("OVERTEMP_FAIL"):
             alarms.append(Alarm("OVERTEMP", "OVERTEMP latched — heaters forced off until RESET_CTRL"))
@@ -68,7 +73,8 @@ def evaluate(state: OnboardState) -> List[Alarm]:
         if bad_components or bad_flags:
             alarms.append(Alarm("SENSOR", "SENSOR — " + " ".join(bad_components + bad_flags)))
         if state.queue_depth is not None and state.queue_depth > QUEUE_ALARM_FRAMES:
-            alarms.append(Alarm("RX_QUEUE", f"onboard queue backlog {state.queue_depth} frames (draining)", AMBER))
+            if not (state.replay and state.replay_live_panels):  # the BACKLOG alarm already says so
+                alarms.append(Alarm("RX_QUEUE", f"onboard queue backlog {state.queue_depth} frames (draining)", AMBER))
         if state.plan_state == "running":
             alarms.append(Alarm("PLAN", "fallback plan RUNNING onboard — autonomous bend in progress", AMBER))
         elif state.plan_state == "failed":

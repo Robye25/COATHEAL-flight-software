@@ -1132,11 +1132,15 @@ bool SystemController::DrainTelemetryQueue(bool* link_ok, std::string* error) {
 
   // Rev C: limit drain to a small batch per tick so the control loop is not
   // blocked by a large backlog (the Pi was accumulating 12k+ frames). The
-  // batch bound is applied inside PendingFrames too: copying the entire
+  // batch bound is applied inside DrainBatch too: copying the entire
   // backlog out of the queue every tick is O(backlog) on the control loop.
+  // The batch is this tick's frame first, then the backlog oldest-first
+  // (see TelemetryQueue::DrainBatch), and every DATA line is stamped with
+  // its age on the wire so the ground station can tell live from replay
+  // without synchronised clocks.
   constexpr std::size_t kMaxDrainPerTick = 10;
   std::vector<QueuedTelemetryFrame> pending =
-      telemetry_queue_.PendingFrames(kMaxDrainPerTick);
+      telemetry_queue_.DrainBatch(kMaxDrainPerTick);
   if (pending.empty()) {
     if (link_ok != nullptr) {
       *link_ok = telemetry_client_.is_connected();
@@ -1145,11 +1149,14 @@ bool SystemController::DrainTelemetryQueue(bool* link_ok, std::string* error) {
   }
 
   std::size_t drained = 0;
+  const std::int64_t now_epoch = CurrentUnixEpochSeconds();
 
   for (const QueuedTelemetryFrame& frame : pending) {
     if (drained >= kMaxDrainPerTick) break;
+    const bool newest = drained == 0;
     TelemetryAck ack;
-    if (!telemetry_client_.SendFrameAwaitAck(frame.frame, &ack)) {
+    if (!telemetry_client_.SendFrameAwaitAck(
+            TagFrameForTransmit(frame.frame, frame.queued_epoch_s, now_epoch), &ack)) {
       if (error != nullptr) {
         *error = "failed to send telemetry frame";
       }
@@ -1178,7 +1185,13 @@ bool SystemController::DrainTelemetryQueue(bool* link_ok, std::string* error) {
       return false;
     }
 
-    if (!telemetry_queue_.Acknowledge(ack.session_id, ack.seq, error)) {
+    if (newest) {
+      // The live frame is out of order: a cumulative ack of its seq would
+      // discard every older frame still waiting in the queue.
+      if (!telemetry_queue_.AcknowledgeExact(frame, error)) {
+        return false;
+      }
+    } else if (!telemetry_queue_.Acknowledge(ack.session_id, ack.seq, error)) {
       return false;
     }
 

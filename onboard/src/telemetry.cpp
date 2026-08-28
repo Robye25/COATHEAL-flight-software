@@ -146,6 +146,14 @@ std::string SerializeTelemetryDataFrame(const TelemetryRecord& record,
   return oss.str();
 }
 
+std::string TagFrameForTransmit(const std::string& frame,
+                                std::int64_t queued_epoch_s,
+                                std::int64_t now_epoch_s) {
+  if (frame.rfind("DATA,", 0) != 0) return frame;
+  const std::int64_t age = now_epoch_s > queued_epoch_s ? now_epoch_s - queued_epoch_s : 0;
+  return frame + ",TX=" + std::to_string(age);
+}
+
 std::string SerializeHeatingCycleEvent(const HeatingCycleEvent& event,
                                        const std::string& session_id) {
   std::ostringstream oss;

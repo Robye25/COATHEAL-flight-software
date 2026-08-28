@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import re
 import time
 from pathlib import Path
 from typing import Optional
@@ -88,6 +89,14 @@ class MainWindow(QMainWindow):
         self._verdict = ReplayVerdict(False, 0.0, None)
         self._session_seen = ""
         self._replayed = 0
+        self._replay_shown = False
+        self._last_replay_mono: Optional[float] = None
+        self._backlog_frames: Optional[int] = None
+        # `mode=` from an ARM/DISARM/EXIT_SAFE/STATUS acknowledgement, applied
+        # to the panels until the next live frame confirms it. Without it an
+        # ARM during a backlog replay looked ignored for minutes (bench,
+        # 2026-08-29).
+        self._mode_override: Optional[str] = None
         self._beep = bool(self._settings.value("alarms/beep", False, type=bool))
 
         self._dispatcher = CommandDispatcher(cmd_host, cmd_port, log_manager=self._logs)
@@ -265,11 +274,14 @@ class MainWindow(QMainWindow):
     def _on_packet(self, pkt: TelemetryPacket) -> None:
         now_mono = time.monotonic()
         rx_time = time.time()
-        if pkt.session_id != self._session_seen:
+        if pkt.tx_age_s is None and pkt.session_id != self._session_seen:
+            # Untagged firmware drains strictly in order, so a new session id
+            # is a new stream and the clock-offset baseline starts over.
             self._session_seen = pkt.session_id
             self._replay.reset()
         onboard_ts = parse_onboard_timestamp(pkt.timestamp)
-        self._verdict = self._replay.classify(onboard_ts, rx_time)
+        self._verdict = self._replay.classify(onboard_ts, rx_time, tx_age_s=pkt.tx_age_s,
+                                              queue_depth=pkt.queue_depth)
         self._last_rx_mono = now_mono
         self._frames += 1
         self._top.on_packet_received(pkt.session_id, now_mono)
@@ -279,13 +291,13 @@ class MainWindow(QMainWindow):
         self._plots.on_packet(pkt, onboard_ts if onboard_ts is not None else rx_time)
         if self._verdict.is_replay:
             self._replayed += 1
-            if self._replayed == 1:
-                self._events.append("[replay] onboard backlog replay detected — panels keep the last live frame", "WARN")
+            self._last_replay_mono = now_mono
             self._apply_state()
         else:
-            if self._replayed and self._last_pkt is not None:
-                self._events.append(f"[replay] caught up after {self._replayed} replayed frames")
-            self._replayed = 0
+            self._session_seen = pkt.session_id
+            if self._verdict.tagged:
+                self._backlog_frames = self._verdict.backlog_frames
+            self._mode_override = None
             self._last_pkt = pkt
             self._top.set_health(pkt)
             self._health.on_packet(pkt)
@@ -303,6 +315,14 @@ class MainWindow(QMainWindow):
         body = resp.body if resp.ok else (resp.error or resp.raw)
         self._events.append(f"[{'ACK' if resp.ok else 'NACK'}] {cmd}  ({ms:.0f} ms)  {body}",
                             "INFO" if resp.ok else "WARN")
+        verb = cmd.strip().split()[0].upper() if cmd.strip() else ""
+        if resp.ok and verb in ("ARM", "DISARM", "EXIT_SAFE", "ENTER_SAFE", "STATUS"):
+            # The acknowledgement is the onboard's word on its mode right now;
+            # the panels must not wait for the next live frame to show it.
+            match = re.search(r"(?:^|;)mode=([A-Z]+)", resp.body or "")
+            if match:
+                self._mode_override = match.group(1)
+                self._apply_state()
         self._console.on_response(cmd, resp, ms, tag)
         for panel in (self._system, self._thermal, self._motion, self._advanced, self._checkout):
             panel.on_response(cmd, resp, ms, tag)
@@ -326,11 +346,33 @@ class MainWindow(QMainWindow):
             state = state_from_packet(self._last_pkt, silence=silence, link_age_s=age)
         else:
             state = dataclasses.replace(OnboardState(), silence=silence, link_age_s=age)
-        replaying = self._verdict.is_replay and age is not None and age < 10.0
+        tagged = self._verdict.tagged
+        if tagged:
+            # Live-first drain: replay frames interleave with live ones, so
+            # "replaying" is a condition, not the verdict of the last frame.
+            now = time.monotonic()
+            recent = self._last_replay_mono is not None and (now - self._last_replay_mono) < 3.0
+            replaying = age is not None and age < 10.0 and (recent or (self._backlog_frames or 0) > 10)
+        else:
+            replaying = self._verdict.is_replay and age is not None and age < 10.0
+        if replaying != self._replay_shown:
+            self._replay_shown = replaying
+            if replaying:
+                self._events.append("[replay] onboard backlog replaying — panels stay LIVE (frames carry their age); "
+                                    "plots and logs fill in" if tagged else
+                                    "[replay] onboard backlog replay detected — panels keep the last live frame", "WARN")
+            else:
+                self._events.append(f"[replay] caught up after {self._replayed} replayed frames")
+                self._replayed = 0
         state = dataclasses.replace(state, replay=replaying,
                                     replay_behind_s=self._verdict.behind_s if replaying else 0.0,
-                                    replay_eta_s=self._verdict.eta_s if replaying else None)
-        self._top.set_replay(state.replay_behind_s if replaying else None, state.replay_eta_s)
+                                    replay_eta_s=self._verdict.eta_s if replaying else None,
+                                    replay_live_panels=replaying and tagged,
+                                    replay_backlog_frames=self._backlog_frames if (replaying and tagged) else None)
+        if self._mode_override and state.have_packet and state.mode != self._mode_override:
+            state = dataclasses.replace(state, mode=self._mode_override)
+        self._top.set_replay(state.replay_behind_s if replaying else None, state.replay_eta_s,
+                             live_panels=state.replay_live_panels, backlog_frames=state.replay_backlog_frames)
         self._state = state
         alarms = self._alarms.update(state)
         if self._alarms.new_keys:
