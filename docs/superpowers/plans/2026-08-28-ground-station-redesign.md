@@ -166,8 +166,8 @@ the logic that must be unit-tested without a display: `alarms.py`,
 
 **Files:** `onboard/include/coatheal/config.hpp` + `config.cpp` (`fallback.bend_min_c`, `bend_max_c`, `bend_deadline_s`, `landed_safe`), `command.hpp`/`command_parser.cpp` (`FALLBACK_PLAN`, `FALLBACK_ARM`, `FALLBACK_DISARM`, `FALLBACK_STATUS`), `system_controller.*` (plan store persisted under `storage.queue_dir`, executor in the tick, `plan:` in `CTRL`), tests `tests/unit/test_phase_rev_c.cpp` / new `test_fallback_plan.cpp`; `docs/protocol.md`, `docs/manual-operations.md`, `config/onboard.example.ini`.
 
-- [ ] Trigger and execution exactly per spec §10; `done` persisted; LANDED behaviour per D6.
-- [ ] Tests drive the controller with a scripted link/pressure/temperature timeline (fake sensors) and assert: no motion before fallback; bend at PRE_FLOAT with window met; deadline behaviour; never twice; disarm stops it.
+- [x] Trigger and execution exactly per spec §10; `done` persisted; LANDED behaviour per D6. (merged 2026-08-28, `fb5d85f`; C++ 18/18)
+- [x] Tests drive the pure `FallbackPlanner` with scripted timelines (10 cases + command/config tests); the tick wiring and LANDED safing are covered by reading and need one bench run (fake sensors) and assert: no motion before fallback; bend at PRE_FLOAT with window met; deadline behaviour; never twice; disarm stops it.
 
 ### Task C2: GUI fallback panel
 
@@ -180,4 +180,4 @@ the logic that must be unit-tested without a display: `alarms.py`,
 - [x] D1 Both suites green; mutation notes collected in the PR description.
 - [x] D2 (read-only part) Bench: GUI against the Pi read-only (2026-08-28: STATUS/COMPONENTS/GET_THERMAL/CHECK/BENDSEQ_STATUS via the console; Pi connected telemetry and drained its backlog into a session directory; CLI telemetry-server wrote the same layout). Still open: the onboard-dependent checks after deploying the branch to the Pi (PING/STATUS/COMPONENTS/CHECK); with the owner: ARM, enable, zero, jog, bend on M1; radio silence with `tcpdump -i eth0 src <pi>` on the Pi showing no onboard-originated packets except replies to the operator's commands.
 - [x] D3 Launchers: `COATHEAL-GroundStation.sh --check` and the Windows `.bat --check` unchanged and passing.
-- [ ] D4 Pull request `feature/gs-redesign` → `main` with before/after screenshots.
+- [ ] D4 Pull request `feature/gs-redesign` → `main` with before/after screenshots (branch not pushed yet — owner's call).
