@@ -185,6 +185,20 @@ class LogManagerTests(unittest.TestCase):
     # and confirm test_session_switch_and_pending_flush fails: commands.csv of
     # the first session lists only ["ARM"].
 
+    def test_session_meta_written_on_first_frame(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = LogManager(Path(tmp) / "logs")
+            mgr.on_packet(parse_telemetry_csv(FRAME_A), rx_utc="rx1")
+            meta = json.loads((mgr.current_dir / "session.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["first_frame_utc"], "rx1",
+                             "session.json must be truthful even if the process dies before close()")
+            self.assertEqual(meta["frames"], 1)
+            mgr.close()
+
+    # MUTATION: remove the `self._write_meta()` call from the first-frame
+    # branch of SessionLogs.write_packet and confirm
+    # test_session_meta_written_on_first_frame fails (first_frame_utc None).
+
     def test_close_without_session_keeps_operator_record(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "logs"

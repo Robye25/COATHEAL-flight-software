@@ -272,7 +272,10 @@ class SessionLogs:
         if meta["first_frame_utc"] is None:
             meta["first_frame_utc"] = rx
             meta["first_seq"] = pkt.seq
-        if meta["frames"] % self.META_EVERY == 0:
+            # Written immediately: a process killed before its first
+            # periodic refresh must still leave a truthful session.json.
+            self._write_meta()
+        elif meta["frames"] % self.META_EVERY == 0:
             self._write_meta()
 
     def write_pull(self, ev: PullEvent, rx_utc: Optional[str] = None) -> None:
