@@ -8,6 +8,8 @@
 //   (e) MotionLock: two motors TryAcquire -> second returns false.
 
 #include <cassert>
+#include <chrono>
+#include <thread>
 #include <cstdint>
 #include <iostream>
 #include <memory>
@@ -55,6 +57,34 @@ std::unique_ptr<StepperChannel> MakeChannel(int id, MotionLock* lock = nullptr) 
 // ustep rate, which under a trapezoidal profile should: rise, plateau near
 // max, then fall. We assert the (smoothed) rate profile is non-decreasing
 // up to a peak and non-increasing afterwards.
+// The pulse thread must ramp in REAL time. It used to feed the ramp a fixed
+// 1 ms per iteration while each iteration is one pulse plus a sleep of one
+// pulse period, so acceleration was applied per step: a 400-microstep move
+// at 100 Hz / 200 steps/s^2 took ~7 s of crawl instead of ~1.3 s (bench,
+// 2026-08-29: "the motors never move").
+void TestPulseThreadRampsInRealTime() {
+  StepperChannelConfig cfg = MakeChannelCfg(0);
+  cfg.use_pulse_thread = true;
+  auto ch = std::make_unique<StepperChannel>(cfg, std::make_unique<SimulatedStepperDriver>(), nullptr);
+  std::string err;
+  const auto t0 = std::chrono::steady_clock::now();
+  assert(ch->MoveToSteps(400, 0.0, &err));
+  double elapsed = 0.0;
+  while (elapsed < 6.0) {
+    ch->Tick(0.05);  // the control loop only wakes the thread in this mode
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    if (ch->Snapshot().position_steps == 400) break;
+  }
+  assert(ch->Snapshot().position_steps == 400);
+  // 100 full steps: 0.5 s ramp covering 25 steps, ~75 steps at 100 Hz, a
+  // short brake -- about 1.3 s. Per-step acceleration needed ~7 s.
+  assert(elapsed > 0.8);
+  assert(elapsed < 3.0);
+  // MUTATION: restore `UpdateRampSpeed(0.001, ...)` in PulseThreadBody and
+  // confirm this test fails on `elapsed < 3.0`.
+}
+
 void TestTrapezoidalRamp() {
   auto ch = MakeChannel(0);
   std::string err;
@@ -598,6 +628,7 @@ int main() {
   TestRefusedEnableCarriesDriverReason();
   TestRefusedEnableWithoutReasonLeavesErrorUntouched();
   TestTrapezoidalRamp();
+  TestPulseThreadRampsInRealTime();
   TestParserIdArgument();
   TestParserLegacyDefault();
   TestBendArityDisambiguation();

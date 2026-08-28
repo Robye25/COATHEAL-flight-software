@@ -260,6 +260,7 @@ void StepperChannel::PulseThreadBody() {
   // wall-clock jumps don't disturb spacing.
   using clock = std::chrono::steady_clock;
   auto next_pulse = clock::now();
+  auto last_ramp_update = clock::now();
 
   while (pulse_thread_run_.load()) {
     std::unique_lock<std::mutex> lock(mu_);
@@ -267,6 +268,7 @@ void StepperChannel::PulseThreadBody() {
       // Nothing to pulse — sleep briefly and re-check.
       cv_.wait_for(lock, std::chrono::milliseconds(5));
       next_pulse = clock::now();
+      last_ramp_update = next_pulse;
       continue;
     }
     const std::int64_t remaining_usteps = std::abs(target_ - position_);
@@ -275,8 +277,19 @@ void StepperChannel::PulseThreadBody() {
       continue;
     }
     // Time-slice: update ramp at 1 kHz, so advance ~1 ms at a time.
-    constexpr double dt_tick = 0.001;
-    UpdateRampSpeed(dt_tick, remaining_usteps);
+    // The ramp integrates real elapsed time. This used to pass a fixed
+    // 1 ms per iteration, but an iteration is one pulse followed by a sleep
+    // of one pulse period, so the acceleration was applied per STEP, not
+    // per second: from standstill the motor crawled at a few microsteps
+    // per second and needed ~500 pulses (5-7 s) to reach 100 Hz -- the
+    // "motors never move" seen on the bench, 2026-08-29. Capped so a
+    // scheduling hiccup cannot jump the speed.
+    const auto now_ramp = clock::now();
+    double dt_s = std::chrono::duration<double>(now_ramp - last_ramp_update).count();
+    last_ramp_update = now_ramp;
+    if (dt_s < 0.0) dt_s = 0.0;
+    if (dt_s > 0.05) dt_s = 0.05;
+    UpdateRampSpeed(dt_s, remaining_usteps);
     const double ustep_rate =
         current_step_hz_ * static_cast<double>(microstep_);
     if (ustep_rate < 1.0) {
