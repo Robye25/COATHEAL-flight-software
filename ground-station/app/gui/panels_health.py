@@ -14,14 +14,15 @@ Wire authority for COMPONENT_STATE:
     `parse_telemetry_csv` turns COMPONENT_STATE=key:state|... into
     `TelemetryPacket.component_state: Dict[str, str]`.
 
-This panel is now the single home for flag-state display in the GUI —
-ValuesPanel no longer duplicates it (see panels_info.py).
+This panel is the single home for flag-state display in the GUI; the
+Values tab (panel_values.py) shows numbers only. `health_summary` is the
+aggregate the top strip's HEALTH dot shows.
 """
 from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QGridLayout, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget,
 )
@@ -100,6 +101,44 @@ def component_color(state: Optional[str]) -> str:
     return GRAY
 
 
+def health_summary(pkt: TelemetryPacket) -> Tuple[str, str]:
+    """Aggregate (color, tooltip) for the top strip's HEALTH dot.
+
+    Green only when every OK/FAIL flag is present and OK and no component
+    is DEGRADED/STALE/FAILED; red if any flag is FAIL or any component is
+    red; amber when everything else is green-worthy but sensors are
+    simulated; gray before the first packet or when flags are unreported
+    (a truncated STATUS field must not paint green over 13 silent flags).
+    """
+    tokens = set(pkt.status.split("|")) if pkt.status else set()
+    failing: List[str] = []
+    unreported: List[str] = []
+    for key, _label in OK_FAIL_FLAGS:
+        if f"{key}_FAIL" in tokens:
+            failing.append(key)
+        elif f"{key}_OK" not in tokens:
+            unreported.append(key)
+    component_state = pkt.component_state or {}
+    red_components = [
+        f"{key} {component_state[key]}" for key, _label in COMPONENTS
+        if component_color(component_state.get(key)) == RED
+    ]
+    if failing or red_components:
+        parts = []
+        if failing:
+            parts.append(", ".join(failing) + " failing")
+        if red_components:
+            parts.append(", ".join(red_components))
+        return RED, "; ".join(parts)
+    if not unreported:
+        if "SIMULATED" in tokens:
+            return AMBER, "running on simulated sensors"
+        return GREEN, "All 14 system flags OK, components OK"
+    if len(unreported) == len(OK_FAIL_FLAGS):
+        return GRAY, "no health flags reported"
+    return GRAY, f"{len(unreported)} flags unreported: " + ", ".join(unreported)
+
+
 class HealthPanel(QWidget):
     """Health tab content. Reuses `StatusDot` from widgets.py for every
     indicator so tests can assert colors via the same `.color()`
@@ -119,7 +158,7 @@ class HealthPanel(QWidget):
         outer.addWidget(scroll)
 
         lay = QVBoxLayout(inner)
-        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setContentsMargins(8, 8, 18, 8)
         lay.setSpacing(8)
 
         # key -> (dot, label). Keys: OK/FAIL flags use their wire key
@@ -164,13 +203,16 @@ class HealthPanel(QWidget):
         grid.setHorizontalSpacing(14)
         grid.setVerticalSpacing(4)
         for i, (key, label, tooltip) in enumerate(rows):
-            row, col = divmod(i, 2)
+            # Single column: the right column is ~300 px on the smallest
+            # supported screen and the longest label does not fit twice.
+            row, col = i, 0
             dot = StatusDot(11)
             dot.set_color(GRAY)
             dot.setToolTip(tooltip)
             text = QLabel(label)
             text.setStyleSheet("font-size: 11pt;")
             text.setToolTip(tooltip)
+            text.setWordWrap(True)
             cell = QWidget()
             h = QHBoxLayout(cell)
             h.setContentsMargins(0, 0, 0, 0)
@@ -199,6 +241,7 @@ class HealthPanel(QWidget):
             text = QLabel(label)
             text.setStyleSheet("font-size: 11pt;")
             text.setToolTip(tooltip)
+            text.setWordWrap(True)
             state_lbl = QLabel("—")
             state_lbl.setStyleSheet(
                 "font-family: monospace; font-size: 10pt; color: #888;")
