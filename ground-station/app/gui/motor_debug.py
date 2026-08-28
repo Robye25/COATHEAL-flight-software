@@ -64,6 +64,8 @@ class MotorDebugSample:
     drv_enn: Optional[bool]
     sd_mode: Optional[bool]
     toff: Optional[int]
+    gstat: Optional[int]
+    resets: Optional[int]
     faults: Tuple[str, ...]
     raw: Dict[str, str] = field(default_factory=dict)
 
@@ -86,6 +88,7 @@ class MotorDebugSample:
             vactual=_int(kv, "vactual"), mscnt=_int(kv, "mscnt"), tstep=_int(kv, "tstep"),
             stst=_flag(kv, "stst"), cs_actual=_int(kv, "cs_actual"), sg_result=_int(kv, "sg_result"),
             drv_enn=_flag(kv, "drv_enn"), sd_mode=_flag(kv, "sd_mode"), toff=_int(kv, "toff"),
+            gstat=_int(kv, "gstat"), resets=_int(kv, "resets"),
             faults=faults, raw=kv,
         )
 
@@ -152,8 +155,20 @@ class MotionEstimator:
                               len(s), verdict, color)
 
     def _verdict(self, last: Optional[MotorDebugSample], seq_rate: float, ramp_rate: float) -> Tuple[str, str]:
+        text, color = self._verdict_core(last, seq_rate, ramp_rate)
+        if last is not None and last.resets:
+            text += f" · chip reset ×{last.resets} since boot — check the 12 V motor supply"
+            if color == "green":
+                color = "amber"
+        return text, color
+
+    def _verdict_core(self, last: Optional[MotorDebugSample], seq_rate: float, ramp_rate: float) -> Tuple[str, str]:
         if last is None:
             return "no sample yet", "gray"
+        if last.gstat is not None and last.gstat & 1:
+            return ("CHIP RESET since it was configured (GSTAT.reset): VMAX=0 and TOFF=0, the ramp generator "
+                    "cannot move — the 12 V or VCC_IO rail dropped; the firmware re-initialises on the next "
+                    "ENABLE or within 64 steps"), "red"
         if last.faults:
             return "DRIVER FAULT: " + " ".join(last.faults) + " (open-load flags are only valid at standstill)", "red"
         if last.sd_mode:
