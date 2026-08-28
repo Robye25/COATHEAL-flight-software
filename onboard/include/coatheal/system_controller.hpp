@@ -13,6 +13,7 @@
 #include "coatheal/command_parser.hpp"
 #include "coatheal/command_server.hpp"
 #include "coatheal/config.hpp"
+#include "coatheal/fallback_planner.hpp"
 #include "coatheal/heater_scheduler.hpp"
 #include "coatheal/motion_lock.hpp"
 #include "coatheal/sensor_manager.hpp"
@@ -62,6 +63,17 @@ class SystemController {
   std::string RadioSilenceFlagPath() const;
   void PersistRadioSilence(bool silent);
   void RestoreRadioSilence();
+  // Link-loss failsafe plan (redesign spec §10). The planner is pure; these
+  // feed it from the tick, apply its action through the stepper, and keep
+  // `<storage.queue_dir>/fallback_plan.txt` in step with its state.
+  std::string FallbackPlanPath() const;
+  void PersistFallbackPlanIfDirty();
+  void RestoreFallbackPlan();
+  std::string FallbackPlanStateName() const;
+  void TickFallbackPlan(MissionPhase phase, const SensorSnapshot& snapshot);
+  std::optional<double> MotorGroupTemperature(std::size_t motor,
+                                              const SensorSnapshot& snapshot) const;
+  void ApplyLandedSafing();
 
   OnboardConfig config_;
   CommandParser parser_;
@@ -91,6 +103,12 @@ class SystemController {
   TelemetryQueue telemetry_queue_;
   TelemetryClient telemetry_client_;
   std::unique_ptr<StepperController> stepper_;
+
+  // Guarded by fallback_mu_: touched by the command thread (FALLBACK_*)
+  // and the tick thread (TickFallbackPlan).
+  mutable std::mutex fallback_mu_;
+  FallbackPlanner fallback_planner_;
+  bool landed_safed_ = false;
 
   std::atomic<bool> running_{true};
   std::atomic<bool> debug_armed_{false};

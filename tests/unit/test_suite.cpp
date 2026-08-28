@@ -1250,6 +1250,129 @@ void TestRadioSilenceGatesBeaconAndHelloReply() {
   assert(client.hello_reply_allowed());
 }
 
+// ---------------------------------------------------------------------------
+// Link-loss failsafe plan (redesign spec §10). Same bare-controller seam as
+// the radio-silence tests: the command surface and the persistence file are
+// exercised without hardware; the state machine itself is covered by
+// tests/unit/test_fallback_planner.cpp.
+
+void TestFallbackCommandParsing() {
+  coatheal::CommandParser parser;
+  const coatheal::CommandParseResult plan = parser.ParseLine("FALLBACK_PLAN 0 800 5 50");
+  assert(plan.ok);
+  assert(plan.command.type == coatheal::CommandType::kFallbackPlan);
+  assert(plan.command.name == "FALLBACK_PLAN");
+  assert(plan.command.args.size() == 4);
+  assert(parser.ParseLine("FALLBACK_PLAN 1 600 3").ok);
+  assert(!parser.ParseLine("FALLBACK_PLAN 1 600").ok);
+  assert(!parser.ParseLine("FALLBACK_PLAN 1 600 3 50 extra").ok);
+  for (const char* line : {"FALLBACK_ARM", "FALLBACK_DISARM", "FALLBACK_STATUS"}) {
+    assert(parser.ParseLine(line).ok);
+    assert(!parser.ParseLine(std::string(line) + " 1").ok);
+  }
+  assert(parser.ParseLine("FALLBACK_ARM").command.type == coatheal::CommandType::kFallbackArm);
+  assert(parser.ParseLine("FALLBACK_DISARM").command.type == coatheal::CommandType::kFallbackDisarm);
+  assert(parser.ParseLine("FALLBACK_STATUS").command.type == coatheal::CommandType::kFallbackStatus);
+}
+
+void TestFallbackPlanCommands() {
+  const std::filesystem::path queue_dir = FreshQueueDir("fallback");
+  coatheal::SystemController controller(LoadRadioTestConfig(queue_dir));
+
+  // Nothing loaded: arming is refused and the status says so.
+  const std::string arm_empty = controller.HandleCommandLine("FALLBACK_ARM", "");
+  assert(arm_empty.rfind("NACK,FALLBACK_ARM", 0) == 0);
+  assert(ContainsText(arm_empty, "no plan loaded"));
+  assert(controller.HandleCommandLine("FALLBACK_STATUS", "") ==
+         "ACK,FALLBACK_STATUS,state=none;armed=0;deadline_s=1800;deadline_started=0;m0=-;m1=-");
+  assert(ContainsText(controller.HandleCommandLine("STATUS", ""), ";plan=none"));
+
+  // Validation mirrors BENDSEQ_LOAD; motor ids come from the config, so a
+  // bare controller (no stepper) can be pre-loaded on the bench.
+  assert(ContainsText(controller.HandleCommandLine("FALLBACK_PLAN 2 800 5", ""), "invalid motor id"));
+  assert(ContainsText(controller.HandleCommandLine("FALLBACK_PLAN 0 999999 5", ""), "invalid target"));
+  assert(ContainsText(controller.HandleCommandLine("FALLBACK_PLAN 0 800 -1", ""), "invalid hold_s"));
+  assert(ContainsText(controller.HandleCommandLine("FALLBACK_PLAN 0 800 5 500", ""), "invalid speed_hz"));
+  assert(ContainsText(controller.HandleCommandLine("FALLBACK_PLAN 0 800", ""), "invalid argument count"));
+  assert(!std::filesystem::exists(queue_dir / "fallback_plan.txt"));
+
+  assert(controller.HandleCommandLine("FALLBACK_PLAN 0 800 5 50", "") ==
+         "ACK,FALLBACK_PLAN,motor=0;target=800;hold_s=5;speed_hz=50");
+  assert(controller.HandleCommandLine("FALLBACK_PLAN 1 600 3", "") ==
+         "ACK,FALLBACK_PLAN,motor=1;target=600;hold_s=3;speed_hz=0");
+  assert(std::filesystem::exists(queue_dir / "fallback_plan.txt"));
+  assert(controller.HandleCommandLine("FALLBACK_ARM", "") == "ACK,FALLBACK_ARM,plan=armed");
+  assert(controller.HandleCommandLine("FALLBACK_STATUS", "") ==
+         "ACK,FALLBACK_STATUS,state=armed;armed=1;deadline_s=1800;deadline_started=0;"
+         "m0=800/5/50/pending;m1=600/3/0/pending");
+  assert(ContainsText(controller.HandleCommandLine("STATUS", ""), ";plan=armed"));
+
+  // Radio silence refuses the plan commands like everything else.
+  assert(controller.HandleCommandLine("RADIO_SILENCE", "").rfind("ACK,", 0) == 0);
+  assert(ContainsText(controller.HandleCommandLine("FALLBACK_DISARM", ""), "radio silence active"));
+  assert(controller.HandleCommandLine("RADIO_RESUME", "").rfind("ACK,", 0) == 0);
+  assert(ContainsText(controller.HandleCommandLine("FALLBACK_STATUS", ""), "state=armed"));
+
+  // The armed plan survives a restart; DISARM clears it, on disk too.
+  {
+    coatheal::SystemController restarted(LoadRadioTestConfig(queue_dir));
+    const std::string status = restarted.HandleCommandLine("FALLBACK_STATUS", "");
+    assert(ContainsText(status, "state=armed;armed=1"));
+    assert(ContainsText(status, "m0=800/5/50/pending;m1=600/3/0/pending"));
+    assert(ContainsText(restarted.HandleCommandLine("STATUS", ""), ";plan=armed"));
+    assert(restarted.HandleCommandLine("FALLBACK_DISARM", "") == "ACK,FALLBACK_DISARM,plan=none");
+  }
+  coatheal::SystemController third(LoadRadioTestConfig(queue_dir));
+  const std::string after = third.HandleCommandLine("FALLBACK_STATUS", "");
+  assert(ContainsText(after, "state=none;armed=0"));
+  assert(ContainsText(after, "m0=800/5/50/pending"));
+
+  // A corrupt file is ignored: no plan, and the controller still starts.
+  {
+    std::ofstream out(queue_dir / "fallback_plan.txt", std::ios::trunc);
+    out << "state=armed\nm0=not,a,plan,line\n";
+  }
+  coatheal::SystemController corrupt(LoadRadioTestConfig(queue_dir));
+  assert(ContainsText(corrupt.HandleCommandLine("FALLBACK_STATUS", ""), "state=none;armed=0;deadline_s=1800;deadline_started=0;m0=-;m1=-"));
+
+  std::filesystem::remove_all(queue_dir);
+}
+
+void TestFallbackConfigValidation() {
+  coatheal::OnboardConfig cfg;
+  std::string error;
+  assert(coatheal::LoadConfigFromIni(WriteTempConfig(), &cfg, &error));
+  assert(cfg.fallback.bend_min_c == -40.0);
+  assert(cfg.fallback.bend_max_c == 40.0);
+  assert(cfg.fallback.bend_deadline_s == 1800.0);
+  assert(cfg.fallback.landed_safe);
+
+  coatheal::OnboardConfig custom;
+  assert(coatheal::LoadConfigFromIni(
+      WriteTempConfig("fallback.bend_min_c=-20\nfallback.bend_max_c=20\n"
+                      "fallback.bend_deadline_s=600\nfallback.landed_safe=false\n"),
+      &custom, &error));
+  assert(custom.fallback.bend_min_c == -20.0);
+  assert(custom.fallback.bend_max_c == 20.0);
+  assert(custom.fallback.bend_deadline_s == 600.0);
+  assert(!custom.fallback.landed_safe);
+
+  // A fresh config per load: the parser fills the struct before validating,
+  // so a rejected window would otherwise leak into the next case.
+  coatheal::OnboardConfig inverted;
+  assert(!coatheal::LoadConfigFromIni(
+      WriteTempConfig("fallback.bend_min_c=10\nfallback.bend_max_c=5\n"), &inverted, &error));
+  assert(error == "fallback.bend_max_c must be > fallback.bend_min_c");
+  coatheal::OnboardConfig flat;
+  assert(!coatheal::LoadConfigFromIni(
+      WriteTempConfig("fallback.bend_min_c=5\nfallback.bend_max_c=5\n"), &flat, &error));
+  assert(error == "fallback.bend_max_c must be > fallback.bend_min_c");
+  coatheal::OnboardConfig negative;
+  assert(!coatheal::LoadConfigFromIni(
+      WriteTempConfig("fallback.bend_deadline_s=-1\n"), &negative, &error));
+  assert(error == "fallback.bend_deadline_s must be >= 0");
+}
+
 }  // namespace
 
 int main() {
@@ -1284,6 +1407,9 @@ int main() {
   TestRadioSilenceBlocksEverythingButResume();
   TestRadioSilencePersistsAcrossRestart();
   TestRadioSilenceGatesBeaconAndHelloReply();
+  TestFallbackCommandParsing();
+  TestFallbackPlanCommands();
+  TestFallbackConfigValidation();
 
   std::cout << "All unit tests passed.\n";
   return 0;
