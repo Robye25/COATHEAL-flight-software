@@ -22,12 +22,7 @@ RESISTANCE_COLORS = [
 RESISTANCE_LABELS = [f"R{i}" for i in range(8)]
 
 PHASE_COLORS = {
-    # Rev-A phase strings (kept for replay of old logs).
-    "ASCENT_HOLD":     "#3498db",
-    "ACTIVATION_RAMP": "#f39c12",
-    "FLOAT_HOLD":      "#2ecc71",
-    "DESCENT_FLOOR":   "#9b59b6",
-    # Rev C phase names.
+    # Rev C phase names (onboard/include/coatheal/phase.hpp).
     "BOOT":            "#7f8c8d",
     "ASCENT":          "#3498db",
     "PRE_FLOAT":       "#f39c12",
@@ -48,10 +43,7 @@ PRE_FLOAT_PRESSURE_MBAR = 150.0
 
 
 def phase_color(phase: str) -> str:
-    for key, color in PHASE_COLORS.items():
-        if key in phase.upper():
-            return color
-    return "#aaaaaa"
+    return PHASE_COLORS.get((phase or "").strip().upper(), "#aaaaaa")
 
 
 def mode_color(mode: str) -> str:

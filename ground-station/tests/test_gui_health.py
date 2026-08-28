@@ -25,11 +25,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 try:
     from app.protocol import TelemetryPacket
     from app.gui.panels_health import OK_FAIL_FLAGS, TRI_STATE_FLAGS, COMPONENTS
-    from app.gui.panels_info import TopStatusStrip
+    from app.gui.panels_health import health_summary
 except Exception as _import_exc:  # pragma: no cover - exercised only when PyQt6 is absent
     TelemetryPacket = None
     OK_FAIL_FLAGS, TRI_STATE_FLAGS, COMPONENTS = [], [], []
-    TopStatusStrip = None
+    health_summary = None
     _IMPORT_ERROR = _import_exc
 else:
     _IMPORT_ERROR = None
@@ -85,11 +85,7 @@ class HealthPanelTests(unittest.TestCase):
 
         win = self._make_window(44100, 45100, "tabpos")
         try:
-            right_tabs = None
-            for t in win.findChildren(QTabWidget):
-                if t.count() and t.tabText(0) in ("Health", "Values"):
-                    right_tabs = t
-                    break
+            right_tabs = win._right_tabs
             self.assertIsNotNone(right_tabs, "could not locate the right-dock tab widget")
             self.assertEqual(right_tabs.tabText(0), "Health")
             self.assertEqual(right_tabs.currentIndex(), 0)
@@ -419,13 +415,13 @@ class HealthPanelTests(unittest.TestCase):
         showed two red FAILED dots. The aggregate must go red and name
         the failed components.
 
-        Tests `TopStatusStrip._health_summary` directly (a `@staticmethod`,
+        Tests `panels_health.health_summary` directly (a pure function,
         no widget construction needed) rather than through a full
         MainWindow -- the on_packet()->_health_summary() wiring itself is
         already exercised by every other test in this file; a MainWindow
         per test here just adds unnecessary pyqtgraph/Qt object churn to
         the full suite run for no additional coverage."""
-        color, tooltip = TopStatusStrip._health_summary(_packet(
+        color, tooltip = health_summary(_packet(
             status=ALL_OK_STATUS,
             component_state={"MOTOR0": "FAILED", "DPS310": "FAILED"},
         ))
@@ -436,7 +432,7 @@ class HealthPanelTests(unittest.TestCase):
         self.assertIn("DPS310", tooltip)
 
     # MUTATION: drop the `or red_components` clause from the `if failing
-    # or red_components:` check in panels_info.py's `_health_summary` and
+    # or red_components:` check in panels_health.py's `health_summary` and
     # confirm test_component_failed_makes_aggregate_red_even_with_all_ok_flags
     # fails, reporting green instead of red.
 
@@ -446,7 +442,7 @@ class HealthPanelTests(unittest.TestCase):
         plain green all-clear, hiding that the data isn't real. Must be
         amber -- not green (hides the fakery) and not red (SIMULATED
         isn't a failure). Same no-MainWindow rationale as the test above."""
-        color, tooltip = TopStatusStrip._health_summary(
+        color, tooltip = health_summary(
             _packet(status=ALL_OK_STATUS + "|SIMULATED")
         )
         self.assertEqual(color, AMBER,
@@ -454,7 +450,7 @@ class HealthPanelTests(unittest.TestCase):
         self.assertEqual(tooltip, "running on simulated sensors")
 
     # MUTATION: delete the `if "SIMULATED" in tokens: return AMBER, ...`
-    # branch from `_health_summary` in panels_info.py and confirm
+    # branch from `health_summary` in panels_health.py and confirm
     # test_simulated_sensors_make_aggregate_amber_not_green fails,
     # reporting green instead of amber.
 
