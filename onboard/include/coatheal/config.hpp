@@ -28,6 +28,19 @@ struct ManualControlConfig {
   double link_loss_fallback_s = 10.0;
 };
 
+struct FallbackConfig {
+  // Operator-armed bend plan executed only during link-loss fallback
+  // (redesign spec §10, owner decisions D3–D6). A motor's bend starts when
+  // its sample group is inside the temperature window, or unconditionally
+  // once bend_deadline_s have passed since fallback first held at
+  // PRE_FLOAT/FLOAT. landed_safe: heaters off + motors disabled the first
+  // time fallback is active at LANDED.
+  double bend_min_c = -40.0;
+  double bend_max_c = 40.0;
+  double bend_deadline_s = 1800.0;
+  bool landed_safe = true;
+};
+
 struct CommsConfig {
   std::string telemetry_host;
   std::string static_ground_ip;
@@ -230,6 +243,7 @@ struct HalConfig {
 struct OnboardConfig {
   RuntimeConfig runtime;
   ManualControlConfig manual;
+  FallbackConfig fallback;
   CommsConfig comms;
   StorageConfig storage;
   PhaseConfig phase;

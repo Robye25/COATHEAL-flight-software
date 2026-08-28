@@ -56,6 +56,11 @@ enum class CommandType {
   kBendSeqClear,
   kPullArm,
   kPullExecute,
+  // Link-loss failsafe plan (redesign spec §10).
+  kFallbackPlan,
+  kFallbackArm,
+  kFallbackDisarm,
+  kFallbackStatus,
   kUnknown,
 };
 
