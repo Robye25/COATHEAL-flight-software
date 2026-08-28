@@ -25,6 +25,7 @@ namespace {
 // ---------------------------------------------------------------------
 
 constexpr std::uint8_t kRegGCONF = 0x00;
+constexpr std::uint8_t kRegGSTAT = 0x01;
 constexpr std::uint8_t kRegIOIN = 0x04;
 constexpr std::uint8_t kRegGLOBALSCALER = 0x0B;
 constexpr std::uint8_t kRegIHOLD_IRUN = 0x10;
@@ -132,12 +133,13 @@ void ScriptReinitSequence(FakeSpiBus* bus, const Tmc5160Config& cfg,
   ExpectWrite(bus, kRegXTARGET, 0U);
   ExpectRead(bus, kRegGCONF, gconf);
   ExpectRead(bus, kRegCHOPCONF, chopconf_run);
+  ExpectWrite(bus, kRegGSTAT, 0x7U);  // clear reset/drv_err/uv_cp: config is on the chip now
 }
 
 // Total Expect() entries ScriptReinitSequence() queues: IOIN (2) + 16
-// register writes + GCONF/CHOPCONF readback (2*2). Used to prove the
+// register writes + GCONF/CHOPCONF readback (2*2) + the GSTAT clear (1). Used to prove the
 // version-gate test stops exactly at IOIN, not "eventually, somehow".
-constexpr std::size_t kFullReinitExpectationCount = 22;
+constexpr std::size_t kFullReinitExpectationCount = 23;
 
 void ScriptHealthyReinit(FakeSpiBus* bus, const Tmc5160Config& cfg) {
   ScriptReinitSequence(bus, cfg, /*ioin_version_byte=*/0x30);
@@ -423,6 +425,7 @@ void TestStepForwardThenReverseAtDivisor4() {
   cfg.microstep = 4;  // Delta = 256/4 = 64
   auto driver = MakeHealthyDriver(&bus, cfg);
 
+  ExpectRead(&bus, kRegGSTAT, 0U);  // reset check first
   ScriptEnableTrueChopconf(&bus, cfg);
   assert(driver->Enable(true));
 
@@ -452,6 +455,7 @@ void TestStepHonoursInvertDirection() {
   cfg.invert_direction = true;
   auto driver = MakeHealthyDriver(&bus, cfg);
 
+  ExpectRead(&bus, kRegGSTAT, 0U);  // reset check first
   ScriptEnableTrueChopconf(&bus, cfg);
   assert(driver->Enable(true));
 
@@ -478,6 +482,7 @@ void TestEnableFalseFreezesInOrder() {
   Tmc5160Config cfg;
   auto driver = MakeHealthyDriver(&bus, cfg);
 
+  ExpectRead(&bus, kRegGSTAT, 0U);  // reset check first
   ScriptEnableTrueChopconf(&bus, cfg);
   assert(driver->Enable(true));
   assert(driver->enabled());
@@ -515,7 +520,8 @@ void TestEnableFalseDetectsIneffectiveEnableLine() {
   assert(driver->enable_line_effective());
   assert(driver->warning().empty());
 
-  // Enable(true): IOIN verify (DRV_ENN=0, enabled) then CHOPCONF TOFF=3.
+  // Enable(true): GSTAT reset check, IOIN verify (DRV_ENN=0, enabled), then CHOPCONF TOFF=3.
+  ExpectRead(&bus, kRegGSTAT, 0U);
   ExpectRead(&bus, kRegIOIN, 0x30000000U);
   ScriptEnableTrueChopconf(&bus, cfg);
   assert(driver->Enable(true));
@@ -535,6 +541,7 @@ void TestEnableFalseDetectsIneffectiveEnableLine() {
   assert(bus.remaining_expectations() == 0);
 
   // Same cycle with a working line: DRV_ENN=1 after disabling.
+  ExpectRead(&bus, kRegGSTAT, 0U);
   ExpectRead(&bus, kRegIOIN, 0x30000000U);
   ScriptEnableTrueChopconf(&bus, cfg);
   assert(driver->Enable(true));
@@ -549,12 +556,65 @@ void TestEnableFalseDetectsIneffectiveEnableLine() {
   assert(bus.remaining_expectations() == 0);
 
   // Enable(true) with DRV_ENN still HIGH is a refusal, as before.
+  ExpectRead(&bus, kRegGSTAT, 0U);
   ExpectRead(&bus, kRegIOIN, 0x30000010U);
   assert(!driver->Enable(true));
   assert(!driver->healthy());
   assert(driver->last_error().find("DRV_ENN still HIGH") != std::string::npos);
   assert(bus.mismatch_count() == 0);
   assert(bus.remaining_expectations() == 0);
+}
+
+// ---------------------------------------------------------------------
+// Chip reset detection (bench 2026-08-29: CHOPCONF read the power-on value
+// 0x10410150 while the firmware believed the motor was enabled -- VMAX=0,
+// so XTARGET moved and XACTUAL never did).
+// ---------------------------------------------------------------------
+
+void TestChipResetOnEnableIsRecovered() {
+  FakeSpiBus bus;
+  Tmc5160Config cfg;
+  auto driver = MakeHealthyDriver(&bus, cfg);
+  assert(bus.remaining_expectations() == 0);
+  // Enable(true): GSTAT says reset -> full re-initialisation, then TOFF=3.
+  ExpectRead(&bus, kRegGSTAT, 0x1U);
+  ScriptHealthyReinit(&bus, cfg);
+  ExpectWrite(&bus, kRegCHOPCONF, Chopconf(cfg.microstep, /*toff=*/3));
+  assert(driver->Enable(true));
+  assert(bus.mismatch_count() == 0);
+  assert(bus.remaining_expectations() == 0);
+  assert(driver->reset_count() == 1);
+  assert(driver->warning().find("chip reset 1x") != std::string::npos);
+  assert(driver->DebugRegisters().empty());  // no script -> nothing, but resets= is wired:
+  // MUTATION: make RecoverFromChipResetUnlocked ignore GSTAT bit 0 and
+  // confirm this test fails on mismatch_count (the reinit never happens).
+}
+
+void TestChipResetMidMoveIsRecoveredWithinTheCheckInterval() {
+  FakeSpiBus bus;
+  Tmc5160Config cfg;
+  cfg.microstep = 4;
+  auto driver = MakeHealthyDriver(&bus, cfg);
+  ExpectRead(&bus, kRegGSTAT, 0U);
+  ExpectWrite(&bus, kRegCHOPCONF, Chopconf(4, /*toff=*/3));
+  assert(driver->Enable(true));
+  // 63 plain steps, then the 64th re-reads GSTAT and finds the chip reset:
+  // configuration rewritten, chopper restored, and the step continues from
+  // the fresh XACTUAL=0 (target 64, not 64*64).
+  for (int i = 1; i <= 63; ++i) {
+    ExpectWrite(&bus, kRegXTARGET, static_cast<std::uint32_t>(64 * i));
+    assert(driver->Step(true));
+  }
+  ExpectRead(&bus, kRegGSTAT, 0x1U);
+  ScriptHealthyReinit(&bus, cfg);
+  ExpectWrite(&bus, kRegCHOPCONF, Chopconf(4, /*toff=*/3));
+  ExpectWrite(&bus, kRegXTARGET, 64U);
+  assert(driver->Step(true));
+  assert(bus.mismatch_count() == 0);
+  assert(bus.remaining_expectations() == 0);
+  assert(driver->target() == 64);
+  assert(driver->reset_count() == 1);
+  assert(driver->enabled());
 }
 
 // ---------------------------------------------------------------------
@@ -661,6 +721,7 @@ void TestEachDatagramIsOneControllerLockHoldWithModeReapplied() {
   cfg.microstep = 4;
   auto driver = MakeHealthyDriver(&bus, cfg);
 
+  ExpectRead(&bus, kRegGSTAT, 0U);  // reset check first
   ScriptEnableTrueChopconf(&bus, cfg);
   assert(driver->Enable(true));
 
@@ -841,6 +902,8 @@ int main() {
   TestStepHonoursInvertDirection();
   TestEnableFalseFreezesInOrder();
   TestEnableFalseDetectsIneffectiveEnableLine();
+  TestChipResetOnEnableIsRecovered();
+  TestChipResetMidMoveIsRecoveredWithinTheCheckInterval();
   TestDebugRegistersDecodeMotionTruth();
   TestTransferFailureMarksUnhealthyAndActiveCheckReprobes();
   TestEachDatagramIsOneControllerLockHoldWithModeReapplied();

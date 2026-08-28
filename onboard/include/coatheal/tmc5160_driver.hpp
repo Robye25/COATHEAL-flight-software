@@ -91,6 +91,12 @@ class Tmc5160Driver : public StepperDriver {
   // STEPPER_DISABLE unable to cut the power stage through EN. Enable(false)
   // detects it and reports it here and through warning().
   bool enable_line_effective() const { return enable_line_effective_; }
+  // Times GSTAT.reset was found set after initialisation: the chip lost VM
+  // or VCC_IO and came back with reset defaults (VMAX=0, TOFF=0, currents
+  // default). Each time the configuration is rewritten (bench 2026-08-29:
+  // CHOPCONF read 0x10410150 while the firmware believed the motor was
+  // enabled; XACTUAL never followed XTARGET).
+  std::uint32_t reset_count() const { return reset_count_; }
   // Test hook: the IOIN verification after driving EN normally runs only
   // when this driver owns the GPIO (use_gpio=true); FakeSpiBus tests run
   // with use_gpio=false and turn it on explicitly.
@@ -181,6 +187,11 @@ class Tmc5160Driver : public StepperDriver {
   bool verify_enable_line_ = false;
   bool enable_line_effective_ = true;
   bool enable_warning_logged_ = false;
+  std::uint32_t reset_count_ = 0;
+  std::uint32_t steps_since_reset_check_ = 0;
+  // Reads GSTAT; on GSTAT.reset rewrites the whole configuration (and the
+  // running chopper if enabled). False only on a bus failure.
+  bool RecoverFromChipResetUnlocked(const char* where);
   mutable std::mutex io_mu_;
 };
 

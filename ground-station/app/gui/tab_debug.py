@@ -36,6 +36,7 @@ REGISTER_ROWS = [
     ("sg_result", "stallGuard result"), ("drv_enn", "DRV_ENN (1 = power stage off)"), ("toff", "TOFF (0 = chopper off)"),
     ("sd_mode", "SD_MODE (1 = STEP/DIR strap)"), ("enabled", "firmware enabled"), ("moving", "firmware moving"),
     ("pulses", "pulses issued"), ("missed", "missed deadlines"), ("faults", "fault flags"),
+    ("gstat", "GSTAT (bit 0 = reset since configured)"), ("resets", "chip resets since boot"),
 ]
 
 

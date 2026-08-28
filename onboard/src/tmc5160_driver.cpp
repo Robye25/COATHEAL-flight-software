@@ -86,6 +86,14 @@ constexpr std::uint32_t kTpowerdown = 10U;
 // microstep divisor.
 constexpr std::uint32_t kVmax = 4U * 100U * 256U;
 
+// GSTAT flags (write 1 to clear): bit 0 reset, bit 1 drv_err, bit 2 uv_cp.
+constexpr std::uint32_t kGstatReset = 0x1U;
+constexpr std::uint32_t kGstatClearAll = 0x7U;
+// Step() re-reads GSTAT this often. One 5-byte datagram per 64 steps is
+// noise next to the XTARGET write every step, and a brown-out that wiped
+// the chip mid-move is caught within 0.64 s at 100 Hz.
+constexpr std::uint32_t kResetCheckInterval = 64U;
+
 bool IsSupportedMicrostep(int divisor) {
   return Tmc5160Driver::EncodeMres(divisor) != Tmc5160Driver::kInvalidMres;
 }
@@ -538,6 +546,13 @@ bool Tmc5160Driver::ReinitializeUnlocked() {
     return false;
   }
   if (!ReadRegister(kRegCHOPCONF, &verify) || verify != chopconf) {
+    healthy_ = false;
+    return false;
+  }
+  // The configuration is on the chip now: clear the reset/drv_err/uv_cp
+  // flags so that GSTAT.reset from here on means exactly "the chip lost its
+  // configuration since this point".
+  if (!WriteRegister(kRegGSTAT, kGstatClearAll)) {
     std::cerr << "[tmc5160] CHOPCONF verify failed on " << cfg_.spi_device
               << '\n';
     healthy_ = false;
@@ -635,6 +650,10 @@ bool Tmc5160Driver::EnableUnlocked(bool enable) {
   if (!healthy_ && !ReinitializeUnlocked()) {
     return false;
   }
+  if (!RecoverFromChipResetUnlocked("enable")) {
+    return false;
+  }
+  steps_since_reset_check_ = 0;
   // Prove the enable line actually reached the chip. DRV_ENN is mirrored
   // in IOIN, so a broken or unrouted enable trace is detectable over SPI
   // -- and it has to be, because it presents exactly like a healthy motor
@@ -720,21 +739,68 @@ std::string Tmc5160Driver::DebugRegisters() {
       << ";gstat=0x" << std::hex << (gstat & 0x7U) << std::dec
       << ";chopconf=0x" << std::hex << chop << std::dec
       << ";toff=" << (chop & 0xFU)
-      << ";mres=" << mres << ";usteps=" << (256U >> mres);
+      << ";mres=" << mres << ";usteps=" << (256U >> mres)
+      << ";resets=" << reset_count_;
   return out.str();
 }
 
 std::string Tmc5160Driver::warning() const {
-  if (enable_line_effective_) return {};
-  return "enable line " + std::to_string(cfg_.enable_line) +
-         " has no effect on DRV_ENN (cs=" + std::to_string(cfg_.cs_line) +
-         "): the power stage cannot be de-energised through EN; STEPPER_DISABLE"
-         " stops the chopper only";
+  std::string text;
+  if (!enable_line_effective_) {
+    text = "enable line " + std::to_string(cfg_.enable_line) +
+           " has no effect on DRV_ENN (cs=" + std::to_string(cfg_.cs_line) +
+           "): the power stage cannot be de-energised through EN; STEPPER_DISABLE"
+           " stops the chopper only";
+  }
+  if (reset_count_ > 0) {
+    if (!text.empty()) text += "; ";
+    text += "chip reset " + std::to_string(reset_count_) +
+            "x since boot (cs=" + std::to_string(cfg_.cs_line) +
+            "): VM or VCC_IO dropped and the configuration was lost -- restored"
+            " each time, but the motor stalls until then; check the 12 V motor"
+            " supply and its current limit";
+  }
+  return text;
+}
+
+bool Tmc5160Driver::RecoverFromChipResetUnlocked(const char* where) {
+  std::uint32_t gstat = 0;
+  if (!ReadRegister(kRegGSTAT, &gstat)) {
+    ReportError(cfg_.spi_device + " cs=" + std::to_string(cfg_.cs_line) +
+                ": GSTAT read failed (" + where + ")");
+    healthy_ = false;
+    return false;
+  }
+  if ((gstat & kGstatReset) == 0U) return true;
+  ++reset_count_;
+  std::cerr << "[tmc5160] " << cfg_.spi_device << " cs=" << cfg_.cs_line
+            << ": chip reset detected on " << where
+            << " (GSTAT=0x" << std::hex << gstat << std::dec
+            << ") -- VM or VCC_IO dropped since the chip was configured;"
+            << " VMAX/TOFF/currents were back at reset defaults, so the motor"
+            << " could not move. Re-initialising (reset #" << reset_count_
+            << " since boot). Check the 12 V motor supply.\n";
+  const bool was_enabled = enabled_;
+  if (!ReinitializeUnlocked()) {
+    healthy_ = false;
+    return false;
+  }
+  target_ = 0;  // Reinitialize zeroed XACTUAL/XTARGET; the stall lost the position anyway.
+  if (was_enabled && !WriteRegister(kRegCHOPCONF, EncodeChopconf(/*toff=*/3))) {
+    healthy_ = false;
+    return false;
+  }
+  return true;
 }
 
 bool Tmc5160Driver::Step(bool direction_forward) {
   std::lock_guard<std::mutex> lock(io_mu_);
   if (!healthy_ || !enabled_) return false;
+
+  if (++steps_since_reset_check_ >= kResetCheckInterval) {
+    steps_since_reset_check_ = 0;
+    if (!RecoverFromChipResetUnlocked("step")) return false;
+  }
 
   const bool physical_forward = direction_forward != cfg_.invert_direction;
   const std::int64_t delta =

@@ -83,6 +83,15 @@ class EstimatorTests(unittest.TestCase):
         self.assertEqual(e.color, "red")
         self.assertIn("SD_MODE", e.verdict)
 
+    def test_chip_reset_is_named_first(self) -> None:
+        est = MotionEstimator()
+        e = est.add(MotorDebugSample.parse(body().replace("gstat=0x0", "gstat=0x1"), t=0.0))
+        self.assertEqual(e.color, "red")
+        self.assertIn("CHIP RESET", e.verdict)
+        est.reset()
+        e = est.add(MotorDebugSample.parse(body(mscnt=0) + ";resets=2", t=0.0))
+        self.assertIn("reset ×2", e.verdict)
+
     def test_fault_flags(self) -> None:
         est = MotionEstimator()
         e = est.add(MotorDebugSample.parse(body().replace("ola=0", "ola=1"), t=0.0))

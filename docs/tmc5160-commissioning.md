@@ -649,3 +649,24 @@ in the journal, without failing the motor. A boot-time
 `TMC5160_VERSION mismatch got=0x0` means the chip was unpowered (VS/12 V
 rail) when the service started; it is re-probed every `motorN.retry_ms`
 while idle and clears on its own once the rail is up.
+
+## Bench note 2026-08-29 — the chip resets and forgets its configuration
+
+Symptom: `STEPPER_ENABLE` and `STEPPER_MOVE` are acknowledged, telemetry
+position and `pulses` advance, `CHECK` says OK — and nothing turns.
+`MOTOR_DEBUG` showed `chopconf=0x10410150` (the TMC5160 **power-on reset
+value**, which the firmware never writes), `toff=0`, `xtarget` climbing
+while `xactual=0`, and `RAMPSTAT` with `velocity_reached=1` + `vzero=1`:
+the ramp generator was running at its target speed of **zero**, because a
+reset had wiped `VMAX`, `AMAX`, the currents and `TOFF`. The chip resets
+when VM (12 V) or VCC_IO dips — a bench supply on a low current limit is the
+usual cause once the coils draw run current.
+
+The firmware now clears `GSTAT` after configuring the chip and re-reads it
+on every `Enable(true)` and every 64 steps; on `GSTAT.reset` it rewrites
+the whole configuration, restores the chopper, logs
+`[tmc5160] … chip reset detected …`, counts it (`CHECK` → `motorN_warn`,
+`MOTOR_DEBUG` → `resets=`), and the console's Debug tab names it in the
+verdict. A motor that keeps stalling with a rising `resets` count is a
+power-supply problem, not a software one.
+
