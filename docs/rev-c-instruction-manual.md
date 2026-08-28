@@ -837,6 +837,20 @@ EN, the actual sense-resistor value, and board mode jumpers. EN remains
 inactive if TMC5160 `IOIN.VERSION` readback is not `0x30` (a `0x40` reading
 means a TMC2240 is answering that CS, not a TMC5160).
 
+### Motor enables and moves, but `CHECK MOTORn` reports `motorN_warn=enable line ... has no effect on DRV_ENN`
+
+The chip's `DRV_ENN` pin (mirrored in `IOIN` bit 4) did not go HIGH when
+the firmware drove the motor's EN GPIO to disable it, so the enable line
+is not routed to the chip: the module's EN header pin is tied low on the
+board (solder jumper / default strap) or the wire lands on another pin.
+The motor still runs — `STEPPER_DISABLE` stops the chopper (`TOFF=0`) —
+but the power stage cannot be de-energised through EN. Compare the
+module's EN/`DRV_ENN` strap with the working motor's module. Diagnose
+without the service: stop `coatheal-onboard.service`, read `IOIN` over
+SPI while toggling the EN GPIO (the raw probe in
+[tmc5160-commissioning.md](tmc5160-commissioning.md) does this); a
+working line flips `DRV_ENN` within a millisecond.
+
 ### Pulses increase but motor does not move
 
 Verify motor voltage, enable polarity, coil pairs, driver current (against

@@ -166,8 +166,9 @@ class GuiCheckButtonTimeoutTests(unittest.TestCase):
             # network-touching _SendJob.run() never executes.
             win._dispatcher._pool = fake_pool
 
-            btn = self._find_button(win._command_panel, "CHECK")
+            btn = win._system.btn_check
             self.assertIsNotNone(btn, "CHECK button not found")
+            win._system.check_target.setCurrentText("ALL")
             btn.click()
 
             self.assertEqual(len(fake_pool.jobs), 1, "CHECK click should queue exactly one job")

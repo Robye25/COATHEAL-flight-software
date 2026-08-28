@@ -222,9 +222,22 @@ class GsBeacon(QThread):
         self._interval = float(interval_s)
         self._sent_nonces = sent_nonces
         self._stop = threading.Event()
+        # Radio silence (spec §9): while quiet the thread keeps running but
+        # sends nothing, so RADIO_RESUME brings discovery back instantly.
+        self._quiet = threading.Event()
+        self.beacons_sent = 0
 
     def set_priority(self, priority: int) -> None:
         self._priority = max(0, min(999, int(priority)))
+
+    def set_quiet(self, quiet: bool) -> None:
+        if quiet:
+            self._quiet.set()
+        else:
+            self._quiet.clear()
+
+    def is_quiet(self) -> bool:
+        return self._quiet.is_set()
 
     def stop(self) -> None:
         self._stop.set()
@@ -241,6 +254,9 @@ class GsBeacon(QThread):
             last_refresh = 0.0
             targets: list[str] = []
             while not self._stop.is_set():
+                if self._quiet.is_set():
+                    self._stop.wait(self._interval)
+                    continue
                 now = time.monotonic()
                 if now - last_refresh > 30.0:
                     targets = _discovery_targets()
@@ -257,6 +273,7 @@ class GsBeacon(QThread):
                 for addr in targets:
                     try:
                         sock.sendto(line, (addr, self._disc_port))
+                        self.beacons_sent += 1
                     except OSError:
                         continue
                 # also legacy GS_HELLO for older onboard builds
@@ -381,17 +398,33 @@ class CommandProbe(QThread):
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._last_success: tuple[str, int] | None = None
+        # Radio silence: every probe makes the onboard answer, so the probe
+        # is parked while silent and resumes on RADIO_RESUME.
+        self._quiet = threading.Event()
+        self.probes_sent = 0
 
     def set_candidates(self, hosts: list[str]) -> None:
         with self._lock:
             self._hosts = probe_host_candidates(*hosts,
                                                 include_static=self._include_static)
 
+    def set_quiet(self, quiet: bool) -> None:
+        if quiet:
+            self._quiet.set()
+        else:
+            self._quiet.clear()
+
+    def is_quiet(self) -> bool:
+        return self._quiet.is_set()
+
     def stop(self) -> None:
         self._stop.set()
 
     def run(self) -> None:
         while not self._stop.is_set():
+            if self._quiet.is_set():
+                self._stop.wait(self._interval)
+                continue
             with self._lock:
                 hosts = list(self._hosts)
             for host in hosts:
@@ -407,6 +440,7 @@ class CommandProbe(QThread):
             self._stop.wait(self._interval)
 
     def _try_ping(self, host: str) -> bool:
+        self.probes_sent += 1
         try:
             with socket.create_connection((host, self._cmd_port), timeout=self._timeout) as sock:
                 sock.settimeout(self._timeout)

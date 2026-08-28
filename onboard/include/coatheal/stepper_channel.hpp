@@ -120,6 +120,9 @@ class StepperChannel {
   bool SpiBusOk() const {
     return driver_ == nullptr || driver_->spi_bus_ok();
   }
+  std::string DriverWarning() const {
+    return driver_ != nullptr ? driver_->warning() : std::string();
+  }
   std::string LastDriverError() const {
     return driver_ != nullptr ? driver_->last_error() : std::string();
   }

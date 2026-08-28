@@ -132,6 +132,14 @@ std::string CommandTypeToString(CommandType type) {
       return "PULL_ARM";
     case CommandType::kPullExecute:
       return "PULL_EXECUTE";
+    case CommandType::kFallbackPlan:
+      return "FALLBACK_PLAN";
+    case CommandType::kFallbackArm:
+      return "FALLBACK_ARM";
+    case CommandType::kFallbackDisarm:
+      return "FALLBACK_DISARM";
+    case CommandType::kFallbackStatus:
+      return "FALLBACK_STATUS";
     case CommandType::kUnknown:
       return "UNKNOWN";
   }
@@ -225,6 +233,10 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
       {"BENDSEQ_CLEAR", CommandType::kBendSeqClear},
       {"PULL_ARM", CommandType::kPullArm},
       {"PULL_EXECUTE", CommandType::kPullExecute},
+      {"FALLBACK_PLAN", CommandType::kFallbackPlan},
+      {"FALLBACK_ARM", CommandType::kFallbackArm},
+      {"FALLBACK_DISARM", CommandType::kFallbackDisarm},
+      {"FALLBACK_STATUS", CommandType::kFallbackStatus},
   };
 
   std::string cmd;
@@ -338,7 +350,17 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
     case CommandType::kGetThermal:
     case CommandType::kRadioSilence:
     case CommandType::kRadioResume:
+    case CommandType::kFallbackArm:
+    case CommandType::kFallbackDisarm:
+    case CommandType::kFallbackStatus:
       if (!require_args(0)) {
+        return result;
+      }
+      break;
+    case CommandType::kFallbackPlan:
+      // <motor> <target_usteps> <hold_s> [speed_hz]
+      if (command.args.size() < 3 || command.args.size() > 4) {
+        result.error = "invalid argument count for " + command.name;
         return result;
       }
       break;

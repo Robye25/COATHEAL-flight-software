@@ -2,14 +2,10 @@ from __future__ import annotations
 
 import argparse
 import collections
-import csv
-import json
 import math
 import socket
 import threading
 import time
-from dataclasses import asdict
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -22,8 +18,13 @@ from .protocol import (
     parse_pull_event,
     parse_telemetry_csv,
 )
+from .telemetry_log import CsvAppender, LogManager, utc_now_iso
 
 DEFAULT_STATIC_ONBOARD_HOST = "169.254.10.10"
+DEFAULT_LOG_ROOT = Path("logs")
+
+CYCLE_CSV_FIELDS = ["gs_rx_utc", "session_id", "cycle_id", "start_ts", "peak_temp_c",
+                    "hold_duration_s", "cooldown_rate_c_per_s", "specimen_index", "raw"]
 
 
 class LivePlotter:
@@ -90,11 +91,15 @@ class LivePlotter:
 
 
 class TelemetryServer:
+    """Headless telemetry receiver. Writes exactly the files the GUI writes
+    (`telemetry_log.LogManager`, schema v6, one directory per onboard
+    session under `<log_root>/sessions/`)."""
+
     def __init__(
         self,
         bind: str,
         port: int,
-        log_path: Path,
+        log_root: Path,
         plot: bool,
         alert_temp_c: float,
         timeout_s: float,
@@ -106,7 +111,7 @@ class TelemetryServer:
     ):
         self.bind = bind
         self.port = port
-        self.log_path = log_path
+        self.log_root = Path(log_root)
         self.plot = plot
         self.alert_temp_c = alert_temp_c
         self.timeout_s = timeout_s
@@ -124,13 +129,19 @@ class TelemetryServer:
 
         self._lock = threading.Lock()
         self._last_seq_by_session: dict[str, int] = {}
+        self._seen_pull_ids: set[tuple[str, int]] = set()
         self._last_onboard_ip = ""
         self._last_onboard_session = ""
+        self.logs = LogManager(self.log_root, gs_info={
+            "component": "telemetry-server", "bind": bind, "port": port,
+        })
+        self._cycles: Optional[CsvAppender] = None
+        self._cycles_dir: Optional[Path] = None
 
         self._load_cursor()
 
     def run(self) -> None:
-        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.log_root.mkdir(parents=True, exist_ok=True)
         self.cursor_path.parent.mkdir(parents=True, exist_ok=True)
         self.discovered_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -166,6 +177,7 @@ class TelemetryServer:
             net_thread.join(timeout=3.0)
             if discovery_thread is not None:
                 discovery_thread.join(timeout=2.0)
+            self.logs.close()
 
     def stop(self) -> None:
         self._stop.set()
@@ -175,6 +187,7 @@ class TelemetryServer:
             return
 
         try:
+            import json
             data = json.loads(self.cursor_path.read_text(encoding="utf-8"))
             sessions = data.get("sessions", {})
             if isinstance(sessions, dict):
@@ -185,10 +198,12 @@ class TelemetryServer:
                     except (TypeError, ValueError):
                         continue
                 self._last_seq_by_session = parsed
-        except (OSError, ValueError, json.JSONDecodeError):
+        except (OSError, ValueError):
             self._last_seq_by_session = {}
 
     def _persist_cursor(self) -> None:
+        import json
+        from datetime import datetime, timezone
         payload = {
             "updated_utc": datetime.now(timezone.utc).isoformat(),
             "sessions": self._last_seq_by_session,
@@ -199,6 +214,8 @@ class TelemetryServer:
             pass
 
     def _persist_discovered(self) -> None:
+        import json
+        from datetime import datetime, timezone
         payload = {
             "updated_utc": datetime.now(timezone.utc).isoformat(),
             "onboard_ip": self._last_onboard_ip,
@@ -278,345 +295,187 @@ class TelemetryServer:
         finally:
             self._stop.set()
 
+    def _cycle_writer(self) -> Optional[CsvAppender]:
+        """`cycles.csv` lives beside the session's other files; the writer is
+        re-created whenever the session directory changes."""
+        current = self.logs.current_dir
+        if current is None:
+            return None
+        if self._cycles is None or self._cycles_dir != current:
+            if self._cycles is not None:
+                self._cycles.close()
+            self._cycles = CsvAppender(current / "cycles.csv", CYCLE_CSV_FIELDS)
+            self._cycles_dir = current
+        return self._cycles
+
     def _handle_connection(self, conn: socket.socket) -> None:
         buffer = ""
-        first = not self.log_path.exists()
+        conn.settimeout(1.0)
+        timeout_warned = False
+        while not self._stop.is_set():
+            try:
+                chunk = conn.recv(4096)
+            except socket.timeout:
+                if (
+                    self.timeout_s > 0
+                    and self._last_packet_time > 0
+                    and (time.time() - self._last_packet_time) > self.timeout_s
+                ):
+                    if not timeout_warned:
+                        print(
+                            f"[alert] telemetry timeout > {self.timeout_s:.1f}s, "
+                            "closing stale connection"
+                        )
+                        timeout_warned = True
+                    return
+                continue
 
-        # CSV v5: adds `mode` + per-sample `sample_0..7` columns and
-        # per-motor `stepperN_*` columns so an offline analyst can answer "is
-        # HEATER_INHIBITED because motor 0 is moving?" from the CSV alone
-        # without re-parsing the raw frame (Agent C, 2026-04-17).
-        sample_cols = [f"sample_{i}" for i in range(8)]
-        heater_cols = [f"h{i}" for i in range(6)]
-        r_cols = [f"r{i}" for i in range(8)]
-        stepper_cols = []
-        for m in (0, 1):
-            for suffix in (
-                "position", "target", "hz", "microstep",
-                "enabled", "moving", "holding", "hold_s", "pulses",
-            ):
-                stepper_cols.append(f"stepper{m}_{suffix}")
-        with self.log_path.open("a", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(
-                f,
-                fieldnames=[
-                    "session_id",
-                    "seq",
-                    "timestamp",
-                    "rtc_valid",
-                    "ambient_temp_c",
-                    "ambient_pressure_mbar",
-                    "uv",
-                    "sample_temps_c",
-                    *sample_cols,
-                    "heater_duty",
-                    *heater_cols,
-                    *r_cols,
-                    "phase",
-                    "mode",
-                    "status",
-                    "sensor_valid",
-                    "sensor_age_ms",
-                    "component_state",
-                    *stepper_cols,
-                ],
-                # `extrasaction='ignore'` lets us pass the full asdict()
-                # without it raising on the additional in-memory fields
-                # (`steppers`, `stepper`, …).
-                extrasaction="ignore",
-            )
-            if first:
-                writer.writeheader()
+            if not chunk:
+                break
 
-            conn.settimeout(1.0)
-            timeout_warned = False
-            while not self._stop.is_set():
-                try:
-                    chunk = conn.recv(4096)
-                except socket.timeout:
-                    if (
-                        self.timeout_s > 0
-                        and self._last_packet_time > 0
-                        and (time.time() - self._last_packet_time) > self.timeout_s
-                    ):
-                        if not timeout_warned:
-                            print(
-                                f"[alert] telemetry timeout > {self.timeout_s:.1f}s, "
-                                "closing stale connection"
-                            )
-                            timeout_warned = True
-                        return
+            buffer += chunk.decode("utf-8", errors="replace")
+            while "\n" in buffer:
+                line, buffer = buffer.split("\n", 1)
+                line = line.strip()
+                if not line:
                     continue
-
-                if not chunk:
-                    break
-
-                buffer += chunk.decode("utf-8", errors="replace")
-                while "\n" in buffer:
-                    line, buffer = buffer.split("\n", 1)
-                    line = line.strip()
-                    if not line:
-                        continue
-                    if line.startswith("EVT,CYCLE,"):
-                        try:
-                            event = parse_heating_cycle_event(line)
-                        except TelemetryParseError as exc:
-                            print(f"[telemetry][evt-parse-error] {exc}: {line}")
-                            continue
-                        self._last_packet_time = time.time()
-                        self._append_event_log(event, line)
-                        ack_line = build_ack(event.session_id, 0)
-                        try:
-                            conn.sendall(ack_line.encode("utf-8"))
-                        except OSError:
-                            return
-                        print(
-                            f"[evt][cycle] session={event.session_id} cycle={event.cycle_id} "
-                            f"specimen={event.specimen_index} peak={event.peak_temp_c:.2f}C "
-                            f"hold={event.hold_duration_s:.1f}s "
-                            f"cool={event.cooldown_rate_c_per_s:.3f}C/s"
-                        )
-                        continue
-
-                    if line.startswith("EVT,PULL,"):
-                        try:
-                            pull = parse_pull_event(line)
-                        except TelemetryParseError as exc:
-                            print(f"[telemetry][evt-parse-error] {exc}: {line}")
-                            continue
-                        self._last_packet_time = time.time()
-                        # Track
-                        # EVT,PULL by (session, pull_id) so the same event
-                        # replayed from the onboard queue doesn't land in
-                        # the pulls CSV multiple times. Key is independent
-                        # of the telemetry-queue seq, which we don't see on
-                        # the wire.
-                        dup_key = (pull.session_id, int(pull.pull_id))
-                        with self._lock:
-                            seen_pulls = getattr(
-                                self, "_seen_pull_ids",
-                                None)
-                            if seen_pulls is None:
-                                seen_pulls = set()
-                                self._seen_pull_ids = seen_pulls
-                            is_dup_pull = dup_key in seen_pulls
-                            if not is_dup_pull:
-                                seen_pulls.add(dup_key)
-                        if not is_dup_pull:
-                            self._append_pull_log(pull, line)
-                        # Rev C fix: the previous 2**63-1 ACK was nuclear —
-                        # it caused Acknowledge() to delete ALL queued frames
-                        # (seq <= 2^63-1 is always true). ACK with 0 is safe:
-                        # it won't remove any queued DATA frames (their seqs
-                        # start at 1). EVT,PULL events are already deduplicated
-                        # on the ground by (session_id, pull_id), so replays
-                        # from the queue are harmless. The proper long-term fix
-                        # is to embed the queue seq in the EVT wire format or
-                        # give EVT frames a separate dequeue path.
-                        ack_line = build_ack(pull.session_id, 0)
-                        try:
-                            conn.sendall(ack_line.encode("utf-8"))
-                        except OSError:
-                            return
-                        samples_str = "|".join(str(s) for s in pull.samples) or "-"
-                        print(
-                            f"[evt][pull] session={pull.session_id} pull={pull.pull_id} "
-                            f"motor={pull.motor_id} steps={pull.steps_moved} "
-                            f"hold={pull.hold_s:.1f}s samples={samples_str}"
-                        )
-                        continue
-
+                rx_utc = utc_now_iso()
+                if line.startswith("EVT,CYCLE,"):
                     try:
-                        packet = parse_telemetry_csv(line)
+                        event = parse_heating_cycle_event(line)
                     except TelemetryParseError as exc:
-                        print(f"[telemetry][parse-error] {exc}: {line}")
+                        print(f"[telemetry][evt-parse-error] {exc}: {line}")
                         continue
-
                     self._last_packet_time = time.time()
-                    # No box sensor. Use the hottest sample
-                    # reading as the over-temperature trigger instead.
-                    valid_temps = [
-                        value for i, value in enumerate(packet.sample_temps_c)
-                        if packet.sensor_valid.get(f"S{i}", True)
-                        and math.isfinite(value)
-                    ]
-                    hot = max(valid_temps) if valid_temps else None
-                    if hot is not None and hot > self.alert_temp_c:
-                        print(f"[alert] sample temp high: {hot:.2f} C")
-
-                    is_duplicate = False
-                    with self._lock:
-                        last_seq = self._last_seq_by_session.get(packet.session_id, -1)
-                        is_duplicate = packet.seq <= last_seq
-                        if not is_duplicate:
-                            self._last_seq_by_session[packet.session_id] = packet.seq
-                            self._persist_cursor()
-
-                    ack_line = build_ack(packet.session_id, packet.seq)
+                    self._append_cycle(event, line, rx_utc)
+                    ack_line = build_ack(event.session_id, 0)
                     try:
                         conn.sendall(ack_line.encode("utf-8"))
                     except OSError:
                         return
+                    print(
+                        f"[evt][cycle] session={event.session_id} cycle={event.cycle_id} "
+                        f"specimen={event.specimen_index} peak={event.peak_temp_c:.2f}C "
+                        f"hold={event.hold_duration_s:.1f}s "
+                        f"cool={event.cooldown_rate_c_per_s:.3f}C/s"
+                    )
+                    continue
 
-                    if is_duplicate:
-                        print(f"[telemetry] duplicate dropped session={packet.session_id} seq={packet.seq}")
+                if line.startswith("EVT,PULL,"):
+                    try:
+                        pull = parse_pull_event(line)
+                    except TelemetryParseError as exc:
+                        print(f"[telemetry][evt-parse-error] {exc}: {line}")
                         continue
+                    self._last_packet_time = time.time()
+                    # EVT,PULL is keyed by (session, pull_id) so a replay
+                    # from the onboard queue never lands twice in pulls.csv.
+                    dup_key = (pull.session_id, int(pull.pull_id))
+                    with self._lock:
+                        is_dup_pull = dup_key in self._seen_pull_ids
+                        if not is_dup_pull:
+                            self._seen_pull_ids.add(dup_key)
+                    if not is_dup_pull:
+                        self.logs.on_pull(pull, rx_utc)
+                    # ACK with seq 0: removes exactly the queued event frame
+                    # and never touches DATA frames (their seqs start at 1).
+                    ack_line = build_ack(pull.session_id, 0)
+                    try:
+                        conn.sendall(ack_line.encode("utf-8"))
+                    except OSError:
+                        return
+                    samples_str = "|".join(str(s) for s in pull.samples) or "-"
+                    print(
+                        f"[evt][pull] session={pull.session_id} pull={pull.pull_id} "
+                        f"motor={pull.motor_id} steps={pull.steps_moved} "
+                        f"hold={pull.hold_s:.1f}s samples={samples_str}"
+                    )
+                    continue
 
-                    row = asdict(packet)
-                    row["sample_temps_c"] = "|".join(f"{x:.2f}" for x in packet.sample_temps_c)
-                    row["heater_duty"] = "|".join(f"{x:.3f}" for x in packet.heater_duty)
-                    row["sensor_valid"] = "|".join(
-                        f"{key}:{int(value)}"
-                        for key, value in packet.sensor_valid.items())
-                    row["sensor_age_ms"] = "|".join(
-                        f"{key}:{value}"
-                        for key, value in packet.sensor_age_ms.items())
-                    row["component_state"] = "|".join(
-                        f"{key}:{value}"
-                        for key, value in packet.component_state.items())
-                    # Also emit one column per sample/heater so the
-                    # CSV is self-describing and easy to plot directly. Fills
-                    # a `-` placeholder when the wire frame is short so no
-                    # downstream column is blank in a well-formed packet.
-                    for i in range(8):
-                        if i < len(packet.sample_temps_c):
-                            row[f"sample_{i}"] = f"{packet.sample_temps_c[i]:.2f}"
-                        else:
-                            row[f"sample_{i}"] = "-"
-                    for i in range(6):
-                        if i < len(packet.heater_duty):
-                            row[f"h{i}"] = f"{packet.heater_duty[i]:.3f}"
-                        else:
-                            row[f"h{i}"] = "-"
-                    # Resistance: one column per sample. Unmeasured channels
-                    # (wire placeholder "-") map to `None` in the packet, and
-                    # render here as "-" so the column is never blank.
-                    for i in range(8):
-                        if i < len(packet.sample_resistance_ohm):
-                            v = packet.sample_resistance_ohm[i]
-                            row[f"r{i}"] = "-" if v is None else f"{v:.3f}"
-                        else:
-                            row[f"r{i}"] = "-"
-                    # Per-motor stepper snapshot expansion. `steppers` is a
-                    # list of dicts ordered by motor id; we emit only the
-                    # slots the frame carries — missing motors render as "-".
-                    motor_snaps = {s.get("motor_id", i): s
-                                   for i, s in enumerate(packet.steppers)}
-                    for m in (0, 1):
-                        snap = motor_snaps.get(m)
-                        for key, suffix in (
-                            ("position", "position"),
-                            ("target", "target"),
-                            ("hz", "hz"),
-                            ("microstep", "microstep"),
-                            ("enabled", "enabled"),
-                            ("moving", "moving"),
-                            ("holding", "holding"),
-                            ("hold_s", "hold_s"),
-                            ("pulses", "pulses"),
-                        ):
-                            val = snap.get(key) if snap is not None else None
-                            if val is None:
-                                row[f"stepper{m}_{suffix}"] = "-"
-                            elif isinstance(val, bool):
-                                row[f"stepper{m}_{suffix}"] = "1" if val else "0"
-                            elif isinstance(val, float):
-                                row[f"stepper{m}_{suffix}"] = f"{val:.3f}"
-                            else:
-                                row[f"stepper{m}_{suffix}"] = str(val)
-                    writer.writerow(row)
-                    f.flush()
+                try:
+                    packet = parse_telemetry_csv(line)
+                except TelemetryParseError as exc:
+                    print(f"[telemetry][parse-error] {exc}: {line}")
+                    continue
 
-                    if self._plotter is not None:
-                        plot_temp = (
-                            packet.ambient_temp_c
-                            if packet.sensor_valid.get("AT", True) and
-                            math.isfinite(packet.ambient_temp_c)
-                            else math.nan
-                        )
-                        plot_pressure = (
-                            packet.ambient_pressure_mbar
-                            if packet.sensor_valid.get("AP", True) and
-                            math.isfinite(packet.ambient_pressure_mbar)
-                            else math.nan
-                        )
-                        self._plotter.push(packet.seq, plot_temp, plot_pressure)
+                self._last_packet_time = time.time()
+                # No box sensor. Use the hottest sample reading as the
+                # over-temperature trigger instead.
+                valid_temps = [
+                    value for i, value in enumerate(packet.sample_temps_c)
+                    if packet.sensor_valid.get(f"S{i}", True)
+                    and math.isfinite(value)
+                ]
+                hot = max(valid_temps) if valid_temps else None
+                if hot is not None and hot > self.alert_temp_c:
+                    print(f"[alert] sample temp high: {hot:.2f} C")
 
-                    hot_str = f"{hot:.2f}C" if hot is not None else "—"
-                    pressure_text = (
-                        f"{packet.ambient_pressure_mbar:.1f}mbar"
+                with self._lock:
+                    last_seq = self._last_seq_by_session.get(packet.session_id, -1)
+                    is_duplicate = packet.seq <= last_seq
+                    if not is_duplicate:
+                        self._last_seq_by_session[packet.session_id] = packet.seq
+                        self._persist_cursor()
+
+                ack_line = build_ack(packet.session_id, packet.seq)
+                try:
+                    conn.sendall(ack_line.encode("utf-8"))
+                except OSError:
+                    return
+
+                if is_duplicate:
+                    print(f"[telemetry] duplicate dropped session={packet.session_id} seq={packet.seq}")
+                    continue
+
+                if self.logs.on_packet(packet, rx_utc):
+                    print(f"[log] session {packet.session_id} -> {self.logs.current_dir}")
+
+                if self._plotter is not None:
+                    plot_temp = (
+                        packet.ambient_temp_c
+                        if packet.sensor_valid.get("AT", True) and
+                        math.isfinite(packet.ambient_temp_c)
+                        else math.nan
+                    )
+                    plot_pressure = (
+                        packet.ambient_pressure_mbar
                         if packet.sensor_valid.get("AP", True) and
                         math.isfinite(packet.ambient_pressure_mbar)
-                        else "N/A"
+                        else math.nan
                     )
-                    print(
-                        f"[telemetry] session={packet.session_id} seq={packet.seq} phase={packet.phase} "
-                        f"P={pressure_text} Thot={hot_str}"
-                    )
+                    self._plotter.push(packet.seq, plot_temp, plot_pressure)
 
-    def _append_pull_log(self, pull: PullEvent, raw_line: str) -> None:
-        """Write a pull-cycle event to a sibling `<log>_pulls.csv` file.
+                hot_str = f"{hot:.2f}C" if hot is not None else "—"
+                pressure_text = (
+                    f"{packet.ambient_pressure_mbar:.1f}mbar"
+                    if packet.sensor_valid.get("AP", True) and
+                    math.isfinite(packet.ambient_pressure_mbar)
+                    else "N/A"
+                )
+                print(
+                    f"[telemetry] session={packet.session_id} seq={packet.seq} phase={packet.phase} "
+                    f"P={pressure_text} Thot={hot_str}"
+                )
 
-        Kept separate from the cycle events log so the two streams can be
-        analyzed independently post-flight. Header is written on first row
-        only so appending to an existing file remains valid.
-        """
-        pull_path = self.log_path.with_name(self.log_path.stem + "_pulls.csv")
-        first = not pull_path.exists()
+    def _append_cycle(self, event: HeatingCycleEvent, raw_line: str, rx_utc: str) -> None:
+        writer = self._cycle_writer()
+        if writer is None:
+            # No session directory yet (a cycle event before the first DATA
+            # frame): open one for this session so the event is not lost.
+            self.logs.log_event("INFO", f"cycle event before first frame: {raw_line}")
+            return
         try:
-            with pull_path.open("a", newline="", encoding="utf-8") as pf:
-                writer = csv.writer(pf)
-                if first:
-                    writer.writerow([
-                        "session_id",
-                        "pull_id",
-                        "motor_id",
-                        "start_ts",
-                        "steps_moved",
-                        "hold_s",
-                        "samples",
-                        "raw",
-                    ])
-                writer.writerow([
-                    pull.session_id,
-                    pull.pull_id,
-                    pull.motor_id,
-                    pull.start_ts,
-                    pull.steps_moved,
-                    f"{pull.hold_s:.2f}",
-                    "|".join(str(s) for s in pull.samples),
-                    raw_line,
-                ])
-        except OSError as exc:
-            print(f"[evt][pull-log-error] {exc}")
-
-    def _append_event_log(self, event, raw_line: str) -> None:
-        event_path = self.log_path.with_name(self.log_path.stem + "_events.csv")
-        first = not event_path.exists()
-        try:
-            with event_path.open("a", newline="", encoding="utf-8") as ef:
-                writer = csv.writer(ef)
-                if first:
-                    writer.writerow([
-                        "session_id",
-                        "cycle_id",
-                        "start_ts",
-                        "peak_temp_c",
-                        "hold_duration_s",
-                        "cooldown_rate_c_per_s",
-                        "specimen_index",
-                        "raw",
-                    ])
-                writer.writerow([
-                    event.session_id,
-                    event.cycle_id,
-                    event.start_ts,
-                    f"{event.peak_temp_c:.2f}",
-                    f"{event.hold_duration_s:.2f}",
-                    f"{event.cooldown_rate_c_per_s:.4f}",
-                    event.specimen_index,
-                    raw_line,
-                ])
+            writer.write({
+                "gs_rx_utc": rx_utc,
+                "session_id": event.session_id,
+                "cycle_id": event.cycle_id,
+                "start_ts": event.start_ts,
+                "peak_temp_c": f"{event.peak_temp_c:.2f}",
+                "hold_duration_s": f"{event.hold_duration_s:.2f}",
+                "cooldown_rate_c_per_s": f"{event.cooldown_rate_c_per_s:.4f}",
+                "specimen_index": event.specimen_index,
+                "raw": raw_line,
+            })
         except OSError as exc:
             print(f"[evt][log-error] {exc}")
 
@@ -631,7 +490,9 @@ def add_subparser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
     parser = subparsers.add_parser("telemetry-server", help="Run telemetry receiver")
     parser.add_argument("--bind", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=4000)
-    parser.add_argument("--log", type=Path, default=Path("logs/ground_telemetry.csv"))
+    parser.add_argument("--log", type=Path, default=DEFAULT_LOG_ROOT,
+                        help="Log root; every onboard session gets its own directory "
+                             "under <root>/sessions/ (same layout as the GUI).")
     parser.add_argument("--plot", action="store_true", help="Enable live matplotlib plot")
     parser.add_argument("--alert-temp-c", type=float, default=80.0)
     parser.add_argument("--timeout-s", type=float, default=10.0)
@@ -644,10 +505,11 @@ def add_subparser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
 
 
 def _handle(args: argparse.Namespace) -> int:
+    import signal
     server = TelemetryServer(
         bind=args.bind,
         port=args.port,
-        log_path=args.log,
+        log_root=args.log,
         plot=args.plot,
         alert_temp_c=args.alert_temp_c,
         timeout_s=args.timeout_s,
@@ -657,6 +519,12 @@ def _handle(args: argparse.Namespace) -> int:
         cursor_path=args.cursor,
         discovered_path=args.discovered,
     )
+    # SIGTERM (systemd stop, `timeout`, a supervisor) must close the session
+    # files as cleanly as Ctrl+C does.
+    try:
+        signal.signal(signal.SIGTERM, lambda _signum, _frame: server.stop())
+    except (ValueError, OSError):
+        pass
     try:
         server.run()
         return 0

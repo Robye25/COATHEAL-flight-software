@@ -634,3 +634,18 @@ section 7 on each such re-probe; do not chase it as a fault in isolation.
 - [ ] Phase current and carrier temperature measured at the commissioning
       `run_current_a_rms`.
 - [ ] Driver-fault shutdown and service-restart behaviour verified.
+
+## Bench note 2026-08-28: enable-line verification in both directions
+
+Raw probe (service stopped, soft-CS, `SPI_NO_CS` — without it CE0 selects
+the MAX31865 click and every register reads `0xFF..`): both modules answer
+`VERSION 0x30`, `SD_MODE=0`; motor 0's `DRV_ENN` follows GPIO 20 within
+2 ms in both directions; motor 1's `DRV_ENN` reads 0 whatever GPIO 21
+does, while the GPIO 21 pad itself drives and reads back correctly and is
+not shorted (pull-up/pull-down continuity identical to GPIO 20). The
+firmware therefore verifies `DRV_ENN` after *disabling* too: a line that
+cannot raise `DRV_ENN` is reported as `motorN_warn=` by `CHECK` and once
+in the journal, without failing the motor. A boot-time
+`TMC5160_VERSION mismatch got=0x0` means the chip was unpowered (VS/12 V
+rail) when the service started; it is re-probed every `motorN.retry_ms`
+while idle and clears on its own once the rail is up.

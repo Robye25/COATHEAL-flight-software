@@ -1,207 +1,425 @@
-"""Plot tabs with pause / crosshair / threshold-line upgrades.
-
-The `LivePlotWidget` base class keeps a ring buffer of (seq, value-map) and
-provides:
-  * `set_paused(bool)` — stops rendering while buffer keeps growing.
-  * A shared crosshair with a floating readout label.
-  * Helper to add horizontal threshold lines from config.
-
-`PlotTabs` bundles five plots (Temperature, Pressure, Heaters, Resistance,
-Stepper) and fans telemetry packets + pause toggle to each.
+"""Center plots (redesign spec §5.6): time axis in mission elapsed time,
+trailing-window selector, full-session retention through `SeriesStore`,
+five pages (Temperatures, Ambient, Heaters, Resistance, Motors), pull
+markers, target overlays, crosshair readout, PNG/CSV export.
 """
 from __future__ import annotations
 
-from collections import deque
-import math
-from typing import Dict
+import csv
+import time
+from datetime import datetime, timezone
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QTabWidget, QVBoxLayout, QWidget
-
-from ..protocol import TelemetryPacket
-from .theme import (
-    HEATER_COLORS, HEATER_LABELS,
-    MAX_POINTS, OVERTEMP_CUTOFF_C, PRE_FLOAT_PRESSURE_MBAR,
-    RESISTANCE_COLORS, RESISTANCE_LABELS, SAMPLE_FLOOR_C,
-    UNIFORMITY_BAND_C,
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtWidgets import (
+    QFileDialog, QHBoxLayout, QLabel, QPushButton, QTabWidget, QVBoxLayout, QWidget,
 )
 
+from ..protocol import PullEvent, TelemetryPacket
+from ..session_dir import session_epoch
+from .series_store import SeriesStore, format_elapsed, window_bounds
+from .theme import (
+    HEATER_COLORS, HEATER_LABELS, OVERTEMP_CUTOFF_C, PRE_FLOAT_PRESSURE_MBAR,
+    RESISTANCE_COLORS, SAMPLE_FLOOR_C,
+)
+from .widgets import MONO_CSS, MUTED, style_button
 
-class LivePlotWidget(QWidget):
-    def __init__(self, title: str, y_label: str, unit: str = "", parent=None):
+MOTOR_COLORS = (("#2ecc71", "#27ae60"), ("#e67e22", "#d35400"))
+WINDOWS: List[Tuple[str, Optional[float]]] = [("5 m", 300.0), ("30 m", 1800.0), ("2 h", 7200.0), ("all", None)]
+REDRAW_MS = 200
+
+
+class MissionTimeAxis(pg.AxisItem):
+    """Bottom axis labelled T+hh:mm:ss from the mission start (UTC clock
+    time until the first frame arrives)."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.t0: Optional[float] = None
+
+    def tickStrings(self, values, scale, spacing):  # noqa: N802
+        if self.t0 is None:
+            return [datetime.fromtimestamp(v, tz=timezone.utc).strftime("%H:%M:%S") for v in values]
+        return [format_elapsed(v - self.t0) for v in values]
+
+
+class TimePlot(QWidget):
+    """One pyqtgraph plot bound to a SeriesStore with a legend row that
+    shows the latest value of every series."""
+
+    def __init__(self, title: str, y_label: str, unit: str = "", *, show_legend: bool = True, parent=None):
         super().__init__(parent)
-        self._plot = pg.PlotWidget()
-        self._plot.setTitle(title, color="#dddddd", size="11pt")
-        self._plot.setLabel("left", y_label, units=unit)
-        self._plot.setLabel("bottom", "Sequence")
-        self._plot.addLegend(offset=(10, 10))
-        self._plot.showGrid(x=True, y=True, alpha=0.25)
-        self._plot.setMenuEnabled(True)
-        self._plot.setClipToView(True)
-
+        self.axis = MissionTimeAxis(orientation="bottom")
+        self.plot = pg.PlotWidget(axisItems={"bottom": self.axis})
+        self.plot.setTitle(title, color="#dddddd", size="10pt")
+        self.plot.setLabel("left", y_label, units=unit)
+        self.plot.showGrid(x=True, y=True, alpha=0.25)
+        self.plot.setMenuEnabled(True)
+        self.plot.setClipToView(True)
+        self.plot.setDownsampling(auto=True, mode="peak")
+        self.plot.plotItem.vb.sigRangeChangedManually.connect(self._on_manual_range)
         self._curves: Dict[str, pg.PlotDataItem] = {}
-        self._x: deque = deque(maxlen=MAX_POINTS)
-        self._y: Dict[str, deque] = {}
-        self._paused = False
+        self._colors: Dict[str, str] = {}
+        self._legend: Dict[str, QLabel] = {}
+        self._markers: List[pg.InfiniteLine] = []
+        self._threshold_lines: Dict[str, pg.InfiniteLine] = {}
+        self.follow = True
+        self.manual_range_changed = None  # callable set by PlotArea
 
-        lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.addWidget(self._plot)
+        lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(2)
+        lay.addWidget(self.plot, 1)
+        self._legend_row = QWidget()
+        self._legend_lay = QHBoxLayout(self._legend_row)
+        self._legend_lay.setContentsMargins(8, 0, 8, 2); self._legend_lay.setSpacing(14)
+        self._legend_row.setVisible(show_legend)
+        lay.addWidget(self._legend_row)
+        self._readout = QLabel(""); self._readout.setStyleSheet(f"{MONO_CSS} color: {MUTED}; font-size: 8pt;")
+        self._legend_lay.addWidget(self._readout)
+        self._legend_lay.addStretch()
 
-        # Crosshair
-        self._vline = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("#888", width=1))
-        self._hline = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen("#888", width=1))
-        self._plot.addItem(self._vline, ignoreBounds=True)
-        self._plot.addItem(self._hline, ignoreBounds=True)
-        self._readout = pg.TextItem(color="#eeeeee", anchor=(0, 1), fill=pg.mkBrush(0, 0, 0, 150))
-        self._plot.addItem(self._readout)
-        self._readout.setPos(0, 0)
-        self._proxy = pg.SignalProxy(self._plot.scene().sigMouseMoved,
-                                     rateLimit=30, slot=self._on_mouse_moved)
+        self._vline = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("#666", width=1))
+        self._hline = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen("#666", width=1))
+        self.plot.addItem(self._vline, ignoreBounds=True)
+        self.plot.addItem(self._hline, ignoreBounds=True)
+        self._proxy = pg.SignalProxy(self.plot.scene().sigMouseMoved, rateLimit=20, slot=self._on_mouse_moved)
+        self._store: Optional[SeriesStore] = None
 
-    # ── public API ──
-    def add_curve(self, name: str, color: str, width: int = 2) -> None:
-        if name in self._curves:
+    # -- setup -----------------------------------------------------------------
+    def add_series(self, name: str, color: str, width: float = 1.6, dashed: bool = False,
+                   legend: bool = True) -> None:
+        pen = pg.mkPen(color=color, width=width, style=Qt.PenStyle.DashLine if dashed else Qt.PenStyle.SolidLine)
+        self._curves[name] = self.plot.plot([], [], pen=pen, name=name)
+        self._colors[name] = color
+        if legend:
+            lbl = QLabel(f"{name} —")
+            lbl.setStyleSheet(f"{MONO_CSS} color: {color}; font-size: 9pt;")
+            self._legend[name] = lbl
+            self._legend_lay.insertWidget(self._legend_lay.count() - 2, lbl)
+
+    def add_threshold(self, key: str, y_value: float, color: str, label: str) -> None:
+        line = pg.InfiniteLine(pos=y_value, angle=0, pen=pg.mkPen(color, width=1, style=Qt.PenStyle.DashLine),
+                               label=label, labelOpts={"color": color, "position": 0.97})
+        self.plot.addItem(line, ignoreBounds=True)
+        self._threshold_lines[key] = line
+
+    def set_threshold(self, key: str, y_value: Optional[float]) -> None:
+        line = self._threshold_lines.get(key)
+        if line is None:
             return
-        pen = pg.mkPen(color=color, width=width)
-        self._curves[name] = self._plot.plot([], [], pen=pen, name=name)
-        self._y[name] = deque(maxlen=MAX_POINTS)
+        line.setVisible(y_value is not None)
+        if y_value is not None:
+            line.setPos(y_value)
 
-    def add_threshold(self, y_value: float, color: str, label: str) -> None:
-        line = pg.InfiniteLine(pos=y_value, angle=0,
-                               pen=pg.mkPen(color, width=1, style=Qt.PenStyle.DashLine),
-                               label=label, labelOpts={"color": color, "position": 0.95})
-        self._plot.addItem(line, ignoreBounds=True)
+    def add_marker(self, t: float, color: str, label: str) -> None:
+        line = pg.InfiniteLine(pos=t, angle=90, pen=pg.mkPen(color, width=1, style=Qt.PenStyle.DotLine),
+                               label=label, labelOpts={"color": color, "position": 0.9, "rotateAxis": (1, 0)})
+        self.plot.addItem(line, ignoreBounds=True)
+        self._markers.append(line)
 
-    def set_paused(self, paused: bool) -> None:
-        self._paused = paused
+    def clear_markers(self) -> None:
+        for line in self._markers:
+            self.plot.removeItem(line)
+        self._markers.clear()
 
-    def push(self, seq: int, values: Dict[str, float]) -> None:
-        self._x.append(seq)
-        for name, val in values.items():
-            if name not in self._y:
-                self._y[name] = deque(maxlen=MAX_POINTS)
-            self._y[name].append(val)
-        if self._paused:
+    def bind(self, store: SeriesStore) -> None:
+        self._store = store
+
+    # -- drawing ---------------------------------------------------------------
+    def redraw(self, t_min: Optional[float], t_max: Optional[float], t0: Optional[float]) -> None:
+        if self._store is None:
             return
-        x = np.fromiter(self._x, dtype=float)
+        self.axis.t0 = t0
         for name, curve in self._curves.items():
-            buf = self._y.get(name)
-            if not buf:
-                continue
-            y = np.fromiter(buf, dtype=float)
-            n = min(len(x), len(y))
-            curve.setData(x[-n:], y[-n:])
+            t, y = self._store.window(name, t_min, t_max)
+            curve.setData(t, y)
+            lbl = self._legend.get(name)
+            if lbl is not None:
+                latest = self._store.latest(name)
+                lbl.setText(f"{name} —" if latest is None else f"{name} {latest:.2f}")
+        if self.follow and t_max is not None and t_min is not None:
+            self.plot.setXRange(t_min, t_max, padding=0.01)
+        elif self.follow and t_min is None and self._store.t0 is not None and self._store.t_last is not None:
+            span = max(60.0, self._store.t_last - self._store.t0)
+            self.plot.setXRange(self._store.t0, self._store.t0 + span, padding=0.01)
 
-    def clear(self) -> None:
-        self._x.clear()
-        for d in self._y.values():
-            d.clear()
-        for c in self._curves.values():
-            c.setData([], [])
+    def _on_manual_range(self, *_args) -> None:
+        self.follow = False
+        if self.manual_range_changed is not None:
+            self.manual_range_changed()
 
-    # ── crosshair handler ──
     def _on_mouse_moved(self, evt) -> None:
         pos = evt[0]
-        vb = self._plot.plotItem.vb
-        if not self._plot.sceneBoundingRect().contains(pos):
+        vb = self.plot.plotItem.vb
+        if not self.plot.sceneBoundingRect().contains(pos) or self._store is None:
             return
         pt = vb.mapSceneToView(pos)
         self._vline.setPos(pt.x()); self._hline.setPos(pt.y())
-        if not self._x:
-            return
-        xs = list(self._x)
-        ix = min(range(len(xs)), key=lambda i: abs(xs[i] - pt.x()))
-        lines = [f"seq {xs[ix]}"]
-        for name, buf in self._y.items():
-            if name in self._curves and ix < len(buf):
-                lines.append(f"{name}: {list(buf)[ix]:.2f}")
-        self._readout.setText("\n".join(lines))
-        self._readout.setPos(pt.x(), pt.y())
+        parts = []
+        stamp = datetime.fromtimestamp(pt.x(), tz=timezone.utc).strftime("%H:%M:%SZ")
+        elapsed = format_elapsed(pt.x() - self.axis.t0) if self.axis.t0 is not None else "—"
+        parts.append(f"T+{elapsed} · {stamp}")
+        for name in self._curves:
+            value = self._store.last_before(name, pt.x())
+            if value is not None:
+                parts.append(f"{name} {value:.2f}")
+        self._readout.setText("   ".join(parts))
+
+    def series_names(self) -> List[str]:
+        return list(self._curves)
 
 
-class PlotTabs(QTabWidget):
+class AmbientPage(QWidget):
+    """Three x-linked stacked plots: ambient temperature, pressure, UV."""
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        # Final BOM: 8 specimen temperature traces, no box-temperature trace.
-        self._temp = LivePlotWidget("Specimen Temperature", "temperature", "°C")
+        lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(2)
+        self.temp = TimePlot("Ambient temperature", "T", "°C")
+        self.pressure = TimePlot("Ambient pressure", "p", "mbar")
+        self.uv = TimePlot("UV (GUVA-S12SD via ADS1115)", "UV", "V")
+        self.temp.add_series("AT", "#3498db")
+        self.pressure.add_series("AP", "#1abc9c")
+        self.pressure.add_threshold("pre_float", PRE_FLOAT_PRESSURE_MBAR, "#f39c12",
+                                    f"pre-float {PRE_FLOAT_PRESSURE_MBAR:.0f} mbar")
+        self.uv.add_series("UV", "#f1c40f")
+        for plot in (self.temp, self.pressure, self.uv):
+            lay.addWidget(plot, 1)
+        self.pressure.plot.setXLink(self.temp.plot)
+        self.uv.plot.setXLink(self.temp.plot)
+
+    @property
+    def plots(self) -> List[TimePlot]:
+        return [self.temp, self.pressure, self.uv]
+
+
+class PlotArea(QWidget):
+    """The centre region: toolbar + tabbed plots over one SeriesStore."""
+
+    paused_changed = pyqtSignal(bool)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.store = SeriesStore()
+        self._t0: Optional[float] = None
+        self._session = ""
+        self._span: Optional[float] = 1800.0
+        self._paused = False
+        self._pull_markers: List[Tuple[float, int, int]] = []
+
+        lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
+        bar = QWidget(); bl = QHBoxLayout(bar); bl.setContentsMargins(8, 4, 8, 0); bl.setSpacing(4)
+        self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
+        bl.addStretch()
+        win_lbl = QLabel("window"); win_lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
+        bl.addWidget(win_lbl)
+        self._window_buttons: List[QPushButton] = []
+        for label, span in WINDOWS:
+            btn = QPushButton(label); btn.setCheckable(True)
+            style_button(btn, "neutral", min_height=22)
+            btn.clicked.connect(lambda _c=False, s=span, b=btn: self.set_window(s))
+            bl.addWidget(btn); self._window_buttons.append(btn)
+        self.btn_follow = QPushButton("FOLLOW"); self.btn_follow.setCheckable(True); self.btn_follow.setChecked(True)
+        style_button(self.btn_follow, "primary", min_height=22)
+        self.btn_follow.clicked.connect(self._follow_clicked)
+        self.btn_pause = QPushButton("PAUSE"); self.btn_pause.setCheckable(True)
+        style_button(self.btn_pause, "neutral", min_height=22)
+        self.btn_pause.clicked.connect(lambda: self.set_paused(self.btn_pause.isChecked()))
+        self.btn_export = QPushButton("EXPORT"); style_button(self.btn_export, "neutral", min_height=22)
+        self.btn_export.clicked.connect(self.export_dialog)
+        for btn in (self.btn_follow, self.btn_pause, self.btn_export):
+            bl.addWidget(btn)
+        lay.addWidget(bar)
+        lay.addWidget(self.tabs, 1)
+
+        # Pages.
+        self.temps = TimePlot("Specimen temperatures", "T", "°C")
         for i in range(8):
-            self._temp.add_curve(f"S{i}", RESISTANCE_COLORS[i % len(RESISTANCE_COLORS)])
-        self._temp.add_threshold(SAMPLE_FLOOR_C, "#2ecc71", f"floor {SAMPLE_FLOOR_C:.0f}°C")
-        self._temp.add_threshold(OVERTEMP_CUTOFF_C, "#e74c3c", f"over-T {OVERTEMP_CUTOFF_C:.0f}°C")
-        self._temp.add_threshold(SAMPLE_FLOOR_C + UNIFORMITY_BAND_C, "#3498db",
-                                 f"unif +{UNIFORMITY_BAND_C:.0f}°C")
-        self._temp.add_threshold(SAMPLE_FLOOR_C - UNIFORMITY_BAND_C, "#3498db",
-                                 f"unif -{UNIFORMITY_BAND_C:.0f}°C")
-
-        self._pressure = LivePlotWidget("Ambient Pressure", "pressure", "mbar")
-        self._pressure.add_curve("ambient", "#3498db", width=2)
-        self._pressure.add_threshold(PRE_FLOAT_PRESSURE_MBAR, "#f39c12",
-                                     f"pre-float {PRE_FLOAT_PRESSURE_MBAR:.0f} mbar")
-
-        self._heaters = LivePlotWidget("Heater Duty", "duty", "%")
-        # Six final-BOM heater traces (H0..H5). Box heater is absent.
+            self.temps.add_series(f"S{i}", RESISTANCE_COLORS[i % len(RESISTANCE_COLORS)])
+        for i in range(6):
+            self.temps.add_series(f"T{i}", HEATER_COLORS[i % len(HEATER_COLORS)], width=1.0, dashed=True, legend=False)
+        self.temps.add_threshold("floor", SAMPLE_FLOOR_C, "#2ecc71", f"fallback floor {SAMPLE_FLOOR_C:.0f} °C")
+        self.temps.add_threshold("overtemp", OVERTEMP_CUTOFF_C, "#e74c3c", f"over-T {OVERTEMP_CUTOFF_C:.0f} °C")
+        self.ambient = AmbientPage()
+        self.heaters = TimePlot("Heater duty", "duty", "%")
         for i, label in enumerate(HEATER_LABELS):
-            self._heaters.add_curve(label, HEATER_COLORS[i % len(HEATER_COLORS)])
+            self.heaters.add_series(label, HEATER_COLORS[i % len(HEATER_COLORS)])
+        self.resistance = TimePlot("Specimen resistance (MAX31865)", "R", "Ω")
+        self._resistance_series_added: set = set()
+        self.motors = TimePlot("Motor position", "pos", "µst")
+        for motor_id, (c_pos, c_tgt) in enumerate(MOTOR_COLORS):
+            self.motors.add_series(f"M{motor_id} pos", c_pos, width=1.8)
+            self.motors.add_series(f"M{motor_id} tgt", c_tgt, width=1.0, dashed=True)
+        self.tabs.addTab(self.temps, "Temperatures")
+        self.tabs.addTab(self.ambient, "Ambient")
+        self.tabs.addTab(self.heaters, "Heaters")
+        self.tabs.addTab(self.resistance, "Resistance")
+        self.tabs.addTab(self.motors, "Motors")
+        for plot in self.all_plots():
+            plot.bind(self.store)
+            plot.manual_range_changed = self._manual_range
+        self._dirty = False
+        self.tabs.currentChanged.connect(lambda _i: self.redraw(force=True))
+        self.set_window(1800.0)
 
-        # Per-channel PT100 element resistance from the Sequent RTD card.
-        # Channels with no reading arrive as None and are skipped, as does
-        # every channel when the payload runs sensor.resistance_source=disabled.
-        self._resistance = LivePlotWidget("Sample Resistance", "resistance", "Ω")
-        for i, label in enumerate(RESISTANCE_LABELS):
-            self._resistance.add_curve(label, RESISTANCE_COLORS[i % len(RESISTANCE_COLORS)])
+        self._timer = QTimer(self); self._timer.timeout.connect(self.redraw); self._timer.start(REDRAW_MS)
 
-        # Two motors, each with a position + target trace.
-        self._stepper = LivePlotWidget("Stepper position", "steps")
-        self._stepper.add_curve("M0 pos", "#2ecc71", width=2)
-        self._stepper.add_curve("M0 tgt", "#27ae60", width=1)
-        self._stepper.add_curve("M1 pos", "#e67e22", width=2)
-        self._stepper.add_curve("M1 tgt", "#d35400", width=1)
+    # -- helpers -----------------------------------------------------------------
+    def all_plots(self) -> List[TimePlot]:
+        return [self.temps, *self.ambient.plots, self.heaters, self.resistance, self.motors]
 
-        self.addTab(self._temp,       "Temperature")
-        self.addTab(self._pressure,   "Pressure")
-        self.addTab(self._heaters,    "Heaters")
-        self.addTab(self._resistance, "Resistance")
-        self.addTab(self._stepper,    "Stepper")
+    def current_plots(self) -> List[TimePlot]:
+        page = self.tabs.currentWidget()
+        if isinstance(page, AmbientPage):
+            return page.plots
+        return [page] if isinstance(page, TimePlot) else []
 
-    # ── API ──
-    def on_packet(self, pkt: TelemetryPacket) -> None:
-        seq = pkt.seq
-        temps = {}
-        for i, t in enumerate(pkt.sample_temps_c[:8]):
-            if pkt.sensor_valid.get(f"S{i}", True) and math.isfinite(t):
-                temps[f"S{i}"] = t
-        if temps:
-            self._temp.push(seq, temps)
-        if (pkt.sensor_valid.get("AP", True) and
-                math.isfinite(pkt.ambient_pressure_mbar)):
-            self._pressure.push(seq, {"ambient": pkt.ambient_pressure_mbar})
-        heaters = {}
-        for i, d in enumerate(pkt.heater_duty[:len(HEATER_LABELS)]):
-            heaters[HEATER_LABELS[i]] = d * 100.0
-        self._heaters.push(seq, heaters)
-        # Resistance: skip unmeasured (None) samples — the corresponding
-        # trace just doesn't advance until a real reading comes in.
-        res_values: Dict[str, float] = {}
-        for i, r in enumerate(pkt.sample_resistance_ohm[:len(RESISTANCE_LABELS)]):
-            if r is not None:
-                res_values[RESISTANCE_LABELS[i]] = float(r)
-        if res_values:
-            self._resistance.push(seq, res_values)
-        # Dual-motor traces. Missing motors are simply not pushed.
-        step_values: Dict[str, float] = {}
-        for i, m in enumerate(pkt.steppers[:2]):
-            step_values[f"M{i} pos"] = float(m["position"])
-            step_values[f"M{i} tgt"] = float(m["target"])
-        if step_values:
-            self._stepper.push(seq, step_values)
+    def set_window(self, span: Optional[float]) -> None:
+        self._span = span
+        for btn, (_label, s) in zip(self._window_buttons, WINDOWS):
+            btn.setChecked(s == span)
+            style_button(btn, "primary" if s == span else "neutral", min_height=22)
+        for plot in self.all_plots():
+            plot.follow = True
+        self.btn_follow.setChecked(True)
+        self.redraw(force=True)
+
+    def window_span(self) -> Optional[float]:
+        return self._span
+
+    def _follow_clicked(self) -> None:
+        follow = self.btn_follow.isChecked()
+        for plot in self.all_plots():
+            plot.follow = follow
+        if follow:
+            self.redraw(force=True)
+
+    def _manual_range(self) -> None:
+        self.btn_follow.setChecked(False)
+
+    def set_paused(self, paused: bool) -> None:
+        self._paused = paused
+        self.btn_pause.setChecked(paused)
+        self.btn_pause.setText("RESUME" if paused else "PAUSE")
+        self.paused_changed.emit(paused)
+        if not paused:
+            self.redraw(force=True)
 
     def toggle_paused(self) -> bool:
-        paused = not self._temp._paused  # all share state via set_paused
-        for w in (self._temp, self._pressure, self._heaters, self._resistance, self._stepper):
-            w.set_paused(paused)
-        return paused
+        self.set_paused(not self._paused)
+        return self._paused
+
+    @property
+    def paused(self) -> bool:
+        return self._paused
+
+    # -- data -------------------------------------------------------------------------
+    def on_packet(self, pkt: TelemetryPacket, rx_time: Optional[float] = None) -> None:
+        t = rx_time if rx_time is not None else time.time()
+        if pkt.session_id != self._session:
+            self._session = pkt.session_id
+            epoch = session_epoch(pkt.session_id)
+            self._t0 = float(epoch) if epoch is not None else t
+        values: Dict[str, float] = {}
+        for i, temp in enumerate(pkt.sample_temps_c[:8]):
+            if pkt.sensor_valid.get(f"S{i}", True) and np.isfinite(temp):
+                values[f"S{i}"] = float(temp)
+        if pkt.sensor_valid.get("AT", True) and np.isfinite(pkt.ambient_temp_c):
+            values["AT"] = float(pkt.ambient_temp_c)
+        if pkt.sensor_valid.get("AP", True) and np.isfinite(pkt.ambient_pressure_mbar):
+            values["AP"] = float(pkt.ambient_pressure_mbar)
+        if pkt.sensor_valid.get("UV", True) and np.isfinite(pkt.uv):
+            values["UV"] = float(pkt.uv)
+        for i, duty in enumerate(pkt.heater_duty[:6]):
+            values[f"H{i}"] = float(duty) * 100.0
+        for i, r in enumerate(pkt.sample_resistance_ohm[:8]):
+            if r is not None:
+                name = f"R{i}"
+                values[name] = float(r)
+                if name not in self._resistance_series_added:
+                    self._resistance_series_added.add(name)
+                    self.resistance.add_series(name, RESISTANCE_COLORS[i % len(RESISTANCE_COLORS)])
+        for snap in pkt.steppers[:2]:
+            m = int(snap.get("motor_id", 0))
+            values[f"M{m} pos"] = float(snap["position"])
+            values[f"M{m} tgt"] = float(snap["target"])
+        self.store.append(t, values)
+        self._dirty = True
+
+    def set_targets(self, targets: List[Optional[float]], rx_time: Optional[float] = None) -> None:
+        """Dashed target overlays on the temperature page (one per heater)."""
+        t = rx_time if rx_time is not None else time.time()
+        values = {f"T{i}": (float(v) if v is not None else np.nan) for i, v in enumerate(targets[:6])}
+        self.store.append(t, values)
+        self._dirty = True
+
+    def on_pull_event(self, ev: PullEvent, rx_time: Optional[float] = None) -> None:
+        t = rx_time if rx_time is not None else time.time()
+        self._pull_markers.append((t, ev.motor_id, ev.pull_id))
+        color = MOTOR_COLORS[ev.motor_id % 2][0]
+        label = f"pull M{ev.motor_id} #{ev.pull_id}"
+        self.resistance.add_marker(t, color, label)
+        self.motors.add_marker(t, color, label)
+        self.temps.add_marker(t, color, label)
 
     def clear(self) -> None:
-        for w in (self._temp, self._pressure, self._heaters, self._resistance, self._stepper):
-            w.clear()
+        self.store.clear()
+        self._t0 = None
+        self._session = ""
+        for plot in self.all_plots():
+            plot.clear_markers()
+        self.redraw(force=True)
+
+    # -- drawing ------------------------------------------------------------------------
+    def redraw(self, force: bool = False) -> None:
+        if self._paused and not force:
+            return
+        if not self._dirty and not force:
+            return
+        self._dirty = False
+        t_min, t_max = window_bounds(self.store.t_last, self._span)
+        if t_max is None and self.store.t_last is not None:
+            t_max = self.store.t_last
+        if t_min is not None and self._t0 is not None and t_min < self._t0:
+            t_min = self._t0
+        for plot in self.current_plots():
+            plot.redraw(t_min, t_max if self._span is not None else None, self._t0)
+
+    # -- export ---------------------------------------------------------------------------
+    def export_dialog(self) -> None:
+        path, selected = QFileDialog.getSaveFileName(
+            self, "Export current plot", "coatheal_plot.png", "PNG image (*.png);;CSV of visible window (*.csv)")
+        if not path:
+            return
+        if path.lower().endswith(".csv") or "CSV" in selected:
+            self.export_csv(path)
+        else:
+            self.export_png(path)
+
+    def export_png(self, path: str) -> None:
+        plots = self.current_plots()
+        if not plots:
+            return
+        from pyqtgraph.exporters import ImageExporter
+        exporter = ImageExporter(plots[0].plot.plotItem)
+        exporter.export(path)
+
+    def export_csv(self, path: str) -> None:
+        plots = self.current_plots()
+        if not plots:
+            return
+        t_min, t_max = window_bounds(self.store.t_last, self._span)
+        names: List[str] = []
+        for plot in plots:
+            names.extend(plot.series_names())
+        with open(path, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.writer(fh)
+            writer.writerow(["utc", "t_plus_s", "series", "value"])
+            for name in names:
+                t, y = self.store.window(name, t_min, t_max)
+                for ti, yi in zip(t, y):
+                    stamp = datetime.fromtimestamp(float(ti), tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+                    elapsed = "" if self._t0 is None else f"{float(ti) - self._t0:.3f}"
+                    writer.writerow([stamp, elapsed, name, f"{float(yi):.6g}"])

@@ -1,10 +1,8 @@
-"""Regression coverage for the telemetry-server CSV expansion (Rev B.1 v5).
-
-Added 2026-04-17 by Agent C after discovering that the CSV header written
-by `TelemetryServer._handle_connection` was missing `mode`, `sample_0..7`,
-`h0..5`, and `stepperN_*` columns even though the parsed packet carries all
-of them. This test drives the server against a synthetic onboard TCP peer
-(loopback) so it catches regressions in both the header and the row writer.
+"""The CLI telemetry server writes exactly what the GUI writes: schema v6
+through `telemetry_log.LogManager`, in a per-session directory. This test
+drives the server against a synthetic onboard TCP peer (loopback) so it
+catches regressions in the wiring, not just in the row builder (which
+`test_telemetry_log.py` covers directly).
 """
 from __future__ import annotations
 
@@ -19,6 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from app.telemetry_log import TELEMETRY_CSV_FIELDS  # noqa: E402
 from app.telemetry_server import TelemetryServer  # noqa: E402
 
 
@@ -29,20 +28,25 @@ FRAME = (
     "RESISTANCE=10.5|11.0|9.8|10.1|10.7|10.3|-|-,"
     "PHASE=FLOAT,MODE=RUN,"
     "STATUS=SD_OK|USB_OK|I2C_OK|SPI_OK|LINK_OK|T_AMBIENT_OK|P_AMBIENT_OK"
-    "|UNIFORMITY_OK|OVERTEMP_OK|ENERGY_OK|RS485_OK|HEATER_INHIBITED|RESISTANCE_OK,"
-    "STEPPER0=pos:100|tgt:200|hz:400|us:16|en:1|mv:1|hold:0|hold_s:0|pulses:100|src:cmd:MOVE,"
-    "STEPPER1=pos:-50|tgt:-50|hz:200|us:8|en:1|mv:0|hold:1|hold_s:3.5|pulses:50|src:phase:FLOAT\n"
+    "|UNIFORMITY_OK|OVERTEMP_OK|ENERGY_OK|HEATER_INHIBITED|RESISTANCE_OK,"
+    "CTRL=fallback:0|link_loss_s:0.0|energy_wh:1.5|budget_wh:130.0|budget_exhausted:0"
+    "|heaters_active:3|queue:0|plan:none,"
+    "STEPPER0=pos:100|tgt:200|hz:100|us:4|en:1|mv:1|hold:0|hold_s:0|pulses:100|src:cmd:MOVE"
+    "|zeroed:1|seq:-|seqst:idle,"
+    "STEPPER1=pos:-50|tgt:-50|hz:100|us:4|en:1|mv:0|hold:1|hold_s:3.5|pulses:50|src:cmd:BEND"
+    "|zeroed:1|seq:flex|seqst:run\n"
 )
+PULL = "EVT,PULL,sess-csv,7,1,2026-04-17T10:00:05Z,800,5.00,4|5|6|7\n"
 
 
 class CsvHeaderTests(unittest.TestCase):
-    def test_csv_contains_all_rev_b1_columns(self) -> None:
+    def test_server_writes_schema_v6_session_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp = Path(tmp_dir)
             server = TelemetryServer(
                 bind="127.0.0.1",
                 port=0,  # overridden below via a pre-bound socket
-                log_path=tmp / "gt.csv",
+                log_root=tmp / "logs",
                 plot=False,
                 alert_temp_c=80.0,
                 timeout_s=5.0,
@@ -52,8 +56,6 @@ class CsvHeaderTests(unittest.TestCase):
                 cursor_path=tmp / "cursor.json",
                 discovered_path=tmp / "discovered.json",
             )
-            # Run the server's network loop on an ephemeral port. We pick
-            # the port, then patch server.port so the listener binds there.
             probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             probe.bind(("127.0.0.1", 0))
             server.port = probe.getsockname()[1]
@@ -62,7 +64,6 @@ class CsvHeaderTests(unittest.TestCase):
             net_thread = threading.Thread(target=server._network_loop, daemon=True)
             net_thread.start()
 
-            # Wait for listener up.
             deadline = time.time() + 2.0
             conn: socket.socket | None = None
             while time.time() < deadline:
@@ -72,74 +73,61 @@ class CsvHeaderTests(unittest.TestCase):
                 except OSError:
                     time.sleep(0.05)
             self.assertIsNotNone(conn, "server did not accept connections")
-            assert conn is not None  # narrow Optional for type checkers
+            assert conn is not None
             try:
-                conn.sendall(FRAME.encode("utf-8"))
-                # Read the ACK to ensure the server processed the frame.
                 conn.settimeout(2.0)
+                conn.sendall(FRAME.encode("utf-8"))
                 ack = conn.recv(256).decode("utf-8", errors="replace")
                 self.assertTrue(ack.startswith("ACK,sess-csv,3"), ack)
+                conn.sendall(PULL.encode("utf-8"))
+                ack = conn.recv(256).decode("utf-8", errors="replace")
+                self.assertTrue(ack.startswith("ACK,sess-csv,0"), ack)
             finally:
                 conn.close()
 
-            # Give the writer a moment to flush.
             time.sleep(0.2)
             server.stop()
             net_thread.join(timeout=2.0)
+            server.logs.close()
 
-            csv_path = tmp / "gt.csv"
-            self.assertTrue(csv_path.exists(), "csv not written")
-            with csv_path.open("r", encoding="utf-8") as f:
+            session_dirs = list((tmp / "logs" / "sessions").iterdir())
+            self.assertEqual(len(session_dirs), 1, session_dirs)
+            session_dir = session_dirs[0]
+            self.assertTrue(session_dir.name.endswith("_sess-csv"), session_dir.name)
+
+            with (session_dir / "telemetry.csv").open("r", encoding="utf-8", newline="") as f:
                 reader = csv.DictReader(f)
+                header = reader.fieldnames
                 rows = list(reader)
+            with (session_dir / "pulls.csv").open("r", encoding="utf-8", newline="") as f:
+                pulls = list(csv.DictReader(f))
+            self.assertTrue((session_dir / "session.json").exists())
 
+        self.assertEqual(header, TELEMETRY_CSV_FIELDS,
+                         "the CLI must write the shared v6 header, nothing else")
         self.assertEqual(len(rows), 1, f"expected one row, got {len(rows)}")
         row = rows[0]
-
-        # Scalar fields.
-        for col in (
-            "session_id", "seq", "timestamp", "rtc_valid",
-            "ambient_temp_c", "ambient_pressure_mbar", "uv",
-            "phase", "mode", "status",
-        ):
-            self.assertIn(col, row, f"missing column {col}")
-            self.assertNotEqual(row[col].strip(), "",
-                                f"column {col} is blank")
-
-        # 8 per-sample columns.
-        for i in range(8):
-            col = f"sample_{i}"
-            self.assertIn(col, row)
-            self.assertNotEqual(row[col].strip(), "", f"{col} blank")
-
-        # 6 heater columns.
-        for i in range(6):
-            col = f"h{i}"
-            self.assertIn(col, row)
-            self.assertNotEqual(row[col].strip(), "", f"{col} blank")
-
-        # 8 resistance columns; r6 and r7 must be literal "-" placeholders.
-        for i in range(8):
-            col = f"r{i}"
-            self.assertIn(col, row)
-            self.assertNotEqual(row[col].strip(), "", f"{col} blank")
-        self.assertEqual(row["r6"], "-")
-        self.assertEqual(row["r7"], "-")
-
-        # Per-motor stepper segments expanded into columns.
-        for m in (0, 1):
-            for suffix in ("position", "target", "hz", "microstep",
-                           "enabled", "moving", "holding", "hold_s",
-                           "pulses"):
-                col = f"stepper{m}_{suffix}"
-                self.assertIn(col, row)
-                self.assertNotEqual(row[col].strip(), "", f"{col} blank")
-
-        # Spot-check values parsed correctly.
         self.assertEqual(row["mode"], "RUN")
         self.assertEqual(row["phase"], "FLOAT")
+        self.assertEqual(row["sample_3"], "-5.3")
+        self.assertEqual(row["h5"], "0.5")
+        self.assertEqual(row["r6"], "", "unmeasured resistance is an empty cell in v6")
         self.assertEqual(row["stepper0_position"], "100")
         self.assertEqual(row["stepper1_position"], "-50")
+        self.assertEqual(row["stepper1_seq"], "flex")
+        self.assertEqual(row["stepper0_zeroed"], "1")
+        self.assertEqual(row["heaters_active"], "3")
+        self.assertEqual(row["energy_wh"], "1.5")
+        self.assertTrue(row["gs_rx_utc"].endswith("Z"))
+
+        self.assertEqual(len(pulls), 1)
+        self.assertEqual(pulls[0]["pull_id"], "7")
+        self.assertEqual(pulls[0]["samples"], "4|5|6|7")
+
+    # MUTATION: in telemetry_server._handle_connection replace
+    # `self.logs.on_packet(packet, rx_utc)` with a no-op and confirm
+    # test_server_writes_schema_v6_session_directory fails on the session
+    # directory count (0 instead of 1).
 
 
 if __name__ == "__main__":

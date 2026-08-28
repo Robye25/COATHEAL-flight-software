@@ -498,6 +498,66 @@ void TestEnableFalseFreezesInOrder() {
 }
 
 // ---------------------------------------------------------------------
+// Enable line verification through IOIN.DRV_ENN
+// ---------------------------------------------------------------------
+
+// Enable(false) must prove the EN line can DISABLE the chip: with DRV_ENN
+// still LOW afterwards the motor is usable but STEPPER_DISABLE cannot
+// de-energise it through EN, so the driver reports a warning (bench,
+// 2026-08-28: motor1's module). With DRV_ENN HIGH the line is effective
+// and the warning clears. Enable(true) keeps refusing a line that leaves
+// DRV_ENN HIGH.
+void TestEnableFalseDetectsIneffectiveEnableLine() {
+  FakeSpiBus bus;
+  Tmc5160Config cfg;
+  auto driver = MakeHealthyDriver(&bus, cfg);
+  driver->set_verify_enable_line(true);
+  assert(driver->enable_line_effective());
+  assert(driver->warning().empty());
+
+  // Enable(true): IOIN verify (DRV_ENN=0, enabled) then CHOPCONF TOFF=3.
+  ExpectRead(&bus, kRegIOIN, 0x30000000U);
+  ScriptEnableTrueChopconf(&bus, cfg);
+  assert(driver->Enable(true));
+
+  // Enable(false) with a line that has no effect: DRV_ENN stays 0.
+  ExpectRead(&bus, kRegXACTUAL, 64U);
+  ExpectWrite(&bus, kRegXTARGET, 64U);
+  ExpectWrite(&bus, kRegCHOPCONF, Chopconf(cfg.microstep, /*toff=*/0));
+  ExpectRead(&bus, kRegIOIN, 0x30000000U);
+  assert(driver->Enable(false));
+  assert(!driver->enabled());
+  assert(driver->healthy());  // a warning, not a fault
+  assert(!driver->enable_line_effective());
+  assert(driver->warning().find("enable line") != std::string::npos);
+  assert(driver->warning().find("DRV_ENN") != std::string::npos);
+  assert(bus.mismatch_count() == 0);
+  assert(bus.remaining_expectations() == 0);
+
+  // Same cycle with a working line: DRV_ENN=1 after disabling.
+  ExpectRead(&bus, kRegIOIN, 0x30000000U);
+  ScriptEnableTrueChopconf(&bus, cfg);
+  assert(driver->Enable(true));
+  ExpectRead(&bus, kRegXACTUAL, 64U);
+  ExpectWrite(&bus, kRegXTARGET, 64U);
+  ExpectWrite(&bus, kRegCHOPCONF, Chopconf(cfg.microstep, /*toff=*/0));
+  ExpectRead(&bus, kRegIOIN, 0x30000010U);
+  assert(driver->Enable(false));
+  assert(driver->enable_line_effective());
+  assert(driver->warning().empty());
+  assert(bus.mismatch_count() == 0);
+  assert(bus.remaining_expectations() == 0);
+
+  // Enable(true) with DRV_ENN still HIGH is a refusal, as before.
+  ExpectRead(&bus, kRegIOIN, 0x30000010U);
+  assert(!driver->Enable(true));
+  assert(!driver->healthy());
+  assert(driver->last_error().find("DRV_ENN still HIGH") != std::string::npos);
+  assert(bus.mismatch_count() == 0);
+  assert(bus.remaining_expectations() == 0);
+}
+
+// ---------------------------------------------------------------------
 // Transfer failure -> unhealthy; ActiveCheck() re-probes
 // ---------------------------------------------------------------------
 
@@ -732,6 +792,7 @@ int main() {
   TestStepForwardThenReverseAtDivisor4();
   TestStepHonoursInvertDirection();
   TestEnableFalseFreezesInOrder();
+  TestEnableFalseDetectsIneffectiveEnableLine();
   TestTransferFailureMarksUnhealthyAndActiveCheckReprobes();
   TestEachDatagramIsOneControllerLockHoldWithModeReapplied();
   TestStealthChopSelectsGconfEnPwmModeBit();

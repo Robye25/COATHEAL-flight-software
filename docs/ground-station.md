@@ -1,175 +1,242 @@
-# Ground Station Module Reference
+# Ground Station Reference
 
-The ground station is the operator interface for Rev C manual-first flight
-operations. It provides a PyQt6 GUI, a CLI telemetry receiver, and a CLI command
-client.
+The ground station is the operator console for Rev C manual-first flight
+operations: a PyQt6 mission console (`gui_app.py`), a headless telemetry
+receiver and a one-shot command client (`main.py`). This page describes the
+console as built by the 2026-08-28 redesign
+(`docs/superpowers/specs/2026-08-28-ground-station-redesign-design.md`).
 
 ```text
 ground-station/
-  gui_app.py                 PyQt6 desktop GUI
-  main.py                    CLI entry point
-  app/protocol.py            DATA, EVT,PULL, ACK, and command parsing
-  app/telemetry_server.py    CLI telemetry receiver
-  app/command_client.py      CLI command uplink
+  gui_app.py                  console entry point
+  main.py                     CLI entry point (telemetry-server, command)
+  app/protocol.py             DATA / EVT,PULL / ACK / command parsing, validators
+  app/reply_format.py         key=value; reply-body parsing and pretty-printing
+  app/telemetry_log.py        schema-v6 CSV writer, session directories, command/event logs
+  app/session_dir.py          per-session directory naming
+  app/thermal_presets.py      thermal presets v2 (atomic file, .bak, v1 migration)
+  app/telemetry_server.py     headless receiver (same writer as the GUI)
+  app/command_client.py       one-shot command uplink
+  app/gui/main_window.py      the console: regions, wiring, shortcuts, persistence
+  app/gui/state.py            OnboardState snapshot per frame
+  app/gui/gating.py           why a control cannot succeed (silence, mode, fallback, enable, zero, temperature)
+  app/gui/alarms.py           alarm model with acknowledgement
+  app/gui/dispatch.py         telemetry receiver thread, command dispatcher, radio-silence gate
+  app/gui/discovery.py        UDP beacon / listener / command probe (quiet during silence)
+  app/gui/panel_top.py        top strip (mode, phase, health, link, rate, target, T+, UTC, radio, panic buttons) and alarm strip
+  app/gui/tab_system.py       System tab
+  app/gui/tab_thermal.py      Thermal tab
+  app/gui/tab_motion.py       Motion tab (bend, standard pull, resistance before/after)
+  app/gui/tab_advanced.py     Advanced tab (sequences, PID, open-loop duty, microstep, presets, network, fallback plan)
+  app/gui/plots.py            time-axis plots over series_store.py
+  app/gui/panels_health.py    Health tab and the aggregate health summary
+  app/gui/panel_checkout.py   live go/no-go checklist + RUN CHECK
+  app/gui/panel_values.py     latest value of every field
+  app/gui/panel_console.py    command console (history, entry, completion)
+  app/gui/panel_events.py     event log and EVT,PULL table
 ```
 
 ## Launch
 
-Plug the laptop into the Pi Ethernet link, then start:
-
-```powershell
+```bash
 cd ground-station
-.\.venv\Scripts\Activate.ps1
-python gui_app.py
+python gui_app.py [--host <onboard-ip>] [--tel-port 4000] [--cmd-port 5000] [--log logs] [--no-firewall-check]
 ```
 
-With no `--host`, the GUI runs plug-and-play:
+With no `--host` the console is plug-and-play: it listens for telemetry on
+TCP 4000, beacons on UDP 4100, probes `169.254.10.10:5000` with `PING`, and
+takes the first onboard it hears (discovery, probe or telemetry peer) as the
+command target. `--log` is the log root; every onboard session gets its own
+directory under `<root>/sessions/`.
 
-1. Listen for telemetry on TCP `4000`.
-2. Send UDP discovery beacons on `4100`.
-3. Probe the Pi at `169.254.10.10:5000`.
-4. Use a successful probe/discovery result as the command target.
-5. Let the Pi retarget telemetry to this laptop's link-local IP.
+The console scales to any screen from 1366×768 up (`Ctrl+=` / `Ctrl+-` /
+`Ctrl+0` change the UI size; the setting persists). The layout is fixed —
+nothing floats — and the three column widths, the console height and the
+window geometry are remembered between runs.
 
-Explicit host mode is still available:
-
-```powershell
-python gui_app.py --host 169.254.10.10 --tel-port 4000 --cmd-port 5000
-```
-
-## GUI Responsibilities
-
-| Component | Responsibility |
-|---|---|
-| `MainWindow` | Main Qt thread, widgets, plots, command buttons |
-| `TelemetryReceiver` | Background TCP server, frame parsing, ACKs, CSV writes |
-| `CommandSender` | One-shot TCP command client |
-| Discovery worker | UDP beacons and onboard-host cache |
-
-The GUI updates all plots and panels from parsed `TelemetryPacket` objects. It
-ACKs duplicate replayed frames so the Pi can clear its durable queue, but it
-does not duplicate CSV rows.
-
-## Rev C Display Model
-
-| Panel / plot | Rev C data |
-|---|---|
-| Connection | Pi command target, telemetry bind state, discovery result |
-| Heater control | Six duties, six PID targets, global/per-channel target controls, PID tuning, and local JSON profiles |
-| Motor dock | Explicit M0/M1 selector, jog/absolute controls, software zero, and runtime sequence editor |
-| Pull events | `EVT,PULL` rows with motor id, steps, hold time, sample group |
-| Temperature plot | PT100 sample temperatures S0..S7 from the Sequent RTD HAT; invalid channels show as unavailable |
-| Pressure plot | DPS310 pressure |
-| Environment / UV plot | GUVA-S12SD value through ADS1115 |
-| Resistance plot | MAX31865 click coating-specimen resistance by default (two monitored slots only); Sequent RTD HAT per-channel PT100 element resistance under `sequent_rtd`; `-`/simulated per `sensor.resistance_source` |
-| Health tab | Dot for every OK/FAIL flag, tri-state mode flag, and COMPONENT_STATE entry; feeds the aggregate health dot on the top status strip |
-| Motors tab | Read-only M0/M1 dashboard (position, target, Hz, microstep, enable/moving/holding) -- independent of the Motor dock's controls |
-| Values panel | Latest parsed telemetry fields (status/component flags moved to the Health tab) |
-| Preflight tab | Checklist dots: RTC valid, ambient sensors in-range, heater duties reporting, motors enabled, telemetry link healthy, specimen uniformity, over-temperature latch clear |
-| Status bar | Phase, sequence, pressure, sample mean, link state, packet rate |
-
-## Safety controls
-
-`Esc` stops BOTH motors (`STEPPER_STOP 0` and `STEPPER_STOP 1`) -- panic-class,
-no confirmation dialog. The EmergencyBar's `STOP MOTORS` button (beside
-`HEATERS OFF`) does the same thing from the mouse; both are unconfirmed panic
-buttons by design, same policy. Every other EmergencyBar action
-(`ENTER SAFE`, `SHUTDOWN SAFE`, `RADIO SILENCE`) requires a confirmation
-dialog first.
-
-While a confirm dialog is open, keyboard shortcuts (including `Esc`) are
-blocked by Qt's modal dialog until it's dismissed -- `Esc` closes the dialog
-itself before it can reach anything else. The View menu (checkable actions
-toggling the left/right/bottom docks, wired to each dock's own
-`toggleViewAction()`) lets an operator hide any dock that isn't needed for the
-current phase of operations.
-
-## Command Workflow
-
-Typical connected operation:
-
-```powershell
-python main.py command --cmd PING
-python main.py command --cmd STATUS
-python main.py command --cmd CHECK
-python main.py command --cmd ARM
-python main.py command --cmd "SET_PHASE ASCENT"
-python main.py command --cmd "SET_PID ALL 0.20 0.02 0.03"
-python main.py command --cmd "SET_TEMP_TARGET 0 25.0"
-python main.py command --cmd GET_THERMAL
-python main.py command --cmd "STEPPER_ENABLE 0"
-python main.py command --cmd "SET_POSITION_ZERO 0"
-python main.py command --cmd "BENDSEQ_LOAD 0 flex 800:2:50 1600:3:75 0:1:50"
-python main.py command --cmd "BENDSEQ_RUN 0 flex"
-python main.py command --cmd "BENDSEQ_STATUS 0"
-python main.py command --cmd HEATERS_OFF --yes
-python main.py command --cmd DISARM
-```
-
-Dangerous commands require GUI confirmation or the CLI `--yes` flag:
+## Layout
 
 ```text
-FORCE_STOP
-HEATERS_OFF
-RESET_CTRL
-SHUTDOWN_SAFE
-OFF
-RESET
+┌ File · View · Help ──────────────────────────────────────────────────────────────────┐
+│ MODE · PHASE · HEALTH · LINK age · RX rate · TARGET · SESSION/seq · T+ · UTC · RADIO │ HEATERS OFF · STOP MOTORS · ENTER SAFE │
+│ alarm strip (only while alarms are active)                                  [ACK ALL] │
+├──────────────┬──────────────────────────────────────────────┬────────────────────────┤
+│ System       │ Temperatures · Ambient · Heaters ·           │ Health · Checkout ·    │
+│ Thermal      │ Resistance · Motors                          │ Values                 │
+│ Motion       │ window 5 m · 30 m · 2 h · all · FOLLOW ·     │                        │
+│ Advanced     │ PAUSE · EXPORT                               │                        │
+├──────────────┴──────────────────────────────┬───────────────┴────────────────────────┤
+│ Console (every command + reply, entry line) │ Events · Pulls                         │
+├─────────────────────────────────────────────┴────────────────────────────────────────┤
+│ session directory · frames · parse errors · disk · UI size · Esc = STOP MOTORS · F1  │
+└──────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Thermal profiles are stored locally in `profiles/thermal_profiles.json`. The Pi
-does not persist targets or tuned gains; applying a profile re-sends them.
-Bench-only commands require `runtime.bench_mode=true` and `ARM_DEBUG`. After debug arming, manual heater duty commands can drive open-loop channels without mapped temperature feedback or scheduler clamping.
+### Top strip
+`MODE` (STANDBY / RUN / SAFE), `PHASE`, `HEALTH` (aggregate dot: green only
+when all 14 OK/FAIL flags are OK and no component is DEGRADED/STALE/FAILED,
+amber on simulated sensors, red on any failure, grey when unreported),
+`LINK` (age of the last frame: green < 2 s, amber < 5 s, red beyond),
+`RX` frames/s, `TARGET` host:port and how it was chosen, `SESSION`/seq,
+`T+` mission elapsed since the first frame of the onboard session, `UTC`,
+`RADIO` (TX, or `SILENT hh:mm:ss`). The panic group on the right sends
+`HEATERS_OFF` and `STEPPER_STOP 0` + `STEPPER_STOP 1` without confirmation;
+`ENTER SAFE` confirms first. During radio silence the whole strip turns
+purple and the panic buttons are disabled (only `RADIO RESUME` is live).
 
-## Protocol Parser
+### Alarm strip
+Appears while alarms are active. Sources: `OVERTEMP`, `SAMPLE_TEMP` (which
+heated channels are invalid), `FALLBACK` (link-loss fallback onboard),
+`SEQ_PAUSED`, `ENERGY`, `MOTORn FAILED`, `HEATERS_INHIBITED` (amber, names
+the moving motor), `SENSOR` (any bad component or bus flag), `RX_QUEUE`
+(onboard backlog draining), `LINK STALE` (suppressed during silence).
+Click a chip or `ACK ALL` to acknowledge; an acknowledged alarm stays listed
+dimmed until its condition clears, and re-raises if the condition returns.
+View → *Audible alarms* adds one beep per new alarm (off by default).
 
-`app/protocol.py` accepts:
+### System tab
+Link (target, receiver state, rate, onboard queue depth, session; a
+`RESTART RECEIVER` button appears only after a receiver failure) · Mode
+(`ARM` confirmed, `DISARM`, `ENTER SAFE` confirmed, `EXIT SAFE` — each
+enabled only in the mode where the onboard accepts it) · Phase (`SET PHASE`
+confirmed; fallback indicator) · Radio (`RADIO SILENCE` confirmed, `RADIO
+RESUME`) · Downlink rate (`SET_TICK_HZ`, 0.1–5 Hz) · Diagnostics (`PING`,
+`STATUS`, `COMPONENTS`, `GET_THERMAL`, `CHECK <component>`, `RESET_CTRL`
+confirmed) · Shutdown (`SHUTDOWN_SAFE` confirmed).
 
-| Input | Parser |
+### Thermal tab
+Energy used / budget, active heaters (of 3), motion inhibit, PID gains ·
+six rows H0–H5: measured temperature of the mapped sample (S0–S5), target
+spin box + `Set` / `Clr`, duty bar, state word (`OFF`, `PID`, `DUTY`,
+`INHIB`, `NO-T` = the sample is invalid so the heater cannot run) · `Set
+all` / `Clear all` / `Refresh` (`GET_THERMAL`, which also supplies the
+target limits) · presets: `Apply` (re-sends `SET_PID ALL …` then a
+`SET_TEMP_TARGET` / `CLEAR_TEMP_TARGET` per heater), `Save as…`, `Capture`
+(reads the onboard's current targets into a preset).
+
+Presets live in `profiles/thermal_presets.json` (v2). Every save is atomic
+and keeps the previous file as `.bak`; a legacy `thermal_profiles.json` is
+migrated on first load and never deleted.
+
+### Motion tab
+Two motor cards (M0 = S0–S3, M1 = S4–S7) with enabled / zeroed / moving /
+holding / healthy dots, position and target, speed, last command, sequence
+state, and the resistance readout: `R now`, `bend start` and `Δ %` for the
+card's monitored specimen — the bend confirmation. The selector (M0 | M1)
+drives the shared controls: `ENABLE`, `DISABLE`, `SET ZERO`, `HOME`, `STOP`
+· jog ±10/±100/±1000 µsteps (allowed before zeroing) · speed 1–100
+full-step Hz · **BEND** (`STEPPER_MOVETO <id> <target> <hold>`) and
+**STANDARD PULL** (`PULL_EXECUTE <id>`, the config-defined pull). BEND and
+STANDARD PULL are disabled — with the reason shown — until the motor is
+enabled and zeroed, the mode is RUN, and neither radio silence nor
+link-loss fallback is active. Pressing them records the specimen
+resistance at bend start; the idle→moving edge does the same automatically.
+
+### Advanced tab
+Bend sequences (`BENDSEQ_LOAD/RUN/PAUSE/RESUME/STOP/STATUS/CLEAR`; step
+speed ≤ 100 Hz) · PID tuning · open-loop duty (`SET_HEATER_DUTY`,
+`SET_ALL_DUTY`, `CLEAR_OVERRIDES`) · microstep · preset management ·
+fallback plan (`FALLBACK_PLAN/ARM/DISARM/STATUS`, executed onboard only
+during link-loss fallback — see the redesign spec §10) · network (beacon
+priority, manual host override). Bench-only commands (`ARM_DEBUG`,
+`HEATER_TEST`, `SET_BENCH_MODE`) are console-only.
+
+### Plots
+x-axis is mission elapsed time (`T+hh:mm:ss`; the crosshair readout also
+shows UTC). Window 5 m / 30 m / 2 h / all; `FOLLOW` re-engages live
+scrolling after a manual pan; `PAUSE` freezes drawing (data keeps
+accumulating); `EXPORT` writes a PNG of the current page or a CSV of the
+visible window. Every series is kept for the whole session. Pages:
+Temperatures (S0–S7, dashed target overlays, fallback floor and
+over-temperature lines), Ambient (three x-linked plots: ambient T, pressure
+with the pre-float line, UV), Heaters (duty %), Resistance (only channels
+that have reported; pull markers), Motors (position/target per motor; pull
+markers).
+
+### Right column
+Health (every OK/FAIL flag, tri-state flag and COMPONENT_STATE entry as a
+dot) · Checkout (live go/no-go rows: link, RTC, DPS310/ADS1115, PT100
+channels valid n/8, MAX31865 clicks reporting, PWM, M0/M1 healthy · enabled
+· zeroed, storage, energy budget, mode RUN, unacknowledged alarms, last
+CHECK; `RUN CHECK ALL`) · Values (every field, monospace).
+
+### Console, events, pulls
+The console lists every command from every panel with ✔/✖, latency and the
+reply body; select a row to see the reply pretty-printed, double-click to
+put the command back in the entry. The entry completes known commands with
+Tab and keeps ↑/↓ history. Events shows the log with level colouring and a
+filter; Pulls lists every `EVT,PULL`. All three are written to the session
+directory automatically.
+
+## Interaction rules
+
+- **Confirmation dialogs**: `ARM`, `SET_PHASE`, `ENTER_SAFE`, `SHUTDOWN_SAFE`,
+  `RADIO_SILENCE`, `RESET_CTRL`, `BENDSEQ_RUN`, `FALLBACK_ARM`. Everything
+  else — including the panic pair — sends immediately.
+- **Gating**: a control that would be refused by the onboard is disabled
+  and its tooltip (and the note under its group) says why. Unknown facts
+  never block; the onboard remains the authority.
+- **Feedback**: a persistent response line under each control group, plus
+  the console. No toasts.
+- **Radio silence**: after `ACK,RADIO_SILENCE` (or a `STATUS` reply carrying
+  `silence=1`) the ground station stops its beacon and probe and refuses to
+  send anything except `RADIO_RESUME`, `RADIO_SILENCE`, `STATUS`, `PING`;
+  refused commands appear in the console and `commands.csv` with the reason.
+
+### Shortcuts
+
+| Keys | Action |
 |---|---|
-| DATA frame | `parse_telemetry_csv` |
-| Pull event | `parse_pull_event` |
-| ACK | `build_ack` |
-| Command line | `build_command` |
+| `Esc` | `STEPPER_STOP 0` + `STEPPER_STOP 1` (panic, no confirm) |
+| `Ctrl+Shift+H` | `HEATERS_OFF` (panic, no confirm) |
+| `Ctrl+L` | focus the console entry |
+| `Ctrl+1 … Ctrl+4` | System / Thermal / Motion / Advanced |
+| `Alt+1 … Alt+5` | plot pages |
+| `P` | pause / resume plots (ignored while typing) |
+| `F5` | send `STATUS` |
+| `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | UI size |
+| `F1` | shortcut list |
 
-The parser keeps compatibility with the `RESISTANCE=` field; which physical
-quantity and slots it carries depends on the onboard `sensor.resistance_source`
-setting — see [configuration.md#sensors](configuration.md#sensors).
+No unmodified letter sends a command. While a confirmation dialog is open
+every shortcut is blocked; `Esc` closes the dialog first.
 
-Invalid samples are not added to plots. Before a sensor has ever succeeded the
-readout is `N/A`; after a failure it shows the last good value and stale age.
-The component panel reports each sensor, motor, and PWM subsystem separately.
+## Logs
 
-## CSV Logs
-
-The GUI writes received DATA frames to `logs/ground_telemetry.csv`. Pull events
-are written to a sibling pull-event CSV. The ACK cursor is stored in
-`logs/ground_ack_cursor.json` so restarted ground-station sessions can dedupe
-replayed onboard queue frames.
-
-## CLI Telemetry Server
-
-Headless telemetry receiver:
-
-```powershell
-python main.py telemetry-server --host 0.0.0.0 --port 4000
+```text
+logs/
+  ground_ack_cursor.json                   per-session ACK cursor (dedupe across restarts)
+  latest_session.txt                       path of the directory in use
+  sessions/<YYYYMMDD-HHMMSS>_<session id>/
+    telemetry.csv                          schema v6, one row per accepted DATA frame
+    pulls.csv                              EVT,PULL
+    commands.csv                           ts_utc, command, ok, latency_ms, body, raw
+    events.log                             the event log
+    session.json                           ground-station metadata and counters
 ```
 
-It binds the telemetry socket, parses incoming DATA and event frames, writes CSV
-logs, and sends ACKs.
+The directory is named after the onboard session id (its boot time first,
+so directories sort chronologically); a ground-station restart while the
+onboard session is unchanged appends to the same directory. Commands and
+events that happen before the first frame are buffered and written when
+the directory opens. The headless `telemetry-server` writes exactly the
+same files.
 
-## CLI Command Client
+Schema v6 columns: `gs_rx_utc, session_id, seq, timestamp, rtc_valid,
+ambient_temp_c, ambient_pressure_mbar, uv, sample_0..7, h0..5, r0..7, phase,
+mode, status, sensor_valid, sensor_age_ms, component_state,
+stepper{0,1}_{position,target,hz,microstep,enabled,ok,moving,holding,hold_s,pulses,missed,source,zeroed,seq,seqstate},
+fallback, link_loss_s, energy_wh, budget_wh, budget_exhausted,
+heaters_active, queue, plan`. Numbers are written losslessly; unmeasured
+values are empty cells.
 
-One-shot command uplink:
+## CLI
 
-```powershell
-python main.py command --cmd STATUS
-python main.py command --host 169.254.10.10 --cmd PING
+```bash
+python main.py telemetry-server [--bind 0.0.0.0] [--port 4000] [--log logs] [--plot] [--alert-temp-c 80] [--timeout-s 10]
+python main.py command --cmd "<COMMAND>" [--host <ip>] [--port 5000] [--timeout <s>] [--yes]
 ```
 
-Host resolution order:
-
-1. Explicit `--host`.
-2. `logs/discovered_onboard.json`.
-3. UDP discovery if enabled.
-4. Static fallback `169.254.10.10`.
+`command` resolves the host from `--host`, then `logs/discovered_onboard.json`,
+then UDP discovery, then `169.254.10.10`. Dangerous commands ask for a
+typed `YES` unless `--yes` is given. Per-verb timeouts come from
+`protocol.COMMAND_TIMEOUTS` (`CHECK` 15 s, everything else 3 s).
