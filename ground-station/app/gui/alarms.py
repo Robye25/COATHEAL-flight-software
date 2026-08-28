@@ -64,6 +64,10 @@ def evaluate(state: OnboardState) -> List[Alarm]:
             alarms.append(Alarm("SENSOR", "SENSOR — " + " ".join(bad_components + bad_flags)))
         if state.queue_depth is not None and state.queue_depth > QUEUE_ALARM_FRAMES:
             alarms.append(Alarm("RX_QUEUE", f"onboard queue backlog {state.queue_depth} frames (draining)", AMBER))
+        if state.plan_state == "running":
+            alarms.append(Alarm("PLAN", "fallback plan RUNNING onboard — autonomous bend in progress", AMBER))
+        elif state.plan_state == "failed":
+            alarms.append(Alarm("PLAN", "fallback plan FAILED onboard — FALLBACK_STATUS for detail"))
     if (not state.silence and state.link_age_s is not None and state.link_age_s >= LINK_STALE_S):
         alarms.append(Alarm("LINK", f"LINK STALE — no frame for {state.link_age_s:.0f} s"))
     return alarms
