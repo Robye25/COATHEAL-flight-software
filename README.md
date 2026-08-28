@@ -15,7 +15,7 @@ coatheal_onboard                       gui_app.py / CLI
   TCP command server :5000  <--------  one-shot commands
   TCP telemetry client :4000 --------> telemetry receiver + ACKs
   UDP discovery :4100       <------->  discovery beacons
-  durable telemetry queue              CSV logs + live plots
+  durable telemetry queue              per-session logs + live plots
 ```
 
 ## Deployment quickstart (plug and play)
@@ -40,6 +40,11 @@ coatheal-deploy                               # every time after that
 
 The script ends with a green `DEPLOYED and RUNNING` banner and the Pi's IP
 addresses. Add `--dry-run` to see every action without changing anything.
+
+**Ground station** — a fixed-layout mission console (System / Thermal /
+Motion / Advanced tabs, mission-time plots, alarm strip, command console;
+see [docs/ground-station.md](docs/ground-station.md)). Every session's
+telemetry, commands and events land in `ground-station/logs/sessions/`.
 
 **Ground station (Windows)** — double-click
 `ground-station/COATHEAL-GroundStation.bat`. The first run sets up a local
@@ -79,7 +84,8 @@ docs/            Architecture, protocol, configuration, and hardware docs
 | [docs/protocol.md](docs/protocol.md) | DATA, `EVT,PULL`, ACK, discovery, and command protocol |
 | [docs/manual-operations.md](docs/manual-operations.md) | Complete CLI workflow for thermal control, zeroing, bend sequences, fallback, and safe stop |
 | [docs/onboard.md](docs/onboard.md) | Onboard C++ module reference |
-| [docs/ground-station.md](docs/ground-station.md) | Ground station GUI/CLI reference |
+| [docs/ground-station.md](docs/ground-station.md) | Ground station console and CLI reference |
+| [docs/superpowers/specs/2026-08-28-ground-station-redesign-design.md](docs/superpowers/specs/2026-08-28-ground-station-redesign-design.md) | Ground-station redesign: owner decisions, layout, protocol additions, radio silence, link-loss failsafe |
 | [docs/architecture.md](docs/architecture.md) | System architecture and data flow |
 | [deploy/README.md](deploy/README.md) | systemd units, one-command deploy, storage layout, ground-station firewall |
 | [docs/development.md](docs/development.md) | Build, test, and bench workflow |
@@ -168,6 +174,9 @@ python -m unittest discover -s ground-station/tests -p "test_*.py"
 | `SET_POSITION_ZERO <id>` | Declare the current physical motor position as zero |
 | `BENDSEQ_LOAD` / `BENDSEQ_RUN` | Define and execute absolute bend sequences |
 | `STEPPER_*` | Direct motor movement commands |
+| `PULL_EXECUTE <id>` | One config-defined standard pull (the console's STANDARD PULL) |
+| `RADIO_SILENCE` / `RADIO_RESUME` | Stop / restart every onboard transmission (telemetry, beacons, hello replies); only `RADIO_RESUME`, `STATUS` and `PING` are answered while silent |
+| `FALLBACK_PLAN <id> <target> <hold_s> [hz]` / `FALLBACK_ARM` / `FALLBACK_DISARM` / `FALLBACK_STATUS` | Operator-armed bend plan the onboard executes on its own only during link-loss fallback at PRE_FLOAT/FLOAT |
 | `SHUTDOWN_SAFE` | Flush logs and stop onboard process |
 
 See [docs/protocol.md](docs/protocol.md) for the complete command list.
