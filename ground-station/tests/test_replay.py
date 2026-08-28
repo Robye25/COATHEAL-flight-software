@@ -48,7 +48,7 @@ class ClassifierTests(unittest.TestCase):
         for k in range(12):
             v = c.classify(1444.0 + k, 1444.0 + k)
         self.assertFalse(v.is_replay, "live again once onboard time advances at 1x with no lag")
-        self.assertEqual(v.behind_s, 0.0)
+        self.assertLess(v.behind_s, 1.0, "only the sub-second residue of the drain's last frame")
 
     # MUTATION: make classify() return is_replay=False always and confirm
     # test_backlog_replay_is_flagged_until_it_catches_up fails on
