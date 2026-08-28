@@ -43,25 +43,45 @@ class ClassifierTests(unittest.TestCase):
                 self.assertIsNotNone(v.eta_s)
                 self.assertGreater(v.eta_s, 0.0)
         self.assertTrue(all(flagged[:250]), "hours-old frames must be replay")
-        self.assertFalse(flagged[-1], "the tail of the backlog is within the threshold and live again")
+        self.assertTrue(flagged[-1], "the last queued frame still arrives at drain speed")
+        # Caught up: live frames again, onboard time at 1x -> live within a few seconds.
+        for k in range(12):
+            v = c.classify(1444.0 + k, 1444.0 + k)
+        self.assertFalse(v.is_replay, "live again once onboard time advances at 1x with no lag")
+        self.assertEqual(v.behind_s, 0.0)
 
     # MUTATION: make classify() return is_replay=False always and confirm
     # test_backlog_replay_is_flagged_until_it_catches_up fails on
     # "hours-old frames must be replay".
 
     def test_startup_replay_without_prior_live_frame(self) -> None:
+        """The console starts in the middle of a drain (bench, 2026-08-28):
+        every frame is newer than the last, so only the rate of onboard
+        time gives it away -- 3 h of 1 Hz frames arriving at 8 per second."""
         c = ReplayClassifier()
-        # GS starts mid-drain: frames from 3 h ago arriving now, getting newer.
-        v = c.classify(onboard_ts=0.0, rx=10800.0)
-        self.assertFalse(v.is_replay, "the first frame defines the best lag so far")
-        v = c.classify(onboard_ts=10.0, rx=10801.0)
-        self.assertFalse(v.is_replay, "still the same lag band")
-        # Once newer frames show a much smaller lag, the old band is exposed:
-        # simulate the drain reaching the present.
-        v = c.classify(onboard_ts=10790.0, rx=10802.0)
+        verdicts = []
+        for k in range(200):
+            verdicts.append(c.classify(onboard_ts=0.0 + k, rx=10800.0 + k / 8.0))
+        self.assertTrue(verdicts[-1].is_replay, "8 onboard seconds per wall second is a replay")
+        self.assertGreater(verdicts[-1].behind_s, 10000.0, "behind estimate falls back to the raw lag")
+        self.assertIsNotNone(verdicts[-1].eta_s)
+        self.assertAlmostEqual(verdicts[-1].eta_s, verdicts[-1].behind_s / 7.0, delta=verdicts[-1].behind_s * 0.05)
+        self.assertTrue(any(v.is_replay for v in verdicts[:20]), "must be recognised within a few seconds")
+        # The drain catches up: onboard time now advances at 1x.
+        for k in range(30):
+            v = c.classify(onboard_ts=10830.0 + k, rx=10830.0 + k)
+        self.assertFalse(v.is_replay, "1x means live")
+
+    # MUTATION: drop the `or fast` term from is_replay in classify() and
+    # confirm test_startup_replay_without_prior_live_frame fails on
+    # "8 onboard seconds per wall second is a replay".
+
+    def test_high_tick_rate_live_is_not_replay(self) -> None:
+        # 5 Hz live telemetry: five frames per second, onboard time still 1x.
+        c = ReplayClassifier()
+        for k in range(50):
+            v = c.classify(onboard_ts=100.0 + k / 5.0, rx=200.0 + k / 5.0)
         self.assertFalse(v.is_replay)
-        v_old = c.classify(onboard_ts=100.0, rx=10803.0)
-        self.assertTrue(v_old.is_replay, "an old frame after a live one is a replay")
 
     def test_missing_timestamp_is_never_replay(self) -> None:
         c = ReplayClassifier()
