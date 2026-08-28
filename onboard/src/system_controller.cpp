@@ -6,6 +6,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <numeric>
@@ -141,6 +143,7 @@ SystemController::SystemController(OnboardConfig config)
   control_overrides_.pid_overrides.resize(config_.hardware.heater_count);
   bend_sequences_.resize(config_.motors.size());
   motor_zeroed_.assign(config_.motors.size(), false);
+  RestoreRadioSilence();
 }
 
 bool ParseInt64(const std::string& text, std::int64_t* out) {
@@ -353,6 +356,35 @@ void SystemController::InhibitHeatersForMotion() {
   }
   std::lock_guard<std::mutex> lock(overrides_mu_);
   last_heater_duty_.assign(config_.hardware.heater_count, 0.0);
+}
+
+std::string SystemController::RadioSilenceFlagPath() const {
+  return (std::filesystem::path(config_.storage.queue_dir) / "radio_silence")
+      .string();
+}
+
+void SystemController::PersistRadioSilence(bool silent) {
+  const std::filesystem::path path(RadioSilenceFlagPath());
+  std::error_code ec;
+  if (silent) {
+    std::filesystem::create_directories(path.parent_path(), ec);
+    std::ofstream flag(path, std::ios::out | std::ios::trunc);
+    if (!flag) {
+      std::cerr << "[radio] could not persist the silence flag at " << path
+                << '\n';
+    }
+  } else {
+    std::filesystem::remove(path, ec);
+  }
+}
+
+void SystemController::RestoreRadioSilence() {
+  const std::string path = RadioSilenceFlagPath();
+  std::error_code ec;
+  if (std::filesystem::exists(path, ec)) {
+    telemetry_client_.SetTransmitEnabled(false);
+    std::cerr << "[radio] silence restored from " << path << '\n';
+  }
 }
 
 void SystemController::TickBendSequences() {
@@ -722,7 +754,29 @@ int SystemController::Run() {
       for (std::size_t i = 0; i < n_channels; ++i) {
         record.steppers.push_back(stepper_->Snapshot(static_cast<int>(i)));
       }
+      // The channel does not know about zeroing or sequences; both live
+      // here under sequence_mu_ (redesign spec §8).
+      std::lock_guard<std::mutex> lock(sequence_mu_);
+      for (std::size_t i = 0; i < record.steppers.size(); ++i) {
+        StepperStatus& st = record.steppers[i];
+        st.zeroed = i < motor_zeroed_.size() && motor_zeroed_[i];
+        if (i < bend_sequences_.size()) {
+          const BendSequenceRuntime& runtime = bend_sequences_[i];
+          st.seq_name = runtime.active_name;
+          st.seq_state = !runtime.running ? "idle"
+                         : (runtime.paused ? "pause" : "run");
+        }
+      }
     }
+    record.ctrl.fallback_active = link_loss_fallback_active_;
+    record.ctrl.link_loss_s = link_loss_s_;
+    record.ctrl.energy_wh = scheduler_.energy_consumed_wh();
+    record.ctrl.budget_wh = config_.power.energy_budget_wh;
+    record.ctrl.budget_exhausted = scheduler_.is_budget_exhausted();
+    record.ctrl.heaters_active = static_cast<int>(std::count_if(
+        scheduled_duty.begin(), scheduled_duty.end(),
+        [](double duty) { return duty > 0.0; }));
+    record.ctrl.queue_depth = telemetry_queue_.size();
 
     const std::string line = SerializeTelemetryDataFrame(record, telemetry_client_.session_id());
     COATHEAL_PERF_STAMP(perf_ts[7]);  // stage 6: build+serialize telemetry
@@ -975,6 +1029,22 @@ std::string SystemController::HandleCommandLine(const std::string& line,
   const Command& command = parsed.command;
   const std::string cmd_name = command.name;
 
+  // Radio silence (redesign spec §9): while transmit is disabled the only
+  // commands that may do anything are the ones needed to lift the silence
+  // or to ask about it. Everything else is refused here, before any of the
+  // handlers below can have a side effect.
+  if (!telemetry_client_.transmit_enabled()) {
+    switch (command.type) {
+      case CommandType::kRadioResume:
+      case CommandType::kRadioSilence:
+      case CommandType::kStatus:
+      case CommandType::kPing:
+        break;
+      default:
+        return Nack(cmd_name, "radio silence active");
+    }
+  }
+
   auto require_debug_arm = [&]() -> bool {
     return config_.runtime.bench_mode && debug_armed_.load();
   };
@@ -1074,6 +1144,7 @@ std::string SystemController::HandleCommandLine(const std::string& line,
              << ";telemetry_target=" << telemetry_client_.current_host()
              << ";queue_depth=" << telemetry_queue_.size()
              << ";tick_hz=" << live_tick_hz_.load()
+             << ";silence=" << (telemetry_client_.transmit_enabled() ? "0" : "1")
              << ";simulated=" << (sensor_manager_.simulated() ? "1" : "0")
              << ";i2c_ok=" << (sensor_manager_.i2c_ok() ? "1" : "0")
              << ";sample_temp_ok=" << (sensor_manager_.sample_temp_ok() ? "1" : "0")
@@ -1630,10 +1701,12 @@ std::string SystemController::HandleCommandLine(const std::string& line,
 
     case CommandType::kRadioSilence:
       telemetry_client_.SetTransmitEnabled(false);
+      PersistRadioSilence(true);
       return Ack(cmd_name, "radio silent");
 
     case CommandType::kRadioResume:
       telemetry_client_.SetTransmitEnabled(true);
+      PersistRadioSilence(false);
       return Ack(cmd_name, "radio resumed");
 
     case CommandType::kSetPhase: {

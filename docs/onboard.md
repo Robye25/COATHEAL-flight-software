@@ -150,12 +150,16 @@ software zero established by `SET_POSITION_ZERO`; there are no limit switches.
 `SerializeTelemetryDataFrame` emits:
 
 ```text
-DATA,<session>,<seq>,<ts>,<rtc_valid>,<ambient_temp_c>,<ambient_pressure_mbar>,<uv>,<sample_0>..<sample_7>,HEATER_DUTY=..,RESISTANCE=..,PHASE=..,MODE=..,STATUS=..,SENSOR_VALID=..,SENSOR_AGE_MS=..,COMPONENT_STATE=..,STEPPER0=..,STEPPER1=..
+DATA,<session>,<seq>,<ts>,<rtc_valid>,<ambient_temp_c>,<ambient_pressure_mbar>,<uv>,<sample_0>..<sample_7>,HEATER_DUTY=..,RESISTANCE=..,PHASE=..,MODE=..,STATUS=..,SENSOR_VALID=..,SENSOR_AGE_MS=..,COMPONENT_STATE=..,CTRL=..,STEPPER0=..,STEPPER1=..
 ```
 
 `RESISTANCE=` remains on the wire for parser compatibility; which physical
 quantity and slots it carries depends on `sensor.resistance_source` — see
-[configuration.md#sensors](configuration.md#sensors).
+[configuration.md#sensors](configuration.md#sensors). `CTRL=` (fallback
+state, link-loss age, heater energy/budget, active heater count, queue depth,
+fallback-plan state) and the `zeroed`/`seq`/`seqst` keys on each `STEPPERn=`
+segment were added 2026-08-28; every key is listed in
+[protocol.md](protocol.md#ctrl-keys-added-2026-08-28).
 
 `SerializeTelemetryPullEventFrame` emits:
 

@@ -64,6 +64,17 @@ class TelemetryClient {
   void SetTransmitEnabled(bool enabled);
   bool transmit_enabled() const;
 
+  // Radio-silence seams (redesign spec §9). `beacon_allowed()` is what the
+  // beacon thread consults before every broadcast; `hello_reply_allowed()`
+  // is what the listener consults before answering a legacy GS_HELLO. Both
+  // are false whenever transmit is disabled, so a silent onboard originates
+  // no datagram at all. The counters let tests observe what the two send
+  // helpers actually did without opening sockets.
+  bool beacon_allowed() const;
+  bool hello_reply_allowed() const;
+  std::uint64_t beacons_sent() const { return beacons_sent_.load(); }
+  std::uint64_t hello_replies_sent() const { return hello_replies_sent_.load(); }
+
   // Treat a successful command connection as authoritative evidence of the
   // ground-station return path. This is the plug-and-play fallback when UDP
   // broadcast discovery is blocked or unreliable on link-local Ethernet.
@@ -127,6 +138,8 @@ class TelemetryClient {
   mutable std::mutex mu_;
   bool connected_ = false;
   bool transmit_enabled_ = true;
+  std::atomic<std::uint64_t> beacons_sent_{0};
+  std::atomic<std::uint64_t> hello_replies_sent_{0};
   int socket_fd_ = -1;
   std::string recv_buffer_;
   std::string session_id_;
