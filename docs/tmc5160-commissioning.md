@@ -671,3 +671,30 @@ the whole configuration, restores the chopper, logs
 verdict. A motor that keeps stalling with a rising `resets` count is a
 power-supply problem, not a software one.
 
+## Bench note 2026-08-29 (later) — two more reasons the motors "never moved"
+
+1. **The pulse thread accelerated per step, not per second**
+   (`StepperChannel::PulseThreadBody` fed the ramp a fixed 1 ms per
+   iteration while each iteration sleeps one pulse period). From standstill
+   the motor crawled at a few microsteps per second and needed ~500 pulses
+   (5–7 s) to reach 100 Hz — a 400-microstep move took 7 s, a 100-microstep
+   jog never got out of the crawl. Fixed in `d06319c`: the ramp integrates
+   measured time; 400 microsteps now take 2.0 s, 800 (one revolution at µ4)
+   about 3 s.
+2. **The 12 V motor rail sags under 0.8 A run current.** With stealthChop the
+   regulator's PWM amplitude (`MOTOR_DEBUG pwm_scale_sum`) is ~21 at
+   standstill for 0.8 A (a healthy ~1 Ω coil at 12 V) but climbs to 255
+   (100 %) at 100 full-steps/s — impossible at a solid 12 V for a NEMA17 at
+   30 rpm — and the chips then reset. At 0.3 A the same moves complete with
+   the regulator relaxed (< 140) and zero resets. Measure VM at the module
+   during a move (expect a steady 12 V; a dip below ~9 V or ringing is the
+   fault), size the supply for ≥ 2 A per motor, keep the leads short and
+   thick, and put ≥ 100 µF/25 V across VM/GND at each module.
+
+Proof the motors turn (spreadCycle, 0.8 A, 800 microsteps = 1 rev): both
+motors reached `XACTUAL=51200` in 3 s with StallGuard ≈ 25–35 at cruise
+(loaded, moving; a stalled motor reads 0), open-load flags clear during
+motion, `status_sg` never set, no resets. Use the console's Debug tab with
+a BEND: one revolution shows as MSCNT cycling 200 times and XACTUAL rising
+by 51,200.
+

@@ -37,6 +37,7 @@ REGISTER_ROWS = [
     ("sd_mode", "SD_MODE (1 = STEP/DIR strap)"), ("enabled", "firmware enabled"), ("moving", "firmware moving"),
     ("pulses", "pulses issued"), ("missed", "missed deadlines"), ("faults", "fault flags"),
     ("gstat", "GSTAT (bit 0 = reset since configured)"), ("resets", "chip resets since boot"),
+    ("stealth", "stealthChop active"), ("pwm_scale_sum", "PWM amplitude 0–255 (255 = cannot reach current)"),
 ]
 
 
