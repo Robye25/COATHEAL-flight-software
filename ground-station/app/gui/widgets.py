@@ -39,6 +39,24 @@ MUTED = "#888888"
 MONO_CSS = "font-family: monospace;"
 
 
+_SOFT_BREAK_AFTER = ";|,/\\=:"
+_ZWSP = "\u200b"
+
+
+def soft_breaks(text: str) -> str:
+    """Insert zero-width spaces after separators so a long unbreakable reply
+    body (`a=1;b=2;...`, a path) can wrap instead of forcing its whole
+    column wider than the screen. Invisible; only affects wrapping."""
+    if not text:
+        return text
+    out = []
+    for ch in text:
+        out.append(ch)
+        if ch in _SOFT_BREAK_AFTER:
+            out.append(_ZWSP)
+    return "".join(out)
+
+
 def style_button(btn: QPushButton, cls: str = "primary", *, bold: bool = True,
                  min_height: int = 26, bg: Optional[str] = None, fg: str = "white",
                  compact: bool = False) -> None:
@@ -135,6 +153,8 @@ class Indicator(QWidget):
         self._label = QLabel(label)
         self._value = QLabel(value)
         self._value.setStyleSheet(f"{MONO_CSS} color: {MUTED};")
+        self._value.setMinimumWidth(1)
+        self._label.setMinimumWidth(1)
         lay.addWidget(self._dot)
         lay.addWidget(self._label, 1)
         lay.addWidget(self._value)
@@ -174,6 +194,8 @@ class ResponseLine(QLabel):
     def __init__(self, parent=None):
         super().__init__("—", parent)
         self.setWordWrap(True)
+        self.setMinimumWidth(1)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         self.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self._paint(MUTED)
         self.last_ok: Optional[bool] = None
@@ -188,13 +210,14 @@ class ResponseLine(QLabel):
         glyph = "✔" if resp.ok else "✖"
         body = resp.body if resp.ok else (resp.error or resp.raw or "no reply")
         latency = f" · {ms:.0f} ms" if ms > 0 else ""
+        body = soft_breaks(body)
         self.setText(f"{glyph} {cmd.strip()}{latency}\n{body}" if body else f"{glyph} {cmd.strip()}{latency}")
         self._paint(GREEN if resp.ok else RED)
         self.last_ok = resp.ok
         self.last_command = cmd.strip()
 
     def show_note(self, text: str, color: str = MUTED) -> None:
-        self.setText(text)
+        self.setText(soft_breaks(text))
         self._paint(color)
 
     def clear_response(self) -> None:

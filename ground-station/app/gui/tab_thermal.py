@@ -19,7 +19,7 @@ from .dispatch import CommandDispatcher
 from .state import HEATER_COUNT, HEATER_SAMPLE, OnboardState
 from .theme import HEATER_COLORS
 from .widgets import (
-    AMBER, GREEN, MONO_CSS, MUTED, RED, Indicator, ResponseLine, group_box, hrow, make_button,
+    AMBER, GREEN, MONO_CSS, MUTED, RED, Indicator, ResponseLine, group_box, hrow, make_button, soft_breaks,
 )
 
 DEFAULT_TARGET_C = 20.0
@@ -184,8 +184,9 @@ class ThermalTab(QScrollArea):
         self.btn_capture = make_button("Capture", "neutral", min_height=24, slot=self.capture_preset)
         self.btn_capture.setToolTip("Sends: GET_THERMAL, then saves the onboard's current targets as a preset.")
         lay.addWidget(hrow(self.preset_select, self.btn_apply_preset, self.btn_save_preset, self.btn_capture))
-        self.preset_info = QLabel(str(self.presets.path))
-        self.preset_info.setWordWrap(True); self.preset_info.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
+        self.preset_info = QLabel(soft_breaks(str(self.presets.path)))
+        self.preset_info.setWordWrap(True); self.preset_info.setMinimumWidth(1)
+        self.preset_info.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(self.preset_info)
         self.resp_preset = ResponseLine()
         lay.addWidget(self.resp_preset)
@@ -227,11 +228,11 @@ class ThermalTab(QScrollArea):
         if current in self.presets.names():
             self.preset_select.setCurrentText(current)
         if self.presets.load_error:
-            self.preset_info.setText(f"preset file unreadable: {self.presets.load_error}")
+            self.preset_info.setText(soft_breaks(f"preset file unreadable: {self.presets.load_error}"))
         elif self.presets.migrated_from:
-            self.preset_info.setText(f"migrated from {self.presets.migrated_from.name} · {self.presets.path}")
+            self.preset_info.setText(soft_breaks(f"migrated from {self.presets.migrated_from.name} · {self.presets.path}"))
         else:
-            self.preset_info.setText(str(self.presets.path))
+            self.preset_info.setText(soft_breaks(str(self.presets.path)))
 
     def current_preset_from_ui(self, name: str) -> ThermalPreset:
         return ThermalPreset(name, targets_c=[row.target.value() for row in self.rows], pid_all=self._gains)

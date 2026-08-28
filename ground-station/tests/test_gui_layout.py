@@ -73,6 +73,12 @@ class LayoutTests(unittest.TestCase):
     def test_status_bar_never_claims_start_telemetry(self) -> None:
         self.assertNotIn("start telemetry", self.win.statusBar().currentMessage().lower())
         self.assertIn("no session yet", self.win.statusBar().currentMessage())
+        from app.protocol import parse_telemetry_csv
+        self.win._on_packet(parse_telemetry_csv(frame()))
+        self.assertIn("frames", self.win.statusBar().currentMessage())
+        # T+ counts from the onboard boot epoch embedded in the session id.
+        self.win._top.refresh()
+        self.assertNotEqual(self.win._top._tplus.text(), "00:00:00")
 
     def test_receiver_autostart_and_failure_recovery(self) -> None:
         import socket

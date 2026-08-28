@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..protocol import PullEvent, TelemetryPacket
+from ..session_dir import session_epoch
 from .series_store import SeriesStore, format_elapsed, window_bounds
 from .theme import (
     HEATER_COLORS, HEATER_LABELS, OVERTEMP_CUTOFF_C, PRE_FLOAT_PRESSURE_MBAR,
@@ -319,7 +320,8 @@ class PlotArea(QWidget):
         t = rx_time if rx_time is not None else time.time()
         if pkt.session_id != self._session:
             self._session = pkt.session_id
-            self._t0 = t
+            epoch = session_epoch(pkt.session_id)
+            self._t0 = float(epoch) if epoch is not None else t
         values: Dict[str, float] = {}
         for i, temp in enumerate(pkt.sample_temps_c[:8]):
             if pkt.sensor_valid.get(f"S{i}", True) and np.isfinite(temp):
@@ -380,6 +382,8 @@ class PlotArea(QWidget):
         t_min, t_max = window_bounds(self.store.t_last, self._span)
         if t_max is None and self.store.t_last is not None:
             t_max = self.store.t_last
+        if t_min is not None and self._t0 is not None and t_min < self._t0:
+            t_min = self._t0
         for plot in self.current_plots():
             plot.redraw(t_min, t_max if self._span is not None else None, self._t0)
 

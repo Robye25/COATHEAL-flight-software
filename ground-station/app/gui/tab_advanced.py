@@ -146,7 +146,8 @@ class AdvancedTab(QScrollArea):
         self.btn_preset_delete = make_button("Delete", "danger", min_height=22, slot=self._delete_preset)
         self.btn_preset_export = make_button("Export…", "neutral", min_height=22, slot=self._export_presets)
         lay.addWidget(hrow(self.preset_select, self.btn_preset_rename, self.btn_preset_delete, self.btn_preset_export))
-        self.preset_note = QLabel(""); self.preset_note.setWordWrap(True); self.preset_note.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
+        self.preset_note = QLabel(""); self.preset_note.setWordWrap(True); self.preset_note.setMinimumWidth(1)
+        self.preset_note.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(self.preset_note)
         outer.addWidget(frame)
 

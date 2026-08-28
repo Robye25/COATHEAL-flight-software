@@ -11,7 +11,7 @@ from ..reply_format import parse_kv_body
 from .checkout import checkout_items
 from .dispatch import CommandDispatcher
 from .state import OnboardState
-from .widgets import AMBER, GRAY, GREEN, MONO_CSS, MUTED, RED, Indicator, ResponseLine, make_button
+from .widgets import AMBER, GRAY, GREEN, MONO_CSS, MUTED, RED, Indicator, ResponseLine, make_button, soft_breaks
 
 _COLORS = {"green": GREEN, "amber": AMBER, "red": RED, "gray": GRAY}
 
@@ -36,7 +36,8 @@ class CheckoutPanel(QScrollArea):
                                      slot=lambda: self._disp.send("CHECK", tag=self))
         self._lay.addWidget(self.btn_check)
         self.summary = QLabel("last CHECK: —")
-        self.summary.setWordWrap(True); self.summary.setStyleSheet(f"{MONO_CSS} color: {MUTED}; font-size: 8pt;")
+        self.summary.setWordWrap(True); self.summary.setMinimumWidth(1)
+        self.summary.setStyleSheet(f"{MONO_CSS} color: {MUTED}; font-size: 8pt;")
         self._lay.addWidget(self.summary)
         self.resp = ResponseLine()
         self._lay.addWidget(self.resp)
@@ -74,7 +75,7 @@ class CheckoutPanel(QScrollArea):
                 text += " · FAIL: " + " ".join(failing)
             if errors:
                 text += " · " + " ".join(errors)
-            self.summary.setText(text)
+            self.summary.setText(soft_breaks(text))
             self.summary.setStyleSheet(f"{MONO_CSS} font-size: 8pt; color: "
                                        f"{GREEN if self.last_check.get('overall') == 'OK' else RED};")
         if tag is self:
