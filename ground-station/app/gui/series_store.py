@@ -26,6 +26,16 @@ class _Series:
             new_cap = max(64, self.t.shape[0] * 2)
             t2 = np.empty(new_cap, dtype=np.float64); t2[: self.n] = self.t[: self.n]; self.t = t2
             y2 = np.empty(new_cap, dtype=np.float64); y2[: self.n] = self.y[: self.n]; self.y = y2
+        if self.n and t < self.t[self.n - 1]:
+            # A backlog frame arriving after live ones (live-first drain):
+            # keep the array time-sorted so window slicing stays valid.
+            idx = int(np.searchsorted(self.t[: self.n], t, side="right"))
+            self.t[idx + 1: self.n + 1] = self.t[idx: self.n]
+            self.y[idx + 1: self.n + 1] = self.y[idx: self.n]
+            self.t[idx] = t
+            self.y[idx] = y
+            self.n += 1
+            return
         self.t[self.n] = t
         self.y[self.n] = y
         self.n += 1
@@ -44,9 +54,10 @@ class SeriesStore:
         """Append `values` at time `t` (seconds, monotonic non-decreasing).
         NaN values are stored as gaps; None values are skipped."""
         t = float(t)
-        if self._t0 is None:
+        if self._t0 is None or t < self._t0:
             self._t0 = t
-        self._t_last = t
+        if self._t_last is None or t > self._t_last:
+            self._t_last = t
         self._count += 1
         for name, value in values.items():
             if value is None:

@@ -202,18 +202,25 @@ directory automatically.
 
 ### Backlog replay
 
-After a link outage the onboard replays its durable queue in order, at
-many frames per second, before any live frame arrives — every one of those
-frames carries the state the onboard had hours ago. The console tells them
-apart (`app/gui/replay.py`: a frame whose onboard timestamp lags the
-ground clock by more than 30 s beyond the smallest lag seen this session)
-and treats them differently: plots and logs take every frame at its
-onboard time; the state, gating, alarms, Health and Values panels take
-**live frames only**. While a replay is running the top strip shows
-`REPLAY −hh:mm:ss · ETA m:ss`, an amber `REPLAY` alarm is raised, and the
-panels keep the last live frame (or stay empty until the first one). No
-synchronised clocks are needed — the clock offset between the two machines
-is learned from the live frames.
+After a link outage the onboard replays its queued frames at ~10/s. With
+current firmware the drain is **live-first**: each tick's frame is sent
+before the backlog and every frame carries its age (`TX=`), so the panels,
+gating and alarms stay on live frames throughout; the replayed frames only
+fill the plots (inserted at their onboard time) and the session logs. The
+top strip shows `REPLAY <n> queued · ETA`, and one amber `BACKLOG` alarm
+replaces the queue-depth alarm until the queue is empty. The previous
+session's backlog and the current session's live frames interleave; each
+lands in its own `logs/sessions/` directory, and commands and events go to
+the newest session.
+
+With firmware that predates the stamp the drain is in order and the console
+falls back to clock reasoning: a frame whose onboard time lags the best lag
+seen this session by more than 30 s, or a stream advancing faster than 1.5×
+wall time, is replay; the panels keep the last live frame and the top strip
+shows how far behind the arriving frames are. In both cases an `ARM`,
+`DISARM`, `EXIT_SAFE` or `STATUS` acknowledgement that carries `mode=` is
+applied to the panels immediately, so an ARM during a replay is never shown
+as ignored.
 
 ## Interaction rules
 

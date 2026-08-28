@@ -78,6 +78,11 @@ class OnboardState:
     replay: bool = False
     replay_behind_s: float = 0.0
     replay_eta_s: Optional[float] = None
+    # Live-first firmware: the panels ARE live during the replay; the backlog
+    # only fills plots and logs. `replay_backlog_frames` is the queue depth
+    # the last live frame reported.
+    replay_live_panels: bool = False
+    replay_backlog_frames: Optional[int] = None
 
     # -- derived -------------------------------------------------------------
     def flag(self, token: str) -> bool:

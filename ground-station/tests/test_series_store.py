@@ -65,5 +65,28 @@ class HelpersTests(unittest.TestCase):
         self.assertEqual(format_elapsed(-61), "-00:01:01")
 
 
+class OutOfOrderInsertTests(unittest.TestCase):
+    """Live-first drains deliver a backlog frame after newer live ones."""
+
+    def test_backlog_points_are_inserted_in_time_order(self) -> None:
+        store = SeriesStore()
+        store.append(100.0, {"a": 1.0})
+        store.append(50.0, {"a": 0.5})
+        store.append(75.0, {"a": 0.75})
+        store.append(101.0, {"a": 1.01})
+        t, y = store.series("a")
+        self.assertEqual(list(t), [50.0, 75.0, 100.0, 101.0])
+        self.assertEqual(list(y), [0.5, 0.75, 1.0, 1.01])
+        self.assertEqual(store.t0, 50.0)
+        self.assertEqual(store.t_last, 101.0)
+        wt, _wy = store.window("a", 60.0, 100.5)
+        self.assertEqual(list(wt), [75.0, 100.0])
+        self.assertEqual(store.latest("a"), 1.01)
+
+    # MUTATION: drop the `t < self.t[self.n - 1]` branch in _Series.append and
+    # confirm test_backlog_points_are_inserted_in_time_order fails on the
+    # sorted-time assertion.
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -333,3 +333,23 @@ These require `runtime.bench_mode=true` and `ARM_DEBUG <token>`.
 | `DISARM_DEBUG` | none | Disable debug mode |
 | `SET_BENCH_MODE` | `<1|0>` | Toggle bench mode |
 | `HEATER_TEST` | `<index> <duty> <seconds>` | Bounded commissioning pulse. Requires bench mode, debug arm, RUN mode, no active motor motion lock, and configured duty/time limits. |
+
+## Backlog drain order and the `TX=` stamp
+
+The onboard keeps every unacknowledged frame in a durable queue and drains
+up to 10 frames per 1 Hz tick once a ground station is reachable. The batch
+is **this tick's frame first**, then the backlog oldest-first: after an
+outage the console sees the present within one tick, and the backlog fills
+in behind it (a 40-minute outage takes about four minutes to replay). The
+live frame is acknowledged individually onboard; a backlog frame's ACK is
+cumulative for that session.
+
+Every `DATA` line is stamped on the wire with `,TX=<seconds>` — how old the
+frame was when it was sent (`now − queued time`, clamped at 0). `TX=0`/`1`
+is live; anything larger is replay. The stamp is not part of the stored
+frame or the CSV; the ground station uses it to keep its panels on live
+frames only, without comparing clocks. `EVT` lines are not stamped (fixed
+columns). Because frames arrive out of order, a ground station must
+deduplicate by the set of `(session, seq)` it has received, not by "seq ≤
+last seen".
+

@@ -88,5 +88,37 @@ class ClassifierTests(unittest.TestCase):
         self.assertFalse(c.classify(None, 5.0).is_replay)
 
 
+class TaggedFrameTests(unittest.TestCase):
+    """Live-first firmware stamps every frame with its age (`TX=`)."""
+
+    def test_tagged_frames_are_classified_by_age_alone(self) -> None:
+        c = ReplayClassifier()
+        live = c.classify(1000.0, 5000.0, tx_age_s=0.0, queue_depth=2400)
+        self.assertFalse(live.is_replay)
+        self.assertTrue(live.tagged)
+        self.assertEqual(live.backlog_frames, 2400)
+        old = c.classify(1.0, 5000.1, tx_age_s=1800.0, queue_depth=2400)
+        self.assertTrue(old.is_replay)
+        self.assertAlmostEqual(old.behind_s, 1800.0)
+        # Clocks hours apart are irrelevant to a stamped frame.
+        self.assertFalse(c.classify(1.0, 5001.0, tx_age_s=1.0, queue_depth=2390).is_replay)
+
+    # MUTATION: make classify() ignore tx_age_s (fall through to the clock
+    # path) and confirm test_tagged_frames_are_classified_by_age_alone fails
+    # on the last assertion (a 5000 s lag beyond the baseline reads as replay).
+
+    def test_eta_from_queue_depth_slope(self) -> None:
+        c = ReplayClassifier()
+        v = None
+        for k in range(6):
+            v = c.classify(1000.0 + k, 5000.0 + k, tx_age_s=0.0, queue_depth=2400 - 9 * k)
+        self.assertIsNotNone(v.eta_s)
+        self.assertAlmostEqual(v.eta_s, (2400 - 45) / 9.0, delta=1.0)
+        # Replay frames in between do not disturb the slope.
+        c.classify(1.0, 5005.5, tx_age_s=3600.0, queue_depth=2400 - 45)
+        self.assertAlmostEqual(c.classify(1006.0, 5006.0, tx_age_s=0.0, queue_depth=2400 - 54).eta_s,
+                               (2400 - 54) / 9.0, delta=1.0)
+
+
 if __name__ == "__main__":
     unittest.main()

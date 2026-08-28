@@ -80,6 +80,15 @@ struct HeatingCycleEvent {
 // can route it separately from DATA frames.
 // Format: EVT,CYCLE,<session_id>,<cycle_id>,<start_ts>,<peak_temp_c>,
 //         <hold_duration_s>,<cooldown_rate_c_per_s>,<specimen_index>
+// Wire-only stamp appended to a DATA frame as it is sent: `,TX=<seconds>`
+// = how old the frame is (now - queued time, clamped at 0). 0-1 s means the
+// frame is live; larger values are the backlog being replayed. The stored
+// frame is untouched (AcknowledgeExact compares stored text), and EVT lines
+// keep their fixed column layout. Ground parsers ignore unknown tokens.
+std::string TagFrameForTransmit(const std::string& frame,
+                                std::int64_t queued_epoch_s,
+                                std::int64_t now_epoch_s);
+
 std::string SerializeHeatingCycleEvent(const HeatingCycleEvent& event,
                                        const std::string& session_id);
 

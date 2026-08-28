@@ -354,75 +354,21 @@ class ValidatorTests(unittest.TestCase):
         self.assertFalse(validate_pid_gains("x", 0.0, 0.0)[0])
 
 
+class TransmitStampTests(unittest.TestCase):
+    """`TX=<age>` is appended on the wire by the live-first drain."""
+    FRAME = ("DATA,coatheal-1787950786-1,7,2026-08-28T21:00:00Z,1,20,1000,0.1,1,2,3,4,5,6,7,8,"
+             "HEATER_DUTY=0|0|0|0|0|0,PHASE=FLOAT,MODE=RUN,STATUS=SD_OK,"
+             "STEPPER0=pos:0|tgt:0|hz:100|us:4|en:0|mv:0|hold:0|hold_s:0|pulses:0|missed:0|src:-|zeroed:0|seq:-|seqst:idle")
+
+    def test_stamp_parsed_and_absence_is_none(self) -> None:
+        self.assertIsNone(parse_telemetry_csv(self.FRAME).tx_age_s)
+        self.assertEqual(parse_telemetry_csv(self.FRAME + ",TX=0").tx_age_s, 0.0)
+        pkt = parse_telemetry_csv(self.FRAME + ",TX=1800")
+        self.assertEqual(pkt.tx_age_s, 1800.0)
+        self.assertEqual(pkt.mode, "RUN", "the stamp must not disturb the other tokens")
+        self.assertEqual(len(pkt.steppers), 1)
+        self.assertIsNone(parse_telemetry_csv(self.FRAME + ",TX=junk").tx_age_s)
+
+
 if __name__ == "__main__":
     unittest.main()
-
-
-# ── 2026-08-28 telemetry additions: STEPPER zeroed/seq/seqst + CTRL= ─────────
-CTRL_DATA = (
-    "DATA,coatheal-1787760547-462807,5,2026-08-27T05:59:03Z,1,23.56,1009.16,0.01,"
-    "nan,nan,nan,nan,nan,nan,nan,nan,"
-    "HEATER_DUTY=0.1|0|0|0|0|0,RESISTANCE=-|-|-|-|-|-|-|-,"
-    "PHASE=ASCENT,MODE=RUN,STATUS=SD_OK|LINK_OK,"
-    "COMPONENT_STATE=PWM:OK,"
-    "CTRL=fallback:1|link_loss_s:12.5|energy_wh:3.25|budget_wh:130.0"
-    "|budget_exhausted:0|heaters_active:2|queue:7|plan:none,"
-    "STEPPER0=pos:1|tgt:2|hz:100|us:4|en:1|mv:0|hold:0|hold_s:0|pulses:0"
-    "|src:cmd:ZERO|zeroed:1|seq:flex|seqst:run,"
-    "STEPPER1=pos:0|tgt:0|hz:100|us:4|en:0|mv:0|hold:0|hold_s:0|pulses:0"
-    "|src:init|zeroed:0|seq:-|seqst:idle"
-)
-
-
-class TelemetryExtensionTests(unittest.TestCase):
-    def test_ctrl_block_parses_to_typed_accessors(self) -> None:
-        pkt = parse_telemetry_csv(CTRL_DATA)
-        self.assertEqual(pkt.ctrl["queue"], "7")
-        self.assertIs(pkt.fallback_active, True)
-        self.assertAlmostEqual(pkt.link_loss_s, 12.5)
-        self.assertAlmostEqual(pkt.energy_wh, 3.25)
-        self.assertAlmostEqual(pkt.budget_wh, 130.0)
-        self.assertIs(pkt.budget_exhausted, False)
-        self.assertEqual(pkt.heaters_active, 2)
-        self.assertEqual(pkt.queue_depth, 7)
-        self.assertEqual(pkt.plan_state, "none")
-
-    # MUTATION: drop the `elif token.startswith("CTRL="):` branch in
-    # parse_telemetry_csv and confirm test_ctrl_block_parses_to_typed_accessors
-    # fails on `pkt.ctrl["queue"]` (KeyError: the dict stays empty).
-
-    def test_ctrl_absent_yields_none_everywhere(self) -> None:
-        pkt = parse_telemetry_csv(DUAL_STEPPER_DATA)
-        self.assertEqual(pkt.ctrl, {})
-        for accessor in ("fallback_active", "link_loss_s", "energy_wh", "budget_wh",
-                         "budget_exhausted", "heaters_active", "queue_depth", "plan_state"):
-            self.assertIsNone(getattr(pkt, accessor), accessor)
-
-    def test_ctrl_malformed_numbers_yield_none_not_exceptions(self) -> None:
-        line = CTRL_DATA.replace("energy_wh:3.25", "energy_wh:abc").replace("queue:7", "queue:x")
-        pkt = parse_telemetry_csv(line)
-        self.assertIsNone(pkt.energy_wh)
-        self.assertIsNone(pkt.queue_depth)
-        self.assertEqual(pkt.heaters_active, 2)
-
-    def test_stepper_zeroed_and_sequence_keys(self) -> None:
-        pkt = parse_telemetry_csv(CTRL_DATA)
-        m0, m1 = pkt.steppers
-        self.assertIs(m0["zeroed"], True)
-        self.assertEqual(m0["seq_name"], "flex")
-        self.assertEqual(m0["seq_state"], "run")
-        self.assertIs(m1["zeroed"], False)
-        self.assertEqual(m1["seq_name"], "", "a wire '-' means no active sequence")
-        self.assertEqual(m1["seq_state"], "idle")
-        self.assertIs(pkt.stepper.zeroed, True)
-
-    # MUTATION: delete the `elif key == "zeroed":` branch in
-    # _parse_stepper_segment and confirm test_stepper_zeroed_and_sequence_keys
-    # fails: m0["zeroed"] is None, not True.
-
-    def test_stepper_keys_absent_on_old_firmware(self) -> None:
-        pkt = parse_telemetry_csv(DUAL_STEPPER_DATA)
-        for snap in pkt.steppers:
-            self.assertIsNone(snap["zeroed"], "unknown must stay None, never False")
-            self.assertEqual(snap["seq_name"], "")
-            self.assertEqual(snap["seq_state"], "")

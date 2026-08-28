@@ -18,6 +18,7 @@ from .protocol import (
     parse_pull_event,
     parse_telemetry_csv,
 )
+from .seqset import SeqSet
 from .telemetry_log import CsvAppender, LogManager, utc_now_iso
 
 DEFAULT_STATIC_ONBOARD_HOST = "169.254.10.10"
@@ -128,7 +129,9 @@ class TelemetryServer:
         self._plotter: Optional[LivePlotter] = None
 
         self._lock = threading.Lock()
-        self._last_seq_by_session: dict[str, int] = {}
+        # Received (session -> SeqSet). The onboard sends this tick's frame
+        # before its backlog, so "seq <= last seen" would drop the backlog.
+        self._received_by_session: dict[str, SeqSet] = {}
         self._seen_pull_ids: set[tuple[str, int]] = set()
         self._last_onboard_ip = ""
         self._last_onboard_session = ""
@@ -191,22 +194,20 @@ class TelemetryServer:
             data = json.loads(self.cursor_path.read_text(encoding="utf-8"))
             sessions = data.get("sessions", {})
             if isinstance(sessions, dict):
-                parsed: dict[str, int] = {}
-                for session_id, seq in sessions.items():
-                    try:
-                        parsed[str(session_id)] = int(seq)
-                    except (TypeError, ValueError):
-                        continue
-                self._last_seq_by_session = parsed
-        except (OSError, ValueError):
-            self._last_seq_by_session = {}
+                # Values are `[[lo, hi], ...]`; a bare int is the pre-2026-08-29
+                # cursor ("everything up to this seq").
+                self._received_by_session = {
+                    str(session_id): SeqSet.from_json(value) for session_id, value in sessions.items()
+                }
+        except Exception:
+            self._received_by_session = {}
 
     def _persist_cursor(self) -> None:
         import json
         from datetime import datetime, timezone
         payload = {
             "updated_utc": datetime.now(timezone.utc).isoformat(),
-            "sessions": self._last_seq_by_session,
+            "sessions": {sid: seen.to_json() for sid, seen in self._received_by_session.items()},
         }
         try:
             self.cursor_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -411,10 +412,11 @@ class TelemetryServer:
                     print(f"[alert] sample temp high: {hot:.2f} C")
 
                 with self._lock:
-                    last_seq = self._last_seq_by_session.get(packet.session_id, -1)
-                    is_duplicate = packet.seq <= last_seq
+                    seen = self._received_by_session.get(packet.session_id)
+                    if seen is None:
+                        seen = self._received_by_session[packet.session_id] = SeqSet()
+                    is_duplicate = not seen.add(packet.seq)
                     if not is_duplicate:
-                        self._last_seq_by_session[packet.session_id] = packet.seq
                         self._persist_cursor()
 
                 ack_line = build_ack(packet.session_id, packet.seq)

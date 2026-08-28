@@ -25,6 +25,11 @@ from datetime import datetime, timezone
 from typing import Deque, Optional, Tuple
 
 REPLAY_THRESHOLD_S = 30.0
+# Frames stamped by the onboard (`TX=<age>`): the drain sends this tick's
+# frame first, so a live frame is 0-1 s old and a backlog frame is as old
+# as the outage. No clock comparison is needed at all.
+TAG_LIVE_MAX_S = 10.0
+DEPTH_WINDOW_S = 15.0
 RATE_WINDOW_S = 5.0
 RATE_RATIO_THRESHOLD = 1.5   # onboard seconds per wall second
 RATE_MIN_SPAN_S = 2.0
@@ -51,6 +56,8 @@ class ReplayVerdict:
     is_replay: bool
     behind_s: float          # onboard time lag beyond the session's best (0 when live)
     eta_s: Optional[float]   # seconds until the replay catches up, when estimable
+    tagged: bool = False     # the onboard stamps frames with their age (live-first drain)
+    backlog_frames: Optional[int] = None   # queue depth reported by the last live frame
 
 
 class ReplayClassifier:
@@ -58,12 +65,20 @@ class ReplayClassifier:
         self.threshold_s = float(threshold_s)
         self._min_lag: Optional[float] = None
         self._recent: Deque[Tuple[float, float]] = deque()   # (rx, onboard_ts)
+        self._depths: Deque[Tuple[float, int]] = deque()     # (rx, queue depth) from live frames
+        self._backlog_frames: Optional[int] = None
 
     def reset(self) -> None:
         self._min_lag = None
         self._recent.clear()
+        self._depths.clear()
+        self._backlog_frames = None
 
-    def classify(self, onboard_ts: Optional[float], rx: float) -> ReplayVerdict:
+    def classify(self, onboard_ts: Optional[float], rx: float, *,
+                 tx_age_s: Optional[float] = None,
+                 queue_depth: Optional[int] = None) -> ReplayVerdict:
+        if tx_age_s is not None:
+            return self._classify_tagged(tx_age_s, rx, queue_depth)
         if onboard_ts is None:
             return ReplayVerdict(False, 0.0, None)
         lag = rx - onboard_ts
@@ -92,6 +107,24 @@ class ReplayClassifier:
             if catch_up > 0.05:
                 eta = behind / catch_up
         return ReplayVerdict(is_replay, behind, eta)
+
+    def _classify_tagged(self, age: float, rx: float, depth: Optional[int]) -> ReplayVerdict:
+        is_replay = age > TAG_LIVE_MAX_S
+        if not is_replay and depth is not None:
+            self._backlog_frames = int(depth)
+            self._depths.append((rx, int(depth)))
+            while self._depths and (rx - self._depths[0][0]) > DEPTH_WINDOW_S:
+                self._depths.popleft()
+        eta = None
+        if len(self._depths) >= 2:
+            rx0, d0 = self._depths[0]
+            rx1, d1 = self._depths[-1]
+            if rx1 - rx0 >= 2.0:
+                rate = (d0 - d1) / (rx1 - rx0)   # frames cleared per wall second
+                if rate > 0.05 and d1 > 0:
+                    eta = d1 / rate
+        return ReplayVerdict(is_replay, age if is_replay else 0.0, eta,
+                             tagged=True, backlog_frames=self._backlog_frames)
 
     @property
     def clock_offset_s(self) -> Optional[float]:
