@@ -102,6 +102,7 @@ class OwnedBusTmc5160Driver : public StepperDriver {
   std::string last_error() const override { return driver_.last_error(); }
   std::string warning() const override { return driver_.warning(); }
   std::string DebugRegisters() override { return driver_.DebugRegisters(); }
+  bool Poll() override { return driver_.Poll(); }
   bool ActiveCheck() override { return driver_.ActiveCheck(); }
   std::uint64_t pulses_issued() const override {
     return driver_.pulses_issued();

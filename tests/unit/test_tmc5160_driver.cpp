@@ -590,6 +590,29 @@ void TestChipResetOnEnableIsRecovered() {
   // confirm this test fails on mismatch_count (the reinit never happens).
 }
 
+void TestChipResetAtIdleIsRecoveredByPoll() {
+  FakeSpiBus bus;
+  Tmc5160Config cfg;
+  auto driver = MakeHealthyDriver(&bus, cfg);
+  // Disabled: Poll() does not touch the bus at all.
+  assert(driver->Poll());
+  assert(bus.remaining_expectations() == 0);
+  ExpectRead(&bus, kRegGSTAT, 0U);
+  ExpectWrite(&bus, kRegCHOPCONF, Chopconf(cfg.microstep, /*toff=*/3));
+  assert(driver->Enable(true));
+  // Enabled and idle: a reset since the last check is repaired in place,
+  // chopper restored (bench 2026-08-29: M1's chip reset right after its
+  // move ended and sat with TOFF=0, holding nothing).
+  ExpectRead(&bus, kRegGSTAT, 0x1U);
+  ScriptHealthyReinit(&bus, cfg);
+  ExpectWrite(&bus, kRegCHOPCONF, Chopconf(cfg.microstep, /*toff=*/3));
+  assert(driver->Poll());
+  assert(bus.mismatch_count() == 0);
+  assert(bus.remaining_expectations() == 0);
+  assert(driver->reset_count() == 1);
+  assert(driver->enabled());
+}
+
 void TestChipResetMidMoveIsRecoveredWithinTheCheckInterval() {
   FakeSpiBus bus;
   Tmc5160Config cfg;
@@ -903,6 +926,7 @@ int main() {
   TestEnableFalseFreezesInOrder();
   TestEnableFalseDetectsIneffectiveEnableLine();
   TestChipResetOnEnableIsRecovered();
+  TestChipResetAtIdleIsRecoveredByPoll();
   TestChipResetMidMoveIsRecoveredWithinTheCheckInterval();
   TestDebugRegistersDecodeMotionTruth();
   TestTransferFailureMarksUnhealthyAndActiveCheckReprobes();

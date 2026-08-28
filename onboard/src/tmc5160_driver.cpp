@@ -687,6 +687,12 @@ bool Tmc5160Driver::EnableUnlocked(bool enable) {
   return true;
 }
 
+bool Tmc5160Driver::Poll() {
+  std::lock_guard<std::mutex> lock(io_mu_);
+  if (bus_ == nullptr || !spi_open_ || !healthy_ || !enabled_) return healthy_;
+  return RecoverFromChipResetUnlocked("idle");
+}
+
 std::string Tmc5160Driver::DebugRegisters() {
   std::lock_guard<std::mutex> lock(io_mu_);
   if (bus_ == nullptr || !spi_open_) return {};

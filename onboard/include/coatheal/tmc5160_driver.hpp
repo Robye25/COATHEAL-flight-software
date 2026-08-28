@@ -83,6 +83,7 @@ class Tmc5160Driver : public StepperDriver {
   // GSTAT, CHOPCONF -- raw and decoded. Read-only (RAMPSTAT's read-clear
   // event bits are not used by this driver).
   std::string DebugRegisters() override;
+  bool Poll() override;
 
   // Whether driving the EN GPIO was last seen to move DRV_ENN in IOIN.
   // Enable(true) already refuses a line that leaves DRV_ENN HIGH; the

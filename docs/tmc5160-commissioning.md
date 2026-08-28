@@ -663,7 +663,8 @@ when VM (12 V) or VCC_IO dips — a bench supply on a low current limit is the
 usual cause once the coils draw run current.
 
 The firmware now clears `GSTAT` after configuring the chip and re-reads it
-on every `Enable(true)` and every 64 steps; on `GSTAT.reset` it rewrites
+on every `Enable(true)`, every 64 steps, and once a second while enabled
+and idle; on `GSTAT.reset` it rewrites
 the whole configuration, restores the chopper, logs
 `[tmc5160] … chip reset detected …`, counts it (`CHECK` → `motorN_warn`,
 `MOTOR_DEBUG` → `resets=`), and the console's Debug tab names it in the
