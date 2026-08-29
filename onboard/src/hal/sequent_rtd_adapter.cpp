@@ -238,25 +238,46 @@ bool SequentRtdAdapter::ReadAll(Reading* out, std::string* error) {
 // report a finite, in-range temperature that simply doesn't match its own
 // raw resistance, and that must not be allowed to drive a heater.
 void SequentRtdAdapter::ApplyValidation(Reading* out) const {
+  // The card writes exactly ±366.000 Ω into a channel with nothing
+  // conducting across its terminals (full-scale saturation; the sign
+  // depends on which lead floats). +366 sits INSIDE the default [60, 390]
+  // plausibility window, so before this classification an open probe was
+  // only caught by the temperature cross-check and surfaced as a cryptic
+  // mismatch. Recognise the sentinel first and name the fault (bench
+  // 2026-08-24/29: 7 of 8 harness channels read ±366, one read 0.2 Ω).
+  constexpr double kOpenSentinelOhm = 366.0;
+  constexpr double kSentinelTolOhm = 0.5;
+
   for (std::size_t i = 0; i < kChannelCount; ++i) {
     const double temp = out->temperature_c[i];
     const double ohms = out->resistance_ohm[i];
 
+    out->channel_valid[i] = false;
     if (!std::isfinite(temp) || !std::isfinite(ohms)) {
-      out->channel_valid[i] = false;
+      out->channel_fault[i] = RtdChannelFault::kOpen;
       continue;
     }
-    if (ohms < options_.resistance_min_ohm ||
-        ohms > options_.resistance_max_ohm) {
-      out->channel_valid[i] = false;
+    if (std::fabs(std::fabs(ohms) - kOpenSentinelOhm) <= kSentinelTolOhm) {
+      out->channel_fault[i] = RtdChannelFault::kOpen;
+      continue;
+    }
+    if (ohms < options_.resistance_min_ohm) {
+      // A negative non-sentinel reading is no conducting probe either.
+      out->channel_fault[i] =
+          ohms >= 0.0 ? RtdChannelFault::kShort : RtdChannelFault::kOpen;
+      continue;
+    }
+    if (ohms > options_.resistance_max_ohm) {
+      out->channel_fault[i] = RtdChannelFault::kOpen;
       continue;
     }
     double derived = 0.0;
     if (!Pt100TemperatureFromOhms(ohms, &derived) ||
         std::fabs(derived - temp) > options_.crosscheck_tol_c) {
-      out->channel_valid[i] = false;
+      out->channel_fault[i] = RtdChannelFault::kMismatch;
       continue;
     }
+    out->channel_fault[i] = RtdChannelFault::kNone;
     out->channel_valid[i] = true;
   }
 }
