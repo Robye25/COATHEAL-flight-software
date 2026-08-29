@@ -247,10 +247,22 @@ bool Tmc5160Driver::CalculateCurrent(double a_rms, double sense_ohm,
 }
 
 std::uint32_t Tmc5160Driver::EncodeChopconf(std::uint8_t toff) const {
-  const std::uint8_t mres = EncodeMres(microstep_);
-  const std::uint8_t safe_mres = (mres == kInvalidMres) ? 0x06U : mres;
+  // MRES is pinned to 0 = native 256 microsteps. The TMC5160's motion
+  // controller counts XACTUAL/XTARGET/VMAX in the microstep resolution
+  // selected by MRES, NOT in 1/256-full-step units. With MRES set from the
+  // configured divisor (6 = 1/4 step) every "one microstep" XTARGET write of
+  // 256/divisor = 64 units commanded 64 quarter-steps = 16 FULL steps in a
+  // ~7 ms slam: the rotor could not follow, the motor buzzed in place, the
+  // position counter ran 64x ahead of reality and the supply rail collapsed
+  // under an 8 rev/s demand (bench 2026-08-29; MSCNT returned to 32 after
+  // every hop, i.e. a hop of 4096 sine-table counts). At MRES=0 one unit is
+  // 1/256 full step, DeltaXtarget(divisor) = 256/divisor is exactly one
+  // configured microstep, and the chip commutates smoothly in between --
+  // the datasheet's recommended way to use the internal ramp generator.
+  // The configured divisor keeps its meaning as the firmware's step size.
+  (void)microstep_;
   std::uint32_t chopconf = 0;
-  chopconf |= static_cast<std::uint32_t>(safe_mres) << 24;
+  chopconf |= 0x0U << 24;  // MRES = 0 -> 256 microsteps
   chopconf |= kChopconfTbl;
   chopconf |= kChopconfHstrt;
   chopconf |= static_cast<std::uint32_t>(toff & 0x0FU);
@@ -465,7 +477,11 @@ bool Tmc5160Driver::ReinitializeUnlocked() {
   }
 
   const std::uint32_t gconf = cfg_.stealth_chop ? kGconfEnPwmMode : 0U;
-  const std::uint32_t chopconf = EncodeChopconf(/*toff=*/3);
+  // The chopper follows enabled_: a disabled motor must come out of
+  // (re)initialisation with TOFF=0. On a module whose EN pin does not reach
+  // DRV_ENN (motor 1, bench 2026-08-28) TOFF is the only thing keeping the
+  // power stage off at boot and after every CHECK.
+  const std::uint32_t chopconf = EncodeChopconf(enabled_ ? 3 : 0);
   // GLOBALSCALER register convention: 0 means "256" (full scale); 256 never
   // appears on the wire as itself.
   const std::uint32_t gs_reg = (globalscaler >= 256U) ? 0U : globalscaler;
@@ -800,16 +816,12 @@ bool Tmc5160Driver::RecoverFromChipResetUnlocked(const char* where) {
             << " VMAX/TOFF/currents were back at reset defaults, so the motor"
             << " could not move. Re-initialising (reset #" << reset_count_
             << " since boot). Check the 12 V motor supply.\n";
-  const bool was_enabled = enabled_;
   if (!ReinitializeUnlocked()) {
     healthy_ = false;
     return false;
   }
   target_ = 0;  // Reinitialize zeroed XACTUAL/XTARGET; the stall lost the position anyway.
-  if (was_enabled && !WriteRegister(kRegCHOPCONF, EncodeChopconf(/*toff=*/3))) {
-    healthy_ = false;
-    return false;
-  }
+  // ReinitializeUnlocked restored TOFF=3 iff enabled_.
   return true;
 }
 
