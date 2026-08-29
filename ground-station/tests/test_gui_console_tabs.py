@@ -48,17 +48,32 @@ class ConsoleTabTests(unittest.TestCase):
         motion = self.win._motion
         motion.selector.set_value(0)
         motion.update_state(self.win._state)
-        motion.bend_target.setValue(800); motion.bend_hold.setValue(5.0)
+        motion.bend_target.setValue(2.0); motion.bend_hold.setValue(5.0)
         self.assertIsNone(motion.btn_bend.reason(), "M0 is enabled+zeroed in RUN: BEND must be live")
         motion.btn_bend.click()
-        self.assertEqual(sent, ["STEPPER_MOVETO 0 800 5"])
+        self.assertEqual(sent, ["STEPPER_MOVETO_MM 0 2.000 5"])
         readout = motion.tracker.readout(0, self.win._state)
         self.assertEqual(readout.r_start, 118.0, "BEND must record the specimen resistance at bend start")
         motion.btn_pull.click()
         self.assertEqual(sent[-1], "PULL_EXECUTE 0")
 
-    # MUTATION: change the BEND wire template to "STEPPER_MOVE" in
+    # MUTATION: change the BEND wire template to "STEPPER_MOVE_MM" in
     # tab_motion._bend and confirm test_bend_sends_moveto_with_hold_and_marks_resistance fails.
+
+    def test_jog_and_drive_settings_send_mm_and_drive_commands(self) -> None:
+        sent = capture_sends(self.win._dispatcher)
+        self.feed()
+        motion = self.win._motion
+        motion.selector.set_value(0)
+        motion.update_state(self.win._state)
+        motion.jog_buttons[3].click()   # +0.1 mm
+        self.assertEqual(sent[-1], "STEPPER_MOVE_MM 0 0.100")
+        motion.current.setValue(0.4)
+        motion.btn_current.click()
+        self.assertEqual(sent[-1], "STEPPER_SET_CURRENT 0 0.400")
+        motion.accel.setValue(400)
+        motion.btn_accel.click()
+        self.assertEqual(sent[-1], "STEPPER_SET_ACCEL 0 400.0")
 
     def test_motion_gating_reasons(self) -> None:
         self.feed()

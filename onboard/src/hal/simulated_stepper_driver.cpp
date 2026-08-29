@@ -24,4 +24,13 @@ void SimulatedStepperDriver::SetMicrostep(int divisor) {
   }
 }
 
+bool SimulatedStepperDriver::SetRunCurrent(double a_rms, std::string* error) {
+  if (a_rms <= 0.0) {
+    if (error) *error = "run current must be > 0";
+    return false;
+  }
+  run_current_a_rms_ = a_rms;
+  return true;
+}
+
 }  // namespace coatheal

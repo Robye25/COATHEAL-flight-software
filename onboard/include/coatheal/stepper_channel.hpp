@@ -36,7 +36,17 @@ struct StepperChannelConfig {
 
   // Trapezoidal acceleration in full-steps/s². Default 200 gives a 0.5 s
   // ramp from 0 to 100 Hz, matching the Rev C mechanical envelope.
+  // Runtime-adjustable via SetAccel(), bounded by max_accel_steps_per_s2.
   double accel_steps_per_s2 = 200.0;
+
+  // Ceiling for SetAccel(), full-steps/s². Mirrors how max_step_hz bounds
+  // SetSpeed().
+  double max_accel_steps_per_s2 = 5000.0;
+
+  // Ball-screw lead (mm of linear travel per motor revolution) for the mm
+  // command surface. mm -> microsteps: mm / lead × full_steps_per_rev ×
+  // microstep.
+  double lead_mm_per_rev = 2.0;
 
   // TMC5160 MRES divisor. Must be a power of two from 1 through 256.
   int microstep = 4;
@@ -88,15 +98,27 @@ class StepperChannel {
   const StepperChannelConfig& config() const { return cfg_; }
 
   // Commanded motion — all operate in *microsteps* except SetSpeed which is
-  // in *full-step Hz* (clamped to cfg.max_step_hz).
+  // in *full-step Hz* (clamped to cfg.max_step_hz) and the mm surface
+  // below.
   bool MoveSteps(std::int64_t delta_usteps, std::string* error);
   bool MoveToSteps(std::int64_t absolute_usteps, double hold_s,
                    std::string* error);
+  // Distance surface: converts through cfg.lead_mm_per_rev at the *current*
+  // microstep divisor, then follows the exact MoveSteps/MoveToSteps paths
+  // (same limits, lock, and mode transitions).
+  bool MoveMillimeters(double delta_mm, std::string* error);
+  bool MoveToMillimeters(double absolute_mm, double hold_s,
+                         std::string* error);
   bool Rotate(double revolutions, std::string* error);
   bool Home(std::string* error);
   void SetPositionZero();
   void Stop();
   bool SetSpeed(double full_step_hz, std::string* error);
+  // Trapezoidal ramp slope, full-steps/s²; (0, cfg.max_accel_steps_per_s2].
+  bool SetAccel(double accel_steps_per_s2, std::string* error);
+  // Runtime run-current change, delegated to the driver (validated there
+  // against the sense-resistor ceiling).
+  bool SetRunCurrent(double a_rms, std::string* error);
   bool SetMicrostep(int divisor, std::string* error);
   bool SetEnabled(bool enable);
 
@@ -144,6 +166,17 @@ class StepperChannel {
   void PulseThreadBody();
   double ClampHz(double hz) const;
   std::int64_t FullStepsPerRev() const { return cfg_.full_steps_per_rev; }
+  // Microsteps per mm of linear travel at the current divisor. Caller holds
+  // mu_. cfg_.lead_mm_per_rev is validated > 0 at config load.
+  double UstepsPerMm() const {
+    return static_cast<double>(cfg_.full_steps_per_rev) *
+           static_cast<double>(microstep_) / cfg_.lead_mm_per_rev;
+  }
+  // Unlocked cores shared by the microstep and mm entry points. Caller
+  // holds mu_.
+  bool MoveStepsUnlocked(std::int64_t delta_usteps, std::string* error);
+  bool MoveToStepsUnlocked(std::int64_t absolute_usteps, double hold_s,
+                           std::string* error);
   void ReleaseLockIfHeld();  // caller holds mu_
   bool AcquireLockForMotion(std::string* error);  // caller holds mu_
   // Core pulse-issuing worker used by both Tick() and the RT thread. Called

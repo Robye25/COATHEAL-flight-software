@@ -8,7 +8,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.protocol import (
     PullEvent, StepperSnapshot, TelemetryParseError, build_ack,
     parse_command_response, parse_pull_event, parse_telemetry_csv,
-    validate_duty, validate_heater_index, validate_microstep,
+    validate_accel, validate_current_a, validate_duty,
+    validate_heater_index, validate_microstep, validate_move_mm,
     validate_pid_gains, validate_revolutions, validate_speed_hz,
     validate_stepper_move, validate_temperature_target,
     validate_tick_hz,
@@ -108,6 +109,30 @@ class DataFrameTests(unittest.TestCase):
         self.assertEqual(len(pkt.steppers), 1)
         self.assertEqual(pkt.steppers[0]["motor_id"], 0)
         self.assertEqual(pkt.steppers[0]["position"], 1234)
+
+    def test_stepper_drive_settings_keys(self) -> None:
+        # 2026-08-29 drive-settings surface: amps/acc/mm/mm_tgt trail seqst.
+        line = STEPPER_DATA.replace(
+            "|src:cmd:MOVE",
+            "|src:cmd:MOVE|zeroed:1|seq:-|seqst:idle"
+            "|amps:0.80|acc:200.0|mm:3.085|mm_tgt:5.000")
+        pkt = parse_telemetry_csv(line)
+        s = pkt.stepper
+        assert isinstance(s, StepperSnapshot)
+        self.assertEqual(s.amps, 0.80)
+        self.assertEqual(s.accel, 200.0)
+        self.assertEqual(s.mm, 3.085)
+        self.assertEqual(s.mm_tgt, 5.0)
+        self.assertEqual(pkt.steppers[0]["amps"], 0.80)
+        self.assertEqual(pkt.steppers[0]["mm"], 3.085)
+
+    def test_stepper_drive_settings_absent_on_old_firmware(self) -> None:
+        s = parse_telemetry_csv(STEPPER_DATA).stepper
+        assert isinstance(s, StepperSnapshot)
+        self.assertIsNone(s.amps)
+        self.assertIsNone(s.accel)
+        self.assertIsNone(s.mm)
+        self.assertIsNone(s.mm_tgt)
 
     def test_stepper_unknown_key_ignored(self) -> None:
         # Forward-compat: unknown keys silently dropped.
@@ -340,6 +365,34 @@ class ValidatorTests(unittest.TestCase):
         self.assertTrue(validate_revolutions(0.0)[0])
         self.assertTrue(validate_revolutions(-12.5)[0])
         self.assertFalse(validate_revolutions(2e6)[0])
+
+    def test_move_mm(self) -> None:
+        # 500 mm mirrors the onboard travel limit at the commissioning
+        # defaults (200000 microsteps, u4, 2 mm lead).
+        self.assertEqual(validate_move_mm(0.1), (True, "0.100"))
+        self.assertEqual(validate_move_mm(-5), (True, "-5.000"))
+        self.assertTrue(validate_move_mm(500.0)[0])
+        self.assertFalse(validate_move_mm(500.1)[0])
+        self.assertFalse(validate_move_mm(float("nan"))[0])
+        self.assertFalse(validate_move_mm(float("inf"))[0])
+        self.assertFalse(validate_move_mm("abc")[0])
+
+    def test_current_a(self) -> None:
+        # (0, 3.1] A RMS mirrors the onboard's flat backstop; the sense
+        # resistor's own ceiling is the onboard's job.
+        self.assertEqual(validate_current_a(0.8), (True, "0.800"))
+        self.assertTrue(validate_current_a(3.1)[0])
+        self.assertFalse(validate_current_a(0.0)[0])
+        self.assertFalse(validate_current_a(3.2)[0])
+        self.assertFalse(validate_current_a("x")[0])
+
+    def test_accel(self) -> None:
+        # (0, 5000] full-steps/s^2 mirrors stepper.max_accel_steps_per_s2.
+        self.assertEqual(validate_accel(200), (True, "200.0"))
+        self.assertTrue(validate_accel(5000)[0])
+        self.assertFalse(validate_accel(0)[0])
+        self.assertFalse(validate_accel(5001)[0])
+        self.assertFalse(validate_accel("x")[0])
 
     def test_temperature_target(self) -> None:
         self.assertTrue(validate_temperature_target(0.0)[0])

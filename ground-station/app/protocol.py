@@ -24,6 +24,13 @@ class StepperSnapshot:
     zeroed: Optional[bool] = None
     seq_name: str = ""
     seq_state: str = ""
+    # Added 2026-08-29 (drive-settings surface): run current, ramp accel,
+    # and the ball-screw-lead-derived linear position. None when the
+    # onboard predates them.
+    amps: Optional[float] = None
+    accel: Optional[float] = None
+    mm: Optional[float] = None
+    mm_tgt: Optional[float] = None
 
 
 @dataclass
@@ -164,6 +171,14 @@ def _parse_stepper_segment(value: str) -> StepperSnapshot:
                 s.seq_name = "" if raw == "-" else raw
             elif key == "seqst":
                 s.seq_state = raw
+            elif key == "amps":
+                s.amps = float(raw)
+            elif key == "acc":
+                s.accel = float(raw)
+            elif key == "mm":
+                s.mm = float(raw)
+            elif key == "mm_tgt":
+                s.mm_tgt = float(raw)
             # unknown keys silently ignored (forward-compat)
         except ValueError as exc:
             raise TelemetryParseError(f"invalid STEPPER {key}={raw!r}: {exc}") from exc
@@ -188,6 +203,10 @@ def _snapshot_to_dict(snap: StepperSnapshot, motor_id: int) -> Dict:
         "zeroed": snap.zeroed,
         "seq_name": snap.seq_name,
         "seq_state": snap.seq_state,
+        "amps": snap.amps,
+        "accel": snap.accel,
+        "mm": snap.mm,
+        "mm_tgt": snap.mm_tgt,
     }
 
 
@@ -401,10 +420,14 @@ KNOWN_COMMANDS = {
     "EXIT_SAFE",
     "STEPPER_MOVE",
     "STEPPER_MOVETO",
+    "STEPPER_MOVE_MM",
+    "STEPPER_MOVETO_MM",
     "STEPPER_ROTATE",
     "STEPPER_HOME",
     "STEPPER_STOP",
     "STEPPER_SET_SPEED",
+    "STEPPER_SET_ACCEL",
+    "STEPPER_SET_CURRENT",
     "STEPPER_SET_MICROSTEP",
     "STEPPER_ENABLE",
     "STEPPER_DISABLE",
@@ -688,3 +711,52 @@ def validate_revolutions(revs: float) -> Tuple[bool, str]:
     if abs(r) > 1e6:
         return False, "revs unrealistically large"
     return True, f"{r:.4f}"
+
+
+def validate_move_mm(mm: float, max_mm: float = 500.0) -> Tuple[bool, str]:
+    """Validate a linear move distance/target in millimetres.
+
+    The default bound mirrors the onboard travel limit: 200000 microsteps at
+    the commissioning defaults (u4, 200 full-steps/rev, 2 mm lead) is
+    500 mm. The onboard still enforces max_position_steps after conversion.
+    """
+    try:
+        v = float(mm)
+    except (TypeError, ValueError):
+        return False, "mm must be numeric"
+    if v != v or v in (float("inf"), float("-inf")):
+        return False, "mm must be finite"
+    if abs(v) > max_mm:
+        return False, f"mm exceeds max_mm {max_mm:g}"
+    return True, f"{v:.3f}"
+
+
+def validate_current_a(a_rms: float, max_a: float = 3.1) -> Tuple[bool, str]:
+    """Validate a motor run current in A RMS.
+
+    Mirrors the onboard's flat (0, 3.1] backstop; the onboard additionally
+    NACKs anything the sense resistor cannot deliver.
+    """
+    try:
+        v = float(a_rms)
+    except (TypeError, ValueError):
+        return False, "current must be numeric"
+    if v <= 0.0 or v > max_a:
+        return False, f"current must be in (0, {max_a}] A RMS"
+    return True, f"{v:.3f}"
+
+
+def validate_accel(accel: float, max_accel: float = 5000.0) -> Tuple[bool, str]:
+    """Validate a trapezoid acceleration in full-steps/s².
+
+    The onboard clamps STEPPER_SET_ACCEL against
+    stepper.max_accel_steps_per_s2 (5000 by default); refuse out-of-range
+    values up front, like validate_speed_hz does for speed.
+    """
+    try:
+        v = float(accel)
+    except (TypeError, ValueError):
+        return False, "accel must be numeric"
+    if v <= 0.0 or v > max_accel:
+        return False, f"accel must be in (0, {max_accel:g}] full-steps/s^2"
+    return True, f"{v:.1f}"

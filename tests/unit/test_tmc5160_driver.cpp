@@ -927,6 +927,62 @@ void TestSdModeGateAcceptsCorrectlyStrappedModule() {
 
 }  // namespace
 
+// ---------------------------------------------------------------------
+// SetRunCurrent (STEPPER_SET_CURRENT): live GLOBALSCALER + IHOLD_IRUN
+// rewrite, persisted into cfg_ so reconfiguration keeps the new value.
+// ---------------------------------------------------------------------
+
+void TestSetRunCurrentRewritesRegistersAndPersists() {
+  FakeSpiBus bus;
+  Tmc5160Config cfg;  // boot current 0.8 A RMS
+  auto driver = MakeHealthyDriver(&bus, cfg);
+
+  // Exactly two writes, derived the same way initialisation derives them.
+  std::uint32_t gs = 0;
+  std::uint8_t irun = 0;
+  std::uint8_t ihold = 0;
+  assert(Tmc5160Driver::CalculateCurrent(0.4, cfg.sense_resistor_ohm,
+                                         cfg.hold_current_frac, &gs, &irun,
+                                         &ihold));
+  const std::uint32_t gs_reg = gs >= 256U ? 0U : gs;
+  const std::uint32_t ihold_irun =
+      (static_cast<std::uint32_t>(ihold) & 0x1FU) |
+      ((static_cast<std::uint32_t>(irun) & 0x1FU) << 8) | (6U << 16);
+  ExpectWrite(&bus, kRegGLOBALSCALER, gs_reg);
+  ExpectWrite(&bus, kRegIHOLD_IRUN, ihold_irun);
+
+  std::string err;
+  assert(driver->SetRunCurrent(0.4, &err));
+  assert(bus.mismatch_count() == 0);
+  assert(bus.remaining_expectations() == 0);
+  assert(std::fabs(driver->run_current_a_rms() - 0.4) < 1e-12);
+
+  // A later reconfiguration (ActiveCheck, chip-reset recovery) must derive
+  // its current registers from the NEW value, not the boot config.
+  Tmc5160Config cfg_after = cfg;
+  cfg_after.run_current_a_rms = 0.4;
+  ScriptHealthyReinit(&bus, cfg_after);
+  assert(driver->ActiveCheck());
+  assert(bus.mismatch_count() == 0);
+  assert(bus.remaining_expectations() == 0);
+}
+
+void TestSetRunCurrentRejectsUnreachableTargetWithoutBusTraffic() {
+  FakeSpiBus bus;
+  Tmc5160Config cfg;  // 0.075 ohm sense: RMS ceiling ~3.06 A
+  auto driver = MakeHealthyDriver(&bus, cfg);
+
+  std::string err;
+  assert(!driver->SetRunCurrent(3.1, &err));
+  assert(!err.empty());
+  // Rejected before any datagram: no scripted expectations were needed.
+  assert(bus.mismatch_count() == 0);
+  assert(bus.remaining_expectations() == 0);
+  // The stored current is untouched, so recovery paths keep the old value.
+  assert(std::fabs(driver->run_current_a_rms() - cfg.run_current_a_rms) <
+         1e-12);
+}
+
 int main() {
   TestEncodeMresTable();
   TestEncodeMresRejectsInvalidDivisor();
@@ -958,5 +1014,7 @@ int main() {
   TestEachDatagramIsOneControllerLockHoldWithModeReapplied();
   TestStealthChopSelectsGconfEnPwmModeBit();
   TestSetMicrostepRejectsInvalidDivisor();
+  TestSetRunCurrentRewritesRegistersAndPersists();
+  TestSetRunCurrentRejectsUnreachableTargetWithoutBusTraffic();
   return 0;
 }

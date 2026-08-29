@@ -428,6 +428,10 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
       if (!parse_i64(key, value, &config->stepper.max_position_steps, line_no)) return false;
     } else if (key == "stepper.enable_on_boot") {
       if (!parse_bool(key, value, &config->stepper.enable_on_boot, line_no)) return false;
+    } else if (key == "stepper.lead_mm_per_rev") {
+      if (!parse_double(key, value, &config->stepper.lead_mm_per_rev, line_no)) return false;
+    } else if (key == "stepper.max_accel_steps_per_s2") {
+      if (!parse_double(key, value, &config->stepper.max_accel_steps_per_s2, line_no)) return false;
 
     } else if (key == "pull.max_step_hz") {
       if (!parse_double(key, value, &config->pull.max_step_hz, line_no)) return false;
@@ -472,6 +476,8 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
         if (!parse_double(key, value, &motor.sense_resistor_ohm, line_no)) return false;
       } else if (suffix == "retry_ms") {
         if (!parse_int(key, value, &motor.retry_ms, line_no)) return false;
+      } else if (suffix == "accel_steps_per_s2") {
+        if (!parse_double(key, value, &motor.accel_steps_per_s2, line_no)) return false;
       } else if (suffix == "samples") {
         if (!ParseSizeList(value, &motor.samples)) {
           if (error != nullptr) {
@@ -803,7 +809,29 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
     return false;
   }
 
+  // Ball-screw lead: bounded to (0, 100] mm/rev. A zero or negative lead
+  // makes the mm->microstep conversion divide by zero; a lead beyond 100 mm
+  // is no ball screw this rig could mount and is almost certainly a typo
+  // (e.g. entering the total travel instead of the per-rev lead).
+  if (!std::isfinite(config->stepper.lead_mm_per_rev) ||
+      config->stepper.lead_mm_per_rev <= 0.0 ||
+      config->stepper.lead_mm_per_rev > 100.0) {
+    if (error != nullptr) {
+      *error = "stepper.lead_mm_per_rev must be in (0, 100] mm";
+    }
+    return false;
+  }
+
+  if (!std::isfinite(config->stepper.max_accel_steps_per_s2) ||
+      config->stepper.max_accel_steps_per_s2 <= 0.0) {
+    if (error != nullptr) {
+      *error = "stepper.max_accel_steps_per_s2 must be > 0";
+    }
+    return false;
+  }
+
   if (config->pull.max_step_hz <= 0.0 || config->pull.accel_steps_per_s2 <= 0.0 ||
+      config->pull.accel_steps_per_s2 > config->stepper.max_accel_steps_per_s2 ||
       (config->pull.microstep != 1 && config->pull.microstep != 2 &&
        config->pull.microstep != 4 && config->pull.microstep != 8 &&
        config->pull.microstep != 16 && config->pull.microstep != 32 &&
@@ -889,6 +917,19 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
                  ".run_current_a_rms exceeds the sense resistor's "
                  "deliverable current ceiling (run_current_a_rms*sqrt(2) "
                  "must be <= 0.325/sense_resistor_ohm)";
+      }
+      return false;
+    }
+    // Per-motor accel override: 0 inherits pull.accel_steps_per_s2, a
+    // positive value must sit under the shared runtime ceiling so config
+    // and STEPPER_SET_ACCEL obey the same bound.
+    if (!std::isfinite(motor.accel_steps_per_s2) ||
+        motor.accel_steps_per_s2 < 0.0 ||
+        motor.accel_steps_per_s2 > config->stepper.max_accel_steps_per_s2) {
+      if (error != nullptr) {
+        *error = "motor" + std::to_string(i) +
+                 ".accel_steps_per_s2 must be 0 (inherit) or in (0, "
+                 "stepper.max_accel_steps_per_s2]";
       }
       return false;
     }

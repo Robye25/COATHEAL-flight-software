@@ -164,8 +164,10 @@ guessed range (section 9, gate 5 of the same bring-up doc).
 | `stepper.default_step_hz` | `100.0` | Default jog rate. |
 | `stepper.max_position_steps` | `200000` | Absolute software travel limit. |
 | `stepper.enable_on_boot` | `false` | Keep drivers de-energized until commanded. |
+| `stepper.lead_mm_per_rev` | `2.0` | Ball-screw lead: linear travel per motor revolution. The mm command surface (`STEPPER_MOVE_MM`, `STEPPER_MOVETO_MM`) and the `mm`/`mm_tgt` telemetry keys convert through this value. Validated `(0, 100]`. |
+| `stepper.max_accel_steps_per_s2` | `5000.0` | Ceiling for `STEPPER_SET_ACCEL` and the per-motor accel overrides, full-steps/s². |
 | `pull.max_step_hz` | `100.0` | Pull cycle max rate. |
-| `pull.accel_steps_per_s2` | `200.0` | Pull acceleration/deceleration. |
+| `pull.accel_steps_per_s2` | `200.0` | Trapezoidal acceleration/deceleration shared by all motion (not just pulls) unless a motor overrides it. Must be ≤ `stepper.max_accel_steps_per_s2`. |
 | `pull.microstep` | `4` | Microstep divisor programmed into each TMC5160. |
 | `pull.travel_full_steps` | `200` | Pull travel in full steps; calibrate to ball-screw lead. |
 | `pull.hold_s` | `5.0` | Hold time at target. |
@@ -184,12 +186,13 @@ load as unknown motor keys, not merely deprecated.**
 | `motor*.spi_device` | `/dev/spidev0.0` | `/dev/spidev0.0` | Shared SPI0 bus device; software drives each configured CS GPIO with `SPI_NO_CS` (see below). |
 | `motor*.cs_line` | `22` | `27` | Chip select GPIO (software CS). |
 | `motor*.enable_line` | `20` | `21` | EN GPIO. |
-| `motor*.run_current_a_rms` | `0.8` | `0.8` | Conservative commissioning current; increase only after thermal validation. Validated against both a flat `(0, 3.1]` A_rms ceiling and the sense resistor's physical current limit (below). |
+| `motor*.run_current_a_rms` | `0.8` | `0.8` | Conservative commissioning current; increase only after thermal validation. Validated against both a flat `(0, 3.1]` A_rms ceiling and the sense resistor's physical current limit (below). `STEPPER_SET_CURRENT` changes it at runtime (same limits) until the service restarts. |
 | `motor*.hold_current_frac` | `0.30` | `0.30` | Hold current fraction, relative to the chosen IRUN. |
 | `motor*.stealth_chop` | `true` | `true` | StealthChop (GCONF `en_pwm_mode`, bit 2). `true` writes `GCONF=0x00000004`, `false` writes `GCONF=0x00000000`; the driver's GCONF readback verify confirms it during `Reinitialize()`. Quiet, low-vibration chopper at low speed; set `false` for spreadCycle's torque headroom. |
 | `motor*.spi_speed_hz` | `1000000` | `1000000` | SPI speed. |
 | `motor*.sense_resistor_ohm` | `0.075` | `0.075` | TMC5160 current-sense resistor value (Ω); feeds the GLOBALSCALER/IHOLD_IRUN current calculation. `0.075` is an assumed typical value for this board family — **read the actual value off the board at the bench** (see [TMC5160 Commissioning §6](tmc5160-commissioning.md#6-current-model-globalscaler--irun-two-regimes)). Validated `> 0.0 && < 1.0`. |
 | `motor*.retry_ms` | `2000` | `2000` | Idle driver re-probe interval after a fault. |
+| `motor*.accel_steps_per_s2` | `0` | `0` | Per-motor trapezoid slope, full-steps/s². `0` inherits `pull.accel_steps_per_s2`; a positive value (≤ `stepper.max_accel_steps_per_s2`) overrides it for this motor. `STEPPER_SET_ACCEL` adjusts it at runtime until restart. |
 | `motor*.samples` | `0,1,2,3` | `4,5,6,7` | Sample indices pulled by the motor. |
 
 The TMC5160 backend uses SPI mode 3, opens SPI with the kernel chip-select

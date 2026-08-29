@@ -107,6 +107,12 @@ class OwnedBusTmc5160Driver : public StepperDriver {
   std::uint64_t pulses_issued() const override {
     return driver_.pulses_issued();
   }
+  bool SetRunCurrent(double a_rms, std::string* error) override {
+    return driver_.SetRunCurrent(a_rms, error);
+  }
+  double run_current_a_rms() const override {
+    return driver_.run_current_a_rms();
+  }
 
  private:
   std::unique_ptr<SpiBus> bus_;
@@ -211,7 +217,11 @@ bool SystemController::Initialize(std::string* error) {
     cfg.full_steps_per_rev = config_.stepper.steps_per_rev;
     cfg.max_step_hz = config_.pull.max_step_hz;
     cfg.default_step_hz = config_.stepper.default_step_hz;
-    cfg.accel_steps_per_s2 = config_.pull.accel_steps_per_s2;
+    cfg.accel_steps_per_s2 = config_.motors[i].accel_steps_per_s2 > 0.0
+                                 ? config_.motors[i].accel_steps_per_s2
+                                 : config_.pull.accel_steps_per_s2;
+    cfg.max_accel_steps_per_s2 = config_.stepper.max_accel_steps_per_s2;
+    cfg.lead_mm_per_rev = config_.stepper.lead_mm_per_rev;
     cfg.microstep = config_.pull.microstep;
     cfg.max_position_steps = config_.stepper.max_position_steps;
     cfg.samples = config_.motors[i].samples;
@@ -2152,6 +2162,48 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       return Ack(cmd_name, "bend queued");
     }
 
+    case CommandType::kStepperMoveMm: {
+      if (!stepper_) return Nack(cmd_name, "stepper unavailable");
+      if (mode_.load() != SystemMode::kRun) {
+        return Nack(cmd_name, "RUN mode required");
+      }
+      if (link_loss_fallback_active_) {
+        return Nack(cmd_name, "manual motion blocked during link-loss fallback");
+      }
+      double mm = 0.0;
+      if (!ParseDouble(command.args[0], &mm)) return Nack(cmd_name, "invalid mm");
+      std::string err;
+      InhibitHeatersForMotion();
+      if (!stepper_->MoveMillimeters(command.motor_id, mm, &err))
+        return Nack(cmd_name, err);
+      return Ack(cmd_name, "move queued");
+    }
+
+    case CommandType::kStepperMoveToMm: {
+      if (!stepper_) return Nack(cmd_name, "stepper unavailable");
+      if (mode_.load() != SystemMode::kRun) {
+        return Nack(cmd_name, "RUN mode required");
+      }
+      if (!motor_zeroed(command.motor_id)) {
+        return Nack(cmd_name, "motor must be zeroed first");
+      }
+      if (link_loss_fallback_active_) {
+        return Nack(cmd_name, "manual motion blocked during link-loss fallback");
+      }
+      double mm = 0.0;
+      double hold_s = 0.0;
+      if (!ParseDouble(command.args[0], &mm)) return Nack(cmd_name, "invalid mm");
+      if (command.args.size() == 2 &&
+          !ParseDouble(command.args[1], &hold_s)) {
+        return Nack(cmd_name, "invalid hold");
+      }
+      std::string err;
+      InhibitHeatersForMotion();
+      if (!stepper_->MoveToMillimeters(command.motor_id, mm, hold_s, &err))
+        return Nack(cmd_name, err);
+      return Ack(cmd_name, "bend queued");
+    }
+
     case CommandType::kStepperRotate: {
       if (!stepper_) return Nack(cmd_name, "stepper unavailable");
       if (mode_.load() != SystemMode::kRun) {
@@ -2224,6 +2276,35 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       if (!stepper_->SetSpeed(command.motor_id, hz, &err))
         return Nack(cmd_name, err);
       return Ack(cmd_name, "speed updated");
+    }
+
+    case CommandType::kStepperSetAccel: {
+      if (!stepper_) return Nack(cmd_name, "stepper unavailable");
+      double accel = 0.0;
+      if (!ParseDouble(command.args[0], &accel)) {
+        return Nack(cmd_name, "invalid accel");
+      }
+      std::string err;
+      if (!stepper_->SetAccel(command.motor_id, accel, &err))
+        return Nack(cmd_name, err);
+      return Ack(cmd_name, "accel updated");
+    }
+
+    case CommandType::kStepperSetCurrent: {
+      if (!stepper_) return Nack(cmd_name, "stepper unavailable");
+      double a_rms = 0.0;
+      if (!ParseDouble(command.args[0], &a_rms)) {
+        return Nack(cmd_name, "invalid current");
+      }
+      // Same flat backstop as config load: whatever the sense resistor
+      // could deliver, nothing on this rig runs above 3.1 A RMS.
+      if (a_rms <= 0.0 || a_rms > 3.1) {
+        return Nack(cmd_name, "current must be in (0, 3.1] A RMS");
+      }
+      std::string err;
+      if (!stepper_->SetRunCurrent(command.motor_id, a_rms, &err))
+        return Nack(cmd_name, SanitizeForReply(err));
+      return Ack(cmd_name, "current updated");
     }
 
     case CommandType::kStepperSetMicrostep: {

@@ -588,6 +588,52 @@ void Tmc5160Driver::ReportError(const std::string& message) {
   std::cerr << "[tmc5160] " << message << '\n';
 }
 
+bool Tmc5160Driver::SetRunCurrent(double a_rms, std::string* error) {
+  std::lock_guard<std::mutex> lock(io_mu_);
+  std::uint32_t globalscaler = 0;
+  std::uint8_t irun = 0;
+  std::uint8_t ihold = 0;
+  if (!CalculateCurrent(a_rms, cfg_.sense_resistor_ohm,
+                        cfg_.hold_current_frac, &globalscaler, &irun,
+                        &ihold)) {
+    if (error) {
+      std::ostringstream msg;
+      msg << "current " << a_rms << " A_rms not deliverable with"
+          << " sense_resistor_ohm=" << cfg_.sense_resistor_ohm
+          << " (peak ceiling " << (kVfs / cfg_.sense_resistor_ohm)
+          << " A)";
+      *error = msg.str();
+    }
+    return false;
+  }
+  if (!healthy_) {
+    if (error) {
+      *error = "driver unhealthy; recover the module before changing current";
+    }
+    return false;
+  }
+  const std::uint32_t gs_reg = (globalscaler >= 256U) ? 0U : globalscaler;
+  const std::uint32_t ihold_irun =
+      (static_cast<std::uint32_t>(ihold) & 0x1FU) |
+      ((static_cast<std::uint32_t>(irun) & 0x1FU) << 8) |
+      (kIholdDelay << 16);
+  if (!WriteRegister(kRegGLOBALSCALER, gs_reg) ||
+      !WriteRegister(kRegIHOLD_IRUN, ihold_irun)) {
+    healthy_ = false;
+    if (error) *error = "SPI write failed while setting current";
+    return false;
+  }
+  // Stored last: ActiveCheck / chip-reset recovery re-derive the registers
+  // from cfg_, so from here on the new current survives reconfiguration.
+  cfg_.run_current_a_rms = a_rms;
+  return true;
+}
+
+double Tmc5160Driver::run_current_a_rms() const {
+  std::lock_guard<std::mutex> lock(io_mu_);
+  return cfg_.run_current_a_rms;
+}
+
 bool Tmc5160Driver::Enable(bool enable) {
   std::lock_guard<std::mutex> lock(io_mu_);
   return EnableUnlocked(enable);

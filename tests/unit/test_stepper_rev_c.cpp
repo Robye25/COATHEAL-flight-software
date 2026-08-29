@@ -9,9 +9,11 @@
 
 #include <cassert>
 #include <chrono>
+#include <cmath>
 #include <thread>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -619,6 +621,138 @@ void TestSimulatedBackendReportsBusHealthy() {
   assert(ctl->SpiBusOk());
 }
 
+// 2026-08-29 drive-settings surface: mm move commands, per-motor current,
+// runtime accel.
+
+// Parser: the mm and drive-settings commands take the same optional-id
+// shape as their microstep siblings.
+void TestParserMmAndDriveCommands() {
+  CommandParser parser;
+
+  auto r = parser.ParseLine("STEPPER_MOVE_MM 1 -2.5");
+  assert(r.ok);
+  assert(r.command.type == CommandType::kStepperMoveMm);
+  assert(r.command.motor_id == 1);
+  assert(r.command.args.size() == 1);
+  assert(r.command.args[0] == "-2.5");
+
+  // Legacy no-id form: a decimal payload is never a plausible motor id.
+  auto r2 = parser.ParseLine("STEPPER_MOVE_MM 1.5");
+  assert(r2.ok);
+  assert(r2.command.motor_id == 0);
+  assert(r2.command.args.size() == 1);
+  assert(r2.command.args[0] == "1.5");
+
+  auto r3 = parser.ParseLine("STEPPER_MOVETO_MM 0 4.0 5");
+  assert(r3.ok);
+  assert(r3.command.type == CommandType::kStepperMoveToMm);
+  assert(r3.command.motor_id == 0);
+  assert(r3.command.args.size() == 2);
+  assert(r3.command.args[0] == "4.0");
+  assert(r3.command.args[1] == "5");
+
+  auto r4 = parser.ParseLine("STEPPER_SET_CURRENT 1 0.4");
+  assert(r4.ok);
+  assert(r4.command.type == CommandType::kStepperSetCurrent);
+  assert(r4.command.motor_id == 1);
+  assert(r4.command.args.size() == 1);
+  assert(r4.command.args[0] == "0.4");
+
+  auto r5 = parser.ParseLine("STEPPER_SET_ACCEL 0 400");
+  assert(r5.ok);
+  assert(r5.command.type == CommandType::kStepperSetAccel);
+  assert(r5.command.motor_id == 0);
+  assert(r5.command.args.size() == 1);
+  assert(r5.command.args[0] == "400");
+}
+
+// mm -> microstep conversion goes through the ball-screw lead at the
+// CURRENT divisor, and tracks a microstep change.
+void TestMoveMillimetersConversion() {
+  auto ch = MakeChannel(0);  // lead 2 mm/rev, 200 full-steps, u4
+  std::string err;
+
+  // 2 mm = 1 revolution = 200 x 4 = 800 microsteps.
+  assert(ch->MoveMillimeters(2.0, &err));
+  assert(ch->Snapshot().target_steps == 800);
+  assert(ch->Snapshot().last_source == "cmd:MOVE_MM");
+
+  ch->Stop();
+  ch->SetPositionZero();
+
+  // Absolute: -1 mm = -400 microsteps.
+  assert(ch->MoveToMillimeters(-1.0, 0.0, &err));
+  assert(ch->Snapshot().target_steps == -400);
+  assert(ch->Snapshot().last_source == "cmd:BEND_MM");
+
+  ch->Stop();
+  ch->SetPositionZero();
+
+  // After a microstep change the same distance lands on the same shaft
+  // angle: 1 mm at u8 = 800 microsteps.
+  assert(ch->SetMicrostep(8, &err));
+  assert(ch->MoveToMillimeters(1.0, 0.0, &err));
+  assert(ch->Snapshot().target_steps == 800);
+
+  // Non-finite distance is refused.
+  assert(!ch->MoveMillimeters(std::numeric_limits<double>::infinity(), &err));
+
+  // Distance beyond max_position_steps is refused by the shared core.
+  ch->Stop();
+  assert(!ch->MoveToMillimeters(1e6, 0.0, &err));
+}
+
+// Snapshot reports the lead-derived linear position once a move completes.
+void TestSnapshotReportsMillimeters() {
+  auto ch = MakeChannel(0);
+  std::string err;
+  assert(ch->MoveMillimeters(2.0, &err));
+  for (int i = 0; i < 20000; ++i) {
+    ch->Tick(0.001);
+    if (!ch->Snapshot().moving) break;
+  }
+  const StepperStatus s = ch->Snapshot();
+  assert(s.position_steps == 800);
+  assert(std::fabs(s.position_mm - 2.0) < 1e-9);
+  assert(std::fabs(s.target_mm - 2.0) < 1e-9);
+}
+
+// SetAccel: applied within (0, max_accel_steps_per_s2], rejected outside,
+// and visible in the snapshot (and thus telemetry).
+void TestSetAccelBounds() {
+  auto ch = MakeChannel(0);  // max_accel default 5000
+  std::string err;
+
+  assert(ch->Snapshot().accel_steps_per_s2 == 200.0);
+  assert(ch->SetAccel(500.0, &err));
+  assert(ch->Snapshot().accel_steps_per_s2 == 500.0);
+
+  assert(!ch->SetAccel(0.0, &err));
+  assert(!ch->SetAccel(-10.0, &err));
+  assert(!ch->SetAccel(5001.0, &err));
+  assert(ch->Snapshot().accel_steps_per_s2 == 500.0);  // unchanged by rejects
+}
+
+// Controller-level current dispatch: routed by id, stored by the backend,
+// reported in the snapshot.
+void TestControllerSetRunCurrent() {
+  std::vector<StepperChannelConfig> cfgs;
+  cfgs.push_back(MakeChannelCfg(0, {0, 1, 2, 3}));
+  cfgs.push_back(MakeChannelCfg(1, {4, 5, 6, 7}));
+  std::vector<std::unique_ptr<StepperDriver>> drvs;
+  drvs.emplace_back(std::make_unique<SimulatedStepperDriver>());
+  drvs.emplace_back(std::make_unique<SimulatedStepperDriver>());
+  StepperController ctl(std::move(cfgs), std::move(drvs));
+
+  std::string err;
+  assert(ctl.SetRunCurrent(1, 0.4, &err));
+  assert(std::fabs(ctl.Snapshot(1).run_current_a_rms - 0.4) < 1e-12);
+  assert(ctl.Snapshot(0).run_current_a_rms == 0.0);  // untouched
+
+  assert(!ctl.SetRunCurrent(0, -0.1, &err));
+  assert(!ctl.SetRunCurrent(9, 0.4, &err));  // unknown id
+}
+
 }  // namespace
 
 int main() {
@@ -638,6 +772,11 @@ int main() {
   TestSetEnabledTrueFailureLeavesChannelDisabled();
   TestPullCycleAcquiresLock();
   TestControllerMultiChannelDispatch();
+  TestParserMmAndDriveCommands();
+  TestMoveMillimetersConversion();
+  TestSnapshotReportsMillimeters();
+  TestSetAccelBounds();
+  TestControllerSetRunCurrent();
   std::cout << "Rev C stepper tests passed" << std::endl;
   return 0;
 }

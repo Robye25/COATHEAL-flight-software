@@ -38,10 +38,16 @@ enum class CommandType {
   kSetPhase,
   kStepperMove,
   kStepperMoveTo,
+  // Distance surface (ball-screw lead conversion happens onboard):
+  // STEPPER_MOVE_MM <id> <mm>, STEPPER_MOVETO_MM <id> <mm> [hold_s].
+  kStepperMoveMm,
+  kStepperMoveToMm,
   kStepperRotate,
   kStepperHome,
   kStepperStop,
   kStepperSetSpeed,
+  kStepperSetAccel,
+  kStepperSetCurrent,
   kStepperSetMicrostep,
   kStepperEnable,
   kStepperDisable,

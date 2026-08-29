@@ -195,6 +195,14 @@ struct StepperConfig {
   double max_step_hz = 100.0;
   std::int64_t max_position_steps = 200000;  // absolute travel limit
   bool enable_on_boot = false;       // stay de-energised until commanded
+  // Ball-screw lead: linear travel per motor revolution. The mm command
+  // surface (STEPPER_MOVE_MM / STEPPER_MOVETO_MM, mm telemetry keys)
+  // converts through this single value; the microstep commands stay raw.
+  double lead_mm_per_rev = 2.0;
+  // Ceiling for STEPPER_SET_ACCEL and motorN.accel_steps_per_s2, in
+  // full-steps/s². Bounds runtime experimentation the same way
+  // pull.max_step_hz bounds STEPPER_SET_SPEED.
+  double max_accel_steps_per_s2 = 5000.0;
 };
 
 struct PullConfig {
@@ -228,6 +236,11 @@ struct MotorConfig {
   // GLOBALSCALER/IHOLD_IRUN current calculation.
   double sense_resistor_ohm = 0.075;
   int retry_ms = 2000;
+  // Per-motor trapezoidal acceleration in full-steps/s². 0 (the default)
+  // inherits pull.accel_steps_per_s2; a positive value overrides it for
+  // this motor only. Runtime-adjustable via STEPPER_SET_ACCEL, bounded by
+  // stepper.max_accel_steps_per_s2 either way.
+  double accel_steps_per_s2 = 0.0;
   std::vector<std::size_t> samples;
 };
 

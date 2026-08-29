@@ -131,6 +131,20 @@ bool StepperController::MoveToSteps(int motor_id, std::int64_t absolute_steps,
   return ch->MoveToSteps(absolute_steps, hold_s, error);
 }
 
+bool StepperController::MoveMillimeters(int motor_id, double delta_mm,
+                                        std::string* error) {
+  StepperChannel* ch = ChannelById(motor_id);
+  if (!ch) { if (error) *error = "unknown motor id"; return false; }
+  return ch->MoveMillimeters(delta_mm, error);
+}
+
+bool StepperController::MoveToMillimeters(int motor_id, double absolute_mm,
+                                          double hold_s, std::string* error) {
+  StepperChannel* ch = ChannelById(motor_id);
+  if (!ch) { if (error) *error = "unknown motor id"; return false; }
+  return ch->MoveToMillimeters(absolute_mm, hold_s, error);
+}
+
 bool StepperController::Rotate(int motor_id, double revolutions,
                                std::string* error) {
   StepperChannel* ch = ChannelById(motor_id);
@@ -168,6 +182,20 @@ bool StepperController::SetSpeed(int motor_id, double step_hz,
   StepperChannel* ch = ChannelById(motor_id);
   if (!ch) { if (error) *error = "unknown motor id"; return false; }
   return ch->SetSpeed(step_hz, error);
+}
+
+bool StepperController::SetAccel(int motor_id, double accel_steps_per_s2,
+                                 std::string* error) {
+  StepperChannel* ch = ChannelById(motor_id);
+  if (!ch) { if (error) *error = "unknown motor id"; return false; }
+  return ch->SetAccel(accel_steps_per_s2, error);
+}
+
+bool StepperController::SetRunCurrent(int motor_id, double a_rms,
+                                      std::string* error) {
+  StepperChannel* ch = ChannelById(motor_id);
+  if (!ch) { if (error) *error = "unknown motor id"; return false; }
+  return ch->SetRunCurrent(a_rms, error);
 }
 
 bool StepperController::SetMicrostep(int motor_id, int divisor,
