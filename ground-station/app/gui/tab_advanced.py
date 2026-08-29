@@ -100,6 +100,8 @@ class AdvancedTab(QScrollArea):
                       "(or the bench debug arm is active). Never more than 3 heaters run at once (scheduler).")
         note.setWordWrap(True); note.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(note)
+        self.debug_note = QLabel(""); self.debug_note.setWordWrap(True); self.debug_note.setMinimumWidth(1)
+        lay.addWidget(self.debug_note)
         self.duty_sliders: List[QSlider] = []
         self.duty_labels: List[QLabel] = []
         self.duty_buttons = []
@@ -359,9 +361,14 @@ class AdvancedTab(QScrollArea):
         for _t, _h, _s, btn in self.plan_rows:
             btn.set_reason(generic)
         for i, btn in enumerate(self.duty_buttons):
-            btn.set_reason(gating.heater_reason(state, i))
+            btn.set_reason(gating.duty_reason(state, i))
         for btn in self.all_duty_buttons:
-            btn.set_reason(gating.all_heaters_reason(state))
+            btn.set_reason(gating.all_duty_reason(state))
+        if state.debug_armed:
+            self.debug_note.setText("DEBUG ARM ACTIVE — open-loop duty allowed without PT100 feedback (DISARM_DEBUG to end)")
+            self.debug_note.setStyleSheet(f"color: {AMBER}; font-size: 8pt; font-weight: bold;")
+        else:
+            self.debug_note.setText("")
         if state.plan_state is not None:
             self.plan_state.setText(f"plan: {state.plan_state}")
             color = {"armed": GREEN, "running": AMBER, "done": GREEN, "failed": RED}.get(state.plan_state, MUTED)

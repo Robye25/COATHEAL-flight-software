@@ -107,6 +107,31 @@ class GatingTests(unittest.TestCase):
         self.assertIn("S2", gating.all_heaters_reason(st) or "")
         self.assertIsNone(gating.heater_reason(st, 2, needs_temperature=False))
 
+    def test_debug_arm_unlocks_open_loop_duty_only(self) -> None:
+        # ARM_DEBUG (CTRL debug:1): the onboard accepts open-loop duty
+        # without PT100 feedback, so duty_reason must stop predicting a
+        # NACK — but closed-loop targets still require valid feedback.
+        armed = state(ctrl="fallback:0|debug:1")
+        self.assertIs(armed.debug_armed, True)
+        self.assertIsNone(gating.duty_reason(armed, 2))
+        self.assertIsNone(gating.all_duty_reason(armed))
+        self.assertIn("S2", gating.heater_reason(armed, 2) or "",
+                      "SET_TEMP_TARGET still needs feedback under debug arm")
+        self.assertIn("S2", gating.all_heaters_reason(armed) or "")
+        # Debug arm lifts only the feedback gate — mode and silence stay.
+        standby_armed = state(mode="STANDBY", ctrl="fallback:0|debug:1")
+        self.assertIn("ARM", gating.duty_reason(standby_armed, 2) or "")
+        silent_armed = state(ctrl="fallback:0|debug:1", silence=True)
+        self.assertEqual(gating.duty_reason(silent_armed, 2), gating.SILENCE)
+        # Not armed (or old firmware without the key): duty stays gated on
+        # feedback, with a hint pointing at ARM_DEBUG.
+        unarmed = state(ctrl="fallback:0|debug:0")
+        self.assertIs(unarmed.debug_armed, False)
+        self.assertIn("ARM_DEBUG", gating.duty_reason(unarmed, 2) or "")
+        old_firmware = state()  # default ctrl has no debug key
+        self.assertIsNone(old_firmware.debug_armed)
+        self.assertIn("S2", gating.duty_reason(old_firmware, 2) or "")
+
     def test_enable_gate_on_failed_motor(self) -> None:
         st = state()
         self.assertIsNone(gating.enable_reason(st, 0))

@@ -55,6 +55,8 @@ def generic_reason(state: OnboardState) -> Optional[str]:
 
 
 def heater_reason(state: OnboardState, heater: int, *, needs_temperature: bool = True) -> Optional[str]:
+    """Closed-loop heater commands (SET_TEMP_TARGET): the onboard requires
+    valid PT100 feedback even while the bench debug arm is active."""
     if state.silence:
         return SILENCE
     reason = _mode_reason(state)
@@ -65,7 +67,21 @@ def heater_reason(state: OnboardState, heater: int, *, needs_temperature: bool =
     return None
 
 
+def duty_reason(state: OnboardState, heater: int) -> Optional[str]:
+    """Open-loop duty (SET_HEATER_DUTY): while the bench debug arm is
+    active the onboard accepts duty without PT100 feedback, so the ground
+    must not keep predicting a NACK that will not happen."""
+    if state.debug_armed:
+        return SILENCE if state.silence else _mode_reason(state)
+    reason = heater_reason(state, heater)
+    if reason and "no valid temperature" in reason:
+        return reason + " — ARM_DEBUG in the console unlocks open-loop bench duty"
+    return reason
+
+
 def all_heaters_reason(state: OnboardState) -> Optional[str]:
+    """SET_ALL_TEMP_TARGETS: every heated channel needs valid feedback,
+    debug arm or not."""
     if state.silence:
         return SILENCE
     reason = _mode_reason(state)
@@ -76,6 +92,17 @@ def all_heaters_reason(state: OnboardState) -> Optional[str]:
         if invalid:
             return "no valid temperature on S" + ", S".join(str(i) for i in invalid)
     return None
+
+
+def all_duty_reason(state: OnboardState) -> Optional[str]:
+    """SET_ALL_DUTY: open-loop, so the bench debug arm lifts the feedback
+    requirement exactly as the onboard does."""
+    if state.debug_armed:
+        return SILENCE if state.silence else _mode_reason(state)
+    reason = all_heaters_reason(state)
+    if reason and reason.startswith("no valid temperature"):
+        return reason + " — ARM_DEBUG in the console unlocks open-loop bench duty"
+    return reason
 
 
 def motion_reason(state: OnboardState, motor_id: int, *, needs_zero: bool,

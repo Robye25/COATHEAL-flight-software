@@ -127,6 +127,11 @@ class TelemetryPacket:
     def plan_state(self) -> Optional[str]:
         return self.ctrl.get("plan")
 
+    @property
+    def debug_armed(self) -> Optional[bool]:
+        """Bench debug arm (ARM_DEBUG) active onboard. None: old firmware."""
+        return self._ctrl_bool("debug")
+
 
 class TelemetryParseError(ValueError):
     pass

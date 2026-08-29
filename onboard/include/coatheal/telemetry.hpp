@@ -48,6 +48,11 @@ struct CtrlStatus {
   int heaters_active = 0;            // scheduled duties > 0 this tick
   std::uint64_t queue_depth = 0;     // frames waiting in the durable queue
   std::string plan = "none";         // fallback bend plan state (Phase C)
+  // Bench debug arm active (ARM_DEBUG accepted, bench_mode on). The
+  // console needs this to unlock open-loop duty controls on channels
+  // without valid PT100 feedback -- the onboard accepts those commands
+  // while armed, and the ground gating must predict that, not block it.
+  bool debug_armed = false;
 };
 
 struct TelemetryRecord {

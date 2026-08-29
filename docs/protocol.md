@@ -79,11 +79,12 @@ Emitted after `COMPONENT_STATE` and before `STEPPER0`, every frame.
 | `heaters_active` | Number of heaters with a non-zero scheduled duty this tick (owner cap: 3) |
 | `queue` | Frames waiting in the durable telemetry queue before this one was enqueued (a backlog draining after a link outage) |
 | `plan` | Link-loss failsafe plan state: `none` (nothing loaded, or disarmed), `armed`, `running`, `done`, `failed` — see [Link-loss failsafe plan](#link-loss-failsafe-plan) |
+| `debug` | `1` while the bench debug arm is active (`ARM_DEBUG` accepted and `runtime.bench_mode` on) — the console uses it to unlock open-loop duty controls on channels without valid PT100 feedback, matching what the onboard will accept. Added 2026-08-29 |
 
 Example:
 
 ```text
-CTRL=fallback:0|link_loss_s:0.0|energy_wh:12.40|budget_wh:130.0|budget_exhausted:0|heaters_active:2|queue:0|plan:none
+CTRL=fallback:0|link_loss_s:0.0|energy_wh:12.40|budget_wh:130.0|budget_exhausted:0|heaters_active:2|queue:0|plan:none|debug:0
 ```
 
 Never-valid values serialize as `nan`. After a failure, the last good value is
