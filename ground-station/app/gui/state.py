@@ -39,6 +39,11 @@ class MotorState:
     source: str = ""
     seq_name: str = ""
     seq_state: str = ""
+    # Drive-settings surface (2026-08-29). None: firmware predates it.
+    amps: Optional[float] = None       # run current, A RMS
+    accel: Optional[float] = None      # trapezoid slope, full-steps/s²
+    mm: Optional[float] = None         # lead-derived linear position
+    mm_tgt: Optional[float] = None
 
     @property
     def samples(self) -> tuple:
@@ -144,6 +149,8 @@ def state_from_packet(pkt: TelemetryPacket, *, silence: bool = False,
             hold_s=float(snap.get("hold_s", 0.0)), pulses=int(snap.get("pulses", 0)),
             source=str(snap.get("source", "")), seq_name=str(snap.get("seq_name", "")),
             seq_state=str(snap.get("seq_state", "")),
+            amps=snap.get("amps"), accel=snap.get("accel"),
+            mm=snap.get("mm"), mm_tgt=snap.get("mm_tgt"),
         ))
     return OnboardState(
         have_packet=True, session_id=pkt.session_id, seq=pkt.seq,

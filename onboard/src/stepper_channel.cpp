@@ -313,6 +313,11 @@ void StepperChannel::PulseThreadBody() {
 
 bool StepperChannel::MoveSteps(std::int64_t delta_usteps, std::string* error) {
   std::lock_guard<std::mutex> lock(mu_);
+  return MoveStepsUnlocked(delta_usteps, error);
+}
+
+bool StepperChannel::MoveStepsUnlocked(std::int64_t delta_usteps,
+                                       std::string* error) {
   if (!enabled_) {
     if (error) *error = "channel disabled";
     return false;
@@ -338,6 +343,11 @@ bool StepperChannel::MoveSteps(std::int64_t delta_usteps, std::string* error) {
 bool StepperChannel::MoveToSteps(std::int64_t absolute_usteps, double hold_s,
                                  std::string* error) {
   std::lock_guard<std::mutex> lock(mu_);
+  return MoveToStepsUnlocked(absolute_usteps, hold_s, error);
+}
+
+bool StepperChannel::MoveToStepsUnlocked(std::int64_t absolute_usteps,
+                                         double hold_s, std::string* error) {
   if (!enabled_) {
     if (error) *error = "channel disabled";
     return false;
@@ -366,6 +376,39 @@ bool StepperChannel::MoveToSteps(std::int64_t absolute_usteps, double hold_s,
   }
   moving_ = (mode_ == Mode::kMoving);
   last_source_ = "cmd:BEND";
+  return true;
+}
+
+bool StepperChannel::MoveMillimeters(double delta_mm, std::string* error) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (!std::isfinite(delta_mm)) {
+    if (error) *error = "distance must be finite";
+    return false;
+  }
+  const double usteps = delta_mm * UstepsPerMm();
+  if (std::fabs(usteps) > 9.0e15) {  // llround overflow guard
+    if (error) *error = "distance too large";
+    return false;
+  }
+  if (!MoveStepsUnlocked(std::llround(usteps), error)) return false;
+  last_source_ = "cmd:MOVE_MM";
+  return true;
+}
+
+bool StepperChannel::MoveToMillimeters(double absolute_mm, double hold_s,
+                                       std::string* error) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (!std::isfinite(absolute_mm)) {
+    if (error) *error = "distance must be finite";
+    return false;
+  }
+  const double usteps = absolute_mm * UstepsPerMm();
+  if (std::fabs(usteps) > 9.0e15) {
+    if (error) *error = "distance too large";
+    return false;
+  }
+  if (!MoveToStepsUnlocked(std::llround(usteps), hold_s, error)) return false;
+  last_source_ = "cmd:BEND_MM";
   return true;
 }
 
@@ -436,6 +479,34 @@ bool StepperChannel::SetSpeed(double full_step_hz, std::string* error) {
   std::lock_guard<std::mutex> lock(mu_);
   step_hz_ = ClampHz(full_step_hz);
   return true;
+}
+
+bool StepperChannel::SetAccel(double accel_steps_per_s2, std::string* error) {
+  if (!std::isfinite(accel_steps_per_s2) || accel_steps_per_s2 <= 0.0) {
+    if (error) *error = "accel must be > 0 full-steps/s^2";
+    return false;
+  }
+  if (accel_steps_per_s2 > cfg_.max_accel_steps_per_s2) {
+    if (error) {
+      std::ostringstream msg;
+      msg << "accel exceeds stepper.max_accel_steps_per_s2 ("
+          << cfg_.max_accel_steps_per_s2 << ")";
+      *error = msg.str();
+    }
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(mu_);
+  cfg_.accel_steps_per_s2 = accel_steps_per_s2;
+  return true;
+}
+
+bool StepperChannel::SetRunCurrent(double a_rms, std::string* error) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (driver_ == nullptr) {
+    if (error) *error = "no driver";
+    return false;
+  }
+  return driver_->SetRunCurrent(a_rms, error);
 }
 
 bool StepperChannel::SetMicrostep(int divisor, std::string* error) {
@@ -564,6 +635,13 @@ StepperStatus StepperChannel::Snapshot() const {
   s.target_steps = target_;
   s.step_hz = step_hz_;
   s.microstep = microstep_;
+  s.accel_steps_per_s2 = cfg_.accel_steps_per_s2;
+  s.run_current_a_rms = driver_ ? driver_->run_current_a_rms() : 0.0;
+  const double usteps_per_mm = UstepsPerMm();
+  if (usteps_per_mm > 0.0) {
+    s.position_mm = static_cast<double>(position_) / usteps_per_mm;
+    s.target_mm = static_cast<double>(target_) / usteps_per_mm;
+  }
   s.enabled = enabled_;
   s.healthy = driver_ != nullptr && driver_->healthy();
   s.moving = moving_;

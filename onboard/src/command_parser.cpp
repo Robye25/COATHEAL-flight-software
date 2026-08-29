@@ -96,6 +96,10 @@ std::string CommandTypeToString(CommandType type) {
       return "STEPPER_MOVE";
     case CommandType::kStepperMoveTo:
       return "STEPPER_MOVETO";
+    case CommandType::kStepperMoveMm:
+      return "STEPPER_MOVE_MM";
+    case CommandType::kStepperMoveToMm:
+      return "STEPPER_MOVETO_MM";
     case CommandType::kStepperRotate:
       return "STEPPER_ROTATE";
     case CommandType::kStepperHome:
@@ -104,6 +108,10 @@ std::string CommandTypeToString(CommandType type) {
       return "STEPPER_STOP";
     case CommandType::kStepperSetSpeed:
       return "STEPPER_SET_SPEED";
+    case CommandType::kStepperSetAccel:
+      return "STEPPER_SET_ACCEL";
+    case CommandType::kStepperSetCurrent:
+      return "STEPPER_SET_CURRENT";
     case CommandType::kStepperSetMicrostep:
       return "STEPPER_SET_MICROSTEP";
     case CommandType::kStepperEnable:
@@ -217,10 +225,14 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
       {"SET_PHASE", CommandType::kSetPhase},
       {"STEPPER_MOVE", CommandType::kStepperMove},
       {"STEPPER_MOVETO", CommandType::kStepperMoveTo},
+      {"STEPPER_MOVE_MM", CommandType::kStepperMoveMm},
+      {"STEPPER_MOVETO_MM", CommandType::kStepperMoveToMm},
       {"STEPPER_ROTATE", CommandType::kStepperRotate},
       {"STEPPER_HOME", CommandType::kStepperHome},
       {"STEPPER_STOP", CommandType::kStepperStop},
       {"STEPPER_SET_SPEED", CommandType::kStepperSetSpeed},
+      {"STEPPER_SET_ACCEL", CommandType::kStepperSetAccel},
+      {"STEPPER_SET_CURRENT", CommandType::kStepperSetCurrent},
       {"STEPPER_SET_MICROSTEP", CommandType::kStepperSetMicrostep},
       {"STEPPER_ENABLE", CommandType::kStepperEnable},
       {"STEPPER_DISABLE", CommandType::kStepperDisable},
@@ -428,8 +440,11 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
       }
       break;
     case CommandType::kStepperMove:
+    case CommandType::kStepperMoveMm:
     case CommandType::kStepperRotate:
     case CommandType::kStepperSetSpeed:
+    case CommandType::kStepperSetAccel:
+    case CommandType::kStepperSetCurrent:
     case CommandType::kStepperSetMicrostep:
       // Arity after id-peel: 1 (the value).
       maybe_extract_id(1, 1);
@@ -438,6 +453,7 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
       }
       break;
     case CommandType::kStepperMoveTo:
+    case CommandType::kStepperMoveToMm:
     case CommandType::kStepperBend:
       // Arity after id-peel: 1 or 2 (steps, [hold_s]).
       maybe_extract_id(1, 2);

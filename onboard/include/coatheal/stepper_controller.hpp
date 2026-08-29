@@ -20,6 +20,13 @@ struct StepperStatus {
   std::int64_t target_steps = 0;        // target for the active motion
   double step_hz = 0.0;                 // configured step rate
   int microstep = 1;                    // current microstep divisor
+  double accel_steps_per_s2 = 0.0;      // active trapezoid slope (full-steps/s²)
+  double run_current_a_rms = 0.0;       // driver run current (0: not reported)
+  // Linear position derived from the ball-screw lead
+  // (cfg.lead_mm_per_rev); what the operator steers by since the mm
+  // command surface landed.
+  double position_mm = 0.0;
+  double target_mm = 0.0;
   bool enabled = false;                 // driver power stage state
   bool healthy = false;
   bool moving = false;                  // pulses currently being issued
@@ -89,11 +96,16 @@ class StepperController {
   bool MoveSteps(int motor_id, std::int64_t delta_steps, std::string* error);
   bool MoveToSteps(int motor_id, std::int64_t absolute_steps, double hold_s,
                    std::string* error);
+  bool MoveMillimeters(int motor_id, double delta_mm, std::string* error);
+  bool MoveToMillimeters(int motor_id, double absolute_mm, double hold_s,
+                         std::string* error);
   bool Rotate(int motor_id, double revolutions, std::string* error);
   bool Home(int motor_id, std::string* error);
   bool SetPositionZero(int motor_id, std::string* error);
   bool Stop(int motor_id, std::string* error);
   bool SetSpeed(int motor_id, double step_hz, std::string* error);
+  bool SetAccel(int motor_id, double accel_steps_per_s2, std::string* error);
+  bool SetRunCurrent(int motor_id, double a_rms, std::string* error);
   bool SetMicrostep(int motor_id, int divisor, std::string* error);
   bool SetEnabled(int motor_id, bool enable, std::string* error);
 

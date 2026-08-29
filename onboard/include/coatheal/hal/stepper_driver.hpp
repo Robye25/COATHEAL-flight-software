@@ -20,6 +20,20 @@ class StepperDriver {
   virtual bool healthy() const = 0;
   virtual bool ActiveCheck() { return healthy(); }
 
+  // Runtime run-current change (STEPPER_SET_CURRENT). Backends with a real
+  // current DAC validate against their sense-resistor limits, apply the new
+  // value to the chip, and keep it across reconfigurations; backends with
+  // no power stage just record it. False = not applied (with an
+  // operator-readable reason in *error).
+  virtual bool SetRunCurrent(double a_rms, std::string* error) {
+    (void)a_rms;
+    (void)error;
+    return true;
+  }
+  // The run current the backend is configured for, in A RMS. 0 when the
+  // backend has no notion of current.
+  virtual double run_current_a_rms() const { return 0.0; }
+
   // Transport health, deliberately separate from healthy().
   //
   // healthy() answers "can this motor be driven" -- a module strapped for
@@ -61,6 +75,8 @@ class SimulatedStepperDriver : public StepperDriver {
   void SetMicrostep(int divisor) override;
   bool healthy() const override { return true; }
   std::uint64_t pulses_issued() const override { return pulses_; }
+  bool SetRunCurrent(double a_rms, std::string* error) override;
+  double run_current_a_rms() const override { return run_current_a_rms_; }
 
   bool enabled() const { return enabled_; }
   int microstep() const { return microstep_; }
@@ -70,6 +86,7 @@ class SimulatedStepperDriver : public StepperDriver {
   bool enabled_ = false;
   bool last_dir_ = true;
   int microstep_ = 1;
+  double run_current_a_rms_ = 0.0;
   std::uint64_t pulses_ = 0;
 };
 

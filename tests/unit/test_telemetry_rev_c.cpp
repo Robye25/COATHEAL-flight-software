@@ -204,6 +204,12 @@ void TestCtrlBlockAndStepperExtrasTokenOrder() {
   m0.zeroed = true;
   m0.seq_name = "flex";
   m0.seq_state = "run";
+  // Drive-settings surface (2026-08-29): trails seqst for the same
+  // forward-compat reason the seqst trio trails src.
+  m0.run_current_a_rms = 0.8;
+  m0.accel_steps_per_s2 = 200.0;
+  m0.position_mm = 0.25;
+  m0.target_mm = 0.5;
   StepperStatus m1;  // defaults: never zeroed, no sequence, no source
   r.steppers = {m0, m1};
 
@@ -211,8 +217,10 @@ void TestCtrlBlockAndStepperExtrasTokenOrder() {
   assert(Contains(line,
                   ",CTRL=fallback:1|link_loss_s:12.5|energy_wh:3.25|budget_wh:130.0"
                   "|budget_exhausted:0|heaters_active:2|queue:7|plan:none,STEPPER0="));
-  assert(Contains(line, "|src:cmd:MOVE|zeroed:1|seq:flex|seqst:run,STEPPER1="));
-  assert(Contains(line, "|src:-|zeroed:0|seq:-|seqst:idle"));
+  assert(Contains(line, "|src:cmd:MOVE|zeroed:1|seq:flex|seqst:run"
+                        "|amps:0.80|acc:200.0|mm:0.250|mm_tgt:0.500,STEPPER1="));
+  assert(Contains(line, "|src:-|zeroed:0|seq:-|seqst:idle"
+                        "|amps:0.00|acc:0.0|mm:0.000|mm_tgt:0.000"));
   assert(line.find("COMPONENT_STATE=") < line.find(",CTRL="));
 
   // An empty plan string still serialises as the documented default word.

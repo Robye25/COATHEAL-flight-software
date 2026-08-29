@@ -57,10 +57,13 @@ know, which is how additions stay backward compatible.
 | `ok`, `en`, `mv`, `hold` | Driver healthy / power stage enabled / pulses being issued / at target with a hold countdown running (`0`/`1`) |
 | `hold_s` | Remaining hold time, seconds |
 | `pulses`, `missed` | Pulses issued since boot, missed pulse deadlines |
-| `src` | Origin of the last motion: `init`, `cmd:MOVE`, `cmd:BEND`, `cmd:HOME`, `cmd:ZERO`, `cmd:STOP`, `cmd:PULL`; `-` when empty |
+| `src` | Origin of the last motion: `init`, `cmd:MOVE`, `cmd:MOVE_MM`, `cmd:BEND`, `cmd:BEND_MM`, `cmd:HOME`, `cmd:ZERO`, `cmd:STOP`, `cmd:PULL`; `-` when empty |
 | `zeroed` | `1` once `SET_POSITION_ZERO <id>` has run since the onboard started (absolute moves, homing, pulls and sequences need it) — added 2026-08-28 |
 | `seq` | Name of the bend sequence active on this motor, `-` when none — added 2026-08-28 |
 | `seqst` | `idle`, `run`, or `pause` — added 2026-08-28 |
+| `amps` | Driver run current, A RMS (2 decimals; `STEPPER_SET_CURRENT` changes it at runtime) — added 2026-08-29 |
+| `acc` | Trapezoidal ramp slope, full-steps/s² (1 decimal; `STEPPER_SET_ACCEL`) — added 2026-08-29 |
+| `mm`, `mm_tgt` | `pos`/`tgt` converted to millimetres of linear travel through `stepper.lead_mm_per_rev` (3 decimals) — added 2026-08-29 |
 
 ### `CTRL` keys (added 2026-08-28)
 
@@ -220,11 +223,15 @@ NACK,<COMMAND>,<reason>
 | `SET_POSITION_ZERO` | `<id>` | Set current physical position as software zero without motion |
 | `STEPPER_MOVE` | `<id> <steps>` | Relative motor move (`<steps>` are microsteps at the configured divisor: µ4 → 800 per revolution) |
 | `STEPPER_MOVETO` | `<id> <abs_usteps> [hold_s]` | Absolute move; motor must be zeroed |
+| `STEPPER_MOVE_MM` | `<id> <mm>` | Relative move in millimetres of linear travel; converted onboard through `stepper.lead_mm_per_rev` (2 mm/rev default → `1.0` = half a revolution) at the current microstep divisor. The console's jog buttons use this |
+| `STEPPER_MOVETO_MM` | `<id> <mm> [hold_s]` | Absolute move in millimetres (zero = `SET_POSITION_ZERO` reference); motor must be zeroed. The console's BEND uses this |
 | `STEPPER_ROTATE` | `<id> <revs>` | Rotate by full revolutions |
 | `STEPPER_BEND` | `<id> <abs_usteps> [hold_s]` | Compatibility alias for absolute move; motor must be zeroed |
 | `STEPPER_HOME` | `<id>` | Return to software zero; motor must be zeroed |
 | `STEPPER_STOP` | `<id>` | Stop motion and release `MotionLock` |
 | `STEPPER_SET_SPEED` | `<id> <hz>` | Set motor speed |
+| `STEPPER_SET_ACCEL` | `<id> <steps_s2>` | Set the trapezoidal ramp slope in full-steps/s², `(0, stepper.max_accel_steps_per_s2]`. Applies to the next ramp update, survives until restart |
+| `STEPPER_SET_CURRENT` | `<id> <a_rms>` | Set the motor run current in A RMS, `(0, 3.1]`. Rewrites `GLOBALSCALER`/`IHOLD_IRUN` on the live chip (hold current keeps its configured fraction) and persists across chip-reset recovery until the service restarts; NACKed when the sense resistor cannot deliver the request or the driver is unhealthy |
 | `STEPPER_SET_MICROSTEP` | `<id> <n>` | Set microstep divisor |
 | `STEPPER_ENABLE` / `STEPPER_DISABLE` | `<id>` | Enable or disable driver output |
 | `PULL_ARM` | `<id>` | Queue one pull cycle |

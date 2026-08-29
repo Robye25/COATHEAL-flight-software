@@ -29,7 +29,14 @@ void AppendStepperSegment(std::ostringstream& oss, const StepperStatus& st,
       // ignore unknown keys, keep working.
       << "|zeroed:" << (st.zeroed ? 1 : 0)
       << "|seq:" << (st.seq_name.empty() ? std::string("-") : st.seq_name)
-      << "|seqst:" << (st.seq_state.empty() ? std::string("idle") : st.seq_state);
+      << "|seqst:" << (st.seq_state.empty() ? std::string("idle") : st.seq_state)
+      // 2026-08-29 drive-settings surface: run current, ramp accel, and the
+      // ball-screw-lead-derived linear position. Appended last so older
+      // ground parsers, which ignore unknown keys, keep working.
+      << "|amps:" << std::setprecision(2) << st.run_current_a_rms
+      << "|acc:" << std::setprecision(1) << st.accel_steps_per_s2
+      << "|mm:" << std::setprecision(3) << st.position_mm
+      << "|mm_tgt:" << std::setprecision(3) << st.target_mm;
 }
 
 void AppendCtrlSegment(std::ostringstream& oss, const CtrlStatus& ctrl) {

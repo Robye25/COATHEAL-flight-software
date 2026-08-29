@@ -85,6 +85,15 @@ class Tmc5160Driver : public StepperDriver {
   std::string DebugRegisters() override;
   bool Poll() override;
 
+  // Runtime run-current change: validates against the configured sense
+  // resistor (same CalculateCurrent path as initialisation), rewrites
+  // GLOBALSCALER + IHOLD_IRUN on the live chip, and updates the stored
+  // config so every later reconfiguration (ActiveCheck, chip-reset
+  // recovery) reapplies the new value. Requires a healthy driver -- a chip
+  // that cannot be talked to cannot have its current changed.
+  bool SetRunCurrent(double a_rms, std::string* error) override;
+  double run_current_a_rms() const override;
+
   // Whether driving the EN GPIO was last seen to move DRV_ENN in IOIN.
   // Enable(true) already refuses a line that leaves DRV_ENN HIGH; the
   // opposite failure -- DRV_ENN stuck LOW, i.e. a module whose enable pin
