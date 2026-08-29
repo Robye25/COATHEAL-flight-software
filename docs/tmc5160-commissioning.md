@@ -382,7 +382,7 @@ commanded travel:
 2. With `pull.microstep` at its configured value (default `4`) and
    `stepper.steps_per_rev=200`, command exactly
    `steps_per_rev * microstep` `Step()` calls in one direction
-   (`STEPPER_MOVE <id> <steps_per_rev*microstep>` using **full steps**, i.e.
+   (`STEPPER_MOVE <id> <steps_per_rev*microstep>` using **microsteps at the configured divisor** (µ4: 800 per revolution), i.e.
    `STEPPER_MOVE <id> 200` at the default microstep — the command takes full
    steps, the driver internally multiplies by the microstep divisor).
 3. Confirm the mark returns to the same orientation — exactly one shaft
