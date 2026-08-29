@@ -383,8 +383,8 @@ commanded travel:
    `stepper.steps_per_rev=200`, command exactly
    `steps_per_rev * microstep` `Step()` calls in one direction
    (`STEPPER_MOVE <id> <steps_per_rev*microstep>` using **microsteps at the configured divisor** (µ4: 800 per revolution), i.e.
-   `STEPPER_MOVE <id> 200` at the default microstep — the command takes full
-   steps, the driver internally multiplies by the microstep divisor).
+   `STEPPER_MOVE <id> 800` at the default µ4 — the command takes microsteps;
+   nothing multiplies by the divisor for you).
 3. Confirm the mark returns to the same orientation — exactly one shaft
    revolution, no more, no less.
 4. Reverse and repeat to confirm the return trip also lands on the mark.
