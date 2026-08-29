@@ -19,6 +19,11 @@ SAMPLE_COUNT = 8
 # flight config). Motor 0 pulls samples 0..3, motor 1 pulls 4..7.
 HEATER_SAMPLE = tuple(range(HEATER_COUNT))
 MOTOR_SAMPLES = ((0, 1, 2, 3), (4, 5, 6, 7))
+# Owner decision (2026-08-29): specimen resistance is measured on exactly
+# two samples, one per motor group, by the two MAX31865 RTD clicks —
+# mirrors the onboard's sensor.max31865_sample_indices=0,4 (click 1 -> S0,
+# click 2 -> S4). Every other RESISTANCE slot is always '-' on the wire.
+RESISTANCE_SAMPLES = (0, 4)
 
 
 @dataclass(frozen=True)

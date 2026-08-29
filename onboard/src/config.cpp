@@ -410,6 +410,8 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
       if (!parse_double(key, value, &config->heaters.debug_max_duty, line_no)) return false;
     } else if (key == "heater.debug_max_seconds") {
       if (!parse_double(key, value, &config->heaters.debug_max_seconds, line_no)) return false;
+    } else if (key == "heater.max_duty") {
+      if (!parse_double(key, value, &config->heaters.max_duty, line_no)) return false;
 
     } else if (key == "hal.status_led_enabled") {
       if (!parse_bool(key, value, &config->hal.status_led_enabled, line_no)) return false;
@@ -796,6 +798,14 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
       config->heaters.debug_max_seconds > 60.0) {
     if (error != nullptr) {
       *error = "invalid heater debug limits";
+    }
+    return false;
+  }
+
+  if (!std::isfinite(config->heaters.max_duty) ||
+      config->heaters.max_duty <= 0.0 || config->heaters.max_duty > 1.0) {
+    if (error != nullptr) {
+      *error = "heater.max_duty must be in (0, 1]";
     }
     return false;
   }

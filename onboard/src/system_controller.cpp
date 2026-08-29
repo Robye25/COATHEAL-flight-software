@@ -1643,6 +1643,11 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       if (duty < 0.0 || duty > 1.0) {
         return Nack(cmd_name, "duty out of range [0,1]");
       }
+      if (duty > config_.heaters.max_duty) {
+        return Nack(cmd_name, "duty exceeds heater.max_duty (" +
+                                  std::to_string(config_.heaters.max_duty) +
+                                  ")");
+      }
       if (duty > 0.0) {
         std::string reason;
         if (!require_debug_arm() && !heater_temperature_valid(index, &reason)) {
@@ -1670,6 +1675,11 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       }
       if (duty < 0.0 || duty > 1.0) {
         return Nack(cmd_name, "duty out of range [0,1]");
+      }
+      if (duty > config_.heaters.max_duty) {
+        return Nack(cmd_name, "duty exceeds heater.max_duty (" +
+                                  std::to_string(config_.heaters.max_duty) +
+                                  ")");
       }
       if (duty > 0.0) {
         std::string reason;
@@ -1711,6 +1721,9 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       }
       if (duty < 0.0 || duty > config_.heaters.debug_max_duty) {
         return Nack(cmd_name, "duty exceeds heater.debug_max_duty");
+      }
+      if (duty > config_.heaters.max_duty) {
+        return Nack(cmd_name, "duty exceeds heater.max_duty");
       }
       if (seconds <= 0.0 || seconds > config_.heaters.debug_max_seconds) {
         return Nack(cmd_name, "duration exceeds heater.debug_max_seconds");
