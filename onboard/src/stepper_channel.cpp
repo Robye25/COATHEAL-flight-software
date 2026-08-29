@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iostream>
 #include <sstream>
 #include <utility>
 
@@ -164,6 +165,32 @@ void StepperChannel::Tick(double dt_s) {
     // notice a chip that lost its configuration (supply dip) and restore
     // it, so an "enabled" motor really holds and the next move works.
     driver_->Poll();
+  }
+
+  // Thermal safety: a driver that latched over-temperature shutdown
+  // (>= ~150 °C die — the chip has already cut its outputs) is stopped and
+  // de-energised here rather than left "enabled" against a dead power
+  // stage. Mirrors the IssuePulses failure teardown (SetEnabled would
+  // re-take mu_). Self-limiting: once enabled_ drops this cannot repeat,
+  // and the operator re-arms with STEPPER_ENABLE after cool-down.
+  if (driver_ != nullptr && enabled_ && driver_->thermal_state() >= 2) {
+    std::cerr << "[stepper] motor " << cfg_.channel_id
+              << ": driver over-temperature shutdown -- stopping motion and"
+              << " disabling the channel; STEPPER_ENABLE re-arms after"
+              << " cool-down\n";
+    driver_->Enable(false);
+    enabled_ = false;
+    target_ = position_;
+    retract_target_ = position_;
+    moving_ = false;
+    mode_ = Mode::kIdle;
+    hold_remaining_s_ = 0.0;
+    retract_after_hold_ = false;
+    current_step_hz_ = 0.0;
+    fractional_steps_ = 0.0;
+    last_source_ = "safety:OVERTEMP";
+    ReleaseLockIfHeld();
+    return;
   }
 
   if (mode_ == Mode::kHolding) {
@@ -637,6 +664,7 @@ StepperStatus StepperChannel::Snapshot() const {
   s.microstep = microstep_;
   s.accel_steps_per_s2 = cfg_.accel_steps_per_s2;
   s.run_current_a_rms = driver_ ? driver_->run_current_a_rms() : 0.0;
+  s.thermal_state = driver_ ? driver_->thermal_state() : 0;
   const double usteps_per_mm = UstepsPerMm();
   if (usteps_per_mm > 0.0) {
     s.position_mm = static_cast<double>(position_) / usteps_per_mm;

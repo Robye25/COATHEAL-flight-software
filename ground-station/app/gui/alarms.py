@@ -59,10 +59,28 @@ def evaluate(state: OnboardState) -> List[Alarm]:
             alarms.append(Alarm("SEQ_PAUSED", "bend sequence paused / faulted — BENDSEQ_STATUS"))
         if state.flag("ENERGY_FAIL") or state.budget_exhausted:
             alarms.append(Alarm("ENERGY", "heater energy budget exhausted — heaters latched off"))
+        elif (state.energy_wh is not None and state.budget_wh and
+              state.energy_wh >= 0.8 * state.budget_wh):
+            alarms.append(Alarm("ENERGY", f"heater energy {state.energy_wh:.1f} Wh ≥ 80 % of the "
+                                          f"{state.budget_wh:.0f} Wh budget — reduce targets or duty", AMBER))
+        if not state.rtc_valid:
+            alarms.append(Alarm("RTC", "RTC invalid — onboard timestamps unreliable (logs affected)", AMBER))
+        if state.debug_armed:
+            alarms.append(Alarm("DEBUG_ARM", "DEBUG ARM active — open-loop heater duty allowed "
+                                             "without PT100 feedback (DISARM_DEBUG to end)", AMBER))
         for motor_id in range(2):
             comp = state.component_state.get(f"MOTOR{motor_id}")
             if comp == "FAILED":
                 alarms.append(Alarm(f"MOTOR{motor_id}", f"M{motor_id} FAILED — CHECK MOTOR{motor_id}"))
+            thermal = state.motor(motor_id).thermal
+            if thermal == "hot":
+                alarms.append(Alarm(f"M{motor_id}_TEMP",
+                                    f"M{motor_id} driver OVER-TEMPERATURE (≥150 °C die) — "
+                                    "motor disabled by safety; let it cool, then ENABLE"))
+            elif thermal == "warn":
+                alarms.append(Alarm(f"M{motor_id}_TEMP",
+                                    f"M{motor_id} driver hot (≥120 °C die pre-warning) — "
+                                    "reduce run current or duty", AMBER))
         if state.heaters_inhibited:
             moving = [f"M{m.motor_id}" for m in state.motors if m.moving or m.holding]
             who = f" ({' '.join(moving)} moving)" if moving else ""

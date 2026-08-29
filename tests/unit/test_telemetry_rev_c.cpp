@@ -210,6 +210,7 @@ void TestCtrlBlockAndStepperExtrasTokenOrder() {
   m0.accel_steps_per_s2 = 200.0;
   m0.position_mm = 0.25;
   m0.target_mm = 0.5;
+  m0.thermal_state = 1;  // driver otpw pre-warning
   StepperStatus m1;  // defaults: never zeroed, no sequence, no source
   r.steppers = {m0, m1};
 
@@ -220,9 +221,10 @@ void TestCtrlBlockAndStepperExtrasTokenOrder() {
                   ",CTRL=fallback:1|link_loss_s:12.5|energy_wh:3.25|budget_wh:130.0"
                   "|budget_exhausted:0|heaters_active:2|queue:7|plan:none|debug:1,STEPPER0="));
   assert(Contains(line, "|src:cmd:MOVE|zeroed:1|seq:flex|seqst:run"
-                        "|amps:0.80|acc:200.0|mm:0.250|mm_tgt:0.500,STEPPER1="));
+                        "|amps:0.80|acc:200.0|mm:0.250|mm_tgt:0.500"
+                        "|therm:warn,STEPPER1="));
   assert(Contains(line, "|src:-|zeroed:0|seq:-|seqst:idle"
-                        "|amps:0.00|acc:0.0|mm:0.000|mm_tgt:0.000"));
+                        "|amps:0.00|acc:0.0|mm:0.000|mm_tgt:0.000|therm:ok"));
   assert(line.find("COMPONENT_STATE=") < line.find(",CTRL="));
 
   // An empty plan string still serialises as the documented default word.

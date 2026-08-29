@@ -21,7 +21,8 @@ FULL_STEPS_PER_REV = 200
 MSCNT_PER_FULL_STEP = 256
 XACTUAL_PER_FULL_STEP = 256
 MSCNT_MODULUS = 1024
-DEFAULT_MM_PER_REV = 1.5
+# The onboard's confirmed ball-screw lead (stepper.lead_mm_per_rev).
+DEFAULT_MM_PER_REV = 2.0
 WINDOW_S = 3.0
 
 
@@ -84,7 +85,7 @@ class MotorDebugSample:
         return cls(
             t=t, motor=_int(kv, "motor") or 0,
             sw_pos=_int(kv, "sw_pos"), sw_tgt=_int(kv, "sw_tgt"), sw_hz=sw_hz,
-            usteps=_int(kv, "us") or _int(kv, "usteps"),
+            usteps=_int(kv, "usteps") or _int(kv, "us"),
             enabled=_flag(kv, "enabled"), moving=_flag(kv, "moving"),
             xactual=_int(kv, "xactual"), xtarget=_int(kv, "xtarget"),
             vactual=_int(kv, "vactual"), mscnt=_int(kv, "mscnt"), tstep=_int(kv, "tstep"),

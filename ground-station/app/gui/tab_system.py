@@ -43,9 +43,11 @@ class SystemTab(QScrollArea):
         self.i_target = Indicator("Command target")
         self.i_receiver = Indicator("Telemetry receiver")
         self.i_rate = Indicator("Frames")
+        self.i_uplink = Indicator("Onboard heard uplink")
+        self.i_uplink.setToolTip("CTRL link_loss_s: how long ago the onboard last heard this ground station")
         self.i_queue = Indicator("Onboard queue")
         self.i_session = Indicator("Session")
-        for ind in (self.i_target, self.i_receiver, self.i_rate, self.i_queue, self.i_session):
+        for ind in (self.i_target, self.i_receiver, self.i_rate, self.i_uplink, self.i_queue, self.i_session):
             lay.addWidget(ind)
         self.btn_restart_receiver = make_button("RESTART RECEIVER", "neutral", min_height=24)
         self.btn_restart_receiver.setToolTip("Restarts the local telemetry receiver — does not send a wire command.")
@@ -132,8 +134,8 @@ class SystemTab(QScrollArea):
         self.btn_check = make_button("CHECK", "neutral", sends="CHECK <component>", slot=self._check)
         self.btn_reset = make_button("RESET_CTRL", "danger", sends="RESET_CTRL", slot=self._reset_ctrl)
         lay.addWidget(hrow(self.check_target, self.btn_check, self.btn_reset))
-        note = QLabel("CHECK drives real hardware conversations (up to 15 s); run motor checks only while both motors are idle. "
-                      "RESET_CTRL clears the over-temperature latch and PID integrators.")
+        note = QLabel("CHECK drives real hardware conversations (up to 15 s); a motor check fails while that motor is moving "
+                      "or holding (CHECK ALL needs both idle). RESET_CTRL clears the over-temperature latch and PID integrators.")
         note.setWordWrap(True); note.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(note)
         self.resp_diag = ResponseLine()
@@ -221,6 +223,12 @@ class SystemTab(QScrollArea):
             else:
                 self.i_fallback.set_value("inactive", GREEN); self.i_fallback.set_color(GREEN)
             self.i_session.set_value(state.session_id)
+            if state.link_loss_s is None:
+                self.i_uplink.set_value("not reported", MUTED); self.i_uplink.set_color("#666666")
+            else:
+                up_color = GREEN if state.link_loss_s < 5.0 else AMBER
+                self.i_uplink.set_value(f"{state.link_loss_s:.0f} s ago", up_color)
+                self.i_uplink.set_color(up_color)
             if state.queue_depth is None:
                 self.i_queue.set_value("not reported", MUTED); self.i_queue.set_color("#666666")
             else:
@@ -251,7 +259,7 @@ class SystemTab(QScrollArea):
             self.i_rate.set_value("—")
         else:
             age = f" · age {age_s:.1f} s" if age_s is not None else ""
-            self.i_rate.set_value(f"{rate_hz:.1f} /s{age}")
+            self.i_rate.set_value(f"{rate_hz:.1f} Hz{age}")
 
     def on_response(self, cmd: str, resp: CommandResponse, ms: float, tag) -> None:
         if tag is not self:

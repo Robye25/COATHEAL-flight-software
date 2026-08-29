@@ -132,6 +132,18 @@ class GatingTests(unittest.TestCase):
         self.assertIsNone(old_firmware.debug_armed)
         self.assertIn("S2", gating.duty_reason(old_firmware, 2) or "")
 
+    def test_thermal_shutdown_names_itself_in_motion_gating(self) -> None:
+        # A hot driver is disabled by the onboard safety; the reason must say
+        # so instead of the generic "not enabled". ENABLE itself stays
+        # available (it is the re-arm path).
+        hot = state(m0="en:0|zeroed:1|therm:hot")
+        reason = gating.motion_reason(hot, 0, needs_zero=False) or ""
+        self.assertIn("over-temperature", reason)
+        self.assertIn("ENABLE", reason)
+        self.assertIsNone(gating.enable_reason(hot, 0))
+        # therm parses through to MotorState.
+        self.assertEqual(hot.motor(0).thermal, "hot")
+
     def test_enable_gate_on_failed_motor(self) -> None:
         st = state()
         self.assertIsNone(gating.enable_reason(st, 0))

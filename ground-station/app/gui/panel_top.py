@@ -281,7 +281,7 @@ class TopStrip(QWidget):
         # in the session id) so it survives a ground-station restart; a
         # session id without an epoch falls back to the first frame seen.
         if self._t0_wall is not None:
-            self._tplus.setText(format_elapsed(time.time() - self._t0_wall))
+            self._tplus.setText(format_elapsed(max(0.0, time.time() - self._t0_wall)))
         elif self._t0_mono is not None:
             self._tplus.setText(format_elapsed(now - self._t0_mono))
 
@@ -328,6 +328,10 @@ class AlarmStrip(QWidget):
         self.hide()
 
     def set_alarms(self, alarms: List[Alarm]) -> None:
+        rendered = tuple((a.key, a.text, a.severity, a.acked) for a in alarms)
+        if rendered == getattr(self, "_rendered_alarms", None):
+            return  # unchanged — skip the chip teardown/rebuild
+        self._rendered_alarms = rendered
         self._alarms = list(alarms)
         while self._chips.count():
             item = self._chips.takeAt(0)

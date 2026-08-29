@@ -319,8 +319,10 @@ class ConsoleTabTests(unittest.TestCase):
         self.assertEqual(est.color, "green", est.verdict)
         self.assertIn("MOVING", debug.verdict.text())
         self.assertEqual(self.win._console.row_count(), rows_before, "quiet replies must not land in the console")
-        self.assertIn("full-steps/s", debug._derived["seq"].text())
+        self.assertIn("full-steps/s", debug.rate.text())
         self.assertEqual(debug._regs["sd_mode"].text(), "0")
+        # Driver health line: thermal state leads (ot=0/otpw=0 in the body).
+        self.assertIn("die < 120", debug.health.text())
 
     # ── alarms ──
     def test_alarm_strip_and_ack(self) -> None:

@@ -60,7 +60,7 @@ class HeaterRow(QWidget):
         self.measured.setFixedWidth(64)
         self.target = QDoubleSpinBox()
         self.target.setRange(0.0, 80.0); self.target.setDecimals(1); self.target.setValue(DEFAULT_TARGET_C)
-        self.target.setSuffix("°C"); self.target.setFixedWidth(62)
+        self.target.setSuffix(" °C"); self.target.setFixedWidth(62)
         self.target.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.btn_set = make_button("Set", "primary", sends=f"SET_TEMP_TARGET {index} <target_c>", min_height=22,
                                    compact=True, width=32, slot=lambda: tab.set_target(index, self.target.value()))
@@ -178,7 +178,7 @@ class ThermalTab(QScrollArea):
         frame, lay = group_box("Presets")
         self.preset_select = QComboBox()
         self.btn_apply_preset = make_button("Apply", "success", min_height=24, slot=self.apply_preset)
-        self.btn_apply_preset.setToolTip("Sends: SET_PID ALL …, then SET_TEMP_TARGET / CLEAR_TEMP_TARGET per heater")
+        self.btn_apply_preset.setToolTip("Sends: SET_PID ALL … (plus any per-channel SET_PID), then SET_TEMP_TARGET / CLEAR_TEMP_TARGET per heater")
         self.btn_save_preset = make_button("Save as…", "neutral", min_height=24, slot=self.save_preset)
         self.btn_save_preset.setToolTip("Saves the six target spin-boxes and the PID gains locally — no wire command.")
         self.btn_capture = make_button("Capture", "neutral", min_height=24, slot=self.capture_preset)

@@ -74,6 +74,7 @@ class TelemetryReceiver(QThread):
 
     def __init__(self, bind: str, port: int, log_manager: LogManager, parent=None):
         super().__init__(parent)
+        self.parse_errors = 0  # malformed frames/events since start (status bar)
         self._bind = bind
         self._port = port
         self._logs = log_manager
@@ -216,6 +217,7 @@ class TelemetryReceiver(QThread):
                     try:
                         ev = parse_pull_event(line)
                     except TelemetryParseError as exc:
+                        self.parse_errors += 1
                         self.log_message.emit(f"[parse-error] {exc}")
                         continue
                     try:
@@ -233,6 +235,7 @@ class TelemetryReceiver(QThread):
                 try:
                     pkt = parse_telemetry_csv(line)
                 except TelemetryParseError as exc:
+                    self.parse_errors += 1
                     self.log_message.emit(f"[parse-error] {exc}")
                     continue
 

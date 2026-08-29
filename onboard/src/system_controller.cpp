@@ -113,6 +113,7 @@ class OwnedBusTmc5160Driver : public StepperDriver {
   double run_current_a_rms() const override {
     return driver_.run_current_a_rms();
   }
+  int thermal_state() const override { return driver_.thermal_state(); }
 
  private:
   std::unique_ptr<SpiBus> bus_;

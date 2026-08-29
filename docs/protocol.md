@@ -64,6 +64,7 @@ know, which is how additions stay backward compatible.
 | `amps` | Driver run current, A RMS (2 decimals; `STEPPER_SET_CURRENT` changes it at runtime) — added 2026-08-29 |
 | `acc` | Trapezoidal ramp slope, full-steps/s² (1 decimal; `STEPPER_SET_ACCEL`) — added 2026-08-29 |
 | `mm`, `mm_tgt` | `pos`/`tgt` converted to millimetres of linear travel through `stepper.lead_mm_per_rev` (3 decimals) — added 2026-08-29 |
+| `therm` | Driver die thermal state from the TMC5160's DRV_STATUS threshold flags (the chip has no numeric temperature ADC): `ok` (< ~120 °C), `warn` (`otpw`, ≥ ~120 °C pre-warning), `hot` (`ot`, ≥ ~150 °C shutdown — **latched**; the onboard safety stops motion and disables the channel, and `STEPPER_ENABLE` re-arms after cool-down). Sampled every idle poll and every 64 steps while moving — added 2026-08-29 |
 
 ### `CTRL` keys (added 2026-08-28)
 

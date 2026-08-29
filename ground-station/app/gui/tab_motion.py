@@ -36,7 +36,7 @@ MOTOR_COLORS = ("#2ecc71", "#e67e22")
 # Jog distances in mm (STEPPER_MOVE_MM; the onboard converts through
 # stepper.lead_mm_per_rev). At the commissioning defaults (2 mm lead) the
 # largest jog is 2.5 revolutions.
-JOG_MM = (-5.0, -1.0, -0.1, 0.1, 1.0, 5.0)
+JOG_MM = (-0.1, -1.0, -5.0, 0.1, 1.0, 5.0)
 DEFAULT_SPEED_HZ = 100
 DEFAULT_BEND_MM = 2.0   # one revolution at the 2 mm default lead
 DEFAULT_HOLD_S = 5.0
@@ -57,17 +57,30 @@ class MotorCard(QFrame):
         sub = QLabel(f"S{samples[0]}–S{samples[-1]}")
         sub.setStyleSheet(f"color: {MUTED}; font-size: 9pt; border: none;")
         lay.addWidget(hrow(title, sub, stretch_last=True))
-        dots = QHBoxLayout(); dots.setSpacing(2)
+        dots = QHBoxLayout(); dots.setSpacing(1)
         self.dots = {}
-        for key in ("EN", "ZERO", "MOV", "HOLD", "OK"):
+        tips = {"EN": "driver power stage enabled", "ZERO": "software zero set (SET_POSITION_ZERO)",
+                "MOV": "pulses being issued", "HOLD": "at target, hold countdown running",
+                "OK": "driver backend healthy", "DRV": "driver die thermal state (TMC5160 flags)"}
+        for key in ("EN", "ZERO", "MOV", "HOLD", "OK", "DRV"):
             lbl = QLabel(key); lbl.setStyleSheet(f"color: {MUTED}; font-size: 7pt; border: none;")
+            lbl.setToolTip(tips[key])
             dot = StatusDot(8); dot.set_color(GRAY)
-            dots.addWidget(lbl); dots.addWidget(dot); dots.addSpacing(3)
+            dot.setToolTip(tips[key])
+            dots.addWidget(lbl); dots.addWidget(dot); dots.addSpacing(1)
             self.dots[key] = dot
         dots.addStretch()
         lay.addLayout(dots)
+        # A shutdown/pre-warning banner: the 8 px DRV dot alone is too easy
+        # to miss when the safety has just disabled the motor.
+        self.thermal_note = QLabel(""); self.thermal_note.setWordWrap(True); self.thermal_note.setMinimumWidth(1)
+        self.thermal_note.setStyleSheet(f"color: {RED}; font-size: 8pt; font-weight: bold; border: none;")
+        self.thermal_note.hide()
+        lay.addWidget(self.thermal_note)
         self.pos = self._kv(lay, "pos / tgt")
-        self.speed = self._kv(lay, "speed")
+        # The operator's primary number during a bend — give it weight.
+        self.pos.setStyleSheet(f"{MONO_CSS} border: none; font-size: 11pt; font-weight: bold;")
+        self.speed = self._kv(lay, "drive")
         self.src = self._kv(lay, "last cmd")
         self.seq = self._kv(lay, "sequence")
         sep = QLabel("resistance"); sep.setStyleSheet(f"color: {MUTED}; font-size: 8pt; border: none; border-bottom: 1px solid #333;")
@@ -98,17 +111,52 @@ class MotorCard(QFrame):
         self.dots["MOV"].set_color(AMBER if motor.moving else "#333333")
         self.dots["HOLD"].set_color(BLUE if motor.holding else "#333333")
         self.dots["OK"].set_color(GREEN if motor.healthy else RED)
+        # TMC5160 die thermal state: threshold flags over SPI (the chip has
+        # no numeric temperature ADC).
+        drv = self.dots["DRV"]
+        if motor.thermal == "hot":
+            drv.set_color(RED)
+            drv.setToolTip("driver ≥150 °C: over-temperature shutdown — motor disabled; cool, then ENABLE")
+        elif motor.thermal == "warn":
+            drv.set_color(AMBER)
+            drv.setToolTip("driver ≥120 °C: pre-warning — reduce run current or duty")
+        elif motor.thermal == "ok":
+            drv.set_color(GREEN)
+            drv.setToolTip("driver die < 120 °C")
+        else:
+            drv.set_color(GRAY)
+            drv.setToolTip("driver thermal state unknown (old firmware)")
+        if motor.thermal == "hot":
+            self.thermal_note.setText("DRIVER ≥150 °C — motor disabled by safety; cool, then ENABLE")
+            self.thermal_note.setStyleSheet(f"color: {RED}; font-size: 8pt; font-weight: bold; border: none;")
+            self.thermal_note.show()
+        elif motor.thermal == "warn":
+            self.thermal_note.setText("driver ≥120 °C — reduce run current or duty")
+            self.thermal_note.setStyleSheet(f"color: {AMBER}; font-size: 8pt; font-weight: bold; border: none;")
+            self.thermal_note.show()
+        else:
+            self.thermal_note.hide()
         if motor.mm is not None and motor.mm_tgt is not None:
-            self.pos.setText(f"{motor.mm:.3f} / {motor.mm_tgt:.3f} mm")
+            pos_text = f"{motor.mm:.3f} / {motor.mm_tgt:.3f} mm"
+            if motor.moving and motor.hz > 0:
+                # ETA from |distance| / (full-steps/s × lead / 200).
+                mm_s = motor.hz * 2.0 / 200.0
+                eta = abs(motor.mm_tgt - motor.mm) / mm_s if mm_s > 0 else 0.0
+                pos_text += f" · ~{eta:.0f} s left"
+            elif motor.holding and motor.hold_s > 0:
+                pos_text += f" · hold {motor.hold_s:.0f} s left"
+            self.pos.setText(pos_text)
             self.pos.setToolTip(f"{motor.position} / {motor.target} µst")
         else:
             self.pos.setText(f"{motor.position} / {motor.target} µst")
-            self.pos.setToolTip("")
+            self.pos.setToolTip("no mm telemetry (old firmware) — raw microsteps shown")
         speed = f"{motor.hz:.0f} Hz · µ{motor.microstep}"
         if motor.amps is not None:
             speed += f" · {motor.amps:.2f} A"
         if motor.accel is not None:
-            speed += f" · {motor.accel:.0f}/s²"
+            speed += f" · {motor.accel:.0f} st/s²"
+        if motor.missed:
+            speed += f" · missed {motor.missed}"
         self.speed.setText(speed)
         self.src.setText(motor.source or "—")
         if motor.seq_state in ("run", "pause"):
@@ -128,7 +176,7 @@ class MotorCard(QFrame):
         else:
             self.r_delta.setText(f"{readout.delta_pct:+.2f} %")
             self.r_delta.setToolTip(f"since {readout.started_utc or '?'} ({readout.source} mark)")
-            self.r_delta.setStyleSheet(f"{MONO_CSS} border: none; color: {GREEN if abs(readout.delta_pct) >= 0.5 else AMBER};")
+            self.r_delta.setStyleSheet(f"{MONO_CSS} border: none; color: {GREEN if abs(readout.delta_pct) >= 0.5 else MUTED};")
 
 
 class MotionTab(QScrollArea):
@@ -184,9 +232,12 @@ class MotionTab(QScrollArea):
             self.jog_buttons.append(btn)
             jog.addWidget(btn, index // 3, index % 3)
         lay.addLayout(jog)
+        self.jog_note = QLabel(""); self.jog_note.setWordWrap(True); self.jog_note.setMinimumWidth(1)
+        self.jog_note.setStyleSheet(f"color: {AMBER}; font-size: 8pt;")
         j_lbl = QLabel("converted onboard via stepper.lead_mm_per_rev (2 mm/rev default)")
         j_lbl.setWordWrap(True); j_lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(j_lbl)
+        lay.addWidget(self.jog_note)
         self.resp_jog = ResponseLine()
         lay.addWidget(self.resp_jog)
         outer.addWidget(frame)
@@ -194,7 +245,7 @@ class MotionTab(QScrollArea):
         frame, lay = group_box("Drive settings (per motor)")
         self.speed = QSpinBox(); self.speed.setRange(1, 100); self.speed.setValue(DEFAULT_SPEED_HZ); self.speed.setSuffix(" Hz")
         self.btn_speed = make_button("SET SPEED", "primary", sends="STEPPER_SET_SPEED <motor_id> <hz>", min_height=24, slot=self._set_speed)
-        s_lbl = QLabel("full-step Hz, 1–100 (pull.max_step_hz)"); s_lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
+        s_lbl = QLabel("full-step Hz, 1–100 (pull.max_step_hz) · 100 Hz = 1.0 mm/s at the 2 mm lead"); s_lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         s_lbl.setWordWrap(True)
         lay.addWidget(hrow(self.speed, self.btn_speed, stretch_last=True))
         lay.addWidget(s_lbl)
@@ -234,7 +285,7 @@ class MotionTab(QScrollArea):
         h_lbl = QLabel("hold"); h_lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(hrow(t_lbl, self.bend_target, h_lbl, self.bend_hold, self.btn_bend))
         self.btn_pull = make_button("STANDARD PULL", "primary", sends="PULL_EXECUTE <motor_id>", min_height=26, slot=self._pull)
-        p_lbl = QLabel("config pull: pull.travel_full_steps × µstep, hold pull.hold_s; emits EVT,PULL")
+        p_lbl = QLabel("pulls to 2.0 mm (one revolution), holds 5 s, retracts to 0 · config pull.*; emits EVT,PULL")
         p_lbl.setWordWrap(True); p_lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(self.btn_pull)
         lay.addWidget(p_lbl)
@@ -313,6 +364,13 @@ class MotionTab(QScrollArea):
         for card in self.cards:
             card.update_card(state.motor(card.motor_id), self.tracker.readout(card.motor_id, state))
         motor_id = self.motor_id()
+        for card in self.cards:
+            selected = card.motor_id == motor_id
+            border = MOTOR_COLORS[card.motor_id] if selected else "#333"
+            card.setStyleSheet("QFrame#motorCard { background: #111; border: "
+                               f"{'2px' if selected else '1px'} solid {border}; border-radius: 4px; }}".replace("}}", "}"))
+        self.btn_stop.setText(f"STOP M{motor_id}")
+        self.btn_stop.setToolTip("stops the selected motor — Esc stops BOTH motors")
         motor = state.motor(motor_id)
         if state.have_packet and motor.present:
             words = ["enabled" if motor.enabled else "disabled",
@@ -331,6 +389,7 @@ class MotionTab(QScrollArea):
         jog_reason = gating.motion_reason(state, motor_id, needs_zero=False)
         for btn in self.jog_buttons:
             btn.set_reason(jog_reason)
+        self.jog_note.setText(f"Jog disabled: {jog_reason}" if jog_reason else "")
         self.btn_speed.set_reason(gating.generic_reason(state))
         self.btn_current.set_reason(gating.generic_reason(state))
         self.btn_accel.set_reason(gating.generic_reason(state))
@@ -351,8 +410,10 @@ class MotionTab(QScrollArea):
             if pull is None:
                 lbl.setText("—"); continue
             samples = "|".join(str(s) for s in pull.samples) or "-"
+            us = self.state.motor(pull.motor_id).microstep or 4
+            mm = pull.steps_moved / (200.0 * us / 2.0)
             lbl.setText(f"{pull.start_ts[11:19] if len(pull.start_ts) > 18 else pull.start_ts}  M{pull.motor_id}  "
-                        f"pull #{pull.pull_id}  {pull.steps_moved:+d} µst  hold {pull.hold_s:.1f} s  S{samples}")
+                        f"pull #{pull.pull_id}  {mm:+.2f} mm  hold {pull.hold_s:.1f} s  S{samples}")
             lbl.setStyleSheet(f"{MONO_CSS} font-size: 9pt; color: {MOTOR_COLORS[pull.motor_id % 2]};")
 
     def on_response(self, cmd: str, resp: CommandResponse, ms: float, tag) -> None:

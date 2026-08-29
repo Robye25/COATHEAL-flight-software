@@ -307,7 +307,7 @@ class MainWindow(QMainWindow):
             self._update_status_bar()
 
     def _on_pull_event(self, ev: PullEvent) -> None:
-        self._pulls.on_pull_event(ev)
+        self._pulls.on_pull_event(ev, self._state.motor(ev.motor_id).microstep or 4)
         self._motion.on_pull_event(ev)
         self._plots.on_pull_event(ev, parse_onboard_timestamp(ev.start_ts) or time.time())
 
@@ -463,7 +463,8 @@ class MainWindow(QMainWindow):
         where = f"sessions/{directory.name}" if directory else "no session yet"
         scale = f" · UI {self._scale.percent} %" if self._scale else ""
         self.statusBar().showMessage(
-            f"{self._log_root} · {where} · {self._frames} frames · {self._parse_errors} parse errors"
+            f"{self._log_root} · {where} · {self._frames} frames · "
+            f"{self._receiver.parse_errors if self._receiver else 0} parse errors"
             f"{self._status_disk}{scale} · Esc = STOP MOTORS · F1 shortcuts")
         self.statusBar().setToolTip(str(directory) if directory else str(self._log_root))
 

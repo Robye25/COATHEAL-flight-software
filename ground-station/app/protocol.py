@@ -31,6 +31,10 @@ class StepperSnapshot:
     accel: Optional[float] = None
     mm: Optional[float] = None
     mm_tgt: Optional[float] = None
+    # Driver die thermal state (TMC5160 threshold flags — no numeric ADC):
+    # "ok" (< ~120 °C), "warn" (>= ~120 °C pre-warning), "hot" (>= ~150 °C
+    # shutdown; the onboard safety disabled the motor). None: old firmware.
+    thermal: Optional[str] = None
 
 
 @dataclass
@@ -184,6 +188,8 @@ def _parse_stepper_segment(value: str) -> StepperSnapshot:
                 s.mm = float(raw)
             elif key == "mm_tgt":
                 s.mm_tgt = float(raw)
+            elif key == "therm":
+                s.thermal = raw
             # unknown keys silently ignored (forward-compat)
         except ValueError as exc:
             raise TelemetryParseError(f"invalid STEPPER {key}={raw!r}: {exc}") from exc
@@ -212,6 +218,7 @@ def _snapshot_to_dict(snap: StepperSnapshot, motor_id: int) -> Dict:
         "accel": snap.accel,
         "mm": snap.mm,
         "mm_tgt": snap.mm_tgt,
+        "thermal": snap.thermal,
     }
 
 
