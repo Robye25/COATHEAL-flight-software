@@ -42,6 +42,7 @@ constexpr std::uint8_t kRegD1 = 0x2A;
 constexpr std::uint8_t kRegVSTOP = 0x2B;
 constexpr std::uint8_t kRegXTARGET = 0x2D;
 constexpr std::uint8_t kRegCHOPCONF = 0x6C;
+constexpr std::uint8_t kRegDRV_STATUS = 0x6F;
 
 void ExpectWrite(FakeSpiBus* bus, std::uint8_t addr, std::uint32_t value) {
   std::vector<std::uint8_t> tx = {
@@ -170,10 +171,14 @@ std::unique_ptr<Tmc5160Driver> MakeHealthyDriver(FakeSpiBus* bus,
   return driver;
 }
 
-// Scripts the single extra CHOPCONF(TOFF=3) write Enable(true) issues
-// unconditionally when the driver is already healthy_ (no Reinitialize()).
-void ScriptEnableTrueChopconf(FakeSpiBus* bus, const Tmc5160Config& cfg) {
+// Scripts the extra conversation Enable(true) issues unconditionally when
+// the driver is already healthy_ (no Reinitialize()): the CHOPCONF(TOFF=3)
+// write, then the DRV_STATUS thermal read that re-primes the ot/otpw
+// tracking after the shutdown latch is cleared (2026-08-29).
+void ScriptEnableTrueChopconf(FakeSpiBus* bus, const Tmc5160Config& cfg,
+                              std::uint32_t drv_status = 0) {
   ExpectWrite(bus, kRegCHOPCONF, Chopconf(cfg.microstep, /*toff=*/3));
+  ExpectRead(bus, kRegDRV_STATUS, drv_status);
 }
 
 // ---------------------------------------------------------------------
@@ -932,6 +937,52 @@ void TestSdModeGateAcceptsCorrectlyStrappedModule() {
 // rewrite, persisted into cfg_ so reconfiguration keeps the new value.
 // ---------------------------------------------------------------------
 
+// ---------------------------------------------------------------------
+// Thermal flags (DRV_STATUS otpw bit 26 / ot bit 25): otpw is live and
+// event-counted, ot latches until the next Enable(true). The TMC5160 has
+// no numeric temperature ADC — these threshold flags are the whole story.
+// ---------------------------------------------------------------------
+
+void TestThermalFlagsLatchAndClearOnReenable() {
+  FakeSpiBus bus;
+  Tmc5160Config cfg;
+  auto driver = MakeHealthyDriver(&bus, cfg);
+
+  ExpectRead(&bus, kRegGSTAT, 0U);
+  ScriptEnableTrueChopconf(&bus, cfg);
+  assert(driver->Enable(true));
+  assert(driver->thermal_state() == 0);
+
+  // Poll (enabled, idle): GSTAT clean, then otpw -> pre-warning, counted.
+  ExpectRead(&bus, kRegGSTAT, 0U);
+  ExpectRead(&bus, kRegDRV_STATUS, 1U << 26);
+  assert(driver->Poll());
+  assert(driver->thermal_state() == 1);
+  assert(driver->otpw_event_count() == 1);
+
+  // ot -> shutdown, latched.
+  ExpectRead(&bus, kRegGSTAT, 0U);
+  ExpectRead(&bus, kRegDRV_STATUS, 1U << 25);
+  assert(driver->Poll());
+  assert(driver->thermal_state() == 2);
+
+  // The chip's own flag clears as the die cools — the latch must NOT.
+  ExpectRead(&bus, kRegGSTAT, 0U);
+  ExpectRead(&bus, kRegDRV_STATUS, 0U);
+  assert(driver->Poll());
+  assert(driver->thermal_state() == 2);
+
+  // Operator re-enable releases the latch; the fresh read would re-latch
+  // a still-hot chip (scripted cool here).
+  ExpectRead(&bus, kRegGSTAT, 0U);
+  ScriptEnableTrueChopconf(&bus, cfg, /*drv_status=*/0U);
+  assert(driver->Enable(true));
+  assert(driver->thermal_state() == 0);
+  assert(driver->otpw_event_count() == 1);  // history survives
+  assert(bus.mismatch_count() == 0);
+  assert(bus.remaining_expectations() == 0);
+}
+
 void TestSetRunCurrentRewritesRegistersAndPersists() {
   FakeSpiBus bus;
   Tmc5160Config cfg;  // boot current 0.8 A RMS
@@ -1016,5 +1067,6 @@ int main() {
   TestSetMicrostepRejectsInvalidDivisor();
   TestSetRunCurrentRewritesRegistersAndPersists();
   TestSetRunCurrentRejectsUnreachableTargetWithoutBusTraffic();
+  TestThermalFlagsLatchAndClearOnReenable();
   return 0;
 }

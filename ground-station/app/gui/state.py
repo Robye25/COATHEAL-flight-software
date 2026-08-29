@@ -41,6 +41,7 @@ class MotorState:
     microstep: int = 0
     hold_s: float = 0.0
     pulses: int = 0
+    missed: int = 0                    # missed step-pulse deadlines since boot
     source: str = ""
     seq_name: str = ""
     seq_state: str = ""
@@ -49,6 +50,9 @@ class MotorState:
     accel: Optional[float] = None      # trapezoid slope, full-steps/s²
     mm: Optional[float] = None         # lead-derived linear position
     mm_tgt: Optional[float] = None
+    # Driver die thermal state: "ok" / "warn" (>=~120 °C) / "hot"
+    # (>=~150 °C, onboard safety disabled the motor). None: old firmware.
+    thermal: Optional[str] = None
 
     @property
     def samples(self) -> tuple:
@@ -155,10 +159,12 @@ def state_from_packet(pkt: TelemetryPacket, *, silence: bool = False,
             position=int(snap.get("position", 0)), target=int(snap.get("target", 0)),
             hz=float(snap.get("hz", 0.0)), microstep=int(snap.get("microstep", 0)),
             hold_s=float(snap.get("hold_s", 0.0)), pulses=int(snap.get("pulses", 0)),
+            missed=int(snap.get("missed_deadlines", 0) or 0),
             source=str(snap.get("source", "")), seq_name=str(snap.get("seq_name", "")),
             seq_state=str(snap.get("seq_state", "")),
             amps=snap.get("amps"), accel=snap.get("accel"),
             mm=snap.get("mm"), mm_tgt=snap.get("mm_tgt"),
+            thermal=snap.get("thermal"),
         ))
     return OnboardState(
         have_packet=True, session_id=pkt.session_id, seq=pkt.seq,

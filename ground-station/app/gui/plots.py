@@ -27,7 +27,8 @@ from .theme import (
 from .widgets import MONO_CSS, MUTED, style_button
 
 MOTOR_COLORS = (("#2ecc71", "#27ae60"), ("#e67e22", "#d35400"))
-WINDOWS: List[Tuple[str, Optional[float]]] = [("5 m", 300.0), ("30 m", 1800.0), ("2 h", 7200.0), ("all", None)]
+WINDOWS: List[Tuple[str, Optional[float]]] = [
+    ("5 min", 300.0), ("30 min", 1800.0), ("2 h", 7200.0), ("4 h", 14400.0), ("all", None)]
 REDRAW_MS = 200
 
 
@@ -42,19 +43,25 @@ class MissionTimeAxis(pg.AxisItem):
     def tickStrings(self, values, scale, spacing):  # noqa: N802
         if self.t0 is None:
             return [datetime.fromtimestamp(v, tz=timezone.utc).strftime("%H:%M:%S") for v in values]
-        return [format_elapsed(v - self.t0) for v in values]
+        return [("T+" if v >= self.t0 else "T-") + format_elapsed(abs(v - self.t0)) for v in values]
 
 
 class TimePlot(QWidget):
     """One pyqtgraph plot bound to a SeriesStore with a legend row that
     shows the latest value of every series."""
 
-    def __init__(self, title: str, y_label: str, unit: str = "", *, show_legend: bool = True, parent=None):
+    def __init__(self, title: str, y_label: str, unit: str = "", *, show_legend: bool = True,
+                 decimals: int = 2, parent=None):
         super().__init__(parent)
+        self.unit = unit
+        self.decimals = decimals
         self.axis = MissionTimeAxis(orientation="bottom")
         self.plot = pg.PlotWidget(axisItems={"bottom": self.axis})
         self.plot.setTitle(title, color="#dddddd", size="10pt")
         self.plot.setLabel("left", y_label, units=unit)
+        # No SI auto-prefixing: it invents units like "kµst"/"kΩ" as the
+        # range grows. Values are shown in the unit named, always.
+        self.plot.getAxis("left").enableAutoSIPrefix(False)
         self.plot.showGrid(x=True, y=True, alpha=0.25)
         self.plot.setMenuEnabled(True)
         self.plot.setClipToView(True)
@@ -90,7 +97,7 @@ class TimePlot(QWidget):
     def add_series(self, name: str, color: str, width: float = 1.6, dashed: bool = False,
                    legend: bool = True) -> None:
         pen = pg.mkPen(color=color, width=width, style=Qt.PenStyle.DashLine if dashed else Qt.PenStyle.SolidLine)
-        self._curves[name] = self.plot.plot([], [], pen=pen, name=name)
+        self._curves[name] = self.plot.plot([], [], pen=pen, name=name, connect="finite")
         self._colors[name] = color
         if legend:
             lbl = QLabel(f"{name} —")
@@ -137,7 +144,10 @@ class TimePlot(QWidget):
             lbl = self._legend.get(name)
             if lbl is not None:
                 latest = self._store.latest(name)
-                lbl.setText(f"{name} —" if latest is None else f"{name} {latest:.2f}")
+                if latest is None or not np.isfinite(latest):
+                    lbl.setText(f"{name} —")
+                else:
+                    lbl.setText(f"{name} {latest:.{self.decimals}f} {self.unit}".rstrip())
         if self.follow and t_max is not None and t_min is not None:
             self.plot.setXRange(t_min, t_max, padding=0.01)
         elif self.follow and t_min is None and self._store.t0 is not None and self._store.t_last is not None:
@@ -157,13 +167,16 @@ class TimePlot(QWidget):
         pt = vb.mapSceneToView(pos)
         self._vline.setPos(pt.x()); self._hline.setPos(pt.y())
         parts = []
-        stamp = datetime.fromtimestamp(pt.x(), tz=timezone.utc).strftime("%H:%M:%SZ")
-        elapsed = format_elapsed(pt.x() - self.axis.t0) if self.axis.t0 is not None else "—"
+        try:
+            stamp = datetime.fromtimestamp(pt.x(), tz=timezone.utc).strftime("%H:%M:%SZ")
+        except (OSError, OverflowError, ValueError):
+            stamp = "—"
+        elapsed = format_elapsed(abs(pt.x() - self.axis.t0)) if self.axis.t0 is not None else "—"
         parts.append(f"T+{elapsed} · {stamp}")
         for name in self._curves:
             value = self._store.last_before(name, pt.x())
-            if value is not None:
-                parts.append(f"{name} {value:.2f}")
+            if value is not None and np.isfinite(value):
+                parts.append(f"{name} {value:.{self.decimals}f} {self.unit}".rstrip())
         self._readout.setText("   ".join(parts))
 
     def series_names(self) -> List[str]:
@@ -176,9 +189,9 @@ class AmbientPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(2)
-        self.temp = TimePlot("Ambient temperature", "T", "°C")
-        self.pressure = TimePlot("Ambient pressure", "p", "mbar")
-        self.uv = TimePlot("UV (GUVA-S12SD via ADS1115)", "UV", "V")
+        self.temp = TimePlot("Ambient temperature", "T", "°C", decimals=1)
+        self.pressure = TimePlot("Ambient pressure", "p", "mbar", decimals=1)
+        self.uv = TimePlot("UV (GUVA-S12SD via ADS1115)", "UV", "V", decimals=3)
         self.temp.add_series("AT", "#3498db")
         self.pressure.add_series("AP", "#1abc9c")
         self.pressure.add_threshold("pre_float", PRE_FLOAT_PRESSURE_MBAR, "#f39c12",
@@ -235,7 +248,7 @@ class PlotArea(QWidget):
         lay.addWidget(self.tabs, 1)
 
         # Pages.
-        self.temps = TimePlot("Specimen temperatures", "T", "°C")
+        self.temps = TimePlot("Specimen temperatures", "T", "°C", decimals=1)
         for i in range(8):
             self.temps.add_series(f"S{i}", RESISTANCE_COLORS[i % len(RESISTANCE_COLORS)])
         for i in range(6):
@@ -243,12 +256,14 @@ class PlotArea(QWidget):
         self.temps.add_threshold("floor", SAMPLE_FLOOR_C, "#2ecc71", f"fallback floor {SAMPLE_FLOOR_C:.0f} °C")
         self.temps.add_threshold("overtemp", OVERTEMP_CUTOFF_C, "#e74c3c", f"over-T {OVERTEMP_CUTOFF_C:.0f} °C")
         self.ambient = AmbientPage()
-        self.heaters = TimePlot("Heater duty", "duty", "%")
+        self.heaters = TimePlot("Heater duty", "duty", "%", decimals=0)
         for i, label in enumerate(HEATER_LABELS):
             self.heaters.add_series(label, HEATER_COLORS[i % len(HEATER_COLORS)])
         self.resistance = TimePlot("Specimen resistance (MAX31865)", "R", "Ω")
         self._resistance_series_added: set = set()
-        self.motors = TimePlot("Motor position", "pos", "µst")
+        # Millimetres of linear travel (the ball-screw-lead-derived mm/mm_tgt
+        # telemetry keys), not microsteps: "kµst" axis labels helped nobody.
+        self.motors = TimePlot("Motor position", "position", "mm", decimals=3)
         for motor_id, (c_pos, c_tgt) in enumerate(MOTOR_COLORS):
             self.motors.add_series(f"M{motor_id} pos", c_pos, width=1.8)
             self.motors.add_series(f"M{motor_id} tgt", c_tgt, width=1.0, dashed=True)
@@ -343,8 +358,17 @@ class PlotArea(QWidget):
                     self.resistance.add_series(name, RESISTANCE_COLORS[i % len(RESISTANCE_COLORS)])
         for snap in pkt.steppers[:2]:
             m = int(snap.get("motor_id", 0))
-            values[f"M{m} pos"] = float(snap["position"])
-            values[f"M{m} tgt"] = float(snap["target"])
+            if snap.get("mm") is not None and snap.get("mm_tgt") is not None:
+                values[f"M{m} pos"] = float(snap["mm"])
+                values[f"M{m} tgt"] = float(snap["mm_tgt"])
+            else:
+                # Pre-mm firmware / replayed old logs: derive mm from
+                # microsteps at the commissioning geometry (200 full-steps
+                # per rev, 2 mm ball-screw lead, divisor from the frame).
+                us = max(1, int(snap.get("microstep") or 4))
+                per_mm = 200.0 * us / 2.0
+                values[f"M{m} pos"] = float(snap["position"]) / per_mm
+                values[f"M{m} tgt"] = float(snap["target"]) / per_mm
         self.store.append(t, values)
         self._dirty = True
 
@@ -410,16 +434,20 @@ class PlotArea(QWidget):
         plots = self.current_plots()
         if not plots:
             return
-        t_min, t_max = window_bounds(self.store.t_last, self._span)
+        if plots[0].follow:
+            t_min, t_max = window_bounds(self.store.t_last, self._span)
+        else:  # export exactly what is on screen
+            t_min, t_max = plots[0].plot.plotItem.vb.viewRange()[0]
+        units = {name: plot.unit for plot in plots for name in plot.series_names()}
         names: List[str] = []
         for plot in plots:
             names.extend(plot.series_names())
         with open(path, "w", newline="", encoding="utf-8") as fh:
             writer = csv.writer(fh)
-            writer.writerow(["utc", "t_plus_s", "series", "value"])
+            writer.writerow(["utc", "t_plus_s", "series", "value", "unit"])
             for name in names:
                 t, y = self.store.window(name, t_min, t_max)
                 for ti, yi in zip(t, y):
                     stamp = datetime.fromtimestamp(float(ti), tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
                     elapsed = "" if self._t0 is None else f"{float(ti) - self._t0:.3f}"
-                    writer.writerow([stamp, elapsed, name, f"{float(yi):.6g}"])
+                    writer.writerow([stamp, elapsed, name, f"{float(yi):.6g}", units.get(name, "")])

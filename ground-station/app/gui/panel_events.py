@@ -53,10 +53,10 @@ class EventsPanel(QWidget):
 
     def append(self, line: str, level: Optional[str] = None) -> None:
         level = level or classify(line)
-        ts = time.strftime("%H:%M:%S")
+        ts = time.strftime("%H:%M:%SZ", time.gmtime())
         self._lines.append((ts, level, line))
         if len(self._lines) > MAX_LINES:
-            self._lines.pop(0)
+            del self._lines[:500]  # trim in batches; a per-line rebuild is O(n) per event
             self._rebuild()
             return
         if self._matches(line):
@@ -92,7 +92,7 @@ class EventsPanel(QWidget):
 
 
 class PullsPanel(QWidget):
-    COLUMNS = ("time", "motor", "pull", "steps", "hold s", "samples", "session")
+    COLUMNS = ("time", "motor", "pull", "moved mm", "µsteps", "hold s", "samples", "session")
     MAX_ROWS = 500
 
     def __init__(self, parent=None):
@@ -109,8 +109,12 @@ class PullsPanel(QWidget):
         self.table.horizontalHeader().setStretchLastSection(True)
         lay.addWidget(self.table, 1)
 
-    def on_pull_event(self, ev: PullEvent) -> None:
-        values = [time.strftime("%H:%M:%S"), f"M{ev.motor_id}", str(ev.pull_id), f"{ev.steps_moved:+d}",
+    def on_pull_event(self, ev: PullEvent, microstep: int = 4) -> None:
+        # mm from µsteps at the 2 mm ball-screw lead; the caller passes the
+        # motor's live divisor (default = the µ4 commissioning setting).
+        mm = ev.steps_moved / (200.0 * max(1, microstep) / 2.0)
+        values = [time.strftime("%H:%M:%SZ", time.gmtime()), f"M{ev.motor_id}", str(ev.pull_id),
+                  f"{mm:+.2f}", f"{ev.steps_moved:+d}",
                   f"{ev.hold_s:.1f}", "|".join(str(s) for s in ev.samples) or "—", ev.session_id[-12:]]
         self.table.insertRow(0)
         for col, value in enumerate(values):

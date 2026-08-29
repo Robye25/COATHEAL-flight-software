@@ -51,6 +51,30 @@ class EvaluateTests(unittest.TestCase):
         self.assertIn("M1", alarms["HEATERS_INHIBITED"].text)
         self.assertEqual(alarms["HEATERS_INHIBITED"].severity, "amber")
 
+    def test_driver_thermal_alarms(self) -> None:
+        # warn -> amber pre-warning; hot -> red with the re-arm instruction.
+        warn = {a.key: a for a in evaluate(state(m1="mv:0|therm:warn"))}
+        self.assertIn("M1_TEMP", warn)
+        self.assertEqual(warn["M1_TEMP"].severity, "amber")
+        self.assertIn("120", warn["M1_TEMP"].text)
+        hot = {a.key: a for a in evaluate(state(m1="mv:0|therm:hot"))}
+        self.assertEqual(hot["M1_TEMP"].severity, "red")
+        self.assertIn("150", hot["M1_TEMP"].text)
+        self.assertIn("ENABLE", hot["M1_TEMP"].text)
+        # ok / old firmware raise nothing.
+        self.assertNotIn("M1_TEMP", {a.key for a in evaluate(state(m1="mv:0|therm:ok"))})
+        self.assertNotIn("M1_TEMP", {a.key for a in evaluate(state())})
+
+    def test_debug_arm_energy_prealarm_and_rtc(self) -> None:
+        armed = {a.key: a for a in evaluate(state(ctrl="fallback:0|queue:0|debug:1"))}
+        self.assertEqual(armed["DEBUG_ARM"].severity, "amber")
+        pre = {a.key: a for a in evaluate(state(ctrl="fallback:0|queue:0|energy_wh:110.0|budget_wh:130.0"))}
+        self.assertEqual(pre["ENERGY"].severity, "amber")
+        self.assertIn("80", pre["ENERGY"].text)
+        # Under 80 %: quiet.
+        low = {a.key for a in evaluate(state(ctrl="fallback:0|queue:0|energy_wh:10.0|budget_wh:130.0"))}
+        self.assertNotIn("ENERGY", low)
+
     def test_plan_states_raise_plan_alarm(self) -> None:
         running = {a.key: a for a in evaluate(state(ctrl="fallback:1|queue:0|plan:running"))}
         self.assertEqual(running["PLAN"].severity, "amber")

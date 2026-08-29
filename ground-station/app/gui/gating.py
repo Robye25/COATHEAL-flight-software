@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from .state import OnboardState
+from .state import HEATER_SAMPLE, OnboardState
 
 SILENCE = "radio silence active — send RADIO RESUME first"
 
@@ -63,7 +63,8 @@ def heater_reason(state: OnboardState, heater: int, *, needs_temperature: bool =
     if reason:
         return reason
     if needs_temperature and state.have_packet and not state.heater_temp_valid(heater):
-        return f"S{heater} has no valid temperature — heater H{heater} cannot run"
+        sample = HEATER_SAMPLE[heater] if heater < len(HEATER_SAMPLE) else heater
+        return f"S{sample} has no valid temperature — heater H{heater} cannot run"
     return None
 
 
@@ -119,6 +120,9 @@ def motion_reason(state: OnboardState, motor_id: int, *, needs_zero: bool,
     motor = state.motor(motor_id)
     if not motor.present:
         return None
+    if motor.thermal == "hot":
+        return (f"M{motor_id} driver over-temperature (≥150 °C) — disabled by the onboard safety; "
+                "let it cool, then ENABLE")
     if needs_enable and not motor.enabled:
         return f"M{motor_id} not enabled — press ENABLE"
     if needs_zero and motor.zeroed is False:

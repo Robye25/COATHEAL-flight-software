@@ -77,11 +77,11 @@ class ValuesPanel(QScrollArea):
         f["rtc_valid"].setText("1" if pkt.rtc_valid else "0")
         f["phase"].setText(pkt.phase)
         f["mode"].setText(pkt.mode or "—")
-        f["ambient_temp_c"].setText(reading("AT", pkt.ambient_temp_c, 2))
+        f["ambient_temp_c"].setText(reading("AT", pkt.ambient_temp_c, 1))
         f["ambient_pressure_mbar"].setText(reading("AP", pkt.ambient_pressure_mbar, 1))
         f["uv"].setText(reading("UV", pkt.uv, 3))
         for i in range(8):
-            f[f"sample_{i}"].setText(reading(f"S{i}", pkt.sample_temps_c[i], 2) if i < len(pkt.sample_temps_c) else "N/A")
+            f[f"sample_{i}"].setText(reading(f"S{i}", pkt.sample_temps_c[i], 1) if i < len(pkt.sample_temps_c) else "N/A")
         for i in RESISTANCE_SAMPLES:
             r = pkt.sample_resistance_ohm[i] if i < len(pkt.sample_resistance_ohm) else None
             f[f"resistance_{i}"].setText("—" if r is None else f"{r:.2f}")
@@ -93,13 +93,24 @@ class ValuesPanel(QScrollArea):
                 for k in ("state", "cfg", "flags", "src"):
                     f[f"m{m}_{k}"].setText("—")
                 continue
-            f[f"m{m}_state"].setText(f"{motor.position} / {motor.target}")
-            f[f"m{m}_cfg"].setText(f"{motor.hz:.0f} Hz · µ{motor.microstep}")
+            if motor.mm is not None and motor.mm_tgt is not None:
+                f[f"m{m}_state"].setText(f"{motor.mm:.3f} / {motor.mm_tgt:.3f} mm")
+                f[f"m{m}_state"].setToolTip(f"{motor.position} / {motor.target} µsteps")
+            else:
+                f[f"m{m}_state"].setText(f"{motor.position} / {motor.target} µst")
+            cfg = f"{motor.hz:.0f} Hz · µstep 1/{motor.microstep}"
+            if motor.amps is not None:
+                cfg += f" · {motor.amps:.2f} A"
+            f[f"m{m}_cfg"].setText(cfg)
             flags = []
             flags.append("EN" if motor.enabled else "dis")
             flags.append("zeroed" if motor.zeroed else ("zero?" if motor.zeroed is None else "unzeroed"))
             flags.append("MOVING" if motor.moving else ("HOLD" if motor.holding else "idle"))
             flags.append("ok" if motor.healthy else "FAILED")
+            if motor.thermal == "hot":
+                flags.append("DRV OVERTEMP")
+            elif motor.thermal == "warn":
+                flags.append("drv ≥120 °C")
             f[f"m{m}_flags"].setText(" · ".join(flags))
             f[f"m{m}_src"].setText(f"{motor.source or '—'} · {motor.seq_name or '-'}/{motor.seq_state or '-'}")
         f["fallback"].setText("—" if state.fallback is None else ("ACTIVE" if state.fallback else "inactive"))

@@ -94,6 +94,13 @@ class Tmc5160Driver : public StepperDriver {
   bool SetRunCurrent(double a_rms, std::string* error) override;
   double run_current_a_rms() const override;
 
+  // DRV_STATUS thermal flags, sampled in Poll() (enabled + idle, ~1 Hz)
+  // and every kResetCheckInterval steps while moving. otpw (bit 26,
+  // >=~120 °C) is live + event-counted; ot (bit 25, >=~150 °C shutdown)
+  // latches until the next Enable(true). See StepperDriver::thermal_state.
+  int thermal_state() const override;
+  std::uint32_t otpw_event_count() const;
+
   // Whether driving the EN GPIO was last seen to move DRV_ENN in IOIN.
   // Enable(true) already refuses a line that leaves DRV_ENN HIGH; the
   // opposite failure -- DRV_ENN stuck LOW, i.e. a module whose enable pin
@@ -199,6 +206,13 @@ class Tmc5160Driver : public StepperDriver {
   bool enable_warning_logged_ = false;
   std::uint32_t reset_count_ = 0;
   std::uint32_t steps_since_reset_check_ = 0;
+  // Thermal tracking (see thermal_state()). Guarded by io_mu_.
+  bool otpw_now_ = false;
+  bool ot_latched_ = false;
+  std::uint32_t otpw_events_ = 0;
+  // Reads DRV_STATUS and updates the thermal flags; edge-logs. Bus
+  // failures are ignored here (reported by the surrounding conversation).
+  void CheckThermalUnlocked();
   // Reads GSTAT; on GSTAT.reset rewrites the whole configuration (and the
   // running chopper if enabled). False only on a bus failure.
   bool RecoverFromChipResetUnlocked(const char* where);

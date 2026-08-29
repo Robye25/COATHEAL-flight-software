@@ -753,6 +753,43 @@ void TestControllerSetRunCurrent() {
   assert(!ctl.SetRunCurrent(9, 0.4, &err));  // unknown id
 }
 
+// Driver over-temperature shutdown (thermal_state() == 2) must stop
+// motion, de-energise the channel, and release the MotionLock — a driver
+// whose chip cut its own outputs must not stay "enabled" against a dead
+// power stage. Re-enable is the operator's re-arm path.
+void TestThermalShutdownDisablesChannelAndReleasesLock() {
+  class OverheatingDriver : public SimulatedStepperDriver {
+   public:
+    int thermal = 0;
+    int thermal_state() const override { return thermal; }
+  };
+
+  MotionLock lock;
+  auto owned = std::make_unique<OverheatingDriver>();
+  OverheatingDriver* drv = owned.get();
+  auto ch = std::make_unique<StepperChannel>(MakeChannelCfg(0),
+                                             std::move(owned), &lock);
+  std::string err;
+  assert(ch->MoveSteps(400, &err));
+  ch->Tick(0.001);
+  assert(ch->Snapshot().moving);
+  assert(lock.holder() == 0);
+
+  drv->thermal = 2;
+  ch->Tick(0.001);
+  const StepperStatus s = ch->Snapshot();
+  assert(!s.enabled);
+  assert(!s.moving);
+  assert(s.thermal_state == 2);
+  assert(s.last_source == "safety:OVERTEMP");
+  assert(lock.holder() == -1);
+
+  // Cooled down: STEPPER_ENABLE re-arms and motion works again.
+  drv->thermal = 0;
+  assert(ch->SetEnabled(true));
+  assert(ch->MoveSteps(100, &err));
+}
+
 }  // namespace
 
 int main() {
@@ -777,6 +814,7 @@ int main() {
   TestSnapshotReportsMillimeters();
   TestSetAccelBounds();
   TestControllerSetRunCurrent();
+  TestThermalShutdownDisablesChannelAndReleasesLock();
   std::cout << "Rev C stepper tests passed" << std::endl;
   return 0;
 }

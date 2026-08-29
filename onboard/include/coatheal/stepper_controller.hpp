@@ -22,6 +22,10 @@ struct StepperStatus {
   int microstep = 1;                    // current microstep divisor
   double accel_steps_per_s2 = 0.0;      // active trapezoid slope (full-steps/s²)
   double run_current_a_rms = 0.0;       // driver run current (0: not reported)
+  // Driver die thermal state: 0 nominal, 1 pre-warning (>= ~120 °C), 2
+  // shutdown latched (>= ~150 °C; channel auto-disabled, STEPPER_ENABLE
+  // re-arms). See StepperDriver::thermal_state().
+  int thermal_state = 0;
   // Linear position derived from the ball-screw lead
   // (cfg.lead_mm_per_rev); what the operator steers by since the mm
   // command surface landed.

@@ -748,13 +748,54 @@ bool Tmc5160Driver::EnableUnlocked(bool enable) {
     return false;
   }
   enabled_ = true;
+  // A successful operator re-enable is the release path for the thermal
+  // shutdown latch (the chip's own ot flag clears once the die cools; the
+  // latch exists so the channel safety cannot race that self-clear). Read
+  // the flags fresh so a still-hot chip immediately re-latches.
+  ot_latched_ = false;
+  otpw_now_ = false;
+  CheckThermalUnlocked();
   return true;
 }
 
 bool Tmc5160Driver::Poll() {
   std::lock_guard<std::mutex> lock(io_mu_);
   if (bus_ == nullptr || !spi_open_ || !healthy_ || !enabled_) return healthy_;
-  return RecoverFromChipResetUnlocked("idle");
+  const bool ok = RecoverFromChipResetUnlocked("idle");
+  if (ok) CheckThermalUnlocked();
+  return ok;
+}
+
+void Tmc5160Driver::CheckThermalUnlocked() {
+  std::uint32_t drv = 0;
+  if (!ReadRegister(kRegDRV_STATUS, &drv)) return;
+  const bool otpw = ((drv >> 26) & 1U) != 0U;
+  const bool ot = ((drv >> 25) & 1U) != 0U;
+  if (otpw && !otpw_now_) {
+    ++otpw_events_;
+    std::cerr << "[tmc5160] " << cfg_.spi_device << " cs=" << cfg_.cs_line
+              << ": over-temperature PRE-WARNING (die >= ~120 C, otpw), event #"
+              << otpw_events_ << " -- reduce run current or duty cycle\n";
+  }
+  otpw_now_ = otpw;
+  if (ot && !ot_latched_) {
+    ot_latched_ = true;
+    std::cerr << "[tmc5160] " << cfg_.spi_device << " cs=" << cfg_.cs_line
+              << ": over-temperature SHUTDOWN (die >= ~150 C, ot) -- the chip"
+              << " has cut its outputs; latching until the next"
+              << " STEPPER_ENABLE\n";
+  }
+}
+
+int Tmc5160Driver::thermal_state() const {
+  std::lock_guard<std::mutex> lock(io_mu_);
+  if (ot_latched_) return 2;
+  return otpw_now_ ? 1 : 0;
+}
+
+std::uint32_t Tmc5160Driver::otpw_event_count() const {
+  std::lock_guard<std::mutex> lock(io_mu_);
+  return otpw_events_;
 }
 
 std::string Tmc5160Driver::DebugRegisters() {
@@ -842,6 +883,20 @@ std::string Tmc5160Driver::warning() const {
             " each time, but the motor stalls until then; check the 12 V motor"
             " supply and its current limit";
   }
+  if (ot_latched_) {
+    if (!text.empty()) text += "; ";
+    text += "driver OVER-TEMPERATURE shutdown (die >= ~150 C, cs=" +
+            std::to_string(cfg_.cs_line) +
+            "): outputs cut and channel disabled; let it cool, then"
+            " STEPPER_ENABLE to re-arm";
+  } else if (otpw_now_ || otpw_events_ > 0) {
+    if (!text.empty()) text += "; ";
+    text += "driver over-temperature pre-warning (die >= ~120 C) " +
+            std::string(otpw_now_ ? "ACTIVE" : "seen") + " " +
+            std::to_string(otpw_events_) + "x (cs=" +
+            std::to_string(cfg_.cs_line) +
+            "): reduce run current or duty cycle";
+  }
   return text;
 }
 
@@ -878,6 +933,7 @@ bool Tmc5160Driver::Step(bool direction_forward) {
   if (++steps_since_reset_check_ >= kResetCheckInterval) {
     steps_since_reset_check_ = 0;
     if (!RecoverFromChipResetUnlocked("step")) return false;
+    CheckThermalUnlocked();
   }
 
   const bool physical_forward = direction_forward != cfg_.invert_direction;

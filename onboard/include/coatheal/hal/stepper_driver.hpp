@@ -34,6 +34,15 @@ class StepperDriver {
   // backend has no notion of current.
   virtual double run_current_a_rms() const { return 0.0; }
 
+  // Driver die thermal state, best-available over the backend's bus. The
+  // TMC5160 has no numeric temperature ADC; it reports two DRV_STATUS
+  // threshold flags, which map to: 0 = nominal, 1 = over-temperature
+  // pre-warning (die >= ~120 °C, otpw), 2 = over-temperature shutdown
+  // seen (die >= ~150 °C, ot) — 2 is LATCHED by the backend until the
+  // next Enable(true) so the channel safety that acts on it cannot race a
+  // self-clearing chip flag. Backends with no thermal telemetry report 0.
+  virtual int thermal_state() const { return 0; }
+
   // Transport health, deliberately separate from healthy().
   //
   // healthy() answers "can this motor be driven" -- a module strapped for

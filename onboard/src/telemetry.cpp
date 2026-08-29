@@ -36,7 +36,14 @@ void AppendStepperSegment(std::ostringstream& oss, const StepperStatus& st,
       << "|amps:" << std::setprecision(2) << st.run_current_a_rms
       << "|acc:" << std::setprecision(1) << st.accel_steps_per_s2
       << "|mm:" << std::setprecision(3) << st.position_mm
-      << "|mm_tgt:" << std::setprecision(3) << st.target_mm;
+      << "|mm_tgt:" << std::setprecision(3) << st.target_mm
+      // Driver die thermal state (TMC5160 DRV_STATUS threshold flags; the
+      // chip has no numeric temperature ADC): ok < ~120 °C, warn = otpw
+      // (>= ~120 °C), hot = ot shutdown latched (>= ~150 °C; the channel
+      // safety has disabled the motor).
+      << "|therm:"
+      << (st.thermal_state >= 2 ? "hot"
+                                : (st.thermal_state == 1 ? "warn" : "ok"));
 }
 
 void AppendCtrlSegment(std::ostringstream& oss, const CtrlStatus& ctrl) {
