@@ -106,6 +106,42 @@ void AppendSequentDiagnostics(std::ostringstream* oss,
   oss->precision(precision);
 }
 
+std::size_t CountValidChannels(const SequentRtdAdapter::Reading& reading) {
+  std::size_t valid = 0;
+  for (const bool ok : reading.channel_valid) valid += ok ? 1U : 0U;
+  return valid;
+}
+
+// Per-channel diagnosis list: `S<i>:ch<n>:<FAULT>:<ohms>` per logical
+// sample, `|`-separated. The card channel number (`ch<n>`, 1-indexed) is
+// what the technician sees on the HAT's terminal blocks, so it goes next
+// to each fault even when the map is the identity. Shared by the
+// COMPONENTS/CHECK replies and the journal edge log so there is exactly
+// one spelling of this diagnosis.
+std::string FormatSequentChannels(
+    const SequentRtdAdapter::Reading& reading,
+    const std::array<std::uint8_t, SequentRtdAdapter::kChannelCount>&
+        channel_map) {
+  std::ostringstream oss;
+  oss << std::fixed << std::setprecision(1);
+  for (std::size_t i = 0; i < SequentRtdAdapter::kChannelCount; ++i) {
+    if (i) oss << '|';
+    oss << 'S' << i << ":ch" << static_cast<int>(channel_map[i]) << ':'
+        << ToString(reading.channel_fault[i]) << ':'
+        << reading.resistance_ohm[i];
+  }
+  return oss.str();
+}
+
+void AppendSequentChannels(
+    std::ostringstream* oss, const SequentRtdAdapter::Reading& reading,
+    const std::array<std::uint8_t, SequentRtdAdapter::kChannelCount>&
+        channel_map) {
+  *oss << ";sequent_rtd_valid=" << CountValidChannels(reading) << '/'
+       << SequentRtdAdapter::kChannelCount
+       << ";sequent_rtd_ch=" << FormatSequentChannels(reading, channel_map);
+}
+
 #if COATHEAL_HAS_LINUX_SENSOR_IO
 int OpenI2c(int address) {
   const int fd = ::open(kI2cDevice, O_RDWR);
@@ -527,6 +563,21 @@ bool SensorManager::HeatedChannelsValid(
   return true;
 }
 
+ComponentState SensorManager::RtdStateForValidCount(std::size_t valid_count,
+                                                    std::size_t channel_count,
+                                                    std::string* error) {
+  if (valid_count == 0) {
+    if (error) *error = "NO_VALID_CHANNELS";
+    return ComponentState::kFailed;
+  }
+  if (valid_count < channel_count) {
+    if (error) *error = "PARTIAL_CHANNELS";
+    return ComponentState::kDegraded;
+  }
+  if (error) *error = "NONE";
+  return ComponentState::kOk;
+}
+
 void SensorManager::SequentRtdLoop() {
   while (running_.load()) {
     SequentRtdAdapter::Reading reading;
@@ -593,15 +644,33 @@ void SensorManager::SequentRtdLoop() {
             sample_cache_[i].valid = false;
           }
         }
-        rtd_health_.state = valid_count == sample_cache_.size()
-                                ? ComponentState::kOk
-                                : ComponentState::kDegraded;
-        rtd_health_.error = valid_count == 0
-                                ? "NO_VALID_CHANNELS"
-                                : (valid_count < sample_cache_.size()
-                                       ? "PARTIAL_CHANNELS"
-                                       : "NONE");
+        rtd_health_.state = RtdStateForValidCount(
+            valid_count, sample_cache_.size(), &rtd_health_.error);
         rtd_health_.last_success_age_ms = 0;
+        // Journal the per-channel diagnosis whenever the fault pattern
+        // CHANGES (rate-limited), so a technician re-terminating the PT100
+        // harness sees each channel flip OPEN/SHORT -> OK live in
+        // journalctl instead of raw-probing I2C. Steady-state repeats stay
+        // silent -- same edge discipline as the MAX31865 saturation log.
+        constexpr auto kRtdFaultLogInterval = std::chrono::seconds(60);
+        const bool pattern_changed =
+            !rtd_has_fault_pattern_ ||
+            reading.channel_fault != rtd_last_fault_pattern_;
+        const bool interval_elapsed =
+            !rtd_has_fault_log_ ||
+            (now - rtd_last_fault_log_) >= kRtdFaultLogInterval;
+        if (pattern_changed && interval_elapsed &&
+            valid_count < sample_cache_.size()) {
+          std::cerr << "[sequent-rtd] channel diagnosis (" << valid_count
+                    << '/' << sample_cache_.size() << " valid): "
+                    << FormatSequentChannels(reading,
+                                             rtd_.options().channel_map)
+                    << '\n';
+          rtd_last_fault_log_ = now;
+          rtd_has_fault_log_ = true;
+        }
+        rtd_last_fault_pattern_ = reading.channel_fault;
+        rtd_has_fault_pattern_ = true;
       } else {
         bool any_previous = false;
         std::chrono::steady_clock::time_point newest{};
@@ -1053,6 +1122,8 @@ bool SensorManager::ActiveCheck(const std::string& component,
   SequentRtdAdapter::Reading reading;
   int rtd_address = 0;
   bool rtd_burst = false;
+  std::array<std::uint8_t, SequentRtdAdapter::kChannelCount> rtd_map =
+      SequentRtdAdapter::Options{}.channel_map;
   auto check_rtd = [&]() {
     // Nothing below this lambda may touch rtd_ directly. SequentRtdLoop
     // writes the adapter's burst_mode_ from the worker thread, inside
@@ -1064,6 +1135,7 @@ bool SensorManager::ActiveCheck(const std::string& component,
     std::lock_guard<std::mutex> lock(rtd_io_mu_);
     rtd_address = rtd_.address();
     rtd_burst = rtd_.burst_mode();
+    rtd_map = rtd_.options().channel_map;
     if (!rtd_bus_active_->available()) {
       rtd_error = "I2C_UNAVAILABLE";
       return false;
@@ -1121,6 +1193,10 @@ bool SensorManager::ActiveCheck(const std::string& component,
       if (rtd_ok) {
         AppendSequentIdentity(&oss, identity);
         AppendSequentDiagnostics(&oss, reading);
+        // A CHECK proves the I2C conversation; the per-channel list shows
+        // whether the probes on the far side of it measure anything
+        // (bench 2026-08-29: CHECK said OK while zero channels validated).
+        AppendSequentChannels(&oss, reading, rtd_map);
       }
     }
     oss << ";max31865_1=" << (!max31865_requested
@@ -1152,12 +1228,14 @@ std::string SensorManager::ComponentSummary() const {
   bool probed = false;
   int address = 0;
   bool burst = false;
+  std::array<std::uint8_t, SequentRtdAdapter::kChannelCount> channel_map{};
   {
     std::lock_guard<std::mutex> io_lock(rtd_io_mu_);
     identity = rtd_identity_;
     probed = rtd_probed_;
     address = rtd_.address();
     burst = rtd_.burst_mode();
+    channel_map = rtd_.options().channel_map;
   }
   std::lock_guard<std::mutex> lock(cache_mu_);
   ComponentHealth dps = dps_health_;
@@ -1201,7 +1279,13 @@ std::string SensorManager::ComponentSummary() const {
       << ";sequent_rtd_addr=0x" << std::hex << address << std::dec
       << ";sequent_rtd_burst=" << (burst ? "1" : "0");
   if (probed) AppendSequentIdentity(&oss, identity);
-  if (rtd_has_reading_) AppendSequentDiagnostics(&oss, rtd_last_reading_);
+  if (rtd_has_reading_) {
+    AppendSequentDiagnostics(&oss, rtd_last_reading_);
+    // Same per-channel diagnosis CHECK carries, from the worker's last
+    // poll, so COMPONENTS alone tells the operator open probe vs short vs
+    // mismatch per terminal block.
+    AppendSequentChannels(&oss, rtd_last_reading_, channel_map);
+  }
   // max31865_health_ is not re-derived here either, same reasoning as
   // rtd_health_ just above: Max31865Loop already folded staleness in.
   oss << ";max31865_1=" << ToString(click1_health.state)

@@ -496,6 +496,40 @@ Note that `RTD_CLICK` selects the *retired* MAX31865 temperature path alias
 for `SEQUENT_RTD` — it is unrelated to the current, unrelated-purpose
 `MAX31865` selector below, which reads the two v3 sample-resistance clicks.
 
+### Per-channel harness diagnosis (`sequent_rtd_ch`)
+
+`COMPONENTS` and `CHECK SEQUENT_RTD` both carry a per-channel diagnosis
+(added 2026-08-29 after the bench read `DEGRADED` with zero usable
+channels):
+
+```text
+sequent_rtd_valid=0/8;sequent_rtd_ch=S0:ch1:OPEN:-366.0|S1:ch2:OPEN:366.0|S2:ch3:SHORT:0.2|...
+```
+
+Each entry is `S<sample>:ch<card channel>:<FAULT>:<ohms>` — the `ch<n>`
+number matches the HAT's terminal blocks. Fault classes:
+
+| Fault | Meaning | Typical cause |
+|---|---|---|
+| `OK` | Resistance in the plausible window and consistent with the card's own temperature | — |
+| `OPEN` | The card's ±366.000 Ω full-scale sentinel, an above-window reading, or a non-finite value | No probe on the terminals, broken lead, loose screw terminal |
+| `SHORT` | Below the plausible window (a PT100 never reads under ~80 Ω in the mission envelope) | Shorted leads, probe wired across the wrong terminals |
+| `MISMATCH` | In-window resistance whose PT100-derived temperature disagrees with the card's reading by more than `sensor.sequent_rtd_crosscheck_tol_c` | 2-wire probe on 3-wire terminals (or vice versa), wrong sensor type, drifting probe |
+
+Component-state semantics: the card polls fine but **zero** channels
+validate → `sequent_rtd=FAILED` (`NO_VALID_CHANNELS`); **some** validate →
+`DEGRADED` (`PARTIAL_CHANNELS`); all eight → `OK`. `CHECK SEQUENT_RTD`'s
+`sequent_rtd=OK` verdict remains a *bus/instrument conversation* check —
+read `sequent_rtd_valid=` in the same reply for probe health.
+
+The onboard also journals the diagnosis whenever the fault pattern changes
+(at most once a minute), so `journalctl -fu coatheal-onboard` shows each
+channel flip to `OK` live while the harness is being re-terminated.
+
+Bench state 2026-08-29: all 8 channels bad — `ch3` SHORT (0.2 Ω), the
+other seven OPEN (±366 Ω). A real PT100 reads ~109 Ω at room temperature.
+This is probe-harness wiring, not card or software.
+
 MAX31865 sample-resistance click check:
 
 ```bash

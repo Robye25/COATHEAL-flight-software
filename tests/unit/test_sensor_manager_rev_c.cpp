@@ -242,6 +242,76 @@ OnboardConfig MakeRtdBusTestConfig() {
 // per-channel plausibility, so a card that never lets the bus open is the
 // right fixture: it never has to touch resistance/temperature plausibility
 // to prove the point.
+void TestRtdStateForValidCountTriState() {
+  // ALL valid -> OK, SOME -> DEGRADED, NONE -> FAILED. The last branch is
+  // the 2026-08-29 bench fix: a card whose bus answers perfectly while
+  // every probe is open/shorted used to report DEGRADED, which suggested
+  // partial function that did not exist.
+  std::string error;
+  assert(SensorManager::RtdStateForValidCount(8, 8, &error) ==
+         ComponentState::kOk);
+  assert(error == "NONE");
+  assert(SensorManager::RtdStateForValidCount(3, 8, &error) ==
+         ComponentState::kDegraded);
+  assert(error == "PARTIAL_CHANNELS");
+  assert(SensorManager::RtdStateForValidCount(0, 8, &error) ==
+         ComponentState::kFailed);
+  assert(error == "NO_VALID_CHANNELS");
+}
+
+// The exact register image the bench harness produced on 2026-08-29:
+// ±366.000 Ω open sentinels on seven channels, a 0.2 Ω short on one, with
+// the card's own (nonsense) temperatures alongside.
+std::vector<std::uint8_t> OpenHarnessRtdImage() {
+  std::vector<std::uint8_t> image = BlankRtdImage();
+  const float temps[8] = {-1210.39f, 690.909f, -259.207f, 690.909f,
+                          690.909f, -1210.39f, -1210.39f, 690.909f};
+  const float res[8] = {-366.0f, 366.0f, 0.205f, 366.0f,
+                        366.0f, -366.0f, -366.0f, 366.0f};
+  for (int channel = 0; channel < sequent_rtd::kChannels; ++channel) {
+    std::memcpy(image.data() + sequent_rtd::kRtdVal1 + channel * 4,
+                &temps[channel], sizeof(float));
+    std::memcpy(image.data() + sequent_rtd::kRtdRes1 + channel * 4,
+                &res[channel], sizeof(float));
+  }
+  return image;
+}
+
+void TestOpenHarnessReportsFailedWithChannelDiagnosis() {
+  const OnboardConfig config = MakeRtdBusTestConfig();
+
+  FakeI2cBus bus;
+  bus.SetImage(OpenHarnessRtdImage());
+
+  Ina3221Adapter ina;
+  SpiAdapter spi;
+  I2cAdapter i2c;
+  RtcAdapter rtc;
+  SensorManager sm(config, &spi, &i2c, &rtc, &ina, &bus);
+  sm.Start();
+
+  std::string summary;
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (std::chrono::steady_clock::now() < deadline) {
+    summary = sm.ComponentSummary();
+    if (summary.find("sequent_rtd=FAILED") != std::string::npos) break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  sm.Stop();
+
+  // Zero valid channels on a healthy bus is a FAILED instrument, and the
+  // reply must carry the per-channel diagnosis a technician can act on.
+  assert(summary.find("sequent_rtd=FAILED") != std::string::npos);
+  assert(summary.find("sequent_rtd_error=NO_VALID_CHANNELS") !=
+         std::string::npos);
+  assert(summary.find("sequent_rtd_valid=0/8") != std::string::npos);
+  assert(summary.find("sequent_rtd_ch=S0:ch1:OPEN:-366.0") !=
+         std::string::npos);
+  assert(summary.find("S2:ch3:SHORT:0.2") != std::string::npos);
+  assert(summary.find("S7:ch8:OPEN:366.0") != std::string::npos);
+}
+
 void TestI2cOkStaysFailedOnUnreachableRtdBus() {
   const OnboardConfig config = MakeRtdBusTestConfig();
 
@@ -849,6 +919,8 @@ int main() {
   TestHeatedChannelPolicyIgnoresUnheatedSamples();
   TestHeatedChannelPolicyRejectsOutOfRangeMapping();
   TestHeatedChannelPolicyFailsClosedOnEmptyMapping();
+  TestRtdStateForValidCountTriState();
+  TestOpenHarnessReportsFailedWithChannelDiagnosis();
   TestI2cOkStaysFailedOnUnreachableRtdBus();
   TestI2cOkRecoversOnHealthyRtdBus();
   TestSequentRtdResistanceFollowsHealthyBus();
