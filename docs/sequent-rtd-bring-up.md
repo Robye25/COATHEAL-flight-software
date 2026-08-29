@@ -527,7 +527,17 @@ channel flip to `OK` live while the harness is being re-terminated.
 
 Bench state 2026-08-29: all 8 channels bad — `ch3` SHORT (0.2 Ω), the
 other seven OPEN (±366 Ω). A real PT100 reads ~109 Ω at room temperature.
-This is probe-harness wiring, not card or software.
+This is probe-harness wiring, not card or software. Later the same day the
+fifth pair (S4/ch5) landed and read `OK:111.2`.
+
+**2-wire probes on the 3-wire terminals** (bench practice, 2026-08-29): the
+harness uses 2-wire PT100s with a jumper across the two `−` pins of each
+3-wire terminal block. That is the standard 2-wire hookup for this card;
+the consequence is that the 3-wire lead compensation measures the jumper
+(≈0 Ω) instead of a real lead, so the reading includes BOTH lead
+resistances — it reads high by `2 × R_lead` (≈+0.5–2.5 °C for typical bench
+leads). Acceptable for bench work; keep leads short, and calibrate it out
+(§6) if the offset matters.
 
 MAX31865 sample-resistance click check:
 

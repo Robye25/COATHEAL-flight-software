@@ -12,9 +12,12 @@ ThermalController::ThermalController(const OnboardConfig& config)
       sample_heating_(config.hardware.heater_count, false),
       active_targets_c_(config.hardware.heater_count) {
   sample_pids_.reserve(config_.hardware.heater_count);
+  // The PID output ceiling IS heater.max_duty (not a fixed 1.0) so the
+  // anti-windup clamp stays consistent with the power the loop is actually
+  // allowed to command.
   for (std::size_t i = 0; i < config_.hardware.heater_count; ++i) {
     sample_pids_.emplace_back(PidGains{config.pid.kp, config.pid.ki, config.pid.kd},
-                              0.0, 1.0, -10.0, 10.0);
+                              0.0, config.heaters.max_duty, -10.0, 10.0);
   }
 }
 
@@ -232,13 +235,18 @@ std::vector<double> ThermalController::ComputeRequestedDuty(
   // Enforce the per-channel latch last so no override can re-arm a tripped
   // channel without RESET_CONTROL. Normal control also requires valid sample
   // feedback; bench/debug open-loop duty overrides deliberately skip only
-  // that feedback-validity clamp.
+  // that feedback-validity clamp. heater.max_duty is the global power
+  // ceiling: it binds every path through here — PID output (already
+  // limited at the PID), floor control, and explicit duty overrides —
+  // because it exists to bound the heater film's surface temperature, and
+  // an override is exactly the path most likely to exceed it.
   for (std::size_t i = 0; i < heater_count; ++i) {
     const bool temp_valid = temp_valid_for(i);
     if ((!temp_valid && !overrides.bench_open_loop_heaters) ||
         channel_latched_[i]) {
       duty[i] = 0.0;
     }
+    duty[i] = std::min(duty[i], config_.heaters.max_duty);
   }
 
   return duty;

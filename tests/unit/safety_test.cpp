@@ -79,6 +79,51 @@ void TestOvertempCutoffLatches() {
   assert(!ctrl.channel_latched()[3]);
 }
 
+// heater.max_duty is the global power ceiling: it must bind the PID
+// output, explicit duty overrides, and the bench open-loop path alike,
+// while the over-temp latch keeps overriding it to zero. Added after the
+// 2026-08-29 bench trip: a 5 W film at 100% duty ran its surface far
+// ahead of the lagging PT100, so a 40 C target still crossed the 85 C
+// latch — bounding delivered power is the fix, not lowering setpoints.
+void TestMaxDutyCeilingBindsEveryPath() {
+  auto cfg = MakeConfig();
+  cfg.heaters.max_duty = 0.3;
+  coatheal::ThermalController ctrl(cfg);
+  coatheal::ControlOverrides ov;
+
+  // Closed-loop: 20 C error at kp=0.2 would ask for 1.0 — capped at 0.3.
+  coatheal::SensorSnapshot cold = MakeSnapshot(8, 20.0);
+  ov.temp_targets_c.assign(6, std::nullopt);
+  ov.temp_targets_c[2] = 40.0;
+  auto duty = ctrl.ComputeRequestedDuty(
+      coatheal::MissionPhase::kFloat, cold, 1.0, ov);
+  assert(duty[2] > 0.0);
+  assert(duty[2] <= 0.3 + 1e-9);
+
+  // Explicit full-power override: still capped.
+  ov.temp_targets_c[2].reset();
+  ov.heater_duty_overrides.assign(6, std::nullopt);
+  ov.heater_duty_overrides[1] = 1.0;
+  duty = ctrl.ComputeRequestedDuty(
+      coatheal::MissionPhase::kFloat, cold, 1.0, ov);
+  assert(duty[1] == 0.3);
+
+  // Bench open-loop (debug arm) path: capped too.
+  ov.bench_open_loop_heaters = true;
+  duty = ctrl.ComputeRequestedDuty(
+      coatheal::MissionPhase::kFloat, cold, 1.0, ov);
+  assert(duty[1] == 0.3);
+  ov.bench_open_loop_heaters = false;
+
+  // The latch still wins over the ceiling: a tripped channel reads 0.
+  coatheal::SensorSnapshot hot = MakeSnapshot(8, 20.0);
+  hot.sample_temps_c[1] = 90.0;
+  duty = ctrl.ComputeRequestedDuty(
+      coatheal::MissionPhase::kFloat, hot, 1.0, ov);
+  assert(duty[1] == 0.0);
+  assert(ctrl.channel_latched()[1]);
+}
+
 void TestUniformityBit() {
   const auto cfg = MakeConfig();
   coatheal::ThermalController ctrl(cfg);
@@ -244,6 +289,7 @@ void TestStorageSafeModeWrites() {
 
 int main() {
   TestOvertempCutoffLatches();
+  TestMaxDutyCeilingBindsEveryPath();
   TestUniformityBit();
   TestInvalidSampleForcesHeaterOff();
   TestManualTemperatureTargetAndPid();

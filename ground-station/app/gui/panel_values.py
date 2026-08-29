@@ -8,7 +8,7 @@ from typing import Dict
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget
 
 from ..protocol import TelemetryPacket
-from .state import OnboardState
+from .state import RESISTANCE_SAMPLES, OnboardState
 from .widgets import MONO_CSS, MUTED, SectionLabel
 
 
@@ -30,9 +30,11 @@ class ValuesPanel(QScrollArea):
         self._section("Samples °C")
         for i in range(8):
             self._row(f"sample_{i}", f"S{i}")
-        self._section("Resistance Ω")
-        for i in range(8):
-            self._row(f"resistance_{i}", f"R{i}")
+        # Only the two click-monitored specimens (owner decision 2026-08-29,
+        # one per motor group); the other RESISTANCE slots are always '-'.
+        self._section("Resistance Ω (MAX31865 clicks)")
+        for click, i in enumerate(RESISTANCE_SAMPLES):
+            self._row(f"resistance_{i}", f"S{i} · click {click + 1} · M{click}")
         self._section("Heaters duty")
         for i in range(6):
             self._row(f"heater_{i}", f"H{i}")
@@ -80,6 +82,7 @@ class ValuesPanel(QScrollArea):
         f["uv"].setText(reading("UV", pkt.uv, 3))
         for i in range(8):
             f[f"sample_{i}"].setText(reading(f"S{i}", pkt.sample_temps_c[i], 2) if i < len(pkt.sample_temps_c) else "N/A")
+        for i in RESISTANCE_SAMPLES:
             r = pkt.sample_resistance_ohm[i] if i < len(pkt.sample_resistance_ohm) else None
             f[f"resistance_{i}"].setText("—" if r is None else f"{r:.2f}")
         for i in range(6):

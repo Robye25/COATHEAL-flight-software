@@ -123,6 +123,7 @@ guessed range (section 9, gate 5 of the same bring-up doc).
 | `heater.active_high` | `true` | MOSFET input polarity. |
 | `heater.debug_max_duty` | `0.25` | Bench-only maximum `HEATER_TEST` duty. |
 | `heater.debug_max_seconds` | `10.0` | Bench-only maximum `HEATER_TEST` duration. |
+| `heater.max_duty` | `1.0` | Global heater power ceiling `(0, 1]`: caps the PID output and every duty override in `ThermalController`, and `SET_HEATER_DUTY` / `SET_ALL_DUTY` / `HEATER_TEST` above it are NACKed. Bound the heater film's surface temperature on the bench (~`0.25` for a 5 W film with a lagging PT100) instead of lowering setpoints; `1.0` keeps flight behavior unchanged. |
 
 ## Power
 

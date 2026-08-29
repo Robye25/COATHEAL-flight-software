@@ -185,6 +185,13 @@ struct HeaterOutputConfig {
   bool active_high = true;
   double debug_max_duty = 0.25;
   double debug_max_seconds = 10.0;
+  // Global heater power ceiling, applied to every duty the controller can
+  // produce (PID output limit + final clamp) and enforced as a NACK on
+  // SET_HEATER_DUTY / SET_ALL_DUTY / HEATER_TEST. 1.0 = full power (flight
+  // default). Bench 2026-08-29: a 5 W film driven at 100% runs its surface
+  // hundreds of °C ahead of a lagging PT100, so a 40 °C target still
+  // tripped the 85 °C latch — cap the power, not the setpoint.
+  double max_duty = 1.0;
 };
 
 struct StepperConfig {
