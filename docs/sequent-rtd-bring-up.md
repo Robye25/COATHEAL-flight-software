@@ -427,15 +427,14 @@ including reporting "out of range," rather than assume a window in advance.
   cannot produce a valid reading on a specimen known to be in a sane state,
   not merely because the range turns out to be wide or saturates easily)*
 
-## 10. Sample-Index Mapping (`max31865_sample_indices`) — Placeholder, Fill In At Bench
+## 10. Sample-Index Mapping (`max31865_sample_indices`)
 
 `sensor.max31865_sample_indices` defaults to `0,4` — entry 0 feeds click 1 /
-SAMPLE1, entry 1 feeds click 2 / SAMPLE2. **This default is an
-owner-flagged placeholder**: `0,4` is simply "the first sample index of each
-motor's group" (`motor0.samples` starts at 0, `motor1.samples` starts at 4),
-chosen because *some* valid default was needed at config-load time, not
-because sample 0 and sample 4 are confirmed to be where the two click-wired
-specimens physically live.
+SAMPLE1, entry 1 feeds click 2 / SAMPLE2. **Owner decision (confirmed
+2026-08-29): specimen resistance is measured on exactly two samples, one per
+motor group, via the two MAX31865 RTD clicks** — `0,4` is the first sample
+index of each motor's group (`motor0.samples` starts at 0, `motor1.samples`
+starts at 4).
 
 Determining the real mapping is a bench/integration task, not a software
 task — record which physical specimen positions SAMPLE1 and SAMPLE2 actually
@@ -448,10 +447,10 @@ them.
 
 - Physical specimen position SAMPLE1 (click 1, CE1) actually measures, as a
   software sample index: `____` *(fill in at bench/integration —
-  placeholder default is `0`)*
+  decided default is `0`)*
 - Physical specimen position SAMPLE2 (click 2, CE0) actually measures, as a
   software sample index: `____` *(fill in at bench/integration —
-  placeholder default is `4`)*
+  decided default is `4`)*
 - Config line to set once confirmed:
   `sensor.max31865_sample_indices=____,____ ` *(fill in at bench)*
 
@@ -561,7 +560,7 @@ sensor.sequent_rtd_crosscheck_tol_c=2.0
 # configurable.
 sensor.max31865_reference_ohm=470.0
 sensor.max31865_poll_ms=1000
-sensor.max31865_sample_indices=0,4           # OWNER-FLAGGED PLACEHOLDER, see section 10
+sensor.max31865_sample_indices=0,4           # one specimen per motor group, see section 10
 
 # max31865_click is the v3-shipped default -- coating/specimen resistance
 # from the two clicks. sequent_rtd (PT100 element resistance from the RTD

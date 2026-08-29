@@ -168,10 +168,11 @@ struct SensorHardwareConfig {
   int max31865_poll_ms = 1000;
   // Which two of hardware.sample_count indices the two clicks feed,
   // click-index-ordered (entry 0 -> click 0/SAMPLE1, entry 1 -> click
-  // 1/SAMPLE2). OWNER-FLAGGED PLACEHOLDER: {0, 4} is the first specimen of
-  // each motor group (motor0.samples starts at 0, motor1.samples starts at
-  // 4) -- config-only to change once the real commissioning mapping from
-  // the coating bench is known.
+  // 1/SAMPLE2). Owner decision (confirmed 2026-08-29): specimen resistance
+  // is measured on exactly TWO samples, one per motor group, via the two
+  // MAX31865 RTD clicks -- {0, 4} is the first specimen of each group
+  // (motor0.samples starts at 0, motor1.samples at 4). Config-tunable if
+  // the instrumented specimen within a group ever changes.
   std::vector<std::size_t> max31865_sample_indices{0, 4};
 };
 

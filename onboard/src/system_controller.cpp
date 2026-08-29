@@ -967,6 +967,9 @@ int SystemController::Run() {
         [](double duty) { return duty > 0.0; }));
     record.ctrl.queue_depth = telemetry_queue_.size();
     record.ctrl.plan = FallbackPlanStateName();
+    // Effective arm: ARM_DEBUG requires bench_mode, and every debug gate
+    // re-checks both, so report what the gates will actually honour.
+    record.ctrl.debug_armed = config_.runtime.bench_mode && debug_armed_.load();
 
     const std::string line = SerializeTelemetryDataFrame(record, telemetry_client_.session_id());
     COATHEAL_PERF_STAMP(perf_ts[7]);  // stage 6: build+serialize telemetry
