@@ -671,30 +671,49 @@ the whole configuration, restores the chopper, logs
 verdict. A motor that keeps stalling with a rising `resets` count is a
 power-supply problem, not a software one.
 
-## Bench note 2026-08-29 (later) — two more reasons the motors "never moved"
+## Bench note 2026-08-29 (later) — the actual root cause: motion-controller units
+
+**The TMC5160's XACTUAL/XTARGET/VMAX count in the microstep resolution
+selected by CHOPCONF.MRES, not in 1/256-full-step units.** The driver set
+MRES from the configured divisor (6 = ¼ step) and wrote `XTARGET += 256 /
+divisor = 64` per pulse, so every "one microstep" pulse commanded 64
+quarter-steps = **16 full steps (28.8°) in a ~7 ms slam** at AMAX=0xFFFF.
+No rotor can follow that: the motor buzzed in place, the position counter
+ran 64× ahead of reality, StallGuard sat near stall, the stealthChop
+regulator pinned at 255 and the shared 12 V rail collapsed under an
+8 rev/s demand, resetting both chips. The tell-tale in every trace:
+after each 64-unit hop `MSCNT` returned to exactly 32 — a hop of 4096
+sine-table counts — and the 2026-08-26 probe (+1000 units → MSCNT +512)
+fits only the MRES unit.
+
+Fix (`42588a7`): MRES is pinned to 0 (native 256 microsteps) so one unit is
+1/256 full step, `DeltaXtarget(divisor) = 256/divisor` is exactly one
+configured microstep and the chip interpolates in between — the
+datasheet's recommended use of the internal ramp generator. The configured
+divisor keeps its meaning as the firmware's step size, so telemetry
+positions, BEND distances and pull travel are unchanged.
+
+Verified with the fix, 0.8 A, stealthChop, both motors: `MSCNT` advances
+64 per pulse, `STEPPER_MOVE <id> 400` = half a revolution in 2.0 s,
+`800` = one revolution in 3 s at 100 full-steps/s, `pwm_scale_sum` 21–33
+throughout (was 255), no open-load flags, **no chip resets**. The earlier
+"12 V rail sags under 0.8 A" reading was a consequence of the over-speed
+demand, not a supply defect — re-check the supply only if `resets` climbs
+again at real speeds.
+
+Two more defects found on the way, both fixed:
 
 1. **The pulse thread accelerated per step, not per second**
    (`StepperChannel::PulseThreadBody` fed the ramp a fixed 1 ms per
-   iteration while each iteration sleeps one pulse period). From standstill
-   the motor crawled at a few microsteps per second and needed ~500 pulses
-   (5–7 s) to reach 100 Hz — a 400-microstep move took 7 s, a 100-microstep
-   jog never got out of the crawl. Fixed in `d06319c`: the ramp integrates
-   measured time; 400 microsteps now take 2.0 s, 800 (one revolution at µ4)
-   about 3 s.
-2. **The 12 V motor rail sags under 0.8 A run current.** With stealthChop the
-   regulator's PWM amplitude (`MOTOR_DEBUG pwm_scale_sum`) is ~21 at
-   standstill for 0.8 A (a healthy ~1 Ω coil at 12 V) but climbs to 255
-   (100 %) at 100 full-steps/s — impossible at a solid 12 V for a NEMA17 at
-   30 rpm — and the chips then reset. At 0.3 A the same moves complete with
-   the regulator relaxed (< 140) and zero resets. Measure VM at the module
-   during a move (expect a steady 12 V; a dip below ~9 V or ringing is the
-   fault), size the supply for ≥ 2 A per motor, keep the leads short and
-   thick, and put ≥ 100 µF/25 V across VM/GND at each module.
+   iteration while each iteration sleeps one pulse period) — a 5–7 s crawl
+   before reaching 100 Hz. Fixed in `d06319c`: the ramp integrates measured
+   time; 400 microsteps take 2.0 s.
+2. **(Re)initialisation always wrote TOFF=3**, so a disabled motor whose EN
+   pin does not reach DRV_ENN (motor 1) was energised at boot and after
+   every CHECK. Fixed in `42588a7`: TOFF follows the enabled state.
 
-Proof the motors turn (spreadCycle, 0.8 A, 800 microsteps = 1 rev): both
-motors reached `XACTUAL=51200` in 3 s with StallGuard ≈ 25–35 at cruise
-(loaded, moving; a stalled motor reads 0), open-load flags clear during
-motion, `status_sg` never set, no resets. Use the console's Debug tab with
-a BEND: one revolution shows as MSCNT cycling 200 times and XACTUAL rising
-by 51,200.
-
+Units reminder: `STEPPER_MOVE <id> <n>` and `STEPPER_MOVETO` take
+**microsteps at the configured divisor** (µ4: 800 = one revolution ≈ 1–2 mm
+of pull); `MOTOR_DEBUG` reports the chip's XACTUAL in 1/256 full steps
+(51,200 per revolution) and MSCNT in sine-table counts (1024 per 4 full
+steps).

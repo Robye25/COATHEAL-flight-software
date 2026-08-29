@@ -218,7 +218,7 @@ NACK,<COMMAND>,<reason>
 | `GET_THERMAL` | none | Return target, measured temperature, and duty for every heater |
 | `CLEAR_OVERRIDES` | none | Clear duty, target, and PID overrides |
 | `SET_POSITION_ZERO` | `<id>` | Set current physical position as software zero without motion |
-| `STEPPER_MOVE` | `<id> <steps>` | Relative motor move |
+| `STEPPER_MOVE` | `<id> <steps>` | Relative motor move (`<steps>` are microsteps at the configured divisor: µ4 → 800 per revolution) |
 | `STEPPER_MOVETO` | `<id> <abs_usteps> [hold_s]` | Absolute move; motor must be zeroed |
 | `STEPPER_ROTATE` | `<id> <revs>` | Rotate by full revolutions |
 | `STEPPER_BEND` | `<id> <abs_usteps> [hold_s]` | Compatibility alias for absolute move; motor must be zeroed |
