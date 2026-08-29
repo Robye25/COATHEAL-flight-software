@@ -71,7 +71,10 @@ void ExpectRead(FakeSpiBus* bus, std::uint8_t addr, std::uint32_t value) {
 }
 
 std::uint32_t Chopconf(int microstep, std::uint8_t toff) {
-  const std::uint8_t mres = Tmc5160Driver::EncodeMres(microstep);
+  // MRES is pinned to 0 (native 256 microsteps) whatever the firmware's
+  // divisor: the motion controller's units follow MRES (see EncodeChopconf).
+  (void)microstep;
+  const std::uint8_t mres = 0;
   return (static_cast<std::uint32_t>(mres) << 24) | (0x2U << 15) |
          (0x4U << 4) | static_cast<std::uint32_t>(toff & 0x0FU);
 }
@@ -92,7 +95,8 @@ std::uint32_t Chopconf(int microstep, std::uint8_t toff) {
 // everything after it unconsumed.
 void ScriptReinitSequence(FakeSpiBus* bus, const Tmc5160Config& cfg,
                           std::uint8_t ioin_version_byte,
-                          std::uint8_t ioin_pin_bits = 0) {
+                          std::uint8_t ioin_pin_bits = 0,
+                          std::uint8_t toff = 0) {
   std::uint32_t globalscaler = 0;
   std::uint8_t irun = 0;
   std::uint8_t ihold = 0;
@@ -106,7 +110,9 @@ void ScriptReinitSequence(FakeSpiBus* bus, const Tmc5160Config& cfg,
   // than hardcoded, so the stealth_chop fixtures below script what the
   // driver must actually write.
   const std::uint32_t gconf = cfg.stealth_chop ? 0x00000004U : 0x00000000U;
-  const std::uint32_t chopconf_run = Chopconf(cfg.microstep, /*toff=*/3);
+  // The chopper comes out of (re)initialisation in the motor's enabled
+  // state: TOFF=0 for a disabled motor (boot, CHECK), 3 when enabled.
+  const std::uint32_t chopconf_run = Chopconf(cfg.microstep, toff);
   const std::uint32_t gs_reg = globalscaler >= 256U ? 0U : globalscaler;
   const std::uint32_t ihold_irun =
       (static_cast<std::uint32_t>(ihold) & 0x1FU) |
@@ -141,8 +147,9 @@ void ScriptReinitSequence(FakeSpiBus* bus, const Tmc5160Config& cfg,
 // version-gate test stops exactly at IOIN, not "eventually, somehow".
 constexpr std::size_t kFullReinitExpectationCount = 23;
 
-void ScriptHealthyReinit(FakeSpiBus* bus, const Tmc5160Config& cfg) {
-  ScriptReinitSequence(bus, cfg, /*ioin_version_byte=*/0x30);
+void ScriptHealthyReinit(FakeSpiBus* bus, const Tmc5160Config& cfg,
+                         std::uint8_t toff = 0) {
+  ScriptReinitSequence(bus, cfg, /*ioin_version_byte=*/0x30, /*ioin_pin_bits=*/0, toff);
 }
 
 std::unique_ptr<Tmc5160Driver> MakeHealthyDriver(FakeSpiBus* bus,
@@ -604,8 +611,7 @@ void TestChipResetAtIdleIsRecoveredByPoll() {
   // chopper restored (bench 2026-08-29: M1's chip reset right after its
   // move ended and sat with TOFF=0, holding nothing).
   ExpectRead(&bus, kRegGSTAT, 0x1U);
-  ScriptHealthyReinit(&bus, cfg);
-  ExpectWrite(&bus, kRegCHOPCONF, Chopconf(cfg.microstep, /*toff=*/3));
+  ScriptHealthyReinit(&bus, cfg, /*toff=*/3);  // enabled: chopper restored by the reinit itself
   assert(driver->Poll());
   assert(bus.mismatch_count() == 0);
   assert(bus.remaining_expectations() == 0);
@@ -629,8 +635,7 @@ void TestChipResetMidMoveIsRecoveredWithinTheCheckInterval() {
     assert(driver->Step(true));
   }
   ExpectRead(&bus, kRegGSTAT, 0x1U);
-  ScriptHealthyReinit(&bus, cfg);
-  ExpectWrite(&bus, kRegCHOPCONF, Chopconf(4, /*toff=*/3));
+  ScriptHealthyReinit(&bus, cfg, /*toff=*/3);  // enabled: chopper restored by the reinit itself
   ExpectWrite(&bus, kRegXTARGET, 64U);
   assert(driver->Step(true));
   assert(bus.mismatch_count() == 0);
@@ -638,6 +643,22 @@ void TestChipResetMidMoveIsRecoveredWithinTheCheckInterval() {
   assert(driver->target() == 64);
   assert(driver->reset_count() == 1);
   assert(driver->enabled());
+}
+
+// A disabled motor must come out of (re)initialisation with the chopper
+// OFF: on the motor-1 module EN does not reach DRV_ENN, so TOFF is the only
+// thing keeping its power stage de-energised at boot and after every CHECK.
+void TestReinitializeKeepsChopperOffWhileDisabled() {
+  FakeSpiBus bus;
+  Tmc5160Config cfg;
+  auto driver = MakeHealthyDriver(&bus, cfg);   // constructor: disabled -> TOFF=0 scripted
+  assert(bus.mismatch_count() == 0);
+  ScriptHealthyReinit(&bus, cfg, /*toff=*/0);
+  assert(driver->ActiveCheck());                // CHECK while disabled
+  assert(bus.mismatch_count() == 0);
+  assert(bus.remaining_expectations() == 0);
+  // MUTATION: hard-code toff=3 in ReinitializeUnlocked and confirm this
+  // test fails on mismatch_count.
 }
 
 // ---------------------------------------------------------------------
@@ -928,6 +949,7 @@ int main() {
   TestStepHonoursInvertDirection();
   TestEnableFalseFreezesInOrder();
   TestEnableFalseDetectsIneffectiveEnableLine();
+  TestReinitializeKeepsChopperOffWhileDisabled();
   TestChipResetOnEnableIsRecovered();
   TestChipResetAtIdleIsRecoveredByPoll();
   TestChipResetMidMoveIsRecoveredWithinTheCheckInterval();
