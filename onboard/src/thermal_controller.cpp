@@ -14,10 +14,15 @@ ThermalController::ThermalController(const OnboardConfig& config)
   sample_pids_.reserve(config_.hardware.heater_count);
   // The PID output ceiling IS heater.max_duty (not a fixed 1.0) so the
   // anti-windup clamp stays consistent with the power the loop is actually
-  // allowed to command.
+  // allowed to command. The integral bound is a wide numeric backstop, not
+  // the anti-windup mechanism: holding a target at zero error is the
+  // integrator's job (equilibrium duty = ki x integral, e.g. 0.5 duty at
+  // ki=0.02 needs 25 error-seconds), so a tight clamp would reintroduce
+  // steady-state droop. Windup during the saturated ramp-up is prevented
+  // structurally by PidController's conditional integration instead.
   for (std::size_t i = 0; i < config_.hardware.heater_count; ++i) {
     sample_pids_.emplace_back(PidGains{config.pid.kp, config.pid.ki, config.pid.kd},
-                              0.0, config.heaters.max_duty, -10.0, 10.0);
+                              0.0, config.heaters.max_duty, -1000.0, 1000.0);
   }
 }
 
@@ -179,14 +184,16 @@ std::vector<double> ThermalController::ComputeRequestedDuty(
       active_targets_c_[i] = target;
 
       if (explicit_target) {
-        if (measured >= target) {
-          sample_heating_[i] = false;
-          sample_pids_[i].Reset();
-          duty[i] = 0.0;
-        } else {
-          sample_heating_[i] = true;
-          duty[i] = sample_pids_[i].Update(target, measured, dt_seconds);
-        }
+        // The PID runs on BOTH sides of the target: above it the negative
+        // error drives the output down (clamped at 0) and un-winds the
+        // integrator; AT the target the integral term holds the
+        // equilibrium duty that balances the losses. The previous
+        // `measured >= target -> duty 0 + Reset()` cut-off erased that
+        // equilibrium every time it was reached, so the loop could never
+        // settle — it sawed between full reheat and coast-down (bench
+        // 2026-08-30, owner report).
+        duty[i] = sample_pids_[i].Update(target, measured, dt_seconds);
+        sample_heating_[i] = duty[i] > 0.0;
       } else {
         const double on_threshold = target - kFloorHysteresisC;
         const double off_threshold = target;
