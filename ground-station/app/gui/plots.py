@@ -171,8 +171,11 @@ class TimePlot(QWidget):
             stamp = datetime.fromtimestamp(pt.x(), tz=timezone.utc).strftime("%H:%M:%SZ")
         except (OSError, OverflowError, ValueError):
             stamp = "—"
-        elapsed = format_elapsed(abs(pt.x() - self.axis.t0)) if self.axis.t0 is not None else "—"
-        parts.append(f"T+{elapsed} · {stamp}")
+        if self.axis.t0 is not None:
+            sign = "T+" if pt.x() >= self.axis.t0 else "T-"
+            parts.append(f"{sign}{format_elapsed(abs(pt.x() - self.axis.t0))} · {stamp}")
+        else:
+            parts.append(f"T+— · {stamp}")
         for name in self._curves:
             value = self._store.last_before(name, pt.x())
             if value is not None and np.isfinite(value):

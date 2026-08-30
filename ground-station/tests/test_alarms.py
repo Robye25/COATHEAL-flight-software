@@ -115,6 +115,19 @@ class ModelTests(unittest.TestCase):
     # MUTATION: remove the loop that deletes cleared keys from self._acked
     # in AlarmModel.update and confirm the "returning condition" assertion fails.
 
+    def test_ack_dies_on_severity_escalation(self) -> None:
+        # Acknowledging the amber ≥120 °C pre-warning must NOT pre-dim the
+        # later RED shutdown alarm on the same key — the escalation re-raises
+        # as new (beep + event-log line).
+        model = AlarmModel()
+        model.update(state(m1="mv:0|therm:warn"))
+        model.acknowledge("M1_TEMP")
+        alarms = {a.key: a for a in model.update(state(m1="mv:0|therm:warn"))}
+        self.assertTrue(alarms["M1_TEMP"].acked, "same severity stays acked")
+        alarms = {a.key: a for a in model.update(state(m1="mv:0|therm:hot"))}
+        self.assertFalse(alarms["M1_TEMP"].acked, "red escalation must not inherit the amber ack")
+        self.assertIn("M1_TEMP", model.new_keys, "escalation must re-raise as new (beep/log)")
+
     def test_ack_all(self) -> None:
         model = AlarmModel()
         model.update(state(status="SD_FAIL|OVERTEMP_FAIL"))

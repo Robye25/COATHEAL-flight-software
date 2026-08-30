@@ -1044,7 +1044,14 @@ int SystemController::Run() {
           ps.start_pos = s.position_steps;
         } else if (ps.lock_held && !lock_held_now) {
           // Falling edge: pull completed; motor released the lock in
-          // StepperChannel::Tick once the retract leg finished.
+          // StepperChannel::Tick once the retract leg finished. A release
+          // by the thermal safety is an ABORT, not a completion — do not
+          // record it as a pull or feed the resistance simulator.
+          if (s.last_source == "safety:OVERTEMP") {
+            ps.lock_held = false;
+            ps.was_moving = false;
+            continue;
+          }
           HeatingPullEvent pev;
           pev.pull_id = next_pull_id_++;
           pev.motor_id = static_cast<int>(i);
@@ -1052,6 +1059,7 @@ int SystemController::Run() {
           pev.steps_moved = s.position_steps - ps.start_pos;
           pev.hold_s = s.hold_remaining_s;
           pev.samples = stepper_->SamplesForMotor(static_cast<int>(i));
+          pev.microstep = s.microstep;
 
           const std::string evt_line =
               SerializeTelemetryPullEventFrame(pev, telemetry_client_.session_id());
