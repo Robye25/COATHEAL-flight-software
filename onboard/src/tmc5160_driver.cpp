@@ -868,6 +868,10 @@ std::string Tmc5160Driver::DebugRegisters() {
 }
 
 std::string Tmc5160Driver::warning() const {
+  // The thermal fields (and reset_count_/enable_line_effective_) are
+  // written under io_mu_ from the pulse thread; reading them unlocked from
+  // the CHECK handler is a data race.
+  std::lock_guard<std::mutex> lock(io_mu_);
   std::string text;
   if (!enable_line_effective_) {
     text = "enable line " + std::to_string(cfg_.enable_line) +

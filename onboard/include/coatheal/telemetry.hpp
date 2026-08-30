@@ -108,11 +108,17 @@ struct HeatingPullEvent {
   std::int64_t steps_moved = 0;       // signed, = final_pos - start_pos
   double hold_s = 0.0;                // time held at target
   std::vector<std::size_t> samples;   // specimen indices the pull covered
+  // Microstep divisor the pull ran at: steps_moved is in µsteps at THIS
+  // divisor, so mm reconstruction on the ground must use it, not the live
+  // one. Appended as a trailing wire field (old parsers ignore it).
+  int microstep = 4;
 };
 
 // Format: EVT,PULL,<session_id>,<pull_id>,<motor_id>,<start_ts>,
-//         <steps_moved>,<hold_s>,<samples>
+//         <steps_moved>,<hold_s>,<samples>,<microstep>
 // where <samples> is pipe-separated ("0|1|2|3"); empty samples => "-".
+// <microstep> (2026-08-30) trails so pre-existing parsers, which require
+// only >= 9 comma fields, keep working.
 std::string SerializeTelemetryPullEventFrame(const HeatingPullEvent& event,
                                              const std::string& session_id);
 

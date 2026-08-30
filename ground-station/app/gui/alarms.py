@@ -106,7 +106,7 @@ class AlarmModel:
     """Keeps acknowledgement state across evaluations."""
 
     def __init__(self) -> None:
-        self._acked: Dict[str, str] = {}   # key -> text it was acked with
+        self._acked: Dict[str, str] = {}   # key -> severity it was acked at
         self._previous: Dict[str, Alarm] = {}
         self._new_keys: List[str] = []
 
@@ -115,9 +115,15 @@ class AlarmModel:
         current: Dict[str, Alarm] = {}
         self._new_keys = []
         for alarm in raw:
-            acked = alarm.key in self._acked
+            # An ack applies to the severity it was given at: when an alarm
+            # escalates (amber pre-warning -> red), the ack dies and the
+            # alarm re-raises as new so it beeps and hits the event log.
+            acked = self._acked.get(alarm.key) == alarm.severity
+            if not acked and alarm.key in self._acked:
+                del self._acked[alarm.key]
             current[alarm.key] = Alarm(alarm.key, alarm.text, alarm.severity, acked)
-            if alarm.key not in self._previous:
+            prev = self._previous.get(alarm.key)
+            if prev is None or prev.severity != alarm.severity:
                 self._new_keys.append(alarm.key)
         # Acknowledgements die with the condition they acknowledged.
         for key in list(self._acked):
@@ -130,7 +136,7 @@ class AlarmModel:
         alarm = self._previous.get(key)
         if alarm is None:
             return
-        self._acked[key] = alarm.text
+        self._acked[key] = alarm.severity
         # Reflect it immediately (not only on the next update) so the
         # strip repaints the chip dimmed on the click that acked it.
         self._previous[key] = Alarm(alarm.key, alarm.text, alarm.severity, True)

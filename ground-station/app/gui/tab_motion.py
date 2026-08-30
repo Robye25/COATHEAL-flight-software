@@ -99,6 +99,7 @@ class MotorCard(QFrame):
 
     def update_card(self, motor: MotorState, readout) -> None:
         if not motor.present:
+            self.thermal_note.hide()
             for dot in self.dots.values():
                 dot.set_color(GRAY)
             for lbl in (self.pos, self.speed, self.src, self.seq, self.r_now, self.r_start, self.r_delta):
@@ -188,7 +189,7 @@ class MotionTab(QScrollArea):
         self._disp = dispatcher
         self.state = OnboardState()
         self.tracker = BendTracker()
-        self._pulls: Deque[PullEvent] = deque(maxlen=3)
+        self._pulls: Deque[tuple] = deque(maxlen=3)  # (PullEvent, mm frozen at arrival)
 
         inner = QWidget(); self.setWidget(inner)
         outer = QVBoxLayout(inner); outer.setContentsMargins(6, 6, 6, 6); outer.setSpacing(8)
@@ -405,15 +406,20 @@ class MotionTab(QScrollArea):
         self.bend_note.setText(f"BEND / STANDARD PULL disabled: {bend_reason}" if bend_reason else "")
 
     def on_pull_event(self, ev: PullEvent) -> None:
-        self._pulls.appendleft(ev)
-        for lbl, pull in zip(self.pull_lines, list(self._pulls) + [None] * 3):
-            if pull is None:
+        # Freeze the mm value at arrival: steps_moved is in µsteps at the
+        # divisor the PULL ran at (carried in the event since 2026-08-30;
+        # live divisor is the fallback for old firmware). Re-deriving on
+        # render would silently rewrite history after STEPPER_SET_MICROSTEP.
+        us = ev.microstep or self.state.motor(ev.motor_id).microstep or 4
+        mm = ev.steps_moved / (200.0 * us / 2.0)
+        self._pulls.appendleft((ev, mm))
+        for lbl, entry in zip(self.pull_lines, list(self._pulls) + [None] * 3):
+            if entry is None:
                 lbl.setText("—"); continue
+            pull, pull_mm = entry
             samples = "|".join(str(s) for s in pull.samples) or "-"
-            us = self.state.motor(pull.motor_id).microstep or 4
-            mm = pull.steps_moved / (200.0 * us / 2.0)
             lbl.setText(f"{pull.start_ts[11:19] if len(pull.start_ts) > 18 else pull.start_ts}  M{pull.motor_id}  "
-                        f"pull #{pull.pull_id}  {mm:+.2f} mm  hold {pull.hold_s:.1f} s  S{samples}")
+                        f"pull #{pull.pull_id}  {pull_mm:+.2f} mm  hold {pull.hold_s:.1f} s  S{samples}")
             lbl.setStyleSheet(f"{MONO_CSS} font-size: 9pt; color: {MOTOR_COLORS[pull.motor_id % 2]};")
 
     def on_response(self, cmd: str, resp: CommandResponse, ms: float, tag) -> None:

@@ -551,9 +551,11 @@ class PullEvent:
 
     Wire format (newline-terminated):
         EVT,PULL,<session>,<pull_id>,<motor_id>,<start_ts>,<steps_moved>,
-            <hold_s>,<samples>
+            <hold_s>,<samples>[,<microstep>]
     where <samples> is pipe-separated specimen indices (e.g. ``0|1|2|3``)
-    or ``-`` for no specimens.
+    or ``-`` for no specimens. <microstep> (added 2026-08-30) is the
+    divisor the pull ran at — steps_moved is in µsteps at THAT divisor, so
+    mm reconstruction must use it; None on old firmware.
     """
 
     session_id: str
@@ -563,6 +565,7 @@ class PullEvent:
     steps_moved: int
     hold_s: float
     samples: List[int] = field(default_factory=list)
+    microstep: Optional[int] = None
 
 
 def parse_pull_event(line: str) -> PullEvent:
@@ -590,6 +593,7 @@ def parse_pull_event(line: str) -> PullEvent:
             start_ts=parts[5],
             steps_moved=int(parts[6]),
             hold_s=float(parts[7]),
+            microstep=int(parts[9]) if len(parts) > 9 and parts[9] else None,
             samples=samples,
         )
     except ValueError as exc:

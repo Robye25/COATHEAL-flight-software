@@ -199,7 +199,7 @@ std::string SerializeTelemetryPullEventFrame(const HeatingPullEvent& event,
   oss << "EVT,PULL," << session_id << ',' << event.pull_id << ',' << event.motor_id
       << ',' << event.start_ts << ',' << event.steps_moved << ','
       << std::fixed << std::setprecision(2) << event.hold_s << ','
-      << samples.str();
+      << samples.str() << ',' << event.microstep;
   return oss.str();
 }
 

@@ -56,6 +56,10 @@ class EventsPanel(QWidget):
         ts = time.strftime("%H:%M:%SZ", time.gmtime())
         self._lines.append((ts, level, line))
         if len(self._lines) > MAX_LINES:
+            # Log FIRST: the early return must never cost the flight record
+            # an event, only the incremental on-screen append.
+            if self._sink is not None:
+                self._sink(level, line)
             del self._lines[:500]  # trim in batches; a per-line rebuild is O(n) per event
             self._rebuild()
             return
