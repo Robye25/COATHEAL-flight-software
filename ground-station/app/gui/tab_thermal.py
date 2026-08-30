@@ -1,14 +1,14 @@
 """Thermal tab: budget header, six heater rows, all-channel targets,
-presets (redesign spec §5.3). PID tuning and open-loop duty live in the
-Advanced tab."""
+presets, PID autotune (redesign spec §5.3). Manual PID gains and
+open-loop duty live in the Advanced tab."""
 from __future__ import annotations
 
 from typing import Dict, List, Optional
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QAbstractSpinBox, QComboBox, QDoubleSpinBox, QGridLayout, QHBoxLayout, QInputDialog, QLabel,
-    QProgressBar, QScrollArea, QVBoxLayout, QWidget,
+    QProgressBar, QScrollArea, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from ..protocol import CommandResponse, validate_temperature_target
@@ -191,7 +191,47 @@ class ThermalTab(QScrollArea):
         self.resp_preset = ResponseLine()
         lay.addWidget(self.resp_preset)
         outer.addWidget(frame)
+
+        # -- PID autotune (relay / Åström–Hägglund, runs onboard) ----------
+        frame, lay = group_box("PID autotune (relay, onboard)")
+        self.tune_heater = QComboBox()
+        for i in range(HEATER_COUNT):
+            self.tune_heater.addItem(f"H{i}", i)
+        self.tune_setpoint = QDoubleSpinBox(); self.tune_setpoint.setRange(0.0, 80.0)
+        self.tune_setpoint.setDecimals(1); self.tune_setpoint.setValue(40.0); self.tune_setpoint.setSuffix(" °C")
+        self.tune_duty = QDoubleSpinBox(); self.tune_duty.setRange(0.05, 1.0)
+        self.tune_duty.setDecimals(2); self.tune_duty.setSingleStep(0.05); self.tune_duty.setValue(0.5)
+        self.tune_cycles = QSpinBox(); self.tune_cycles.setRange(1, 10); self.tune_cycles.setValue(4)
+        hl = QLabel("relay duty"); hl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
+        cl = QLabel("cycles"); cl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
+        lay.addWidget(hrow(self.tune_heater, self.tune_setpoint, hl, self.tune_duty, cl, self.tune_cycles))
+        self.btn_tune_start = make_button("START TUNE", "success",
+                                          sends="PID_TUNE_START <heater> <setpoint_c> <relay_duty> <cycles>",
+                                          min_height=26, slot=self._tune_start)
+        self.btn_tune_abort = make_button("ABORT", "danger", sends="PID_TUNE_ABORT", min_height=26,
+                                          slot=lambda: self._send("PID_TUNE_ABORT"))
+        self.btn_tune_apply = make_button("APPLY GAINS", "primary", sends="SET_PID <heater> <kp> <ki> <kd>",
+                                          min_height=26, slot=self._tune_apply)
+        lay.addWidget(hrow(self.btn_tune_start, self.btn_tune_abort, self.btn_tune_apply))
+        note = QLabel("Bangs the heater between 0 and the relay duty around the setpoint, measures the induced "
+                      "oscillation (Ku, Tu) and suggests Tyreus–Luyben gains. Takes exclusive heater control; "
+                      "several minutes per channel. APPLY sends SET_PID for the tuned heater — save a preset after.")
+        note.setWordWrap(True); note.setMinimumWidth(1); note.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
+        lay.addWidget(note)
+        self.tune_status = QLabel("idle")
+        self.tune_status.setWordWrap(True); self.tune_status.setMinimumWidth(1)
+        self.tune_status.setStyleSheet(f"{MONO_CSS} color: {MUTED};")
+        lay.addWidget(self.tune_status)
+        self.resp_tune = ResponseLine()
+        lay.addWidget(self.resp_tune)
+        outer.addWidget(frame)
         outer.addStretch()
+
+        self._tune_result: Optional[Dict[str, str]] = None
+        self._tune_timer = QTimer(self)
+        self._tune_timer.setInterval(3000)
+        self._tune_timer.timeout.connect(self._tune_poll)
+        self._disp.quiet_response.connect(self._on_tune_quiet)
 
         self._capture_pending: Optional[str] = None
         self.refresh_presets()
@@ -219,6 +259,63 @@ class ThermalTab(QScrollArea):
         for row in self.rows:
             row.target.setValue(self.all_target.value())
         self._send(f"SET_ALL_TEMP_TARGETS {norm}")
+
+    # -- PID autotune ------------------------------------------------------------
+    def _tune_start(self) -> None:
+        heater = int(self.tune_heater.currentData() or 0)
+        self._tune_result = None
+        self.btn_tune_apply.set_reason("no tune result yet")
+        self._send(f"PID_TUNE_START {heater} {self.tune_setpoint.value():g} "
+                   f"{self.tune_duty.value():g} {self.tune_cycles.value()}")
+        self._tune_timer.start()
+        self._tune_poll()
+
+    def _tune_poll(self) -> None:
+        if self._disp.silence:
+            self._tune_timer.stop()
+            return
+        self._disp.send("PID_TUNE_STATUS", tag=self, quiet=True)
+
+    def _on_tune_quiet(self, cmd: str, resp: CommandResponse, ms: float, tag) -> None:
+        if tag is not self or not cmd.upper().startswith("PID_TUNE_STATUS"):
+            return
+        if not resp.ok:
+            self.tune_status.setText(soft_breaks(f"status error: {resp.error or resp.raw}"))
+            return
+        kv = parse_kv_body(resp.body)
+        state = kv.get("state", "?")
+        if state == "running":
+            self.tune_status.setText(soft_breaks(
+                f"RUNNING on H{kv.get('heater', '?')} · setpoint {kv.get('setpoint_c', '?')} °C · "
+                f"relay {kv.get('relay', '?')} at {kv.get('relay_duty', '?')} duty · "
+                f"cycle {kv.get('cycles', '?')} · {kv.get('elapsed_s', '?')} s"))
+            self.tune_status.setStyleSheet(f"{MONO_CSS} color: {AMBER};")
+        elif state == "done":
+            self._tune_timer.stop()
+            self._tune_result = kv
+            self.btn_tune_apply.set_reason(None)
+            self.tune_status.setText(soft_breaks(
+                f"DONE H{kv.get('heater', '?')}: kp={kv.get('kp', '?')} ki={kv.get('ki', '?')} "
+                f"kd={kv.get('kd', '?')}  (Ku={kv.get('ku', '?')}, Tu={kv.get('tu_s', '?')} s, "
+                f"a=±{kv.get('amplitude_c', '?')} °C; Z-N alt: kp={kv.get('zn_kp', '?')} "
+                f"ki={kv.get('zn_ki', '?')} kd={kv.get('zn_kd', '?')}) — APPLY GAINS, then save a preset"))
+            self.tune_status.setStyleSheet(f"{MONO_CSS} color: {GREEN};")
+        elif state == "failed":
+            self._tune_timer.stop()
+            self.tune_status.setText(soft_breaks(f"FAILED: {kv.get('error', 'unknown reason')}"))
+            self.tune_status.setStyleSheet(f"{MONO_CSS} color: {RED};")
+        else:
+            self._tune_timer.stop()
+            self.tune_status.setText("idle")
+            self.tune_status.setStyleSheet(f"{MONO_CSS} color: {MUTED};")
+
+    def _tune_apply(self) -> None:
+        kv = self._tune_result
+        if not kv:
+            self.resp_tune.show_note("✖ no tune result to apply", RED)
+            return
+        heater = kv.get("heater", "0")
+        self._send(f"SET_PID {heater} {kv.get('kp')} {kv.get('ki')} {kv.get('kd')}")
 
     # -- presets -----------------------------------------------------------------
     def refresh_presets(self) -> None:
@@ -286,6 +383,17 @@ class ThermalTab(QScrollArea):
             duty = state.heater_duty[row.index] if state.have_packet else 0.0
             row.update_row(temp, duty, self._targets[row.index], inhibited, gating.heater_reason(state, row.index))
         self.btn_set_all.set_reason(gating.all_heaters_reason(state))
+        tune_ch = int(self.tune_heater.currentData() or 0)
+        if state.tune_channel:
+            self.btn_tune_start.set_reason(f"tune already running on {state.tune_channel}")
+            if not self._tune_timer.isActive() and not self._disp.silence:
+                self._tune_timer.start()  # e.g. console restarted mid-tune
+            self.btn_tune_abort.set_reason(gating.generic_reason(state))
+        else:
+            self.btn_tune_start.set_reason(gating.heater_reason(state, tune_ch))
+            self.btn_tune_abort.set_reason("no tune running")
+        if self._tune_result is None:
+            self.btn_tune_apply.set_reason("no tune result yet")
         for btn in (self.btn_clear_all, self.btn_refresh, self.btn_apply_preset, self.btn_capture):
             btn.set_reason(gating.generic_reason(state))
         if state.have_packet:
@@ -312,6 +420,9 @@ class ThermalTab(QScrollArea):
         if verb == "GET_THERMAL" and resp.ok:
             self._absorb_get_thermal(resp.body)
         if tag is not self:
+            return
+        if verb.startswith("PID_TUNE") or (verb == "SET_PID" and self._tune_result is not None):
+            self.resp_tune.show_response(cmd, resp, ms)
             return
         if verb in ("SET_TEMP_TARGET", "CLEAR_TEMP_TARGET"):
             self.resp_heaters.show_response(cmd, resp, ms)

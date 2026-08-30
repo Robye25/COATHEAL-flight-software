@@ -70,6 +70,12 @@ std::string CommandTypeToString(CommandType type) {
       return "HEATER_TEST";
     case CommandType::kSetPid:
       return "SET_PID";
+    case CommandType::kPidTuneStart:
+      return "PID_TUNE_START";
+    case CommandType::kPidTuneAbort:
+      return "PID_TUNE_ABORT";
+    case CommandType::kPidTuneStatus:
+      return "PID_TUNE_STATUS";
     case CommandType::kSetTempTarget:
       return "SET_TEMP_TARGET";
     case CommandType::kSetAllTempTargets:
@@ -212,6 +218,9 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
       {"SET_ALL_DUTY", CommandType::kSetAllDuty},
       {"HEATER_TEST", CommandType::kHeaterTest},
       {"SET_PID", CommandType::kSetPid},
+      {"PID_TUNE_START", CommandType::kPidTuneStart},
+      {"PID_TUNE_ABORT", CommandType::kPidTuneAbort},
+      {"PID_TUNE_STATUS", CommandType::kPidTuneStatus},
       {"SET_TEMP_TARGET", CommandType::kSetTempTarget},
       {"SET_ALL_TEMP_TARGETS", CommandType::kSetAllTempTargets},
       {"CLEAR_TEMP_TARGET", CommandType::kClearTempTarget},
@@ -368,7 +377,16 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
     case CommandType::kFallbackArm:
     case CommandType::kFallbackDisarm:
     case CommandType::kFallbackStatus:
+    case CommandType::kPidTuneAbort:
+    case CommandType::kPidTuneStatus:
       if (!require_args(0)) {
+        return result;
+      }
+      break;
+    case CommandType::kPidTuneStart:
+      // <heater> <setpoint_c> [relay_duty] [cycles]
+      if (command.args.size() < 2 || command.args.size() > 4) {
+        result.error = "invalid argument count for " + command.name;
         return result;
       }
       break;

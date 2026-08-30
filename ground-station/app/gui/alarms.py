@@ -68,6 +68,9 @@ def evaluate(state: OnboardState) -> List[Alarm]:
         if state.debug_armed:
             alarms.append(Alarm("DEBUG_ARM", "DEBUG ARM active — open-loop heater duty allowed "
                                              "without PT100 feedback (DISARM_DEBUG to end)", AMBER))
+        if state.tune_channel:
+            alarms.append(Alarm("PID_TUNE", f"PID autotune running on {state.tune_channel} — "
+                                            "heaters under tuner control (PID_TUNE_ABORT to stop)", AMBER))
         for motor_id in range(2):
             comp = state.component_state.get(f"MOTOR{motor_id}")
             if comp == "FAILED":

@@ -808,8 +808,73 @@ int SystemController::Run() {
     std::vector<double> requested_duty = thermal_controller_.ComputeRequestedDuty(
         phase, snapshot, tick_duration.count(), effective_control);
     bool debug_heat_requested = false;
+    bool tune_active = false;
+    int tune_channel_now = -1;
+    double tune_duty_now = 0.0;
     {
+      // Relay PID auto-tune: while running it owns the heaters outright —
+      // its relay duty replaces every requested duty (other channels 0) so
+      // nothing disturbs the limit cycle it is measuring. Every gate that
+      // could invalidate the measurement or the safety envelope aborts it.
       std::lock_guard<std::mutex> lock(overrides_mu_);
+      if (pid_tuner_.active()) {
+        const int ch = tune_channel_;
+        const std::size_t sample =
+            ch >= 0 &&
+                    static_cast<std::size_t>(ch) <
+                        config_.heaters.temperature_channels.size()
+                ? config_.heaters.temperature_channels[ch]
+                : static_cast<std::size_t>(ch);
+        const bool temp_valid =
+            sample < snapshot.sample_temps_c.size() &&
+            (snapshot.sample_temp_valid.empty() ||
+             (sample < snapshot.sample_temp_valid.size() &&
+              snapshot.sample_temp_valid[sample]));
+        const double temp =
+            temp_valid ? snapshot.sample_temps_c[sample] : 0.0;
+        const auto latched = thermal_controller_.channel_latched();
+        if (current_mode != SystemMode::kRun) {
+          pid_tuner_.Abort("left RUN mode");
+        } else if (link_loss_fallback_active_) {
+          pid_tuner_.Abort("link-loss fallback engaged");
+        } else if (control_overrides.heaters_off) {
+          pid_tuner_.Abort("heaters commanded off");
+        } else if (ch >= 0 && static_cast<std::size_t>(ch) < latched.size() &&
+                   latched[ch]) {
+          pid_tuner_.Abort("overtemp latch tripped");
+        }
+        const double now_s = std::chrono::duration<double>(
+                                 tick_start.time_since_epoch())
+                                 .count();
+        const double duty = pid_tuner_.Tick(temp_valid, temp, now_s);
+        if (pid_tuner_.active()) {
+          std::fill(requested_duty.begin(), requested_duty.end(), 0.0);
+          if (ch >= 0 &&
+              static_cast<std::size_t>(ch) < requested_duty.size()) {
+            requested_duty[ch] = duty;
+          }
+          tune_commanded_duty_ = duty;
+          tune_active = true;
+          tune_channel_now = ch;
+          tune_duty_now = duty;
+        }
+      }
+      if (!tune_result_logged_ &&
+          (pid_tuner_.state() == PidAutoTuner::State::kDone ||
+           pid_tuner_.state() == PidAutoTuner::State::kFailed)) {
+        tune_result_logged_ = true;
+        if (pid_tuner_.state() == PidAutoTuner::State::kDone) {
+          const auto& r = pid_tuner_.result();
+          std::cerr << "[pid-tune] H" << tune_channel_ << " done: Ku=" << r.ku
+                    << " Tu=" << r.tu_s << "s a=" << r.amplitude_c
+                    << "C -> TL kp=" << r.kp << " ki=" << r.ki
+                    << " kd=" << r.kd << " (ZN kp=" << r.zn_kp
+                    << " ki=" << r.zn_ki << " kd=" << r.zn_kd << ")\n";
+        } else {
+          std::cerr << "[pid-tune] H" << tune_channel_
+                    << " FAILED: " << pid_tuner_.error() << '\n';
+        }
+      }
       if (heater_test_.active) {
         const bool motion_active =
             active_motion_lock_ != nullptr && active_motion_lock_->holder() != -1;
@@ -850,14 +915,14 @@ int SystemController::Run() {
                     [](const std::optional<double>& value) {
                       return value.has_value();
                     }) ||
-        debug_heat_requested;
+        debug_heat_requested || tune_active;
     const bool bench_open_loop_active =
         heaters_allowed &&
         config_.runtime.bench_mode &&
         debug_armed_.load() &&
         control_overrides.bench_open_loop_heaters;
     std::vector<double> scheduled_duty;
-    if (bench_open_loop_active) {
+    if (bench_open_loop_active && !tune_active) {
       scheduled_duty = requested_duty;
       for (double& duty : scheduled_duty) {
         duty = std::clamp(duty, 0.0, 1.0);
@@ -867,6 +932,13 @@ int SystemController::Run() {
           requested_duty,
           heaters_allowed && (any_flying_phase || manual_heat_requested),
           tick_duration.count());
+    }
+    if (tune_active && tune_channel_now >= 0 &&
+        static_cast<std::size_t>(tune_channel_now) < scheduled_duty.size() &&
+        scheduled_duty[tune_channel_now] + 1e-9 < tune_duty_now) {
+      std::lock_guard<std::mutex> lock(overrides_mu_);
+      pid_tuner_.Abort(
+          "scheduler clamped the tune duty (motion inhibit or power budget)");
     }
     COATHEAL_PERF_STAMP(perf_ts[5]);  // stage 4: heater scheduler
 
@@ -971,6 +1043,8 @@ int SystemController::Run() {
     // Effective arm: ARM_DEBUG requires bench_mode, and every debug gate
     // re-checks both, so report what the gates will actually honour.
     record.ctrl.debug_armed = config_.runtime.bench_mode && debug_armed_.load();
+    record.ctrl.tune =
+        tune_active ? ("H" + std::to_string(tune_channel_now)) : "-";
 
     const std::string line = SerializeTelemetryDataFrame(record, telemetry_client_.session_id());
     COATHEAL_PERF_STAMP(perf_ts[7]);  // stage 6: build+serialize telemetry
@@ -1268,6 +1342,12 @@ std::string SystemController::HandleCommandLine(const std::string& line,
 
   auto require_debug_arm = [&]() -> bool {
     return config_.runtime.bench_mode && debug_armed_.load();
+  };
+  // While the relay auto-tune owns the heaters, competing heat commands
+  // would corrupt its measurement — they are refused, not queued.
+  auto tune_running = [&]() -> bool {
+    std::lock_guard<std::mutex> lock(overrides_mu_);
+    return pid_tuner_.active();
   };
 
   auto set_state_override = [&](auto fn) {
@@ -1641,6 +1721,9 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       if (mode_.load() != SystemMode::kRun) {
         return Nack(cmd_name, "RUN mode required");
       }
+      if (tune_running()) {
+        return Nack(cmd_name, "PID tune running; PID_TUNE_ABORT first");
+      }
       std::size_t index = 0;
       double duty = 0.0;
       if (!ParseIndex(command.args[0], &index) || !ParseDouble(command.args[1], &duty)) {
@@ -1678,6 +1761,9 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       if (mode_.load() != SystemMode::kRun) {
         return Nack(cmd_name, "RUN mode required");
       }
+      if (tune_running()) {
+        return Nack(cmd_name, "PID tune running; PID_TUNE_ABORT first");
+      }
       double duty = 0.0;
       if (!ParseDouble(command.args[0], &duty)) {
         return Nack(cmd_name, "invalid duty");
@@ -1712,6 +1798,9 @@ std::string SystemController::HandleCommandLine(const std::string& line,
     case CommandType::kHeaterTest: {
       if (!require_debug_arm()) {
         return Nack(cmd_name, "bench debug arm required");
+      }
+      if (tune_running()) {
+        return Nack(cmd_name, "PID tune running; PID_TUNE_ABORT first");
       }
       if (mode_.load() != SystemMode::kRun) {
         return Nack(cmd_name, "RUN mode required");
@@ -1781,9 +1870,135 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       return Ack(cmd_name, "pid override applied");
     }
 
+    case CommandType::kPidTuneStart: {
+      if (mode_.load() != SystemMode::kRun) {
+        return Nack(cmd_name, "RUN mode required");
+      }
+      std::size_t index = 0;
+      double setpoint = 0.0;
+      if (!ParseIndex(command.args[0], &index) ||
+          index >= config_.hardware.heater_count) {
+        return Nack(cmd_name, "heater index out of range");
+      }
+      if (!ParseDouble(command.args[1], &setpoint) ||
+          setpoint < config_.heater_safety.target_min_c ||
+          setpoint > config_.heater_safety.target_max_c) {
+        return Nack(cmd_name, "setpoint outside heater target limits");
+      }
+      double relay_duty = 0.5;
+      if (command.args.size() >= 3 &&
+          (!ParseDouble(command.args[2], &relay_duty) || relay_duty <= 0.0 ||
+           relay_duty > 1.0)) {
+        return Nack(cmd_name, "relay duty must be in (0, 1]");
+      }
+      relay_duty = std::min(relay_duty, config_.heaters.max_duty);
+      std::size_t cycles = 4;
+      if (command.args.size() >= 4 &&
+          (!ParseIndex(command.args[3], &cycles) || cycles < 1 ||
+           cycles > 10)) {
+        return Nack(cmd_name, "cycles must be 1..10");
+      }
+      std::string reason;
+      if (!heater_temperature_valid(index, &reason)) {
+        return Nack(cmd_name, reason);
+      }
+      std::lock_guard<std::mutex> lock(overrides_mu_);
+      if (pid_tuner_.active()) {
+        return Nack(cmd_name, "tune already running on H" +
+                                  std::to_string(tune_channel_) +
+                                  "; PID_TUNE_ABORT first");
+      }
+      if (heater_test_.active) {
+        return Nack(cmd_name, "HEATER_TEST running");
+      }
+      const bool overrides_active =
+          control_overrides_.all_heaters_override.has_value() ||
+          (index < control_overrides_.heater_duty_overrides.size() &&
+           control_overrides_.heater_duty_overrides[index].has_value()) ||
+          (index < control_overrides_.temp_targets_c.size() &&
+           control_overrides_.temp_targets_c[index].has_value());
+      if (overrides_active) {
+        return Nack(cmd_name,
+                    "duty/target override active on that heater; "
+                    "CLEAR_OVERRIDES first");
+      }
+      const auto latched = thermal_controller_.channel_latched();
+      if (index < latched.size() && latched[index]) {
+        return Nack(cmd_name, "overtemp latch tripped; RESET_CTRL first");
+      }
+      PidAutoTuner::Config tcfg;
+      tcfg.setpoint_c = setpoint;
+      tcfg.relay_duty = relay_duty;
+      tcfg.cycles = static_cast<int>(cycles);
+      tcfg.abort_ceiling_c =
+          std::min(setpoint + 15.0,
+                   config_.heater_safety.max_sample_temp_c - 5.0);
+      tune_channel_ = static_cast<int>(index);
+      tune_result_logged_ = false;
+      pid_tuner_.Start(tcfg, std::chrono::duration<double>(
+                                 std::chrono::steady_clock::now()
+                                     .time_since_epoch())
+                                 .count());
+      std::ostringstream body;
+      body << "tuning H" << index << " around " << setpoint << " C, relay "
+           << relay_duty << ", " << cycles << " cycles";
+      return Ack(cmd_name, body.str());
+    }
+
+    case CommandType::kPidTuneAbort: {
+      std::lock_guard<std::mutex> lock(overrides_mu_);
+      if (!pid_tuner_.active()) {
+        return Nack(cmd_name, "no tune running");
+      }
+      pid_tuner_.Abort("aborted by operator");
+      return Ack(cmd_name, "tune aborted");
+    }
+
+    case CommandType::kPidTuneStatus: {
+      std::lock_guard<std::mutex> lock(overrides_mu_);
+      const double now_s = std::chrono::duration<double>(
+                               std::chrono::steady_clock::now()
+                                   .time_since_epoch())
+                               .count();
+      std::ostringstream body;
+      const char* state = "idle";
+      switch (pid_tuner_.state()) {
+        case PidAutoTuner::State::kIdle: state = "idle"; break;
+        case PidAutoTuner::State::kRunning: state = "running"; break;
+        case PidAutoTuner::State::kDone: state = "done"; break;
+        case PidAutoTuner::State::kFailed: state = "failed"; break;
+      }
+      body << "state=" << state;
+      if (pid_tuner_.state() != PidAutoTuner::State::kIdle) {
+        const auto& cfg = pid_tuner_.config();
+        body << ";heater=" << tune_channel_
+             << ";setpoint_c=" << cfg.setpoint_c
+             << ";relay_duty=" << cfg.relay_duty
+             << ";hysteresis_c=" << cfg.hysteresis_c
+             << ";cycles=" << pid_tuner_.cycles_done() << '/' << cfg.cycles
+             << ";relay=" << (pid_tuner_.relay_on() ? "on" : "off")
+             << ";elapsed_s=" << static_cast<int>(pid_tuner_.elapsed_s(now_s));
+      }
+      if (pid_tuner_.state() == PidAutoTuner::State::kDone) {
+        const auto& r = pid_tuner_.result();
+        body << ";ku=" << r.ku << ";tu_s=" << r.tu_s
+             << ";amplitude_c=" << r.amplitude_c
+             << ";kp=" << r.kp << ";ki=" << r.ki << ";kd=" << r.kd
+             << ";zn_kp=" << r.zn_kp << ";zn_ki=" << r.zn_ki
+             << ";zn_kd=" << r.zn_kd;
+      }
+      if (pid_tuner_.state() == PidAutoTuner::State::kFailed) {
+        body << ";error=" << SanitizeForReply(pid_tuner_.error());
+      }
+      return Ack(cmd_name, body.str());
+    }
+
     case CommandType::kSetTempTarget: {
       if (mode_.load() != SystemMode::kRun) {
         return Nack(cmd_name, "RUN mode required");
+      }
+      if (tune_running()) {
+        return Nack(cmd_name, "PID tune running; PID_TUNE_ABORT first");
       }
       std::size_t index = 0;
       double target = 0.0;
@@ -1815,6 +2030,9 @@ std::string SystemController::HandleCommandLine(const std::string& line,
     case CommandType::kSetAllTempTargets: {
       if (mode_.load() != SystemMode::kRun) {
         return Nack(cmd_name, "RUN mode required");
+      }
+      if (tune_running()) {
+        return Nack(cmd_name, "PID tune running; PID_TUNE_ABORT first");
       }
       double target = 0.0;
       if (!ParseDouble(command.args[0], &target) ||

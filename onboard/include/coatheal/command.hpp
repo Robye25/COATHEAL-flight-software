@@ -25,6 +25,12 @@ enum class CommandType {
   kSetAllDuty,
   kHeaterTest,
   kSetPid,
+  // Relay PID auto-tune sequence (bench commissioning):
+  // PID_TUNE_START <heater> <setpoint_c> [relay_duty] [cycles],
+  // PID_TUNE_ABORT, PID_TUNE_STATUS.
+  kPidTuneStart,
+  kPidTuneAbort,
+  kPidTuneStatus,
   kSetTempTarget,
   kSetAllTempTargets,
   kClearTempTarget,

@@ -80,12 +80,13 @@ Emitted after `COMPONENT_STATE` and before `STEPPER0`, every frame.
 | `heaters_active` | Number of heaters with a non-zero scheduled duty this tick (owner cap: 3) |
 | `queue` | Frames waiting in the durable telemetry queue before this one was enqueued (a backlog draining after a link outage) |
 | `plan` | Link-loss failsafe plan state: `none` (nothing loaded, or disarmed), `armed`, `running`, `done`, `failed` — see [Link-loss failsafe plan](#link-loss-failsafe-plan) |
+| `tune` | Active PID auto-tune channel (`H4`) or `-` when idle — the tuner owns the heaters while active. Added 2026-08-31 |
 | `debug` | `1` while the bench debug arm is active (`ARM_DEBUG` accepted and `runtime.bench_mode` on) — the console uses it to unlock open-loop duty controls on channels without valid PT100 feedback, matching what the onboard will accept. Added 2026-08-29 |
 
 Example:
 
 ```text
-CTRL=fallback:0|link_loss_s:0.0|energy_wh:12.40|budget_wh:130.0|budget_exhausted:0|heaters_active:2|queue:0|plan:none|debug:0
+CTRL=fallback:0|link_loss_s:0.0|energy_wh:12.40|budget_wh:130.0|budget_exhausted:0|heaters_active:2|queue:0|plan:none|debug:0|tune:-
 ```
 
 Never-valid values serialize as `nan`. After a failure, the last good value is
@@ -220,6 +221,9 @@ NACK,<COMMAND>,<reason>
 | `CLEAR_TEMP_TARGET` | `<index>` | Clear one target |
 | `CLEAR_TEMP_TARGETS` | none | Clear every target |
 | `SET_PID` | `<index\|ALL> <kp> <ki> <kd>` | Set non-negative PID gains |
+| `PID_TUNE_START` | `<heater> <setpoint_c> [relay_duty] [cycles]` | Start the relay (Åström–Hägglund) PID auto-tune on one heater: bangs it between 0 and `relay_duty` (default 0.5, clamped to `heater.max_duty`) around the setpoint, measures the limit cycle over `cycles` periods (default 4, 1..10) and computes Tyreus–Luyben gains (Ziegler–Nichols also reported). Requires RUN + valid PT100 on that channel + no latch + no duty/target override. Takes **exclusive** heater control (all other channels forced to 0); competing heater commands are NACKed until it ends. Aborts itself on: invalid reading, leaving RUN, link-loss fallback, HEATERS_OFF, overtemp latch, scheduler clamping (motion inhibit / power budget), ceiling `min(setpoint+15, max_sample_temp−5)`, or timeout |
+| `PID_TUNE_ABORT` | none | Abort the running tune (heater off) |
+| `PID_TUNE_STATUS` | none | `state=idle\|running\|done\|failed` plus progress (`heater`, `cycles a/b`, `relay`, `elapsed_s`); on `done` the measured `ku`/`tu_s`/`amplitude_c` and suggested `kp/ki/kd` (Tyreus–Luyben) + `zn_kp/zn_ki/zn_kd`; on `failed` the reason. Gains are **suggested only** — apply with `SET_PID` (the console's APPLY GAINS does this) |
 | `GET_THERMAL` | none | Return target, measured temperature, and duty for every heater |
 | `CLEAR_OVERRIDES` | none | Clear duty, target, and PID overrides |
 | `SET_POSITION_ZERO` | `<id>` | Set current physical position as software zero without motion |

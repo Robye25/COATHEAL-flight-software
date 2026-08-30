@@ -87,6 +87,8 @@ class OnboardState:
     # Bench debug arm (ARM_DEBUG) active onboard: unlocks open-loop duty on
     # channels without valid PT100 feedback. None: firmware predates the key.
     debug_armed: Optional[bool] = None
+    # Active PID auto-tune channel ("H4"); None when idle or old firmware.
+    tune_channel: Optional[str] = None
     # Ground-side facts.
     silence: bool = False
     link_age_s: Optional[float] = None
@@ -181,5 +183,6 @@ def state_from_packet(pkt: TelemetryPacket, *, silence: bool = False,
         budget_exhausted=pkt.budget_exhausted, heaters_active=pkt.heaters_active,
         queue_depth=pkt.queue_depth, plan_state=pkt.plan_state,
         debug_armed=pkt.debug_armed,
+        tune_channel=pkt.tune_channel,
         silence=silence, link_age_s=link_age_s,
     )

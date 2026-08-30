@@ -110,6 +110,13 @@ class DataFrameTests(unittest.TestCase):
         self.assertEqual(pkt.steppers[0]["motor_id"], 0)
         self.assertEqual(pkt.steppers[0]["position"], 1234)
 
+    def test_ctrl_tune_channel(self) -> None:
+        base = STEPPER_DATA.replace("STEPPER=", "CTRL=fallback:0|tune:H4,STEPPER=")
+        self.assertEqual(parse_telemetry_csv(base).tune_channel, "H4")
+        idle = STEPPER_DATA.replace("STEPPER=", "CTRL=fallback:0|tune:-,STEPPER=")
+        self.assertIsNone(parse_telemetry_csv(idle).tune_channel)
+        self.assertIsNone(parse_telemetry_csv(STEPPER_DATA).tune_channel)  # old firmware
+
     def test_stepper_drive_settings_keys(self) -> None:
         # 2026-08-29 drive-settings surface: amps/acc/mm/mm_tgt trail seqst.
         line = STEPPER_DATA.replace(
