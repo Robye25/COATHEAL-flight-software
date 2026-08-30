@@ -324,6 +324,28 @@ class ConsoleTabTests(unittest.TestCase):
         # Driver health line: thermal state leads (ot=0/otpw=0 in the body).
         self.assertIn("die < 120", debug.health.text())
 
+    # ── PID autotune ──
+    def test_pid_autotune_start_and_result_flow(self) -> None:
+        from app.protocol import CommandResponse
+        sent = []
+        self.win._dispatcher.send = lambda cmd, tag=None, timeout=None, quiet=False: sent.append((cmd, quiet))
+        thermal = self.win._thermal
+        self.feed()
+        thermal.tune_heater.setCurrentIndex(4)
+        thermal.tune_setpoint.setValue(40.0)
+        thermal._tune_start()
+        self.assertEqual(sent[0], ("PID_TUNE_START 4 40 0.5 4", False))
+        self.assertEqual(sent[1], ("PID_TUNE_STATUS", True), "status poll uses the quiet path")
+        done = CommandResponse(ok=True, command="PID_TUNE_STATUS",
+                               body="state=done;heater=4;setpoint_c=40;relay_duty=0.5;hysteresis_c=1;"
+                                    "cycles=4/4;relay=off;elapsed_s=300;ku=0.35;tu_s=14.2;amplitude_c=1.1;"
+                                    "kp=0.109;ki=0.0035;kd=0.246;zn_kp=0.21;zn_ki=0.03;zn_kd=0.37", raw="")
+        self.win._dispatcher.quiet_response.emit("PID_TUNE_STATUS", done, 3.0, thermal)
+        self.assertIn("kp=0.109", thermal.tune_status.text().replace("\u200b", ""))
+        self.assertIsNone(thermal.btn_tune_apply.reason(), "APPLY unlocks once a result exists")
+        thermal._tune_apply()
+        self.assertEqual(sent[-1][0], "SET_PID 4 0.109 0.0035 0.246")
+
     # ── alarms ──
     def test_alarm_strip_and_ack(self) -> None:
         self.feed(status="SD_OK|OVERTEMP_FAIL|SAMPLE_TEMP_OK")

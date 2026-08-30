@@ -192,6 +192,16 @@ target_link_libraries(coatheal_pwm_slice_tests PRIVATE coatheal_onboard_core)
 
 add_test(NAME coatheal_pwm_slice_tests COMMAND coatheal_pwm_slice_tests)
 
+# Relay PID auto-tuner tests: convergence, abort paths, and the tuned
+# gains closing the loop on the same simulated plant.
+add_executable(coatheal_pid_autotune_tests
+  unit/test_pid_autotune.cpp
+)
+
+target_link_libraries(coatheal_pid_autotune_tests PRIVATE coatheal_onboard_core)
+
+add_test(NAME coatheal_pid_autotune_tests COMMAND coatheal_pid_autotune_tests)
+
 # Sequent RTD HAT register-conversation tests. No hardware required.
 add_executable(coatheal_sequent_rtd_tests
   unit/test_sequent_rtd_adapter.cpp

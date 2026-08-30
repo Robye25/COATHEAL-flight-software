@@ -57,9 +57,10 @@ void AppendCtrlSegment(std::ostringstream& oss, const CtrlStatus& ctrl) {
       << "|heaters_active:" << ctrl.heaters_active
       << "|queue:" << ctrl.queue_depth
       << "|plan:" << (ctrl.plan.empty() ? std::string("none") : ctrl.plan)
-      // Appended last (2026-08-29) so older ground parsers, which ignore
-      // unknown keys, keep working.
-      << "|debug:" << (ctrl.debug_armed ? 1 : 0);
+      // Appended last (2026-08-29/31) so older ground parsers, which
+      // ignore unknown keys, keep working.
+      << "|debug:" << (ctrl.debug_armed ? 1 : 0)
+      << "|tune:" << (ctrl.tune.empty() ? std::string("-") : ctrl.tune);
 }
 
 }  // namespace

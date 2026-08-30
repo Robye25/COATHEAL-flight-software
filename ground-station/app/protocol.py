@@ -136,6 +136,13 @@ class TelemetryPacket:
         """Bench debug arm (ARM_DEBUG) active onboard. None: old firmware."""
         return self._ctrl_bool("debug")
 
+    @property
+    def tune_channel(self) -> Optional[str]:
+        """Active PID auto-tune channel ("H4") or None when idle / old
+        firmware."""
+        raw = self.ctrl.get("tune")
+        return raw if raw and raw != "-" else None
+
 
 class TelemetryParseError(ValueError):
     pass
@@ -415,6 +422,9 @@ KNOWN_COMMANDS = {
     "SET_ALL_DUTY",
     "HEATER_TEST",
     "SET_PID",
+    "PID_TUNE_START",
+    "PID_TUNE_ABORT",
+    "PID_TUNE_STATUS",
     "SET_TEMP_TARGET",
     "SET_ALL_TEMP_TARGETS",
     "CLEAR_TEMP_TARGET",

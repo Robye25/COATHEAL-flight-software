@@ -215,11 +215,12 @@ void TestCtrlBlockAndStepperExtrasTokenOrder() {
   r.steppers = {m0, m1};
 
   r.ctrl.debug_armed = true;
+  r.ctrl.tune = "H4";
 
   const std::string line = SerializeTelemetryDataFrame(r, "sess-b");
   assert(Contains(line,
                   ",CTRL=fallback:1|link_loss_s:12.5|energy_wh:3.25|budget_wh:130.0"
-                  "|budget_exhausted:0|heaters_active:2|queue:7|plan:none|debug:1,STEPPER0="));
+                  "|budget_exhausted:0|heaters_active:2|queue:7|plan:none|debug:1|tune:H4,STEPPER0="));
   assert(Contains(line, "|src:cmd:MOVE|zeroed:1|seq:flex|seqst:run"
                         "|amps:0.80|acc:200.0|mm:0.250|mm_tgt:0.500"
                         "|therm:warn,STEPPER1="));
@@ -230,8 +231,9 @@ void TestCtrlBlockAndStepperExtrasTokenOrder() {
   // An empty plan string still serialises as the documented default word.
   r.ctrl.plan.clear();
   r.ctrl.debug_armed = false;
+  r.ctrl.tune = "-";
   assert(Contains(SerializeTelemetryDataFrame(r, "sess-b"),
-                  "|plan:none|debug:0,STEPPER0="));
+                  "|plan:none|debug:0|tune:-,STEPPER0="));
 }
 
 void TestStatusFlagsDropRs485() {

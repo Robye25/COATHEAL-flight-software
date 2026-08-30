@@ -75,6 +75,12 @@ class EvaluateTests(unittest.TestCase):
         low = {a.key for a in evaluate(state(ctrl="fallback:0|queue:0|energy_wh:10.0|budget_wh:130.0"))}
         self.assertNotIn("ENERGY", low)
 
+    def test_pid_tune_raises_amber_chip(self) -> None:
+        tuning = {a.key: a for a in evaluate(state(ctrl="fallback:0|queue:0|tune:H4"))}
+        self.assertEqual(tuning["PID_TUNE"].severity, "amber")
+        self.assertIn("H4", tuning["PID_TUNE"].text)
+        self.assertNotIn("PID_TUNE", {a.key for a in evaluate(state(ctrl="fallback:0|queue:0|tune:-"))})
+
     def test_plan_states_raise_plan_alarm(self) -> None:
         running = {a.key: a for a in evaluate(state(ctrl="fallback:1|queue:0|plan:running"))}
         self.assertEqual(running["PLAN"].severity, "amber")
