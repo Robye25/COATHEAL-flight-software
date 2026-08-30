@@ -1,6 +1,7 @@
 // Safety regression tests: per-channel over-temperature cutoff latch,
 // uniformity monitor during FLOAT, ambient-range flagging, and
 // StorageManager SAFE-mode fsync durability.
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <filesystem>
@@ -14,6 +15,7 @@
 #include "coatheal/hal/rtc_adapter.hpp"
 #include "coatheal/hal/spi_adapter.hpp"
 #include "coatheal/sensor_manager.hpp"
+#include "coatheal/pid_controller.hpp"
 #include "coatheal/status_flags.hpp"
 #include "coatheal/storage_manager.hpp"
 #include "coatheal/telemetry.hpp"
@@ -192,6 +194,72 @@ void TestManualTemperatureTargetAndPid() {
   assert(duty[0] == 0.0);
 }
 
+// Owner report 2026-08-30: reaching the target snapped the duty to zero
+// and wiped the PID, so the loop sawed between full reheat and coast-down
+// forever. Closed-loop check on a first-order plant: the controller must
+// SETTLE — temperature holding at the target with the duty resting at the
+// plant's equilibrium (~0.5 here), never chopping to zero.
+void TestTargetHoldsEquilibriumDutyWithoutChopping() {
+  const auto cfg = MakeConfig();  // default gains 0.2/0.02/0.03, max_duty 1.0
+  coatheal::ThermalController ctrl(cfg);
+  coatheal::ControlOverrides ov;
+  ov.floor_control_enabled = false;
+  ov.temp_targets_c.resize(cfg.hardware.heater_count);
+  ov.pid_overrides.resize(cfg.hardware.heater_count);
+  ov.temp_targets_c[0] = 40.0;
+
+  // Plant: dT/dt = k_heat·duty − k_loss·(T − T_amb). Equilibrium duty at
+  // 40 °C: k_loss·20/k_heat = 0.5.
+  constexpr double kHeat = 2.0;   // °C/s at full duty
+  constexpr double kLoss = 0.05;  // 1/s
+  constexpr double kAmbient = 20.0;
+  double temp = kAmbient;
+  double min_duty_late = 1.0;
+  double max_temp = temp;
+  auto snapshot = MakeSnapshot(8, kAmbient);
+  for (int t = 0; t < 600; ++t) {
+    snapshot.sample_temps_c[0] = temp;
+    const auto duty = ctrl.ComputeRequestedDuty(
+        coatheal::MissionPhase::kBoot, snapshot, 1.0, ov);
+    temp += kHeat * duty[0] - kLoss * (temp - kAmbient);
+    max_temp = std::max(max_temp, temp);
+    if (t >= 500) {
+      min_duty_late = std::min(min_duty_late, duty[0]);
+      assert(std::fabs(temp - 40.0) < 1.0);  // holding the target
+    }
+  }
+  // The regression: the old cut-off forced duty to 0 on every target
+  // crossing, so the late-window minimum was 0. A settled loop rests at
+  // the equilibrium duty instead.
+  assert(min_duty_late > 0.2);
+  // Conditional anti-windup: the saturated ramp must not bank an integral
+  // that discharges as a large overshoot.
+  assert(max_temp < 44.0);
+}
+
+// The integrator must (a) not wind up while the output is saturated and
+// (b) hold the steady-state output at zero error — (b) is what the old
+// reset-at-target threw away.
+void TestPidConditionalAntiWindupAndHold() {
+  coatheal::PidController pid({0.0, 1.0, 0.0}, 0.0, 1.0, -1000.0, 1000.0);
+  // 50 s hard against the ceiling: the integral must stay frozen...
+  for (int i = 0; i < 50; ++i) {
+    assert(pid.Update(10.0, 0.0, 1.0) <= 1.0 + 1e-9);
+  }
+  // ...so the moment the error vanishes, the output lets go at once
+  // (an unconditional integrator would hold the ceiling for ~1000 s).
+  assert(pid.Update(0.0, 0.0, 1.0) < 0.1);
+
+  // Hold: integrate a small error inside the linear band, then sit at
+  // zero error — the built-up integral keeps the output where it was.
+  pid.Reset();
+  for (int i = 0; i < 3; ++i) {
+    pid.Update(0.2, 0.0, 1.0);
+  }
+  const double held = pid.Update(0.0, 0.0, 1.0);
+  assert(held > 0.4);  // ki=1: three 0.2 error-seconds banked
+}
+
 void TestPerChannelPidOverridesGlobalPid() {
   const auto cfg = MakeConfig();
   coatheal::ThermalController ctrl(cfg);
@@ -293,6 +361,8 @@ int main() {
   TestUniformityBit();
   TestInvalidSampleForcesHeaterOff();
   TestManualTemperatureTargetAndPid();
+  TestTargetHoldsEquilibriumDutyWithoutChopping();
+  TestPidConditionalAntiWindupAndHold();
   TestPerChannelPidOverridesGlobalPid();
   TestAmbientRangeFlags();
   TestStatusFlagsSerialize();
