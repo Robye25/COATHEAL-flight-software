@@ -708,6 +708,53 @@ void TestMax31865OneClickBusFailureFailsResistanceOk() {
   assert(!ever_ok);
 }
 
+// A rejected click must still REPORT what it measured. Bench 2026-08-31:
+// a specimen was wired to click 1 yet the console showed nothing, because
+// a saturated read emits "-" on the wire and the raw ohms were only ever
+// visible in a rate-limited journal line. COMPONENTS now carries the
+// measurement and the decoded fault register either way, which is what
+// separates "open circuit" from "specimen above the reference ceiling".
+void TestSaturatedClickStillReportsOhmsAndFault() {
+  OnboardConfig config = MakeMax31865TestConfig();
+  config.sensors.max31865_poll_ms = 5;
+
+  FakeSpiBus click1_bus;
+  FakeSpiBus click2_bus;
+  // Both pegged at full scale with the RTD_HIGH fault bit (0x80) — the
+  // exact bench signature.
+  ScriptSaturatedOneShot(&click1_bus, 0xFF, 0xFF, 0x80);
+  ScriptSaturatedOneShot(&click2_bus, 0xFF, 0xFF, 0x80);
+
+  SpiAdapter spi;
+  I2cAdapter i2c;
+  RtcAdapter rtc;
+  SensorManager sm(config, &spi, &i2c, &rtc, /*ina=*/nullptr,
+                   /*rtd_bus_override=*/nullptr, &click1_bus, &click2_bus);
+  sm.Start();
+  std::string summary;
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  while (std::chrono::steady_clock::now() < deadline) {
+    summary = sm.ComponentSummary();
+    if (summary.find("max31865_1_fault=RTD_HIGH") != std::string::npos) break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  sm.Stop();
+
+  // The decoded fault and the measured ohms are both present even though
+  // the channel is rejected and the wire shows "-".
+  assert(summary.find("max31865_1_fault=RTD_HIGH") != std::string::npos);
+  assert(summary.find("max31865_1_ohm=") != std::string::npos);
+  assert(summary.find("max31865_1_ohm=-") == std::string::npos);
+  // The reference resistor is reported next to it: it IS the ceiling that
+  // a pinned reading is sitting on.
+  assert(summary.find("max31865_reference_ohm=") != std::string::npos);
+  // And which sample index each click feeds, so the operator can tell
+  // where to look on the ground.
+  assert(summary.find("max31865_1_sample=S0") != std::string::npos);
+  assert(summary.find("max31865_2_sample=S4") != std::string::npos);
+}
+
 void TestMax31865SaturatedReadingKeepsClicksBusOkWhileIndexReadsZero() {
   OnboardConfig config = MakeMax31865TestConfig();
   config.sensors.max31865_poll_ms = 5000;  // see the timing-choice comment above
@@ -927,6 +974,7 @@ int main() {
   TestSequentRtdResistanceFailsOnUnreachableBus();
   TestMax31865HealthyClicksPopulateOnlyMonitoredIndices();
   TestMax31865OneClickBusFailureFailsResistanceOk();
+  TestSaturatedClickStillReportsOhmsAndFault();
   TestMax31865SaturatedReadingKeepsClicksBusOkWhileIndexReadsZero();
   TestMax31865AbsentClickFloatingLowFailsResistanceOk();
   TestMax31865AbsentClickFloatingHighFailsResistanceOk();
