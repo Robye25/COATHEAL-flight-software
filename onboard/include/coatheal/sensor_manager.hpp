@@ -168,6 +168,16 @@ class SensorManager {
   // Index 0 = click 0 (SAMPLE1), index 1 = click 1 (SAMPLE2). Written only
   // by Max31865Loop, under cache_mu_, exactly like rtd_health_.
   std::array<ComponentHealth, 2> max31865_health_;
+  // Last reading per click, kept even when the channel was rejected: a
+  // saturated/faulted read still carries the measured ohms and the chip's
+  // fault register, and those are exactly what tells "open probe" from
+  // "specimen above the reference resistor's ceiling" (bench 2026-08-31:
+  // both clicks pegged at 469.99 ohm / fault 0x80 with one specimen
+  // supposedly wired). Reported by COMPONENTS and CHECK MAX31865.
+  std::array<double, 2> click_last_ohm_{{0.0, 0.0}};
+  std::array<std::uint8_t, 2> click_last_fault_{{0, 0}};
+  std::array<bool, 2> click_last_valid_{{false, false}};
+  std::array<bool, 2> click_has_reading_{{false, false}};
   // Per-click last-successful-conversation bookkeeping for FailedState(),
   // mirroring ScalarCache's has_value/last_success pair. Written only by
   // Max31865Loop, under cache_mu_.

@@ -106,6 +106,30 @@ void AppendSequentDiagnostics(std::ostringstream* oss,
   oss->precision(precision);
 }
 
+// MAX31865 fault register (0x07) bit names, datasheet Table 4. Reported
+// verbatim so an operator can tell an open probe from an over-range
+// specimen from a bias/reference wiring fault.
+std::string DecodeMax31865Fault(std::uint8_t fault) {
+  if (fault == 0) return "none";
+  struct Bit { std::uint8_t mask; const char* name; };
+  static constexpr Bit kBits[] = {
+      {0x80, "RTD_HIGH"},      // measured RTD above the high threshold
+      {0x40, "RTD_LOW"},       // below the low threshold
+      {0x20, "REFIN_HIGH"},    // REFIN- > 0.85*VBIAS
+      {0x10, "REFIN_LOW_FORCE_OPEN"},
+      {0x08, "RTDIN_LOW_FORCE_OPEN"},
+      {0x04, "OV_UV"},         // over/under voltage on an input
+  };
+  std::string out;
+  for (const Bit& b : kBits) {
+    if ((fault & b.mask) != 0U) {
+      if (!out.empty()) out += '+';
+      out += b.name;
+    }
+  }
+  return out.empty() ? "unknown" : out;
+}
+
 std::size_t CountValidChannels(const SequentRtdAdapter::Reading& reading) {
   std::size_t valid = 0;
   for (const bool ok : reading.channel_valid) valid += ok ? 1U : 0U;
@@ -720,6 +744,12 @@ void SensorManager::UpdateClickHealth(
     const std::chrono::steady_clock::time_point& now) {
   ComponentHealth& health = max31865_health_[click];
   if (ok) {
+    // Keep the measurement even when it is about to be rejected: the raw
+    // ohms + fault register are the only way to diagnose WHY.
+    click_last_ohm_[click] = reading.resistance_ohm;
+    click_last_fault_[click] = reading.fault_bits;
+    click_last_valid_[click] = !reading.out_of_range;
+    click_has_reading_[click] = true;
     click_has_success_[click] = true;
     click_last_success_[click] = now;
     health.last_success_age_ms = 0;
@@ -742,9 +772,14 @@ void SensorManager::UpdateClickHealth(
         std::cerr << "[max31865] MAX31865_" << (click + 1)
                   << " specimen out of range: raw="
                   << reading.resistance_ohm << " ohm (NOT a valid "
-                  << "measurement), fault_bits=0x" << std::hex
-                  << static_cast<int>(reading.fault_bits) << std::dec
-                  << "; bus healthy, channel reported invalid\n";
+                  << "measurement), fault="
+                  << DecodeMax31865Fault(reading.fault_bits) << " (0x"
+                  << std::hex << static_cast<int>(reading.fault_bits)
+                  << std::dec << "); reference resistor "
+                  << config_.sensors.max31865_reference_ohm
+                  << " ohm sets the measurable ceiling -- a reading pinned "
+                  << "there means an OPEN circuit or a specimen ABOVE that "
+                  << "ceiling; bus healthy, channel reported invalid\n";
         click_last_saturation_log_[click] = now;
         click_has_saturation_log_[click] = true;
       }
@@ -1209,6 +1244,23 @@ bool SensorManager::ActiveCheck(const std::string& component,
                                   : (click_ok[1] ? "OK" : "FAIL"))
         << ";max31865_2_error="
         << (!max31865_requested ? "SKIPPED" : click_errors[1]);
+    if (max31865_requested) {
+      const std::ios_base::fmtflags cflags = oss.flags();
+      const std::streamsize cprec = oss.precision();
+      oss << std::fixed << std::setprecision(2);
+      for (int click = 0; click < 2; ++click) {
+        oss << ";max31865_" << (click + 1)
+            << "_ohm=" << click_readings[click].resistance_ohm
+            << ";max31865_" << (click + 1) << "_fault="
+            << DecodeMax31865Fault(click_readings[click].fault_bits)
+            << ";max31865_" << (click + 1) << "_valid="
+            << (click_readings[click].valid ? 1 : 0);
+      }
+      oss << ";max31865_reference_ohm="
+          << config_.sensors.max31865_reference_ohm;
+      oss.flags(cflags);
+      oss.precision(cprec);
+    }
     *details = oss.str();
   }
   return dps_ok && ads_ok && rtd_ok && max31865_ok;
@@ -1294,6 +1346,32 @@ std::string SensorManager::ComponentSummary() const {
       << ";max31865_2=" << ToString(click2_health.state)
       << ";max31865_2_error=" << click2_health.error
       << ";max31865_2_age_ms=" << click2_health.last_success_age_ms;
+  // The measurement itself, valid or not: without it a rejected channel is
+  // indistinguishable from an unwired one on the ground.
+  const std::ios_base::fmtflags rflags = oss.flags();
+  const std::streamsize rprec = oss.precision();
+  oss << std::fixed << std::setprecision(2);
+  for (int click = 0; click < 2; ++click) {
+    const ComponentHealth& h = click == 0 ? click1_health : click2_health;
+    (void)h;
+    oss << ";max31865_" << (click + 1) << "_ohm=";
+    if (click_has_reading_[click]) {
+      oss << click_last_ohm_[click];
+    } else {
+      oss << '-';
+    }
+    oss << ";max31865_" << (click + 1) << "_fault="
+        << DecodeMax31865Fault(click_last_fault_[click])
+        << ";max31865_" << (click + 1) << "_sample=";
+    if (click < static_cast<int>(config_.sensors.max31865_sample_indices.size())) {
+      oss << 'S' << config_.sensors.max31865_sample_indices[click];
+    } else {
+      oss << '-';
+    }
+  }
+  oss << ";max31865_reference_ohm=" << config_.sensors.max31865_reference_ohm;
+  oss.flags(rflags);
+  oss.precision(rprec);
   oss << ";sample_valid_channels=" << sample_valid_channels
       << ";heated_channels_ok="
       << (HeatedChannelsValid(config_, channel_valid) ? "1" : "0")
