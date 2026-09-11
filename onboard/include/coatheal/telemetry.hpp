@@ -48,6 +48,14 @@ struct CtrlStatus {
   int heaters_active = 0;            // scheduled duties > 0 this tick
   std::uint64_t queue_depth = 0;     // frames waiting in the durable queue
   std::string plan = "none";         // fallback bend plan state (Phase C)
+  // Active PID auto-tune channel ("H4") or "-" when idle, so the console
+  // can flag that a tune sequence owns the heaters.
+  std::string tune = "-";
+  // Bench debug arm active (ARM_DEBUG accepted, bench_mode on). The
+  // console needs this to unlock open-loop duty controls on channels
+  // without valid PT100 feedback -- the onboard accepts those commands
+  // while armed, and the ground gating must predict that, not block it.
+  bool debug_armed = false;
 };
 
 struct TelemetryRecord {
@@ -80,6 +88,15 @@ struct HeatingCycleEvent {
 // can route it separately from DATA frames.
 // Format: EVT,CYCLE,<session_id>,<cycle_id>,<start_ts>,<peak_temp_c>,
 //         <hold_duration_s>,<cooldown_rate_c_per_s>,<specimen_index>
+// Wire-only stamp appended to a DATA frame as it is sent: `,TX=<seconds>`
+// = how old the frame is (now - queued time, clamped at 0). 0-1 s means the
+// frame is live; larger values are the backlog being replayed. The stored
+// frame is untouched (AcknowledgeExact compares stored text), and EVT lines
+// keep their fixed column layout. Ground parsers ignore unknown tokens.
+std::string TagFrameForTransmit(const std::string& frame,
+                                std::int64_t queued_epoch_s,
+                                std::int64_t now_epoch_s);
+
 std::string SerializeHeatingCycleEvent(const HeatingCycleEvent& event,
                                        const std::string& session_id);
 
@@ -94,11 +111,17 @@ struct HeatingPullEvent {
   std::int64_t steps_moved = 0;       // signed, = final_pos - start_pos
   double hold_s = 0.0;                // time held at target
   std::vector<std::size_t> samples;   // specimen indices the pull covered
+  // Microstep divisor the pull ran at: steps_moved is in µsteps at THIS
+  // divisor, so mm reconstruction on the ground must use it, not the live
+  // one. Appended as a trailing wire field (old parsers ignore it).
+  int microstep = 4;
 };
 
 // Format: EVT,PULL,<session_id>,<pull_id>,<motor_id>,<start_ts>,
-//         <steps_moved>,<hold_s>,<samples>
+//         <steps_moved>,<hold_s>,<samples>,<microstep>
 // where <samples> is pipe-separated ("0|1|2|3"); empty samples => "-".
+// <microstep> (2026-08-30) trails so pre-existing parsers, which require
+// only >= 9 comma fields, keep working.
 std::string SerializeTelemetryPullEventFrame(const HeatingPullEvent& event,
                                              const std::string& session_id);
 

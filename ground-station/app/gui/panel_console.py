@@ -119,7 +119,7 @@ class ConsolePanel(QWidget):
         body = resp.body if resp.ok else (resp.error or resp.raw or "no reply")
         row = self.table.rowCount()
         self.table.insertRow(row)
-        values = (time.strftime("%H:%M:%S"), cmd.strip(), "✔" if resp.ok else "✖",
+        values = (time.strftime("%H:%M:%SZ", time.gmtime()), cmd.strip(), "✔" if resp.ok else "✖",
                   f"{ms:.0f}" if ms > 0 else "—", body.replace("\n", " "))
         color = QColor(GREEN if resp.ok else RED)
         for col, value in enumerate(values):

@@ -90,6 +90,8 @@ class TopStrip(QWidget):
         self._sess_box, self._sess = _field("SESSION")
         self._tplus_box, self._tplus = _field("T+")
         self._utc_box, self._utc = _field("UTC")
+        self._replay_box, self._replay = _field("REPLAY")
+        self._replay_box.hide()
         self._radio_box, self._radio = _field("RADIO")
         self._radio_dot = StatusDot(9); self._radio_dot.set_color(GRAY)
         self._radio_box.layout().insertWidget(1, self._radio_dot)
@@ -107,7 +109,7 @@ class TopStrip(QWidget):
             lay.addWidget(box)
         lay.addWidget(self._target_box, 3)
         lay.addWidget(self._sess_box, 2)
-        for box in (self._tplus_box, self._utc_box, self._radio_box):
+        for box in (self._tplus_box, self._utc_box, self._replay_box, self._radio_box):
             lay.addWidget(box)
 
         # Panic group: unconfirmed HEATERS OFF / STOP MOTORS, confirmed ENTER SAFE.
@@ -195,6 +197,29 @@ class TopStrip(QWidget):
         self.btn_enter_safe.set_reason("radio silence active" if active else None)
         self.refresh()
 
+    def set_replay(self, behind_s: Optional[float], eta_s: Optional[float] = None, *,
+                   live_panels: bool = False, backlog_frames: Optional[int] = None) -> None:
+        """Show the backlog replay (None = nothing replaying). With
+        `live_panels` the panels are current and only the queue depth
+        matters; without it the arriving frames are `behind_s` old."""
+        if behind_s is None:
+            self._replay_box.hide()
+            return
+        eta = f" · ETA {format_elapsed(eta_s)}" if eta_s else ""
+        if live_panels:
+            text = (f"{backlog_frames} queued" if backlog_frames is not None else "draining") + eta
+            tip = "The onboard is replaying its queued backlog into the plots and logs; the panels are live."
+        else:
+            text = f"−{format_elapsed(behind_s)}" + eta
+            tip = "The onboard is replaying its queued backlog; the panels keep showing the last live frame."
+        self._replay.setText(text)
+        self._replay.setStyleSheet(f"{MONO_CSS} font-weight: bold; color: {AMBER}; border: none;")
+        self._replay_box.setToolTip(tip)
+        self._replay_box.show()
+
+    def replay_visible(self) -> bool:
+        return not self._replay_box.isHidden()
+
     def set_target(self, text: str, color: str = GREEN) -> None:
         self._target_full = text
         self._target.setStyleSheet(f"{MONO_CSS} font-weight: bold; color: {color}; border: none;")
@@ -256,7 +281,7 @@ class TopStrip(QWidget):
         # in the session id) so it survives a ground-station restart; a
         # session id without an epoch falls back to the first frame seen.
         if self._t0_wall is not None:
-            self._tplus.setText(format_elapsed(time.time() - self._t0_wall))
+            self._tplus.setText(format_elapsed(max(0.0, time.time() - self._t0_wall)))
         elif self._t0_mono is not None:
             self._tplus.setText(format_elapsed(now - self._t0_mono))
 
@@ -303,6 +328,10 @@ class AlarmStrip(QWidget):
         self.hide()
 
     def set_alarms(self, alarms: List[Alarm]) -> None:
+        rendered = tuple((a.key, a.text, a.severity, a.acked) for a in alarms)
+        if rendered == getattr(self, "_rendered_alarms", None):
+            return  # unchanged — skip the chip teardown/rebuild
+        self._rendered_alarms = rendered
         self._alarms = list(alarms)
         while self._chips.count():
             item = self._chips.takeAt(0)

@@ -16,6 +16,7 @@
 #include "coatheal/fallback_planner.hpp"
 #include "coatheal/heater_scheduler.hpp"
 #include "coatheal/motion_lock.hpp"
+#include "coatheal/pid_autotuner.hpp"
 #include "coatheal/sensor_manager.hpp"
 #include "coatheal/state_manager.hpp"
 #include "coatheal/stepper_controller.hpp"
@@ -157,6 +158,16 @@ class SystemController {
     std::chrono::steady_clock::time_point until{};
   };
   HeaterTestRuntime heater_test_;
+
+  // Relay PID auto-tune (PID_TUNE_*). Guarded by overrides_mu_ like the
+  // rest of the operator-command state: the dispatch thread starts/aborts
+  // and reads status, the control loop ticks it. While active it takes
+  // exclusive heater control (every other channel forced to 0) so nothing
+  // disturbs the measured limit cycle.
+  PidAutoTuner pid_tuner_;
+  int tune_channel_ = -1;
+  double tune_commanded_duty_ = 0.0;
+  bool tune_result_logged_ = false;
 
   // Pull-event bookkeeping: emit EVT,PULL after each motor completes a
   // pull cycle. Edge-detects channel moving true->false while the MotionLock

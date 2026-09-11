@@ -48,17 +48,32 @@ class ConsoleTabTests(unittest.TestCase):
         motion = self.win._motion
         motion.selector.set_value(0)
         motion.update_state(self.win._state)
-        motion.bend_target.setValue(800); motion.bend_hold.setValue(5.0)
+        motion.bend_target.setValue(2.0); motion.bend_hold.setValue(5.0)
         self.assertIsNone(motion.btn_bend.reason(), "M0 is enabled+zeroed in RUN: BEND must be live")
         motion.btn_bend.click()
-        self.assertEqual(sent, ["STEPPER_MOVETO 0 800 5"])
+        self.assertEqual(sent, ["STEPPER_MOVETO_MM 0 2.000 5"])
         readout = motion.tracker.readout(0, self.win._state)
         self.assertEqual(readout.r_start, 118.0, "BEND must record the specimen resistance at bend start")
         motion.btn_pull.click()
         self.assertEqual(sent[-1], "PULL_EXECUTE 0")
 
-    # MUTATION: change the BEND wire template to "STEPPER_MOVE" in
+    # MUTATION: change the BEND wire template to "STEPPER_MOVE_MM" in
     # tab_motion._bend and confirm test_bend_sends_moveto_with_hold_and_marks_resistance fails.
+
+    def test_jog_and_drive_settings_send_mm_and_drive_commands(self) -> None:
+        sent = capture_sends(self.win._dispatcher)
+        self.feed()
+        motion = self.win._motion
+        motion.selector.set_value(0)
+        motion.update_state(self.win._state)
+        motion.jog_buttons[3].click()   # +0.1 mm
+        self.assertEqual(sent[-1], "STEPPER_MOVE_MM 0 0.100")
+        motion.current.setValue(0.4)
+        motion.btn_current.click()
+        self.assertEqual(sent[-1], "STEPPER_SET_CURRENT 0 0.400")
+        motion.accel.setValue(400)
+        motion.btn_accel.click()
+        self.assertEqual(sent[-1], "STEPPER_SET_ACCEL 0 400.0")
 
     def test_motion_gating_reasons(self) -> None:
         self.feed()
@@ -126,6 +141,28 @@ class ConsoleTabTests(unittest.TestCase):
         self.assertIsNone(self.win._thermal.targets()[1])
         self.assertEqual(self.win._thermal.rows[0].target.maximum(), 60.0, "limits come from GET_THERMAL")
 
+    def test_thermal_targets_follow_external_clears(self) -> None:
+        from app.protocol import CommandResponse
+        self.feed()
+        thermal = self.win._thermal
+        disp = self.win._dispatcher
+        ok = lambda verb, body="ok": CommandResponse(ok=True, command=verb, body=body, raw="")  # noqa: E731
+        disp.response_received.emit("SET_ALL_TEMP_TARGETS 30", ok("SET_ALL_TEMP_TARGETS"), 5.0, self.win._system)
+        self.assertEqual(thermal.targets(), [30.0] * 6, "targets set from another tab must be mirrored")
+        # The panic button lives on the top panel: its ACK clears every
+        # target onboard (protocol.md), so no row may keep saying PID.
+        disp.response_received.emit("HEATERS_OFF", ok("HEATERS_OFF", "all heaters disabled"), 5.0, self.win._top)
+        self.assertEqual(thermal.targets(), [None] * 6)
+        disp.response_received.emit("SET_TEMP_TARGET 2 25", ok("SET_TEMP_TARGET"), 5.0, thermal)
+        self.assertEqual(thermal.targets()[2], 25.0)
+        disp.response_received.emit("SET_HEATER_DUTY 2 0.100", ok("SET_HEATER_DUTY"), 5.0, self.win._system)
+        self.assertIsNone(thermal.targets()[2], "a duty override clears that channel's target onboard")
+        # A NACK changes nothing.
+        disp.response_received.emit("SET_ALL_TEMP_TARGETS 40",
+                                    CommandResponse(ok=False, command="SET_ALL_TEMP_TARGETS", error="RUN mode required", raw=""),
+                                    5.0, thermal)
+        self.assertEqual(thermal.targets(), [None] * 6)
+
     # ── System tab ──
     def test_mode_buttons_follow_mode(self) -> None:
         system = self.win._system
@@ -188,6 +225,148 @@ class ConsoleTabTests(unittest.TestCase):
 
     # MUTATION: comment out `worker.set_quiet(active)` in
     # MainWindow._on_silence_changed and confirm the beacon quiet assertion fails.
+
+    # ── replay of the onboard backlog ──
+    def test_replayed_frames_do_not_drive_state_or_gating(self) -> None:
+        import time
+        from datetime import datetime, timezone
+        now = time.time()
+        live_ts = datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        old_ts = datetime.fromtimestamp(now - 3 * 3600, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.feed(mode="RUN", ts=live_ts)
+        self.assertIsNone(self.win._motion.btn_enable.reason())
+        # The backlog replays: hours-old frames that still say STANDBY.
+        for seq in range(2, 8):
+            self.feed(seq=seq, mode="STANDBY", ts=old_ts)
+        self.assertEqual(self.win._state.mode, "RUN", "a replayed frame must not overwrite the live state")
+        self.assertIsNone(self.win._motion.btn_enable.reason(), "gating must follow the live state")
+        self.assertTrue(self.win._state.replay)
+        self.assertTrue(self.win._top.replay_visible())
+        self.assertIn("REPLAY", [a.key for a in self.win._alarms.active])
+        self.assertEqual(self.win._motion.motor_note.text(), "")
+        # Live again, now genuinely STANDBY: state and gating follow, badge clears.
+        self.feed(seq=9, mode="STANDBY", ts=live_ts)
+        self.assertEqual(self.win._state.mode, "STANDBY")
+        self.assertIn("ARM", self.win._motion.btn_enable.reason() or "")
+        self.assertIn("ARM", self.win._motion.motor_note.text())
+        self.assertFalse(self.win._state.replay)
+        self.assertFalse(self.win._top.replay_visible())
+        self.assertNotIn("REPLAY", [a.key for a in self.win._alarms.active])
+
+    # MUTATION: in MainWindow._on_packet set `self._last_pkt = pkt` for replayed
+    # frames too and confirm test_replayed_frames_do_not_drive_state_or_gating
+    # fails on "a replayed frame must not overwrite the live state".
+
+    def test_tagged_live_first_drain_keeps_panels_live(self) -> None:
+        from app.protocol import parse_telemetry_csv
+        ctrl = "fallback:0|link_loss_s:0.0|energy_wh:1.0|budget_wh:130.0|budget_exhausted:0|heaters_active:0|queue:{q}|plan:none"
+        # Live-first firmware: this tick's frame (TX=0) arrives before the
+        # previous session's backlog (TX=1800, a different session id).
+        self.win._on_packet(parse_telemetry_csv(frame(seq=3000, mode="RUN", ctrl=ctrl.format(q=2400)) + ",TX=0"))
+        self.assertEqual(self.win._state.mode, "RUN")
+        for k in range(5):
+            self.win._on_packet(parse_telemetry_csv(
+                frame(seq=100 + k, session="coatheal-1787700000-9", mode="STANDBY",
+                      ts="2026-08-27T00:00:00Z", ctrl=ctrl.format(q=2400)) + ",TX=1800"))
+            self.win._on_packet(parse_telemetry_csv(frame(seq=3001 + k, mode="RUN", ctrl=ctrl.format(q=2395 - 5 * k)) + ",TX=0"))
+        self.assertEqual(self.win._state.mode, "RUN", "old-session backlog frames must not touch the panels")
+        self.assertIsNone(self.win._motion.btn_enable.reason())
+        self.assertTrue(self.win._state.replay)
+        self.assertTrue(self.win._state.replay_live_panels)
+        self.assertEqual(self.win._state.replay_backlog_frames, 2375)
+        self.assertTrue(self.win._top.replay_visible())
+        texts = {a.key: a.text for a in self.win._alarms.active}
+        self.assertIn("panels are LIVE", texts.get("REPLAY", ""))
+        self.assertNotIn("RX_QUEUE", texts, "one alarm for the backlog, not two")
+        # The queue empties: replay condition clears once no replay frame has
+        # arrived for a while and the reported depth is back to normal.
+        self.win._last_replay_mono -= 10.0
+        self.win._on_packet(parse_telemetry_csv(frame(seq=3010, mode="RUN", ctrl=ctrl.format(q=0)) + ",TX=0"))
+        self.assertFalse(self.win._state.replay)
+        self.assertFalse(self.win._top.replay_visible())
+
+    # MUTATION: in _on_packet, ignore pkt.tx_age_s when calling classify() and
+    # confirm test_tagged_live_first_drain_keeps_panels_live fails: the
+    # untagged path takes the first 2026-08-27 frame as a clock baseline.
+
+    def test_ack_mode_is_applied_before_the_next_live_frame(self) -> None:
+        import time
+        from datetime import datetime, timezone
+        from app.protocol import CommandResponse
+        now = time.time()
+        live_ts = datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        old_ts = datetime.fromtimestamp(now - 3 * 3600, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.feed(mode="STANDBY", ts=live_ts)
+        self.assertIn("ARM", self.win._motion.btn_enable.reason() or "")
+        self.win._on_response("ARM", CommandResponse(ok=True, command="ARM", body="mode=RUN;manual_control=1", raw=""), 1.0, None)
+        self.assertEqual(self.win._state.mode, "RUN", "the ACK is the onboard's word on its mode")
+        self.assertIsNone(self.win._motion.btn_enable.reason())
+        self.assertIn("now RUN", self.win._system.btn_arm.reason() or "")
+        # A replayed STANDBY frame (untagged firmware) must not undo it...
+        for seq in range(2, 8):
+            self.feed(seq=seq, mode="STANDBY", ts=old_ts)
+        self.assertEqual(self.win._state.mode, "RUN")
+        # ...and the next live frame is authoritative again.
+        self.feed(seq=9, mode="STANDBY", ts=live_ts)
+        self.assertEqual(self.win._state.mode, "STANDBY")
+
+    # MUTATION: delete the `mode=` handling in _on_response and confirm
+    # test_ack_mode_is_applied_before_the_next_live_frame fails on "the ACK is
+    # the onboard's word on its mode".
+
+    # ── Debug tab ──
+    def test_debug_probe_polls_quietly_and_renders_a_verdict(self) -> None:
+        from app.protocol import CommandResponse
+        sent = []
+        self.win._dispatcher.send = lambda cmd, tag=None, timeout=None, quiet=False: sent.append((cmd, quiet))
+        debug = self.win._debug
+        debug.selector.set_value(1)
+        debug.read_once()
+        self.assertEqual(sent, [("MOTOR_DEBUG 1", True)], "the probe must use the quiet path")
+        body = ("motor=1;sw_pos=312;sw_tgt=800;sw_hz=100;us=4;enabled=1;moving=1;holding=0;pulses=312;missed=0;"
+                "xactual=0;xtarget=204800;vactual=35000;mscnt=0;tstep=120;drv_status=0x0;stst=0;cs_actual=9;sg_result=18;"
+                "stallguard=0;ot=0;otpw=0;s2ga=0;s2gb=0;ola=0;olb=0;s2vsa=0;s2vsb=0;stealth=1;fsactive=0;rampstat=0x0;"
+                "vzero=0;pos_reached=0;vel_reached=1;status_sg=0;ioin=0x30000000;drv_enn=0;sd_mode=0;version=0x30;"
+                "gstat=0x0;chopconf=0x06010043;toff=3;mres=6;usteps=4")
+        rows_before = self.win._console.row_count()
+        clock = [100.0]
+        debug._clock = lambda: clock[0]
+        for k, mscnt in enumerate((0, 256, 512, 768)):
+            clock[0] = 100.0 + 0.5 * k
+            resp = CommandResponse(ok=True, command="MOTOR_DEBUG", body=body.replace("mscnt=0", f"mscnt={mscnt}"), raw="")
+            self.win._dispatcher.quiet_response.emit("MOTOR_DEBUG 1", resp, 3.0, debug)
+        est = debug.last_estimate
+        self.assertIsNotNone(est)
+        self.assertAlmostEqual(est.sequencer_full_steps_s, 2.0, places=3)
+        self.assertEqual(est.color, "green", est.verdict)
+        self.assertIn("MOVING", debug.verdict.text())
+        self.assertEqual(self.win._console.row_count(), rows_before, "quiet replies must not land in the console")
+        self.assertIn("full-steps/s", debug.rate.text())
+        self.assertEqual(debug._regs["sd_mode"].text(), "0")
+        # Driver health line: thermal state leads (ot=0/otpw=0 in the body).
+        self.assertIn("die < 120", debug.health.text())
+
+    # ── PID autotune ──
+    def test_pid_autotune_start_and_result_flow(self) -> None:
+        from app.protocol import CommandResponse
+        sent = []
+        self.win._dispatcher.send = lambda cmd, tag=None, timeout=None, quiet=False: sent.append((cmd, quiet))
+        thermal = self.win._thermal
+        self.feed()
+        thermal.tune_heater.setCurrentIndex(4)
+        thermal.tune_setpoint.setValue(40.0)
+        thermal._tune_start()
+        self.assertEqual(sent[0], ("PID_TUNE_START 4 40 0.5 4", False))
+        self.assertEqual(sent[1], ("PID_TUNE_STATUS", True), "status poll uses the quiet path")
+        done = CommandResponse(ok=True, command="PID_TUNE_STATUS",
+                               body="state=done;heater=4;setpoint_c=40;relay_duty=0.5;hysteresis_c=1;"
+                                    "cycles=4/4;relay=off;elapsed_s=300;ku=0.35;tu_s=14.2;amplitude_c=1.1;"
+                                    "kp=0.109;ki=0.0035;kd=0.246;zn_kp=0.21;zn_ki=0.03;zn_kd=0.37", raw="")
+        self.win._dispatcher.quiet_response.emit("PID_TUNE_STATUS", done, 3.0, thermal)
+        self.assertIn("kp=0.109", thermal.tune_status.text().replace("\u200b", ""))
+        self.assertIsNone(thermal.btn_tune_apply.reason(), "APPLY unlocks once a result exists")
+        thermal._tune_apply()
+        self.assertEqual(sent[-1][0], "SET_PID 4 0.109 0.0035 0.246")
 
     # ── alarms ──
     def test_alarm_strip_and_ack(self) -> None:

@@ -427,6 +427,75 @@ class HardwareSetupTests(unittest.TestCase):
         source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
         self.assertEqual(hardware_setup.validate_candidate(source), [])
 
+    # --- boot-gpio: config.txt safe states derived from the INI -------------
+
+    def test_boot_gpio_lines_for_the_example_config(self) -> None:
+        # Schematic v4: heaters on BCM 19,13,6,5,24,23 (active-high -> hold
+        # low, pull-down); TMC5160 CS 22/27 and active-low EN 20/21 -> hold
+        # high, pull-up. Sorted, grouped per state.
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        lines = hardware_setup.boot_gpio_lines(hardware_setup._ini_values(source))
+        self.assertEqual(lines, [
+            "gpio=5,6,13,19,23,24=op,dl,pd",
+            "gpio=20,21,22,27=op,dh,pu",
+        ])
+
+    def test_boot_gpio_lines_follow_polarity_keys(self) -> None:
+        values = {
+            "heater.output_lines": "19, 13",
+            "heater.active_high": "false",       # active-low heater: OFF = high
+            "motor0.cs_line": "22",
+            "motor0.enable_line": "20",
+            "motor0.enable_active_low": "false",  # active-high EN: OFF = low
+            "motor1.cs_line": "27",
+            "motor1.enable_line": "21",
+        }
+        lines = hardware_setup.boot_gpio_lines(values)
+        self.assertEqual(lines, [
+            "gpio=20=op,dl,pd",
+            "gpio=13,19,21,22,27=op,dh,pu",
+        ])
+
+    def test_boot_gpio_lines_reject_missing_heaters_and_bad_pins(self) -> None:
+        with self.assertRaises(ValueError):
+            hardware_setup.boot_gpio_lines({"motor0.cs_line": "22"})
+        with self.assertRaises(ValueError):
+            hardware_setup.boot_gpio_lines({"heater.output_lines": "19,40"})
+
+    def test_boot_gpio_block_upsert_is_idempotent_and_replaces_stale(self) -> None:
+        block = hardware_setup.render_boot_gpio_block(["gpio=5,6=op,dl,pd"])
+        base = "dtparam=i2c_arm=on\ndtparam=spi=on\n\n[all]\n"
+        once = hardware_setup.upsert_boot_gpio_block(base, block)
+        self.assertTrue(once.startswith(base.rstrip("\n") + "\n\n"))
+        self.assertTrue(once.endswith(block))
+        self.assertEqual(once.count(hardware_setup.BOOT_GPIO_BEGIN), 1)
+        # Re-applying the same block changes nothing.
+        self.assertEqual(hardware_setup.upsert_boot_gpio_block(once, block), once)
+        # A different block replaces the old one wholesale, keeping the rest.
+        newer = hardware_setup.render_boot_gpio_block(["gpio=22,27=op,dh,pu"])
+        updated = hardware_setup.upsert_boot_gpio_block(once, newer)
+        self.assertNotIn("gpio=5,6=op,dl,pd", updated)
+        self.assertIn("gpio=22,27=op,dh,pu", updated)
+        self.assertEqual(updated.count(hardware_setup.BOOT_GPIO_BEGIN), 1)
+        self.assertIn("dtparam=spi=on", updated)
+
+    def test_boot_gpio_install_reports_unchanged_then_updated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_txt = root / "config.txt"
+            config_txt.write_text("dtparam=spi=on\n", encoding="utf-8")
+            args = argparse.Namespace(config=hardware_setup.EXAMPLE_CONFIG, install=config_txt)
+            with mock.patch("builtins.print") as printed:
+                self.assertEqual(hardware_setup.boot_gpio(args), 0)
+            self.assertIn("reboot", printed.call_args[0][0])
+            text = config_txt.read_text(encoding="utf-8")
+            self.assertIn("gpio=5,6,13,19,23,24=op,dl,pd", text)
+            self.assertIn("gpio=20,21,22,27=op,dh,pu", text)
+            with mock.patch("builtins.print") as printed:
+                self.assertEqual(hardware_setup.boot_gpio(args), 0)
+            self.assertIn("already carries", printed.call_args[0][0])
+            self.assertEqual(config_txt.read_text(encoding="utf-8"), text)
+
     def test_migrate_config_removes_stale_keys_and_forces_rtd_tmc5160(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

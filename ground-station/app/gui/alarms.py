@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
+from .series_store import format_elapsed
 from .state import OnboardState
 
 RED = "red"
@@ -35,6 +36,15 @@ class Alarm:
 def evaluate(state: OnboardState) -> List[Alarm]:
     """Raw active alarms for `state`, in display order."""
     alarms: List[Alarm] = []
+    if state.replay:
+        eta = f", ETA {format_elapsed(state.replay_eta_s)}" if state.replay_eta_s else ""
+        if state.replay_live_panels:
+            count = f"{state.replay_backlog_frames} queued frames" if state.replay_backlog_frames else "queued frames"
+            alarms.append(Alarm("REPLAY", f"BACKLOG — onboard replaying {count}{eta}; "
+                                          "panels are LIVE, the replay fills plots and logs", AMBER))
+        else:
+            alarms.append(Alarm("REPLAY", f"REPLAY — onboard backlog {format_elapsed(state.replay_behind_s)} behind{eta}; "
+                                          "panels show the last LIVE frame, not the replay", AMBER))
     if state.have_packet:
         if state.flag("OVERTEMP_FAIL"):
             alarms.append(Alarm("OVERTEMP", "OVERTEMP latched — heaters forced off until RESET_CTRL"))
@@ -49,10 +59,36 @@ def evaluate(state: OnboardState) -> List[Alarm]:
             alarms.append(Alarm("SEQ_PAUSED", "bend sequence paused / faulted — BENDSEQ_STATUS"))
         if state.flag("ENERGY_FAIL") or state.budget_exhausted:
             alarms.append(Alarm("ENERGY", "heater energy budget exhausted — heaters latched off"))
+        elif (state.energy_wh is not None and state.budget_wh and
+              state.energy_wh >= 0.8 * state.budget_wh):
+            alarms.append(Alarm("ENERGY", f"heater energy {state.energy_wh:.1f} Wh ≥ 80 % of the "
+                                          f"{state.budget_wh:.0f} Wh budget — reduce targets or duty", AMBER))
+        if not state.rtc_valid:
+            # No RTC on schematic v4: the onboard derives rtc_valid from its
+            # system clock (past the firmware build date AND NTP-synced since
+            # boot). A bench with no time source sits here permanently; the
+            # GS receive stamp (gs_rx_utc) is the authoritative timeline.
+            alarms.append(Alarm("RTC", "Onboard clock unsynchronised — no NTP sync since boot; "
+                                       "DATA timestamps untrusted (gs_rx_utc is authoritative)", AMBER))
+        if state.debug_armed:
+            alarms.append(Alarm("DEBUG_ARM", "DEBUG ARM active — open-loop heater duty allowed "
+                                             "without PT100 feedback (DISARM_DEBUG to end)", AMBER))
+        if state.tune_channel:
+            alarms.append(Alarm("PID_TUNE", f"PID autotune running on {state.tune_channel} — "
+                                            "heaters under tuner control (PID_TUNE_ABORT to stop)", AMBER))
         for motor_id in range(2):
             comp = state.component_state.get(f"MOTOR{motor_id}")
             if comp == "FAILED":
                 alarms.append(Alarm(f"MOTOR{motor_id}", f"M{motor_id} FAILED — CHECK MOTOR{motor_id}"))
+            thermal = state.motor(motor_id).thermal
+            if thermal == "hot":
+                alarms.append(Alarm(f"M{motor_id}_TEMP",
+                                    f"M{motor_id} driver OVER-TEMPERATURE (≥150 °C die) — "
+                                    "motor disabled by safety; let it cool, then ENABLE"))
+            elif thermal == "warn":
+                alarms.append(Alarm(f"M{motor_id}_TEMP",
+                                    f"M{motor_id} driver hot (≥120 °C die pre-warning) — "
+                                    "reduce run current or duty", AMBER))
         if state.heaters_inhibited:
             moving = [f"M{m.motor_id}" for m in state.motors if m.moving or m.holding]
             who = f" ({' '.join(moving)} moving)" if moving else ""
@@ -63,7 +99,8 @@ def evaluate(state: OnboardState) -> List[Alarm]:
         if bad_components or bad_flags:
             alarms.append(Alarm("SENSOR", "SENSOR — " + " ".join(bad_components + bad_flags)))
         if state.queue_depth is not None and state.queue_depth > QUEUE_ALARM_FRAMES:
-            alarms.append(Alarm("RX_QUEUE", f"onboard queue backlog {state.queue_depth} frames (draining)", AMBER))
+            if not (state.replay and state.replay_live_panels):  # the BACKLOG alarm already says so
+                alarms.append(Alarm("RX_QUEUE", f"onboard queue backlog {state.queue_depth} frames (draining)", AMBER))
         if state.plan_state == "running":
             alarms.append(Alarm("PLAN", "fallback plan RUNNING onboard — autonomous bend in progress", AMBER))
         elif state.plan_state == "failed":
@@ -77,7 +114,7 @@ class AlarmModel:
     """Keeps acknowledgement state across evaluations."""
 
     def __init__(self) -> None:
-        self._acked: Dict[str, str] = {}   # key -> text it was acked with
+        self._acked: Dict[str, str] = {}   # key -> severity it was acked at
         self._previous: Dict[str, Alarm] = {}
         self._new_keys: List[str] = []
 
@@ -86,9 +123,15 @@ class AlarmModel:
         current: Dict[str, Alarm] = {}
         self._new_keys = []
         for alarm in raw:
-            acked = alarm.key in self._acked
+            # An ack applies to the severity it was given at: when an alarm
+            # escalates (amber pre-warning -> red), the ack dies and the
+            # alarm re-raises as new so it beeps and hits the event log.
+            acked = self._acked.get(alarm.key) == alarm.severity
+            if not acked and alarm.key in self._acked:
+                del self._acked[alarm.key]
             current[alarm.key] = Alarm(alarm.key, alarm.text, alarm.severity, acked)
-            if alarm.key not in self._previous:
+            prev = self._previous.get(alarm.key)
+            if prev is None or prev.severity != alarm.severity:
                 self._new_keys.append(alarm.key)
         # Acknowledgements die with the condition they acknowledged.
         for key in list(self._acked):
@@ -101,7 +144,7 @@ class AlarmModel:
         alarm = self._previous.get(key)
         if alarm is None:
             return
-        self._acked[key] = alarm.text
+        self._acked[key] = alarm.severity
         # Reflect it immediately (not only on the next update) so the
         # strip repaints the chip dimmed on the click that acked it.
         self._previous[key] = Alarm(alarm.key, alarm.text, alarm.severity, True)

@@ -96,7 +96,7 @@ class GuiSmoke(unittest.TestCase):
             (self.win._system.btn_arm, "Sends: ARM"),
             (self.win._motion.btn_enable, "Sends: STEPPER_ENABLE <motor_id>"),
             (self.win._motion.btn_zero, "Sends: SET_POSITION_ZERO <motor_id>"),
-            (self.win._motion.btn_bend, "Sends: STEPPER_MOVETO <motor_id> <target> <hold_s>"),
+            (self.win._motion.btn_bend, "Sends: STEPPER_MOVETO_MM <motor_id> <mm> <hold_s>"),
             (self.win._top.btn_heaters_off, "Sends: HEATERS_OFF"),
             (self.win._top.btn_stop_motors, "Sends: STEPPER_STOP 0"),
         ]

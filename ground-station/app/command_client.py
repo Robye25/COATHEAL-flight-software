@@ -6,7 +6,7 @@ import socket
 import time
 from pathlib import Path
 
-from .protocol import build_command, timeout_for
+from .protocol import build_command, recv_reply_line, timeout_for
 
 DEFAULT_STATIC_HOST = "169.254.10.10"
 
@@ -82,8 +82,7 @@ def send_command(host: str, port: int, command: str, timeout: float) -> str:
     payload = build_command(command)
     with socket.create_connection((host, port), timeout=timeout) as sock:
         sock.sendall(payload.encode("utf-8"))
-        data = sock.recv(4096)
-    return data.decode("utf-8", errors="replace").strip()
+        return recv_reply_line(sock)
 
 
 def add_subparser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:

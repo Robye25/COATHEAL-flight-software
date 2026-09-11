@@ -26,13 +26,16 @@ from ..protocol import (
     PullEvent,
     TelemetryPacket,
     TelemetryParseError,
+    ack_for_raw_line,
     build_ack,
     parse_command_response,
     parse_pull_event,
     parse_telemetry_csv,
+    recv_reply_line,
     timeout_for,
 )
 from ..reply_format import parse_kv_body
+from ..seqset import SeqSet
 from ..telemetry_log import LogManager, utc_now_iso
 
 DEFAULT_COMMAND_HOST = "169.254.10.10"
@@ -66,18 +69,25 @@ class TelemetryReceiver(QThread):
     session_opened     = pyqtSignal(str, str)  # (session_id, directory path)
 
     _STALE_EMIT_S   = 5.0  # emit "stale" status when DATA frames older than this
-    _DATA_TIMEOUT_S = 8.0  # idle window before we force-close the onboard socket
+    # Idle window before the onboard socket is force-closed. Must exceed the
+    # slowest legal tick (SET_TICK_HZ 0.1 = one frame per 10 s) or the
+    # receiver would drop a healthy connection between every two frames.
+    _DATA_TIMEOUT_S = 12.0
     # The ACK cursor used to be rewritten on every frame (5 writes/s at the
     # top tick rate); once a second is plenty for a crash-recovery hint.
     _CURSOR_MIN_INTERVAL_S = 1.0
 
     def __init__(self, bind: str, port: int, log_manager: LogManager, parent=None):
         super().__init__(parent)
+        self.parse_errors = 0  # malformed frames/events since start (status bar)
         self._bind = bind
         self._port = port
         self._logs = log_manager
         self._stop_flag = threading.Event()
-        self._last_seq_by_session: dict[str, int] = {}
+        # Received (session -> SeqSet). Frames arrive out of order (the
+        # onboard sends this tick's frame before its backlog), so "seq <=
+        # last seen" would drop a whole backlog as duplicates.
+        self._received_by_session: dict[str, SeqSet] = {}
         self._cursor_dirty = False
         self._cursor_last_persist = 0.0
         self._load_cursor()
@@ -95,8 +105,8 @@ class TelemetryReceiver(QThread):
             return
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
-            self._last_seq_by_session = {
-                str(k): int(v) for k, v in data.get("sessions", {}).items()
+            self._received_by_session = {
+                str(k): SeqSet.from_json(v) for k, v in data.get("sessions", {}).items()
             }
         except Exception:
             pass
@@ -109,7 +119,7 @@ class TelemetryReceiver(QThread):
             return
         payload = {
             "updated_utc": datetime.now(timezone.utc).isoformat(),
-            "sessions": self._last_seq_by_session,
+            "sessions": {sid: seen.to_json() for sid, seen in self._received_by_session.items()},
         }
         try:
             self._cursor_path().write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -211,8 +221,9 @@ class TelemetryReceiver(QThread):
                 if line.startswith("EVT,PULL,"):
                     try:
                         ev = parse_pull_event(line)
-                    except TelemetryParseError as exc:
-                        self.log_message.emit(f"[parse-error] {exc}")
+                    except Exception as exc:  # parse error of any shape
+                        if not self._ack_unparseable(conn, line, exc):
+                            return
                         continue
                     try:
                         conn.sendall(build_ack(ev.session_id, 0).encode("utf-8"))
@@ -228,14 +239,19 @@ class TelemetryReceiver(QThread):
                     continue
                 try:
                     pkt = parse_telemetry_csv(line)
-                except TelemetryParseError as exc:
-                    self.log_message.emit(f"[parse-error] {exc}")
+                except Exception as exc:  # TelemetryParseError, or anything else
+                    # Never let one bad line take the receiver down: the
+                    # thread would die, and the un-ACKed frame would be
+                    # re-sent by the onboard on every reconnect.
+                    if not self._ack_unparseable(conn, line, exc):
+                        return
                     continue
 
-                last_seq = self._last_seq_by_session.get(pkt.session_id, -1)
-                is_dup = pkt.seq <= last_seq
+                seen = self._received_by_session.get(pkt.session_id)
+                if seen is None:
+                    seen = self._received_by_session[pkt.session_id] = SeqSet()
+                is_dup = not seen.add(pkt.seq)
                 if not is_dup:
-                    self._last_seq_by_session[pkt.session_id] = pkt.seq
                     self._cursor_dirty = True
                     self._persist_cursor()
 
@@ -251,12 +267,28 @@ class TelemetryReceiver(QThread):
                     continue
 
                 if self._logs.on_packet(pkt, rx_utc):
-                    directory = self._logs.current_dir
+                    directory = self._logs.dir_for(pkt.session_id) or self._logs.current_dir
                     self.log_message.emit(
                         f"[log] session {pkt.session_id} -> {directory}")
                     self.session_opened.emit(pkt.session_id, str(directory))
 
                 self.packet_received.emit(pkt)
+
+    def _ack_unparseable(self, conn: socket.socket, line: str, exc: Exception) -> bool:
+        """Log an unparseable frame, keep its raw text, and ACK whatever
+        identity can be read off it so the onboard drops it from its queue.
+        Returns False only when the socket is gone."""
+        self.parse_errors += 1
+        self.log_message.emit(f"[parse-error] {exc}")
+        self._logs.log_event("WARN", f"unparseable frame ({exc}): {line}")
+        ack = ack_for_raw_line(line)
+        if ack is None:
+            return True
+        try:
+            conn.sendall(ack.encode("utf-8"))
+        except OSError:
+            return False
+        return True
 
 
 # ── async command dispatcher ─────────────────────────────────────────────────
@@ -286,8 +318,7 @@ class _SendJob(QRunnable):
         try:
             with socket.create_connection((self._host, self._port), timeout=self._timeout) as s:
                 s.sendall(payload)
-                data = s.recv(4096)
-            raw = data.decode("utf-8", errors="replace").strip()
+                raw = recv_reply_line(s)
             resp = parse_command_response(raw) if raw else CommandResponse(
                 ok=False, command=self._cmd, error="empty reply", raw="")
         except Exception as exc:
@@ -306,6 +337,10 @@ class CommandDispatcher(QObject):
     """
 
     response_received = pyqtSignal(str, object, float, object)  # cmd, CommandResponse, ms, tag
+    # Replies to `quiet` sends (high-rate polls such as the Debug tab's
+    # MOTOR_DEBUG): delivered here only -- not to the console, the history
+    # or commands.csv -- so a 2 Hz probe does not bury the operator's record.
+    quiet_response = pyqtSignal(str, object, float, object)
     silence_changed = pyqtSignal(bool)
 
     def __init__(self, host: str, port: int, history_size: int = 200,
@@ -350,21 +385,22 @@ class CommandDispatcher(QObject):
         return None
 
     def send(self, command: str, tag: Optional[object] = None,
-             timeout: Optional[float] = None) -> None:
+             timeout: Optional[float] = None, quiet: bool = False) -> None:
+        emit = self.quiet_response.emit if quiet else self.response_received.emit
         reason = self.blocked_reason(command)
         if reason is not None:
             resp = CommandResponse(ok=False, command=command.strip(), error=reason, raw="")
             # Delivered synchronously: a refusal is not a network event and
             # every consumer (history, log, response line) must see it in
             # the same order as the click that caused it.
-            self.response_received.emit(command, resp, 0.0, tag)
+            emit(command, resp, 0.0, tag)
             return
         # `timeout=None` (the default) resolves per-verb via
         # protocol.timeout_for -- CHECK gets a longer budget than the plain
         # 3.0s default (see protocol.COMMAND_TIMEOUTS for why). An
         # explicitly-passed timeout always wins over the table.
         resolved_timeout = timeout if timeout is not None else timeout_for(command)
-        job = _SendJob(self.host, self.port, command, resolved_timeout, tag, self.response_received.emit)
+        job = _SendJob(self.host, self.port, command, resolved_timeout, tag, emit)
         self._pool.start(job)
 
     def _on_response(self, cmd: str, resp: CommandResponse, ms: float, _tag) -> None:

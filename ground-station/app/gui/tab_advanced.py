@@ -12,8 +12,8 @@ from PyQt6.QtWidgets import (
 )
 
 from ..protocol import (
-    CommandResponse, validate_duty, validate_microstep, validate_pid_gains, validate_speed_hz,
-    validate_stepper_move,
+    CommandResponse, validate_duty, validate_microstep, validate_move_mm, validate_pid_gains,
+    validate_speed_hz,
 )
 from ..thermal_presets import PresetStore
 from . import gating
@@ -23,6 +23,11 @@ from .theme import HEATER_COLORS
 from .widgets import (
     AMBER, GREEN, MONO_CSS, MUTED, RED, ResponseLine, Segmented, confirm, group_box, hrow, make_button,
 )
+
+
+def _mm_to_usteps(mm: float, microstep: int) -> int:
+    """mm of linear travel -> microsteps at the 2 mm ball-screw lead."""
+    return int(round(mm / 2.0 * 200.0 * max(1, microstep)))
 
 
 class AdvancedTab(QScrollArea):
@@ -51,14 +56,14 @@ class AdvancedTab(QScrollArea):
         self.btn_seq_del = make_button("−", "neutral", min_height=22, slot=self._remove_step)
         lay.addWidget(hrow(self.seq_motor, self.seq_name, self.btn_seq_add, self.btn_seq_del))
         self.seq_table = QTableWidget(0, 3)
-        self.seq_table.setHorizontalHeaderLabels(["target µst", "hold s", "speed Hz"])
+        self.seq_table.setHorizontalHeaderLabels(["target mm", "hold s", "speed Hz"])
         self.seq_table.verticalHeader().setVisible(False)
         self.seq_table.setMinimumHeight(110)
         self.seq_table.horizontalHeader().setStretchLastSection(True)
         lay.addWidget(self.seq_table)
         self._add_step()
         grid = QGridLayout(); grid.setSpacing(3)
-        self.btn_seq_load = make_button("LOAD", "primary", sends="BENDSEQ_LOAD <motor_id> <name> <target>:<hold>[:<hz>] ...", min_height=24, slot=self._seq_load)
+        self.btn_seq_load = make_button("LOAD", "primary", sends="BENDSEQ_LOAD <motor_id> <name> <target µst from mm>:<hold>[:<hz>] ...", min_height=24, slot=self._seq_load)
         self.btn_seq_run = make_button("RUN", "success", sends="BENDSEQ_RUN <motor_id> <name>", min_height=24, slot=self._seq_run)
         self.btn_seq_pause = make_button("PAUSE", "danger", sends="BENDSEQ_PAUSE <motor_id>", min_height=24, slot=lambda: self._seq_cmd("BENDSEQ_PAUSE"))
         self.btn_seq_resume = make_button("RESUME", "success", sends="BENDSEQ_RESUME <motor_id>", min_height=24, slot=lambda: self._seq_cmd("BENDSEQ_RESUME"))
@@ -100,6 +105,8 @@ class AdvancedTab(QScrollArea):
                       "(or the bench debug arm is active). Never more than 3 heaters run at once (scheduler).")
         note.setWordWrap(True); note.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(note)
+        self.debug_note = QLabel(""); self.debug_note.setWordWrap(True); self.debug_note.setMinimumWidth(1)
+        lay.addWidget(self.debug_note)
         self.duty_sliders: List[QSlider] = []
         self.duty_labels: List[QLabel] = []
         self.duty_buttons = []
@@ -132,7 +139,8 @@ class AdvancedTab(QScrollArea):
         self.us = QComboBox(); self.us.addItems(["1", "2", "4", "8", "16", "32", "64", "128", "256"]); self.us.setCurrentText("4")
         self.btn_us = make_button("Set", "primary", sends="STEPPER_SET_MICROSTEP <motor_id> <n>", min_height=24, slot=self._set_microstep)
         lay.addWidget(hrow(self.us_motor, self.us, self.btn_us, stretch_last=True))
-        note = QLabel("Changing the divisor rescales positions — re-zero the motor afterwards. Commissioning default 4.")
+        note = QLabel("The firmware rescales its stored position so mm travel is preserved across a divisor change — no re-zero "
+                      "needed. Loaded bend sequences and fallback plans stay in raw µsteps: re-LOAD them after changing it. Commissioning default 4.")
         note.setWordWrap(True); note.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(note)
         self.resp_us = ResponseLine()
@@ -156,13 +164,14 @@ class AdvancedTab(QScrollArea):
         self.plan_rows = []
         for motor_id in range(MOTOR_COUNT):
             name = QLabel(f"M{motor_id}"); name.setStyleSheet(f"{MONO_CSS} font-weight: bold;")
-            target = QSpinBox(); target.setRange(-200000, 200000); target.setValue(800); target.setSuffix(" µst")
+            target = QDoubleSpinBox(); target.setRange(-500.0, 500.0); target.setDecimals(2)
+            target.setValue(2.0); target.setSuffix(" mm")
             hold = QDoubleSpinBox(); hold.setRange(0.0, 3600.0); hold.setDecimals(1); hold.setValue(5.0); hold.setSuffix(" s")
             speed = QSpinBox(); speed.setRange(1, 100); speed.setValue(100); speed.setSuffix(" Hz")
             for spin, width in ((target, 84), (hold, 60), (speed, 64)):
                 spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
                 spin.setFixedWidth(width)
-            btn = make_button("LOAD", "primary", sends=f"FALLBACK_PLAN {motor_id} <target> <hold> <hz>", min_height=22,
+            btn = make_button("LOAD", "primary", sends=f"FALLBACK_PLAN {motor_id} <target µst from mm> <hold> <hz>", min_height=22,
                               compact=True, slot=lambda m=motor_id: self._plan_load(m))
             self.plan_rows.append((target, hold, speed, btn))
             lay.addWidget(hrow(name, target, hold, speed, btn))
@@ -212,7 +221,7 @@ class AdvancedTab(QScrollArea):
     def _add_step(self) -> None:
         row = self.seq_table.rowCount()
         self.seq_table.insertRow(row)
-        for col, text in enumerate(("0", "0", "")):
+        for col, text in enumerate(("0.0", "0", "")):
             self.seq_table.setItem(row, col, QTableWidgetItem(text))
 
     def _remove_step(self) -> None:
@@ -233,17 +242,25 @@ class AdvancedTab(QScrollArea):
         encoded: List[str] = []
         for row in range(self.seq_table.rowCount()):
             try:
-                target = int(self.seq_table.item(row, 0).text().strip())
+                target_mm = float(self.seq_table.item(row, 0).text().strip())
                 hold = float(self.seq_table.item(row, 1).text().strip())
                 speed_text = self.seq_table.item(row, 2).text().strip()
             except (AttributeError, ValueError) as exc:
                 self.resp_seq.show_note(f"✖ step {row + 1}: {exc}", RED)
                 return None
-            ok, msg = validate_stepper_move(target)
+            ok, msg = validate_move_mm(target_mm)
             if not ok:
                 self.resp_seq.show_note(f"✖ step {row + 1}: {msg}", RED); return None
             if hold < 0:
                 self.resp_seq.show_note(f"✖ step {row + 1}: hold must be non-negative", RED); return None
+            # The BENDSEQ_LOAD wire format stays absolute µsteps; convert at
+            # the motor's live divisor, never a guess: a sequence encoded at
+            # µ4 for a motor running µ16 bends four times short.
+            us = self._live_microstep(self._seq_motor_id())
+            if us is None:
+                self.resp_seq.show_note("✖ motor microstep unknown — wait for telemetry before loading", RED)
+                return None
+            target = _mm_to_usteps(target_mm, us)
             step = f"{target}:{hold:g}"
             if speed_text:
                 ok, msg = validate_speed_hz(float(speed_text))
@@ -297,9 +314,23 @@ class AdvancedTab(QScrollArea):
             self.resp_us.show_note(f"✖ {norm}", RED); return
         self._send(f"STEPPER_SET_MICROSTEP {int(self.us_motor.value() or 0)} {norm}")
 
+    def _live_microstep(self, motor_id: int) -> int | None:
+        """The motor's live divisor from telemetry, or None while the console
+        has not seen a STEPPER<n> segment for it. Absolute µstep targets
+        must never be encoded against a guessed divisor: the failsafe plan
+        executes on its own, with nobody there to notice a 4x short bend."""
+        motor = self.state.motor(motor_id)
+        return motor.microstep if motor.present and motor.microstep > 0 else None
+
     def _plan_load(self, motor_id: int) -> None:
         target, hold, speed, _btn = self.plan_rows[motor_id]
-        self._send(f"FALLBACK_PLAN {motor_id} {target.value()} {hold.value():g} {speed.value()}")
+        us = self._live_microstep(motor_id)
+        if us is None:
+            self.resp_plan.show_note(
+                f"✖ M{motor_id} microstep unknown — wait for telemetry before loading the plan", RED)
+            return
+        usteps = _mm_to_usteps(target.value(), us)
+        self._send(f"FALLBACK_PLAN {motor_id} {usteps} {hold.value():g} {speed.value()}")
 
     def _plan_arm(self) -> None:
         if confirm(self, "Arm the fallback plan?", "Send FALLBACK_ARM? The onboard will execute the loaded plan on its own if the link is lost at PRE_FLOAT/FLOAT."):
@@ -352,16 +383,23 @@ class AdvancedTab(QScrollArea):
         generic = gating.generic_reason(state)
         self.btn_seq_load.set_reason(generic)
         self.btn_seq_run.set_reason(gating.sequence_run_reason(state, motor_id))
-        for btn in (self.btn_seq_pause, self.btn_seq_resume, self.btn_seq_stop, self.btn_seq_status, self.btn_seq_clear,
+        for btn in (self.btn_seq_stop, self.btn_seq_status, self.btn_seq_clear,
                     self.btn_pid, self.btn_clear_overrides, self.btn_us, self.btn_plan_arm, self.btn_plan_disarm,
                     self.btn_plan_status):
             btn.set_reason(generic)
+        self.btn_seq_pause.set_reason(gating.motion_reason(state, motor_id, needs_zero=False, needs_enable=False))
+        self.btn_seq_resume.set_reason(gating.motion_reason(state, motor_id, needs_zero=True, needs_enable=False))
         for _t, _h, _s, btn in self.plan_rows:
             btn.set_reason(generic)
         for i, btn in enumerate(self.duty_buttons):
-            btn.set_reason(gating.heater_reason(state, i))
+            btn.set_reason(gating.duty_reason(state, i))
         for btn in self.all_duty_buttons:
-            btn.set_reason(gating.all_heaters_reason(state))
+            btn.set_reason(gating.all_duty_reason(state))
+        if state.debug_armed:
+            self.debug_note.setText("DEBUG ARM ACTIVE — open-loop duty allowed without PT100 feedback (DISARM_DEBUG to end)")
+            self.debug_note.setStyleSheet(f"color: {AMBER}; font-size: 8pt; font-weight: bold;")
+        else:
+            self.debug_note.setText("")
         if state.plan_state is not None:
             self.plan_state.setText(f"plan: {state.plan_state}")
             color = {"armed": GREEN, "running": AMBER, "done": GREEN, "failed": RED}.get(state.plan_state, MUTED)

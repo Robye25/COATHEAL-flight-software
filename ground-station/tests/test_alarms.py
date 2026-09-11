@@ -51,6 +51,49 @@ class EvaluateTests(unittest.TestCase):
         self.assertIn("M1", alarms["HEATERS_INHIBITED"].text)
         self.assertEqual(alarms["HEATERS_INHIBITED"].severity, "amber")
 
+    def test_driver_thermal_alarms(self) -> None:
+        # warn -> amber pre-warning; hot -> red with the re-arm instruction.
+        warn = {a.key: a for a in evaluate(state(m1="mv:0|therm:warn"))}
+        self.assertIn("M1_TEMP", warn)
+        self.assertEqual(warn["M1_TEMP"].severity, "amber")
+        self.assertIn("120", warn["M1_TEMP"].text)
+        hot = {a.key: a for a in evaluate(state(m1="mv:0|therm:hot"))}
+        self.assertEqual(hot["M1_TEMP"].severity, "red")
+        self.assertIn("150", hot["M1_TEMP"].text)
+        self.assertIn("ENABLE", hot["M1_TEMP"].text)
+        # ok / old firmware raise nothing.
+        self.assertNotIn("M1_TEMP", {a.key for a in evaluate(state(m1="mv:0|therm:ok"))})
+        self.assertNotIn("M1_TEMP", {a.key for a in evaluate(state())})
+
+    def test_debug_arm_energy_prealarm_and_rtc(self) -> None:
+        armed = {a.key: a for a in evaluate(state(ctrl="fallback:0|queue:0|debug:1"))}
+        self.assertEqual(armed["DEBUG_ARM"].severity, "amber")
+        pre = {a.key: a for a in evaluate(state(ctrl="fallback:0|queue:0|energy_wh:110.0|budget_wh:130.0"))}
+        self.assertEqual(pre["ENERGY"].severity, "amber")
+        self.assertIn("80", pre["ENERGY"].text)
+        # Under 80 %: quiet.
+        low = {a.key for a in evaluate(state(ctrl="fallback:0|queue:0|energy_wh:10.0|budget_wh:130.0"))}
+        self.assertNotIn("ENERGY", low)
+        # rtc_valid=1 in the frame: no clock alarm.
+        self.assertNotIn("RTC", low)
+
+    def test_unsynchronised_onboard_clock_is_an_amber_alarm(self) -> None:
+        # The onboard derives rtc_valid (no RTC on schematic v4); 0 means
+        # its clock has not been NTP-synced since boot -- a warning, since
+        # gs_rx_utc keeps the log timeline, never a red.
+        unsynced = frame().replace(",2026-08-28T00:00:00Z,1,", ",2026-08-28T00:00:00Z,0,", 1)
+        st = state_from_packet(parse_telemetry_csv(unsynced), link_age_s=0.5)
+        self.assertFalse(st.rtc_valid)
+        alarms = {a.key: a for a in evaluate(st)}
+        self.assertEqual(alarms["RTC"].severity, "amber")
+        self.assertIn("gs_rx_utc", alarms["RTC"].text)
+
+    def test_pid_tune_raises_amber_chip(self) -> None:
+        tuning = {a.key: a for a in evaluate(state(ctrl="fallback:0|queue:0|tune:H4"))}
+        self.assertEqual(tuning["PID_TUNE"].severity, "amber")
+        self.assertIn("H4", tuning["PID_TUNE"].text)
+        self.assertNotIn("PID_TUNE", {a.key for a in evaluate(state(ctrl="fallback:0|queue:0|tune:-"))})
+
     def test_plan_states_raise_plan_alarm(self) -> None:
         running = {a.key: a for a in evaluate(state(ctrl="fallback:1|queue:0|plan:running"))}
         self.assertEqual(running["PLAN"].severity, "amber")
@@ -90,6 +133,19 @@ class ModelTests(unittest.TestCase):
 
     # MUTATION: remove the loop that deletes cleared keys from self._acked
     # in AlarmModel.update and confirm the "returning condition" assertion fails.
+
+    def test_ack_dies_on_severity_escalation(self) -> None:
+        # Acknowledging the amber ≥120 °C pre-warning must NOT pre-dim the
+        # later RED shutdown alarm on the same key — the escalation re-raises
+        # as new (beep + event-log line).
+        model = AlarmModel()
+        model.update(state(m1="mv:0|therm:warn"))
+        model.acknowledge("M1_TEMP")
+        alarms = {a.key: a for a in model.update(state(m1="mv:0|therm:warn"))}
+        self.assertTrue(alarms["M1_TEMP"].acked, "same severity stays acked")
+        alarms = {a.key: a for a in model.update(state(m1="mv:0|therm:hot"))}
+        self.assertFalse(alarms["M1_TEMP"].acked, "red escalation must not inherit the amber ack")
+        self.assertIn("M1_TEMP", model.new_keys, "escalation must re-raise as new (beep/log)")
 
     def test_ack_all(self) -> None:
         model = AlarmModel()

@@ -79,6 +79,27 @@ class Tmc5160Driver : public StepperDriver {
   bool spi_bus_ok() const override { return spi_bus_ok_; }
   std::string last_error() const override { return last_error_message_; }
   std::string warning() const override;
+  // XACTUAL, XTARGET, VACTUAL, MSCNT, DRV_STATUS, RAMPSTAT, TSTEP, IOIN,
+  // GSTAT, CHOPCONF -- raw and decoded. Read-only (RAMPSTAT's read-clear
+  // event bits are not used by this driver).
+  std::string DebugRegisters() override;
+  bool Poll() override;
+
+  // Runtime run-current change: validates against the configured sense
+  // resistor (same CalculateCurrent path as initialisation), rewrites
+  // GLOBALSCALER + IHOLD_IRUN on the live chip, and updates the stored
+  // config so every later reconfiguration (ActiveCheck, chip-reset
+  // recovery) reapplies the new value. Requires a healthy driver -- a chip
+  // that cannot be talked to cannot have its current changed.
+  bool SetRunCurrent(double a_rms, std::string* error) override;
+  double run_current_a_rms() const override;
+
+  // DRV_STATUS thermal flags, sampled in Poll() (enabled + idle, ~1 Hz)
+  // and every kResetCheckInterval steps while moving. otpw (bit 26,
+  // >=~120 °C) is live + event-counted; ot (bit 25, >=~150 °C shutdown)
+  // latches until the next Enable(true). See StepperDriver::thermal_state.
+  int thermal_state() const override;
+  std::uint32_t otpw_event_count() const;
 
   // Whether driving the EN GPIO was last seen to move DRV_ENN in IOIN.
   // Enable(true) already refuses a line that leaves DRV_ENN HIGH; the
@@ -87,6 +108,12 @@ class Tmc5160Driver : public StepperDriver {
   // STEPPER_DISABLE unable to cut the power stage through EN. Enable(false)
   // detects it and reports it here and through warning().
   bool enable_line_effective() const { return enable_line_effective_; }
+  // Times GSTAT.reset was found set after initialisation: the chip lost VM
+  // or VCC_IO and came back with reset defaults (VMAX=0, TOFF=0, currents
+  // default). Each time the configuration is rewritten (bench 2026-08-29:
+  // CHOPCONF read 0x10410150 while the firmware believed the motor was
+  // enabled; XACTUAL never followed XTARGET).
+  std::uint32_t reset_count() const { return reset_count_; }
   // Test hook: the IOIN verification after driving EN normally runs only
   // when this driver owns the GPIO (use_gpio=true); FakeSpiBus tests run
   // with use_gpio=false and turn it on explicitly.
@@ -177,6 +204,18 @@ class Tmc5160Driver : public StepperDriver {
   bool verify_enable_line_ = false;
   bool enable_line_effective_ = true;
   bool enable_warning_logged_ = false;
+  std::uint32_t reset_count_ = 0;
+  std::uint32_t steps_since_reset_check_ = 0;
+  // Thermal tracking (see thermal_state()). Guarded by io_mu_.
+  bool otpw_now_ = false;
+  bool ot_latched_ = false;
+  std::uint32_t otpw_events_ = 0;
+  // Reads DRV_STATUS and updates the thermal flags; edge-logs. Bus
+  // failures are ignored here (reported by the surrounding conversation).
+  void CheckThermalUnlocked();
+  // Reads GSTAT; on GSTAT.reset rewrites the whole configuration (and the
+  // running chopper if enabled). False only on a bus failure.
+  bool RecoverFromChipResetUnlocked(const char* where);
   mutable std::mutex io_mu_;
 };
 

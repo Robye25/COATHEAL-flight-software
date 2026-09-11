@@ -39,6 +39,28 @@ inline constexpr int kPt1000     = 133;                      // 133 uint8, 0x0f
 // forwards to this.
 bool Pt100TemperatureFromOhms(double resistance_ohm, double* temperature_c);
 
+// Why a channel failed validation, in terms a harness technician can act
+// on. Diagnosis only: control code keys off channel_valid, never off this.
+enum class RtdChannelFault : std::uint8_t {
+  kNone,      // channel_valid == true
+  kOpen,      // card's ±366 Ω open/full-scale sentinel, above-window, or
+              // non-finite: no conducting probe on the terminal block
+  kShort,     // resistance below the plausible window (PT100 ~80 Ω at −50 °C)
+  kMismatch,  // in-window resistance whose PT100-derived temperature
+              // disagrees with the card's own reading (miswired 2/3-wire,
+              // wrong sensor, drifting probe)
+};
+
+inline const char* ToString(RtdChannelFault fault) {
+  switch (fault) {
+    case RtdChannelFault::kNone: return "OK";
+    case RtdChannelFault::kOpen: return "OPEN";
+    case RtdChannelFault::kShort: return "SHORT";
+    case RtdChannelFault::kMismatch: return "MISMATCH";
+  }
+  return "OPEN";
+}
+
 // 8-channel PT100/PT1000 acquisition on a Sequent Microsystems stackable
 // RTD HAT. Byte-addressed I2C memory at 0x40 + stack.
 //
@@ -83,6 +105,8 @@ class SequentRtdAdapter {
     std::array<double, kChannelCount> temperature_c{};
     std::array<double, kChannelCount> resistance_ohm{};
     std::array<bool, kChannelCount> channel_valid{};
+    // Per-channel diagnosis paired with channel_valid (kNone iff valid).
+    std::array<RtdChannelFault, kChannelCount> channel_fault{};
     // Diagnostics only; never used for control. Byte interpretations are
     // inferred from the register map and confirmed at bench bring-up.
     double card_temp_c = 0.0;
@@ -97,6 +121,8 @@ class SequentRtdAdapter {
 
   bool burst_mode() const { return burst_mode_; }
   int address() const { return kAddressBase + options_.stack; }
+  // Immutable after construction; safe to read from any thread.
+  const Options& options() const { return options_; }
 
  private:
   bool EnsureOpen(std::string* error);

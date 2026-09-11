@@ -25,6 +25,12 @@ enum class CommandType {
   kSetAllDuty,
   kHeaterTest,
   kSetPid,
+  // Relay PID auto-tune sequence (bench commissioning):
+  // PID_TUNE_START <heater> <setpoint_c> [relay_duty] [cycles],
+  // PID_TUNE_ABORT, PID_TUNE_STATUS.
+  kPidTuneStart,
+  kPidTuneAbort,
+  kPidTuneStatus,
   kSetTempTarget,
   kSetAllTempTargets,
   kClearTempTarget,
@@ -38,10 +44,16 @@ enum class CommandType {
   kSetPhase,
   kStepperMove,
   kStepperMoveTo,
+  // Distance surface (ball-screw lead conversion happens onboard):
+  // STEPPER_MOVE_MM <id> <mm>, STEPPER_MOVETO_MM <id> <mm> [hold_s].
+  kStepperMoveMm,
+  kStepperMoveToMm,
   kStepperRotate,
   kStepperHome,
   kStepperStop,
   kStepperSetSpeed,
+  kStepperSetAccel,
+  kStepperSetCurrent,
   kStepperSetMicrostep,
   kStepperEnable,
   kStepperDisable,
@@ -61,6 +73,7 @@ enum class CommandType {
   kFallbackArm,
   kFallbackDisarm,
   kFallbackStatus,
+  kMotorDebug,
   kUnknown,
 };
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import re
 import time
 from pathlib import Path
 from typing import Optional
@@ -38,9 +39,11 @@ from .panel_top import AlarmStrip, TopStrip
 from .panel_values import ValuesPanel
 from .panels_health import HealthPanel
 from .plots import PlotArea
+from .replay import ReplayClassifier, ReplayVerdict, parse_onboard_timestamp
 from .scale import UiScale
 from .state import OnboardState, state_from_packet
 from .tab_advanced import AdvancedTab
+from .tab_debug import DebugTab
 from .tab_motion import MotionTab
 from .tab_system import SystemTab
 from .tab_thermal import ThermalTab
@@ -82,6 +85,18 @@ class MainWindow(QMainWindow):
         self._parse_errors = 0
         self._state = OnboardState()
         self._alarms = AlarmModel()
+        self._replay = ReplayClassifier()
+        self._verdict = ReplayVerdict(False, 0.0, None)
+        self._session_seen = ""
+        self._replayed = 0
+        self._replay_shown = False
+        self._last_replay_mono: Optional[float] = None
+        self._backlog_frames: Optional[int] = None
+        # `mode=` from an ARM/DISARM/EXIT_SAFE/STATUS acknowledgement, applied
+        # to the panels until the next live frame confirms it. Without it an
+        # ARM during a backlog replay looked ignored for minutes (bench,
+        # 2026-08-29).
+        self._mode_override: Optional[str] = None
         self._beep = bool(self._settings.value("alarms/beep", False, type=bool))
 
         self._dispatcher = CommandDispatcher(cmd_host, cmd_port, log_manager=self._logs)
@@ -108,9 +123,10 @@ class MainWindow(QMainWindow):
         self._advanced.gains_changed.connect(self._thermal.set_gains)
         self._advanced.priority_changed.connect(self._on_priority_changed)
         self._advanced.host_override_changed.connect(self._on_host_override)
+        self._debug = DebugTab(self._dispatcher, self._settings)
         self._left_tabs = QTabWidget(); self._left_tabs.setObjectName("leftTabs")
         for widget, title in ((self._system, "System"), (self._thermal, "Thermal"),
-                              (self._motion, "Motion"), (self._advanced, "Advanced")):
+                              (self._motion, "Motion"), (self._advanced, "Advanced"), (self._debug, "Debug")):
             self._left_tabs.addTab(widget, title)
         self._left_tabs.setMinimumWidth(410)
 
@@ -258,27 +274,56 @@ class MainWindow(QMainWindow):
     def _on_packet(self, pkt: TelemetryPacket) -> None:
         now_mono = time.monotonic()
         rx_time = time.time()
-        self._last_pkt = pkt
+        if pkt.tx_age_s is None and pkt.session_id != self._session_seen:
+            # Untagged firmware drains strictly in order, so a new session id
+            # is a new stream and the clock-offset baseline starts over.
+            self._session_seen = pkt.session_id
+            self._replay.reset()
+        onboard_ts = parse_onboard_timestamp(pkt.timestamp)
+        self._verdict = self._replay.classify(onboard_ts, rx_time, tx_age_s=pkt.tx_age_s,
+                                              queue_depth=pkt.queue_depth)
         self._last_rx_mono = now_mono
         self._frames += 1
         self._top.on_packet_received(pkt.session_id, now_mono)
-        self._top.set_health(pkt)
-        self._plots.on_packet(pkt, rx_time)
-        self._health.on_packet(pkt)
-        self._apply_state()
-        self._values.on_packet(pkt, self._state)
+        # Plots and logs take every frame, at its onboard time; the live
+        # panels (state, gating, alarms, health, values) take only frames
+        # that are not a replay of the onboard backlog (replay.py).
+        self._plots.on_packet(pkt, onboard_ts if onboard_ts is not None else rx_time)
+        if self._verdict.is_replay:
+            self._replayed += 1
+            self._last_replay_mono = now_mono
+            self._apply_state()
+        else:
+            self._session_seen = pkt.session_id
+            if self._verdict.tagged:
+                self._backlog_frames = self._verdict.backlog_frames
+            self._mode_override = None
+            self._last_pkt = pkt
+            self._top.set_health(pkt)
+            self._health.on_packet(pkt)
+            self._apply_state()
+            self._values.on_packet(pkt, self._state)
         if self._frames % 20 == 0:
             self._update_status_bar()
 
     def _on_pull_event(self, ev: PullEvent) -> None:
-        self._pulls.on_pull_event(ev)
+        self._pulls.on_pull_event(
+            ev, ev.microstep or self._state.motor(ev.motor_id).microstep or 4)
         self._motion.on_pull_event(ev)
-        self._plots.on_pull_event(ev, time.time())
+        self._plots.on_pull_event(ev, parse_onboard_timestamp(ev.start_ts) or time.time())
 
     def _on_response(self, cmd: str, resp: CommandResponse, ms: float, tag) -> None:
         body = resp.body if resp.ok else (resp.error or resp.raw)
         self._events.append(f"[{'ACK' if resp.ok else 'NACK'}] {cmd}  ({ms:.0f} ms)  {body}",
                             "INFO" if resp.ok else "WARN")
+        verb = cmd.strip().split()[0].upper() if cmd.strip() else ""
+        if resp.ok and verb in ("ARM", "DISARM", "EXIT_SAFE", "ENTER_SAFE", "STATUS"):
+            # The acknowledgement is the onboard's word on its mode right now;
+            # the panels must not wait for the next live frame to show it.
+            match = re.search(r"(?:^|;)mode=([A-Z]+)", resp.body or "")
+            if match:
+                self._mode_override = match.group(1)
+                self._apply_state()
         self._console.on_response(cmd, resp, ms, tag)
         for panel in (self._system, self._thermal, self._motion, self._advanced, self._checkout):
             panel.on_response(cmd, resp, ms, tag)
@@ -302,6 +347,33 @@ class MainWindow(QMainWindow):
             state = state_from_packet(self._last_pkt, silence=silence, link_age_s=age)
         else:
             state = dataclasses.replace(OnboardState(), silence=silence, link_age_s=age)
+        tagged = self._verdict.tagged
+        if tagged:
+            # Live-first drain: replay frames interleave with live ones, so
+            # "replaying" is a condition, not the verdict of the last frame.
+            now = time.monotonic()
+            recent = self._last_replay_mono is not None and (now - self._last_replay_mono) < 3.0
+            replaying = age is not None and age < 10.0 and (recent or (self._backlog_frames or 0) > 10)
+        else:
+            replaying = self._verdict.is_replay and age is not None and age < 10.0
+        if replaying != self._replay_shown:
+            self._replay_shown = replaying
+            if replaying:
+                self._events.append("[replay] onboard backlog replaying — panels stay LIVE (frames carry their age); "
+                                    "plots and logs fill in" if tagged else
+                                    "[replay] onboard backlog replay detected — panels keep the last live frame", "WARN")
+            else:
+                self._events.append(f"[replay] caught up after {self._replayed} replayed frames")
+                self._replayed = 0
+        state = dataclasses.replace(state, replay=replaying,
+                                    replay_behind_s=self._verdict.behind_s if replaying else 0.0,
+                                    replay_eta_s=self._verdict.eta_s if replaying else None,
+                                    replay_live_panels=replaying and tagged,
+                                    replay_backlog_frames=self._backlog_frames if (replaying and tagged) else None)
+        if self._mode_override and state.have_packet and state.mode != self._mode_override:
+            state = dataclasses.replace(state, mode=self._mode_override)
+        self._top.set_replay(state.replay_behind_s if replaying else None, state.replay_eta_s,
+                             live_panels=state.replay_live_panels, backlog_frames=state.replay_backlog_frames)
         self._state = state
         alarms = self._alarms.update(state)
         if self._alarms.new_keys:
@@ -315,6 +387,7 @@ class MainWindow(QMainWindow):
         self._thermal.update_state(state)
         self._motion.update_state(state)
         self._advanced.update_state(state)
+        self._debug.update_state(state)
         self._checkout.update_state(state, link_ok=self._link_ok, unacked_alarms=self._alarms.unacked_count)
 
     def _tick(self) -> None:
@@ -391,7 +464,8 @@ class MainWindow(QMainWindow):
         where = f"sessions/{directory.name}" if directory else "no session yet"
         scale = f" · UI {self._scale.percent} %" if self._scale else ""
         self.statusBar().showMessage(
-            f"{self._log_root} · {where} · {self._frames} frames · {self._parse_errors} parse errors"
+            f"{self._log_root} · {where} · {self._frames} frames · "
+            f"{self._receiver.parse_errors if self._receiver else 0} parse errors"
             f"{self._status_disk}{scale} · Esc = STOP MOTORS · F1 shortcuts")
         self.statusBar().setToolTip(str(directory) if directory else str(self._log_root))
 
@@ -448,7 +522,7 @@ class MainWindow(QMainWindow):
         ("Esc", "STEPPER_STOP 0 + STEPPER_STOP 1 (panic, no confirm)"),
         ("Ctrl+Shift+H", "HEATERS_OFF (panic, no confirm)"),
         ("Ctrl+L", "focus the console entry"),
-        ("Ctrl+1 … Ctrl+4", "System / Thermal / Motion / Advanced"),
+        ("Ctrl+1 … Ctrl+5", "System / Thermal / Motion / Advanced / Debug"),
         ("Alt+1 … Alt+5", "plot tabs"),
         ("P", "pause / resume plots (ignored while typing)"),
         ("F5", "send STATUS"),
@@ -472,7 +546,7 @@ class MainWindow(QMainWindow):
         sc("Esc", self._motion.stop_all)
         sc("Ctrl+Shift+H", lambda: self._dispatcher.send("HEATERS_OFF", tag=self._top))
         sc("Ctrl+L", self._console.focus_entry)
-        for i in range(4):
+        for i in range(5):
             sc(f"Ctrl+{i + 1}", lambda idx=i: self._left_tabs.setCurrentIndex(idx))
         for i in range(5):
             sc(f"Alt+{i + 1}", lambda idx=i: self._plots.tabs.setCurrentIndex(idx))

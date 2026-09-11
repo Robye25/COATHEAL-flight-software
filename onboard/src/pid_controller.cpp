@@ -26,16 +26,29 @@ double PidController::Update(double setpoint, double measured, double dt_seconds
   const double safe_dt = dt_seconds <= 1e-6 ? 1e-3 : dt_seconds;
   const double error = setpoint - measured;
 
-  integral_ += error * safe_dt;
-  integral_ = std::clamp(integral_, integral_min_, integral_max_);
-
   double derivative = 0.0;
   if (has_prev_) {
     derivative = (error - prev_error_) / safe_dt;
   }
-
   prev_error_ = error;
   has_prev_ = true;
+
+  // Conditional anti-windup: only accumulate the integral while doing so
+  // can still change the output. During a long saturated ramp (output
+  // pinned at output_max_ with a large positive error) an unconditional
+  // integral would keep growing and then discharge as overshoot past the
+  // setpoint; freezing it while the output is saturated IN THE DIRECTION
+  // of the error leaves the integrator free to do its real job — holding
+  // the steady-state output at zero error.
+  const double tentative = (gains_.kp * error) +
+                           (gains_.ki * (integral_ + error * safe_dt)) +
+                           (gains_.kd * derivative);
+  const bool saturating_high = tentative > output_max_ && error > 0.0;
+  const bool saturating_low = tentative < output_min_ && error < 0.0;
+  if (!saturating_high && !saturating_low) {
+    integral_ += error * safe_dt;
+    integral_ = std::clamp(integral_, integral_min_, integral_max_);
+  }
 
   double out = (gains_.kp * error) + (gains_.ki * integral_) + (gains_.kd * derivative);
   out = std::clamp(out, output_min_, output_max_);

@@ -1,10 +1,10 @@
 [Unit]
 Description=COATHEAL Onboard (debug profile)
-After=network-online.target systemd-time-wait-sync.service
+After=network-online.target
 Wants=network-online.target
 # Flight and debug both bind port 5000 - only one can run at a time.
 Conflicts=coatheal-onboard.service
-StartLimitIntervalSec=300
+StartLimitIntervalSec=0
 StartLimitBurst=20
 
 [Service]

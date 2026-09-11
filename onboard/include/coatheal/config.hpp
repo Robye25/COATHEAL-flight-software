@@ -168,10 +168,11 @@ struct SensorHardwareConfig {
   int max31865_poll_ms = 1000;
   // Which two of hardware.sample_count indices the two clicks feed,
   // click-index-ordered (entry 0 -> click 0/SAMPLE1, entry 1 -> click
-  // 1/SAMPLE2). OWNER-FLAGGED PLACEHOLDER: {0, 4} is the first specimen of
-  // each motor group (motor0.samples starts at 0, motor1.samples starts at
-  // 4) -- config-only to change once the real commissioning mapping from
-  // the coating bench is known.
+  // 1/SAMPLE2). Owner decision (confirmed 2026-08-29): specimen resistance
+  // is measured on exactly TWO samples, one per motor group, via the two
+  // MAX31865 RTD clicks -- {0, 4} is the first specimen of each group
+  // (motor0.samples starts at 0, motor1.samples at 4). Config-tunable if
+  // the instrumented specimen within a group ever changes.
   std::vector<std::size_t> max31865_sample_indices{0, 4};
 };
 
@@ -184,6 +185,13 @@ struct HeaterOutputConfig {
   bool active_high = true;
   double debug_max_duty = 0.25;
   double debug_max_seconds = 10.0;
+  // Global heater power ceiling, applied to every duty the controller can
+  // produce (PID output limit + final clamp) and enforced as a NACK on
+  // SET_HEATER_DUTY / SET_ALL_DUTY / HEATER_TEST. 1.0 = full power (flight
+  // default). Bench 2026-08-29: a 5 W film driven at 100% runs its surface
+  // hundreds of °C ahead of a lagging PT100, so a 40 °C target still
+  // tripped the 85 °C latch — cap the power, not the setpoint.
+  double max_duty = 1.0;
 };
 
 struct StepperConfig {
@@ -195,6 +203,14 @@ struct StepperConfig {
   double max_step_hz = 100.0;
   std::int64_t max_position_steps = 200000;  // absolute travel limit
   bool enable_on_boot = false;       // stay de-energised until commanded
+  // Ball-screw lead: linear travel per motor revolution. The mm command
+  // surface (STEPPER_MOVE_MM / STEPPER_MOVETO_MM, mm telemetry keys)
+  // converts through this single value; the microstep commands stay raw.
+  double lead_mm_per_rev = 2.0;
+  // Ceiling for STEPPER_SET_ACCEL and motorN.accel_steps_per_s2, in
+  // full-steps/s². Bounds runtime experimentation the same way
+  // pull.max_step_hz bounds STEPPER_SET_SPEED.
+  double max_accel_steps_per_s2 = 5000.0;
 };
 
 struct PullConfig {
@@ -228,12 +244,19 @@ struct MotorConfig {
   // GLOBALSCALER/IHOLD_IRUN current calculation.
   double sense_resistor_ohm = 0.075;
   int retry_ms = 2000;
+  // Per-motor trapezoidal acceleration in full-steps/s². 0 (the default)
+  // inherits pull.accel_steps_per_s2; a positive value overrides it for
+  // this motor only. Runtime-adjustable via STEPPER_SET_ACCEL, bounded by
+  // stepper.max_accel_steps_per_s2 either way.
+  double accel_steps_per_s2 = 0.0;
   std::vector<std::size_t> samples;
 };
 
 struct HalConfig {
-  // The final pinout has no status LEDs. Keep both disabled so their old
-  // defaults, BCM 17 and BCM 27, remain available for heater channels.
+  // The final pinout (schematic v4) has no status LEDs. Keep both disabled:
+  // their old default lines now belong to other owners -- BCM 17 is the
+  // Sequent RTD HAT's RS485_DIR (reserved) and BCM 27 is motor 1's
+  // chip-select (motor1.cs_line) -- so enabling either would collide.
   bool status_led_enabled = false;
   bool mode_led_enabled = false;
   std::size_t status_led_line = 17;  // heartbeat

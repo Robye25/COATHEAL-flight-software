@@ -148,6 +148,15 @@ void TestCommandParser() {
   assert(heater_test.command.type == coatheal::CommandType::kHeaterTest);
   assert(heater_test.command.args.size() == 3);
   assert(!parser.ParseLine("HEATER_TEST 0 0.1").ok);
+  {
+    // MOTOR_DEBUG <id>: exactly one argument, the motor id.
+    const auto dbg = parser.ParseLine("MOTOR_DEBUG 1");
+    assert(dbg.ok);
+    assert(dbg.command.type == coatheal::CommandType::kMotorDebug);
+    assert(dbg.command.args.size() == 1 && dbg.command.args[0] == "1");
+    assert(!parser.ParseLine("MOTOR_DEBUG").ok);
+    assert(!parser.ParseLine("MOTOR_DEBUG 1 2").ok);
+  }
 }
 
 void TestHeaterSchedulerEnergyBudget() {
@@ -494,6 +503,54 @@ void TestUnackedFramesStillSurviveRestart() {
     assert(pending.front().seq == 3);
     assert(pending.back().seq == 5);
   }
+
+  std::error_code ec;
+  std::filesystem::remove_all(queue_dir, ec);
+}
+
+// The drain sends this tick's frame before the backlog, and the ground
+// station must be able to tell the two apart from the wire alone.
+void TestDrainBatchSendsTheNewestFrameFirst() {
+  const std::filesystem::path queue_dir =
+      std::filesystem::temp_directory_path() /
+      ("coatheal_queue_test5_" +
+       std::to_string(coatheal::CurrentUnixEpochSeconds()));
+  std::string error;
+  coatheal::TelemetryQueue queue(queue_dir.string(), 72.0, 1024 * 1024);
+  assert(queue.Initialize(&error));
+  assert(queue.DrainBatch(10).empty());
+  for (std::uint64_t seq = 1; seq <= 6; ++seq) {
+    coatheal::QueuedTelemetryFrame f;
+    // Retention pruning is relative to now: a 1970 timestamp would be dropped.
+    f.queued_epoch_s = coatheal::CurrentUnixEpochSeconds();
+    f.session_id = "s3";
+    f.seq = seq;
+    f.frame = "DATA,s3," + std::to_string(seq) + ",frame";
+    assert(queue.Enqueue(f, &error));
+  }
+  const auto batch = queue.DrainBatch(4);
+  assert(batch.size() == 4);
+  assert(batch[0].seq == 6);  // this tick's frame goes first
+  assert(batch[1].seq == 1 && batch[2].seq == 2 && batch[3].seq == 3);
+  // MUTATION: make DrainBatch return PendingFrames(max) and confirm the
+  // batch[0].seq == 6 assertion fails.
+
+  // Exactly the newest is acked; the backlog is untouched and the next
+  // batch again leads with the newest remaining frame.
+  assert(queue.AcknowledgeExact(batch[0], &error));
+  assert(queue.size() == 5);
+  assert(queue.DrainBatch(10).front().seq == 5);
+  // A cumulative ack of a backlog frame never reaches newer frames.
+  assert(queue.Acknowledge("s3", 3, &error));
+  assert(queue.size() == 2);
+  // Healthy steady state: one pending frame is the whole batch.
+  assert(queue.Acknowledge("s3", 4, &error));
+  assert(queue.DrainBatch(10).size() == 1);
+
+  // The wire stamp: age in seconds, clamped, DATA frames only.
+  assert(coatheal::TagFrameForTransmit("DATA,s3,1,x", 100, 130) == "DATA,s3,1,x,TX=30");
+  assert(coatheal::TagFrameForTransmit("DATA,s3,1,x", 100, 90) == "DATA,s3,1,x,TX=0");
+  assert(coatheal::TagFrameForTransmit("EVT,PULL,s3,1", 100, 130) == "EVT,PULL,s3,1");
 
   std::error_code ec;
   std::filesystem::remove_all(queue_dir, ec);
@@ -1137,6 +1194,16 @@ void TestCommandPeerCanSeedTelemetryTarget() {
   assert(latest.command_port == 5000);
   assert(latest.priority == 1000);
   assert(client.current_host() == "169.254.10.11");
+
+  // A loopback bench command (priority 0, see HandleCommandLine) must not
+  // displace the known ground station even while disconnected...
+  client.ObserveGroundStation("127.0.0.1", 4000, 5000, 0);
+  assert(client.current_host() == "169.254.10.11");
+  // ...but is accepted when nothing better was ever heard.
+  coatheal::TelemetryClient bare("", 4000, 5000, 2000, false, 4100, "", "",
+                                 2000, 30, 5, 100);
+  bare.ObserveGroundStation("127.0.0.1", 4000, 5000, 0);
+  assert(bare.current_host() == "127.0.0.1");
 }
 
 // ---------------------------------------------------------------------------
@@ -1375,6 +1442,37 @@ void TestFallbackConfigValidation() {
 
 }  // namespace
 
+// ---------------------------------------------------------------------------
+// Argument hardening (2026-09 flight-readiness review): NaN must never pass a
+// range check, STOPPED is not an operator phase, and SHUTDOWN_SAFE leaves the
+// process running.
+
+void TestCommandArgumentHardening() {
+  const std::filesystem::path queue_dir = FreshQueueDir("hardening");
+  coatheal::SystemController controller(LoadRadioTestConfig(queue_dir));
+
+  // "nan"/"inf" parse as numbers but compare false against every bound; a
+  // NaN tick rate used to become the 10 s floor and trip the watchdog.
+  assert(ContainsText(controller.HandleCommandLine("SET_TICK_HZ nan", ""), "NACK,SET_TICK_HZ"));
+  assert(ContainsText(controller.HandleCommandLine("SET_TICK_HZ inf", ""), "NACK,SET_TICK_HZ"));
+  assert(ContainsText(controller.HandleCommandLine("SET_TICK_HZ 0.5x", ""), "NACK,SET_TICK_HZ"));
+  assert(controller.HandleCommandLine("SET_TICK_HZ 0.5", "") == "ACK,SET_TICK_HZ,tick_hz=0.5");
+  assert(controller.HandleCommandLine("ARM", "").rfind("ACK,", 0) == 0);
+  assert(ContainsText(controller.HandleCommandLine("SET_HEATER_DUTY 0 nan", ""), "invalid args"));
+  assert(ContainsText(controller.HandleCommandLine("SET_ALL_DUTY nan", ""), "invalid duty"));
+  assert(ContainsText(controller.HandleCommandLine("SET_TEMP_TARGET 0 nan", ""), "invalid target args"));
+  assert(ContainsText(controller.HandleCommandLine("SET_PID ALL nan 0 0", ""), "invalid pid args"));
+
+  // STOPPED would end the control loop; the operator gets SHUTDOWN_SAFE,
+  // which makes the outputs safe and keeps the process (and telemetry) up.
+  assert(ContainsText(controller.HandleCommandLine("SET_PHASE STOPPED", ""), "not an operator phase"));
+  assert(controller.HandleCommandLine("SET_PHASE FLOAT", "") == "ACK,SET_PHASE,phase=FLOAT");
+  const std::string safe = controller.HandleCommandLine("SHUTDOWN_SAFE", "");
+  assert(safe.rfind("ACK,SHUTDOWN_SAFE", 0) == 0);
+  assert(ContainsText(safe, "process keeps running"));
+  assert(controller.HandleCommandLine("STATUS", "").rfind("ACK,STATUS,phase=FLOAT;", 0) == 0);
+}
+
 int main() {
   TestPidBoundsAndAntiWindup();
   TestHeaterSchedulerCap();
@@ -1385,6 +1483,7 @@ int main() {
   TestTelemetryQueueDeferredCompactionRetentionAndTornLines();
   TestDrainedQueueLeavesNothingToReplay();
   TestUnackedFramesStillSurviveRestart();
+  TestDrainBatchSendsTheNewestFrameFirst();
   TestConfigParsesReliabilityFields();
   TestConfigRejectsGpioCollisions();
   TestConfigRejectsReservedGpioCollisions();
@@ -1409,6 +1508,7 @@ int main() {
   TestRadioSilenceGatesBeaconAndHelloReply();
   TestFallbackCommandParsing();
   TestFallbackPlanCommands();
+  TestCommandArgumentHardening();
   TestFallbackConfigValidation();
 
   std::cout << "All unit tests passed.\n";

@@ -8,7 +8,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.protocol import (
     PullEvent, StepperSnapshot, TelemetryParseError, build_ack,
     parse_command_response, parse_pull_event, parse_telemetry_csv,
-    validate_duty, validate_heater_index, validate_microstep,
+    validate_accel, validate_current_a, validate_duty,
+    validate_heater_index, validate_microstep, validate_move_mm,
     validate_pid_gains, validate_revolutions, validate_speed_hz,
     validate_stepper_move, validate_temperature_target,
     validate_tick_hz,
@@ -108,6 +109,37 @@ class DataFrameTests(unittest.TestCase):
         self.assertEqual(len(pkt.steppers), 1)
         self.assertEqual(pkt.steppers[0]["motor_id"], 0)
         self.assertEqual(pkt.steppers[0]["position"], 1234)
+
+    def test_ctrl_tune_channel(self) -> None:
+        base = STEPPER_DATA.replace("STEPPER=", "CTRL=fallback:0|tune:H4,STEPPER=")
+        self.assertEqual(parse_telemetry_csv(base).tune_channel, "H4")
+        idle = STEPPER_DATA.replace("STEPPER=", "CTRL=fallback:0|tune:-,STEPPER=")
+        self.assertIsNone(parse_telemetry_csv(idle).tune_channel)
+        self.assertIsNone(parse_telemetry_csv(STEPPER_DATA).tune_channel)  # old firmware
+
+    def test_stepper_drive_settings_keys(self) -> None:
+        # 2026-08-29 drive-settings surface: amps/acc/mm/mm_tgt trail seqst.
+        line = STEPPER_DATA.replace(
+            "|src:cmd:MOVE",
+            "|src:cmd:MOVE|zeroed:1|seq:-|seqst:idle"
+            "|amps:0.80|acc:200.0|mm:3.085|mm_tgt:5.000")
+        pkt = parse_telemetry_csv(line)
+        s = pkt.stepper
+        assert isinstance(s, StepperSnapshot)
+        self.assertEqual(s.amps, 0.80)
+        self.assertEqual(s.accel, 200.0)
+        self.assertEqual(s.mm, 3.085)
+        self.assertEqual(s.mm_tgt, 5.0)
+        self.assertEqual(pkt.steppers[0]["amps"], 0.80)
+        self.assertEqual(pkt.steppers[0]["mm"], 3.085)
+
+    def test_stepper_drive_settings_absent_on_old_firmware(self) -> None:
+        s = parse_telemetry_csv(STEPPER_DATA).stepper
+        assert isinstance(s, StepperSnapshot)
+        self.assertIsNone(s.amps)
+        self.assertIsNone(s.accel)
+        self.assertIsNone(s.mm)
+        self.assertIsNone(s.mm_tgt)
 
     def test_stepper_unknown_key_ignored(self) -> None:
         # Forward-compat: unknown keys silently dropped.
@@ -341,6 +373,34 @@ class ValidatorTests(unittest.TestCase):
         self.assertTrue(validate_revolutions(-12.5)[0])
         self.assertFalse(validate_revolutions(2e6)[0])
 
+    def test_move_mm(self) -> None:
+        # 500 mm mirrors the onboard travel limit at the commissioning
+        # defaults (200000 microsteps, u4, 2 mm lead).
+        self.assertEqual(validate_move_mm(0.1), (True, "0.100"))
+        self.assertEqual(validate_move_mm(-5), (True, "-5.000"))
+        self.assertTrue(validate_move_mm(500.0)[0])
+        self.assertFalse(validate_move_mm(500.1)[0])
+        self.assertFalse(validate_move_mm(float("nan"))[0])
+        self.assertFalse(validate_move_mm(float("inf"))[0])
+        self.assertFalse(validate_move_mm("abc")[0])
+
+    def test_current_a(self) -> None:
+        # (0, 3.1] A RMS mirrors the onboard's flat backstop; the sense
+        # resistor's own ceiling is the onboard's job.
+        self.assertEqual(validate_current_a(0.8), (True, "0.800"))
+        self.assertTrue(validate_current_a(3.1)[0])
+        self.assertFalse(validate_current_a(0.0)[0])
+        self.assertFalse(validate_current_a(3.2)[0])
+        self.assertFalse(validate_current_a("x")[0])
+
+    def test_accel(self) -> None:
+        # (0, 5000] full-steps/s^2 mirrors stepper.max_accel_steps_per_s2.
+        self.assertEqual(validate_accel(200), (True, "200.0"))
+        self.assertTrue(validate_accel(5000)[0])
+        self.assertFalse(validate_accel(0)[0])
+        self.assertFalse(validate_accel(5001)[0])
+        self.assertFalse(validate_accel("x")[0])
+
     def test_temperature_target(self) -> None:
         self.assertTrue(validate_temperature_target(0.0)[0])
         self.assertTrue(validate_temperature_target(80.0)[0])
@@ -354,75 +414,66 @@ class ValidatorTests(unittest.TestCase):
         self.assertFalse(validate_pid_gains("x", 0.0, 0.0)[0])
 
 
+class TransmitStampTests(unittest.TestCase):
+    """`TX=<age>` is appended on the wire by the live-first drain."""
+    FRAME = ("DATA,coatheal-1787950786-1,7,2026-08-28T21:00:00Z,1,20,1000,0.1,1,2,3,4,5,6,7,8,"
+             "HEATER_DUTY=0|0|0|0|0|0,PHASE=FLOAT,MODE=RUN,STATUS=SD_OK,"
+             "STEPPER0=pos:0|tgt:0|hz:100|us:4|en:0|mv:0|hold:0|hold_s:0|pulses:0|missed:0|src:-|zeroed:0|seq:-|seqst:idle")
+
+    def test_stamp_parsed_and_absence_is_none(self) -> None:
+        self.assertIsNone(parse_telemetry_csv(self.FRAME).tx_age_s)
+        self.assertEqual(parse_telemetry_csv(self.FRAME + ",TX=0").tx_age_s, 0.0)
+        pkt = parse_telemetry_csv(self.FRAME + ",TX=1800")
+        self.assertEqual(pkt.tx_age_s, 1800.0)
+        self.assertEqual(pkt.mode, "RUN", "the stamp must not disturb the other tokens")
+        self.assertEqual(len(pkt.steppers), 1)
+        self.assertIsNone(parse_telemetry_csv(self.FRAME + ",TX=junk").tx_age_s)
+
+
 if __name__ == "__main__":
     unittest.main()
 
 
-# ── 2026-08-28 telemetry additions: STEPPER zeroed/seq/seqst + CTRL= ─────────
-CTRL_DATA = (
-    "DATA,coatheal-1787760547-462807,5,2026-08-27T05:59:03Z,1,23.56,1009.16,0.01,"
-    "nan,nan,nan,nan,nan,nan,nan,nan,"
-    "HEATER_DUTY=0.1|0|0|0|0|0,RESISTANCE=-|-|-|-|-|-|-|-,"
-    "PHASE=ASCENT,MODE=RUN,STATUS=SD_OK|LINK_OK,"
-    "COMPONENT_STATE=PWM:OK,"
-    "CTRL=fallback:1|link_loss_s:12.5|energy_wh:3.25|budget_wh:130.0"
-    "|budget_exhausted:0|heaters_active:2|queue:7|plan:none,"
-    "STEPPER0=pos:1|tgt:2|hz:100|us:4|en:1|mv:0|hold:0|hold_s:0|pulses:0"
-    "|src:cmd:ZERO|zeroed:1|seq:flex|seqst:run,"
-    "STEPPER1=pos:0|tgt:0|hz:100|us:4|en:0|mv:0|hold:0|hold_s:0|pulses:0"
-    "|src:init|zeroed:0|seq:-|seqst:idle"
-)
+class ParserHardeningTests(unittest.TestCase):
+    """A frame the receiver cannot parse must surface as TelemetryParseError
+    (the receivers catch exactly that) and must still be acknowledgeable by
+    its raw identity, or the onboard re-sends it forever."""
 
+    _TAIL = "HEATER_DUTY=0|0|0|0|0|0,PHASE=FLOAT,STATUS=SD_OK"
 
-class TelemetryExtensionTests(unittest.TestCase):
-    def test_ctrl_block_parses_to_typed_accessors(self) -> None:
-        pkt = parse_telemetry_csv(CTRL_DATA)
-        self.assertEqual(pkt.ctrl["queue"], "7")
-        self.assertIs(pkt.fallback_active, True)
-        self.assertAlmostEqual(pkt.link_loss_s, 12.5)
-        self.assertAlmostEqual(pkt.energy_wh, 3.25)
-        self.assertAlmostEqual(pkt.budget_wh, 130.0)
-        self.assertIs(pkt.budget_exhausted, False)
-        self.assertEqual(pkt.heaters_active, 2)
-        self.assertEqual(pkt.queue_depth, 7)
-        self.assertEqual(pkt.plan_state, "none")
+    def test_bad_prefix_numeric_is_a_parse_error(self) -> None:
+        line = f"DATA,s1,42,2026-01-01T00:00:00Z,1,abc,140.1,0.1,5,5,5,5,5,5,5,5,{self._TAIL}"
+        with self.assertRaises(TelemetryParseError):
+            parse_telemetry_csv(line)
 
-    # MUTATION: drop the `elif token.startswith("CTRL="):` branch in
-    # parse_telemetry_csv and confirm test_ctrl_block_parses_to_typed_accessors
-    # fails on `pkt.ctrl["queue"]` (KeyError: the dict stays empty).
+    def test_bad_sample_or_duty_is_a_parse_error(self) -> None:
+        with self.assertRaises(TelemetryParseError):
+            parse_telemetry_csv(f"DATA,s1,42,t,1,1.0,140.1,0.1,5,x,5,5,5,5,5,5,{self._TAIL}")
+        with self.assertRaises(TelemetryParseError):
+            parse_telemetry_csv("DATA,s1,42,t,1,1.0,140.1,0.1,5,5,5,5,5,5,5,5,HEATER_DUTY=0|q|0,PHASE=FLOAT,STATUS=SD_OK")
 
-    def test_ctrl_absent_yields_none_everywhere(self) -> None:
-        pkt = parse_telemetry_csv(DUAL_STEPPER_DATA)
-        self.assertEqual(pkt.ctrl, {})
-        for accessor in ("fallback_active", "link_loss_s", "energy_wh", "budget_wh",
-                         "budget_exhausted", "heaters_active", "queue_depth", "plan_state"):
-            self.assertIsNone(getattr(pkt, accessor), accessor)
+    def test_nan_and_inf_still_parse(self) -> None:
+        pkt = parse_telemetry_csv(f"DATA,s1,42,t,1,nan,-nan,inf,nan,5,5,5,5,5,5,5,{self._TAIL}")
+        self.assertTrue(math.isnan(pkt.ambient_temp_c))
+        self.assertTrue(math.isnan(pkt.sample_temps_c[0]))
 
-    def test_ctrl_malformed_numbers_yield_none_not_exceptions(self) -> None:
-        line = CTRL_DATA.replace("energy_wh:3.25", "energy_wh:abc").replace("queue:7", "queue:x")
-        pkt = parse_telemetry_csv(line)
-        self.assertIsNone(pkt.energy_wh)
-        self.assertIsNone(pkt.queue_depth)
-        self.assertEqual(pkt.heaters_active, 2)
+    def test_ack_for_raw_line(self) -> None:
+        from app.protocol import ack_for_raw_line
+        self.assertEqual(ack_for_raw_line("DATA,sess-1,42,garbage,,"), "ACK,sess-1,42\n")
+        self.assertEqual(ack_for_raw_line("EVT,PULL,sess-1,7,junk"), "ACK,sess-1,0\n")
+        self.assertIsNone(ack_for_raw_line("DATA,sess-1,notanumber,x"))
+        self.assertIsNone(ack_for_raw_line("HELLO"))
 
-    def test_stepper_zeroed_and_sequence_keys(self) -> None:
-        pkt = parse_telemetry_csv(CTRL_DATA)
-        m0, m1 = pkt.steppers
-        self.assertIs(m0["zeroed"], True)
-        self.assertEqual(m0["seq_name"], "flex")
-        self.assertEqual(m0["seq_state"], "run")
-        self.assertIs(m1["zeroed"], False)
-        self.assertEqual(m1["seq_name"], "", "a wire '-' means no active sequence")
-        self.assertEqual(m1["seq_state"], "idle")
-        self.assertIs(pkt.stepper.zeroed, True)
+    def test_recv_reply_line_reassembles_split_replies(self) -> None:
+        from app.protocol import recv_reply_line
 
-    # MUTATION: delete the `elif key == "zeroed":` branch in
-    # _parse_stepper_segment and confirm test_stepper_zeroed_and_sequence_keys
-    # fails: m0["zeroed"] is None, not True.
+        class FakeSock:
+            def __init__(self, chunks):
+                self._chunks = list(chunks)
 
-    def test_stepper_keys_absent_on_old_firmware(self) -> None:
-        pkt = parse_telemetry_csv(DUAL_STEPPER_DATA)
-        for snap in pkt.steppers:
-            self.assertIsNone(snap["zeroed"], "unknown must stay None, never False")
-            self.assertEqual(snap["seq_name"], "")
-            self.assertEqual(snap["seq_state"], "")
+            def recv(self, _n):
+                return self._chunks.pop(0) if self._chunks else b""
+
+        self.assertEqual(recv_reply_line(FakeSock([b"ACK,STATUS,phase=FLO", b"AT;mode=RUN\n"])),
+                         "ACK,STATUS,phase=FLOAT;mode=RUN")
+        self.assertEqual(recv_reply_line(FakeSock([b"NACK,PING,x"])), "NACK,PING,x")

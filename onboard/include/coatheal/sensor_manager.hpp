@@ -74,6 +74,17 @@ class SensorManager {
   static bool HeatedChannelsValid(const OnboardConfig& config,
                                   const std::vector<bool>& channel_valid);
 
+  // Component state for a successful RTD-card poll, from how many of its
+  // channels validated. All → OK; some → DEGRADED (PARTIAL_CHANNELS); NONE
+  // → FAILED (NO_VALID_CHANNELS): a card whose bus answers perfectly but
+  // measures nothing is a failed instrument, not a degraded one (bench
+  // 2026-08-29: all 8 harness channels open/short read as DEGRADED, which
+  // suggested partial function that did not exist). Static for testability;
+  // `error` receives the matching error token.
+  static ComponentState RtdStateForValidCount(std::size_t valid_count,
+                                              std::size_t channel_count,
+                                              std::string* error);
+
  private:
   bool ReadDps310At(int address, double* temp_c, double* pressure_mbar);
   bool ReadAds1115At(int address, double* voltage);
@@ -157,6 +168,16 @@ class SensorManager {
   // Index 0 = click 0 (SAMPLE1), index 1 = click 1 (SAMPLE2). Written only
   // by Max31865Loop, under cache_mu_, exactly like rtd_health_.
   std::array<ComponentHealth, 2> max31865_health_;
+  // Last reading per click, kept even when the channel was rejected: a
+  // saturated/faulted read still carries the measured ohms and the chip's
+  // fault register, and those are exactly what tells "open probe" from
+  // "specimen above the reference resistor's ceiling" (bench 2026-08-31:
+  // both clicks pegged at 469.99 ohm / fault 0x80 with one specimen
+  // supposedly wired). Reported by COMPONENTS and CHECK MAX31865.
+  std::array<double, 2> click_last_ohm_{{0.0, 0.0}};
+  std::array<std::uint8_t, 2> click_last_fault_{{0, 0}};
+  std::array<bool, 2> click_last_valid_{{false, false}};
+  std::array<bool, 2> click_has_reading_{{false, false}};
   // Per-click last-successful-conversation bookkeeping for FailedState(),
   // mirroring ScalarCache's has_value/last_success pair. Written only by
   // Max31865Loop, under cache_mu_.
@@ -201,6 +222,13 @@ class SensorManager {
   bool rtd_probed_ = false;
   SequentRtdAdapter::Reading rtd_last_reading_;
   bool rtd_has_reading_ = false;
+  // Edge state for SequentRtdLoop's channel-diagnosis journal line: log
+  // when the per-channel fault pattern changes, at most once a minute.
+  std::array<RtdChannelFault, SequentRtdAdapter::kChannelCount>
+      rtd_last_fault_pattern_{};
+  bool rtd_has_fault_pattern_ = false;
+  std::chrono::steady_clock::time_point rtd_last_fault_log_{};
+  bool rtd_has_fault_log_ = false;
 
   // Owned SPI transports for the two MAX31865 clicks (production: real
   // LinuxSpiBus, one per click since each is a distinct spidev device).

@@ -10,18 +10,24 @@ set -euo pipefail
 # previously installed COATHEAL service iteration, migrates an existing local
 # config to the current schema (retired keys dropped, v3 defaults injected,
 # original backed up), rebuilds, proves the config loads with the flight
-# binary itself, reinstalls + starts the systemd units, and verifies the
-# service is up. Any failing step aborts loudly — it never leaves a
-# half-deployed service enabled.
+# binary itself, installs the boot-time GPIO safe-state block in config.txt,
+# reinstalls + starts the systemd units, and verifies the service is up. Any
+# failing step aborts loudly — it never leaves a half-deployed service
+# enabled.
 #
 #   --dry-run   print every action instead of executing it
+#   --flight    refuse a config that is not at flight values (bench mode,
+#               simulated backends, a bench heater.max_duty); without it
+#               those are only warned about, loudly
 #   <dir>       project directory (default /bexus/code/coatheal)
 
 PROJECT_DIR="/bexus/code/coatheal"
 DRY_RUN=0
+FLIGHT=0
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=1 ;;
+    --flight) FLIGHT=1 ;;
     --post-pull) ;;  # internal re-exec marker, handled below
     *) PROJECT_DIR="$arg" ;;
   esac
@@ -56,22 +62,11 @@ if [[ "${COATHEAL_DEPLOY_PULLED:-0}" != "1" ]]; then
   exec bash "$PROJECT_DIR/deploy_onboard.sh" "$@" --post-pull
 fi
 
-# --- 2. Retire every previously installed COATHEAL service iteration.
-#        Wildcard sweep so old iterations are caught regardless of the unit
-#        names they used. Data and logs are never touched.
-say "Retiring previously installed COATHEAL services"
-mapfile -t OLD_UNITS < <(systemctl list-unit-files 'coatheal*' --no-legend 2>/dev/null | awk '{print $1}')
-if [[ ${#OLD_UNITS[@]} -gt 0 ]]; then
-  for unit in "${OLD_UNITS[@]}"; do
-    echo "    stopping/disabling $unit"
-    run sudo systemctl disable --now "$unit" || true
-  done
-else
-  echo "    none found"
-fi
-
-# --- 3. System dependencies, service user, interfaces. Fast no-ops when
-#        already satisfied.
+# --- 2. System dependencies, service user, interfaces. Fast no-ops when
+#        already satisfied. (The previously installed service keeps running
+#        and stays enabled until the new build and config have both been
+#        proven, in step 5c -- a deploy that dies half-way must never leave
+#        the Pi with no enabled onboard service.)
 say "Installing system dependencies"
 run sudo apt-get update -y
 run sudo apt-get install -y \
@@ -115,7 +110,10 @@ run sudo chown -R coatheal:coatheal /bexus/data /bexus/logs "$PROJECT_DIR/logs"
 # --- 4. Build. Always through a normal reconfigure; a stale build/ from a
 #        previous iteration is handled by CMake itself.
 say "Building the onboard software"
-run cmake -S "$PROJECT_DIR" -B "$PROJECT_DIR/build"
+# Release build, and refuse a binary built without libgpiod: that one
+# compiles and "runs" with every heater and motor output stubbed out.
+run cmake -S "$PROJECT_DIR" -B "$PROJECT_DIR/build" \
+  -DCMAKE_BUILD_TYPE=Release -DCOATHEAL_REQUIRE_LIBGPIOD=ON
 run cmake --build "$PROJECT_DIR/build" -j"$(nproc)"
 if [[ "$DRY_RUN" != "1" ]]; then
   [[ -x "$BINARY" ]] || die "build produced no binary at $BINARY"
@@ -135,6 +133,92 @@ run python3 "$PROJECT_DIR/scripts/hardware_setup.py" migrate-config \
 
 say "Proving the migrated config loads in the flight binary"
 run "$BINARY" --config "$LOCAL_INI" --check-config || die "the flight binary rejected $LOCAL_INI"
+
+# --- 5a. Flight invariants. migrate-config deliberately keeps whatever the
+#         local INI says for these keys (a bench-tuned heater.max_duty, bench
+#         mode, simulated backends), and none of them may fly. Always shown;
+#         fatal with --flight.
+say "Checking flight invariants in $LOCAL_INI"
+FLIGHT_VIOLATIONS=""
+if [[ -f "$LOCAL_INI" ]]; then
+  FLIGHT_VIOLATIONS="$(python3 - "$LOCAL_INI" <<'PY'
+import sys
+values = {}
+for raw in open(sys.argv[1], encoding="utf-8"):
+    line = raw.strip()
+    if not line or line[0] in "#;" or "=" not in line:
+        continue
+    key, value = line.split("=", 1)
+    values[key.strip()] = value.strip()
+def truthy(v):
+    return v.lower() in ("1", "true", "yes", "on")
+bad = []
+for key in ("runtime.bench_mode", "runtime.use_simulated_pwm", "runtime.use_simulated_sensors"):
+    if key in values and truthy(values[key]):
+        bad.append(f"{key}={values[key]} (flight: false)")
+if "heater.max_duty" in values:
+    try:
+        if float(values["heater.max_duty"]) < 0.999:
+            bad.append(f"heater.max_duty={values['heater.max_duty']} (flight: 1.0)")
+    except ValueError:
+        bad.append(f"heater.max_duty={values['heater.max_duty']} (unparseable)")
+print("\n".join(bad))
+PY
+)"
+fi
+if [[ -n "$FLIGHT_VIOLATIONS" ]]; then
+  printf '\033[1;33m  NOT AT FLIGHT VALUES:\033[0m\n'
+  while IFS= read -r violation; do
+    printf '\033[1;33m    %s\033[0m\n' "$violation"
+  done <<< "$FLIGHT_VIOLATIONS"
+  if [[ "$FLIGHT" == "1" ]]; then
+    die "flight invariants violated (above); fix $LOCAL_INI, or deploy without --flight for a bench deploy"
+  fi
+  printf '\033[1;33m  bench deploy: pass --flight to refuse these values\033[0m\n'
+else
+  echo "    all flight invariants hold (bench mode and simulated backends off, heater.max_duty 1.0)"
+fi
+
+# --- 5b. Boot-time GPIO safe states. Schematic v4 fits no pull resistors on
+#         the heater or motor-driver control lines, and the Pi powers on with
+#         BCM 5/6 pulled UP (HEATER4/HEATER3 driven on) and BCM 20-22/27
+#         pulled DOWN (both TMC5160s enabled and selected). A managed gpio=
+#         block in config.txt, derived from the config just validated, pins
+#         every one of those lines to its safe level from firmware boot until
+#         the service claims it. Idempotent; a changed block needs a reboot.
+say "Installing boot-time GPIO safe states in config.txt"
+BOOT_CONFIG=""
+for candidate in /boot/firmware/config.txt /boot/config.txt; do
+  if [[ -f "$candidate" ]]; then BOOT_CONFIG="$candidate"; break; fi
+done
+REBOOT_NEEDED=0
+if [[ "$DRY_RUN" == "1" ]]; then
+  run sudo python3 "$PROJECT_DIR/scripts/hardware_setup.py" boot-gpio \
+    --config "$LOCAL_INI" --install "${BOOT_CONFIG:-/boot/firmware/config.txt}"
+else
+  [[ -n "$BOOT_CONFIG" ]] || die "no config.txt under /boot/firmware or /boot — is this a Raspberry Pi?"
+  BOOT_GPIO_RESULT="$(sudo python3 "$PROJECT_DIR/scripts/hardware_setup.py" boot-gpio \
+    --config "$LOCAL_INI" --install "$BOOT_CONFIG")" \
+    || die "could not install the boot-time GPIO block into $BOOT_CONFIG"
+  echo "    $BOOT_GPIO_RESULT"
+  if [[ "$BOOT_GPIO_RESULT" == *updated* ]]; then REBOOT_NEEDED=1; fi
+fi
+
+# --- 5c. Retire every previously installed COATHEAL service iteration.
+#         Wildcard sweep so old iterations are caught regardless of the unit
+#         names they used. Data and logs are never touched. Deliberately the
+#         last step before the new units go in: everything that can fail
+#         (pull, build, config, GPIO block) has already succeeded.
+say "Retiring previously installed COATHEAL services"
+mapfile -t OLD_UNITS < <(systemctl list-unit-files 'coatheal*' --no-legend 2>/dev/null | awk '{print $1}')
+if [[ ${#OLD_UNITS[@]} -gt 0 ]]; then
+  for unit in "${OLD_UNITS[@]}"; do
+    echo "    stopping/disabling $unit"
+    run sudo systemctl disable --now "$unit" || true
+  done
+else
+  echo "    none found"
+fi
 
 # --- 6. Install and start the canonical systemd units (idempotent installer;
 #        enables + starts flight and link-watch, leaves debug disabled).
@@ -169,4 +253,14 @@ printf '  Config  : %s\n' "$LOCAL_INI"
 printf '  IPs     : %s\n' "$(hostname -I 2>/dev/null || echo unknown)"
 printf '  The ground station can now discover this onboard automatically.\n'
 printf '  Next deploy: just run   coatheal-deploy\n'
+if [[ "$REBOOT_NEEDED" == "1" ]]; then
+  printf '\n\033[1;33m  REBOOT REQUIRED: the boot-time GPIO block in %s changed.\033[0m\n' "$BOOT_CONFIG"
+  printf '\033[1;33m  Until the Pi reboots, heaters/drivers are only safe once the service claims them.\033[0m\n'
+fi
+if [[ -n "$FLIGHT_VIOLATIONS" ]]; then
+  printf '\n\033[1;33m  BENCH VALUES IN %s -- not a flight deploy:\033[0m\n' "$LOCAL_INI"
+  while IFS= read -r violation; do
+    printf '\033[1;33m    %s\033[0m\n' "$violation"
+  done <<< "$FLIGHT_VIOLATIONS"
+fi
 printf '\033[1;32m================================================================\033[0m\n'

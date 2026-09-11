@@ -47,13 +47,25 @@ std::string Nack(const std::string& command, const std::string& message) {
 
 bool ParseDouble(const std::string& text, double* out) {
   try {
-    const double value = std::stod(text);
+    std::size_t consumed = 0;
+    const double value = std::stod(text, &consumed);
+    // Whole token and finite. "nan"/"inf" parse as numbers, yet a NaN passes
+    // every `x < lo || x > hi` range check below (all comparisons with NaN
+    // are false): a NaN duty or target poisons the heater energy tally, a
+    // NaN tick rate becomes the 10 s floor and trips the watchdog, a NaN
+    // speed parks a motor mid-move with the MotionLock held.
+    if (consumed != text.size() || !std::isfinite(value)) return false;
     *out = value;
     return true;
   } catch (...) {
     return false;
   }
 }
+
+// Longest hold accepted on any absolute move (STEPPER_MOVETO/_MM, STEPPER_BEND,
+// sequence steps, the fallback plan). A hold keeps the MotionLock, and with
+// it the heater inhibit, for its whole duration.
+constexpr double kMaxHoldSeconds = 86400.0;
 
 bool ParseIndex(const std::string& text, std::size_t* out) {
   try {
@@ -101,10 +113,19 @@ class OwnedBusTmc5160Driver : public StepperDriver {
   bool spi_bus_ok() const override { return driver_.spi_bus_ok(); }
   std::string last_error() const override { return driver_.last_error(); }
   std::string warning() const override { return driver_.warning(); }
+  std::string DebugRegisters() override { return driver_.DebugRegisters(); }
+  bool Poll() override { return driver_.Poll(); }
   bool ActiveCheck() override { return driver_.ActiveCheck(); }
   std::uint64_t pulses_issued() const override {
     return driver_.pulses_issued();
   }
+  bool SetRunCurrent(double a_rms, std::string* error) override {
+    return driver_.SetRunCurrent(a_rms, error);
+  }
+  double run_current_a_rms() const override {
+    return driver_.run_current_a_rms();
+  }
+  int thermal_state() const override { return driver_.thermal_state(); }
 
  private:
   std::unique_ptr<SpiBus> bus_;
@@ -172,7 +193,8 @@ bool IsSequenceNameValid(const std::string& name) {
 }
 
 bool SystemController::Initialize(std::string* error) {
-  sensor_manager_.Start();
+  // The sensor manager is started only after the TMC5160 drivers below
+  // have claimed their chip-select lines (see the note past stepper_).
   if (config_.runtime.use_simulated_pwm) {
     pwm_ = std::make_unique<SimulatedPwmController>(config_.hardware.heater_count);
   } else {
@@ -209,7 +231,11 @@ bool SystemController::Initialize(std::string* error) {
     cfg.full_steps_per_rev = config_.stepper.steps_per_rev;
     cfg.max_step_hz = config_.pull.max_step_hz;
     cfg.default_step_hz = config_.stepper.default_step_hz;
-    cfg.accel_steps_per_s2 = config_.pull.accel_steps_per_s2;
+    cfg.accel_steps_per_s2 = config_.motors[i].accel_steps_per_s2 > 0.0
+                                 ? config_.motors[i].accel_steps_per_s2
+                                 : config_.pull.accel_steps_per_s2;
+    cfg.max_accel_steps_per_s2 = config_.stepper.max_accel_steps_per_s2;
+    cfg.lead_mm_per_rev = config_.stepper.lead_mm_per_rev;
     cfg.microstep = config_.pull.microstep;
     cfg.max_position_steps = config_.stepper.max_position_steps;
     cfg.samples = config_.motors[i].samples;
@@ -273,6 +299,16 @@ bool SystemController::Initialize(std::string* error) {
   }
   stepper_ = std::make_unique<StepperController>(
       std::move(channel_cfgs), std::move(drivers));
+
+  // Only now start the sensor workers. Max31865Loop transacts on SPI0 the
+  // moment it starts, and until each Tmc5160Driver above has requested its
+  // CS line HIGH those lines sit at the SoC's power-on pull-DOWN (BCM 22/27,
+  // schematic v4 has no external pull-ups): both drivers selected, so every
+  // click datagram would also be clocked into them and latched on the CS
+  // edge as a register write the init sequence never rewrites. Starting the
+  // clicks first (the order until 2026-09) made that a race on every
+  // service start.
+  sensor_manager_.Start();
 
   // SPI_OK describes the BUS, not the motors on it. A module that answers
   // every datagram but is unusable (wrong TMC5160 version, SD_MODE
@@ -740,16 +776,38 @@ int SystemController::Run() {
 
     if (state_overrides.reset_control) {
       thermal_controller_.Reset();
+      // The heater energy latch is documented (protocol.md, CTRL
+      // budget_exhausted) as "heaters stay off until RESET_CTRL", and this
+      // is the only place that can honour it. HeaterScheduler::Reset() is
+      // what clears the latch, and it also restarts the tally, so it is
+      // called only once the latch has actually tripped: an ordinary
+      // RESET_CTRL (overtemp latch, PID integrators) leaves the running
+      // energy count alone.
+      if (scheduler_.is_budget_exhausted()) {
+        std::cerr << "[energy] budget latch cleared by RESET_CTRL after "
+                  << scheduler_.energy_consumed_wh() << " Wh; tally restarts"
+                  << " at 0 against " << config_.power.energy_budget_wh
+                  << " Wh\n";
+        scheduler_.Reset();
+      }
     }
 
     const SystemMode current_mode = mode_.load();
-    if (last_link_ok) {
+    const bool transmit_enabled = telemetry_client_.transmit_enabled();
+    if (!transmit_enabled) {
+      // Radio silence: the link is down on purpose, so the outage clock
+      // must not run. Otherwise the first tick after RADIO_RESUME already
+      // carries link_loss_s_ >= the fallback threshold and engages
+      // link-loss fallback for a tick -- stopping manual motion, running
+      // floor heating and, with a plan armed at PRE_FLOAT/FLOAT, starting
+      // the failsafe bend -- before the ground station could answer once.
+      link_loss_s_ = 0.0;
+    } else if (last_link_ok) {
       link_seen_ = true;
       link_loss_s_ = 0.0;
     } else if (link_seen_) {
       link_loss_s_ += tick_duration.count();
     }
-    const bool transmit_enabled = telemetry_client_.transmit_enabled();
     link_loss_fallback_active_ =
         config_.manual.manual_first &&
         config_.manual.link_loss_fallback_enabled &&
@@ -795,8 +853,73 @@ int SystemController::Run() {
     std::vector<double> requested_duty = thermal_controller_.ComputeRequestedDuty(
         phase, snapshot, tick_duration.count(), effective_control);
     bool debug_heat_requested = false;
+    bool tune_active = false;
+    int tune_channel_now = -1;
+    double tune_duty_now = 0.0;
     {
+      // Relay PID auto-tune: while running it owns the heaters outright —
+      // its relay duty replaces every requested duty (other channels 0) so
+      // nothing disturbs the limit cycle it is measuring. Every gate that
+      // could invalidate the measurement or the safety envelope aborts it.
       std::lock_guard<std::mutex> lock(overrides_mu_);
+      if (pid_tuner_.active()) {
+        const int ch = tune_channel_;
+        const std::size_t sample =
+            ch >= 0 &&
+                    static_cast<std::size_t>(ch) <
+                        config_.heaters.temperature_channels.size()
+                ? config_.heaters.temperature_channels[ch]
+                : static_cast<std::size_t>(ch);
+        const bool temp_valid =
+            sample < snapshot.sample_temps_c.size() &&
+            (snapshot.sample_temp_valid.empty() ||
+             (sample < snapshot.sample_temp_valid.size() &&
+              snapshot.sample_temp_valid[sample]));
+        const double temp =
+            temp_valid ? snapshot.sample_temps_c[sample] : 0.0;
+        const auto latched = thermal_controller_.channel_latched();
+        if (current_mode != SystemMode::kRun) {
+          pid_tuner_.Abort("left RUN mode");
+        } else if (link_loss_fallback_active_) {
+          pid_tuner_.Abort("link-loss fallback engaged");
+        } else if (control_overrides.heaters_off) {
+          pid_tuner_.Abort("heaters commanded off");
+        } else if (ch >= 0 && static_cast<std::size_t>(ch) < latched.size() &&
+                   latched[ch]) {
+          pid_tuner_.Abort("overtemp latch tripped");
+        }
+        const double now_s = std::chrono::duration<double>(
+                                 tick_start.time_since_epoch())
+                                 .count();
+        const double duty = pid_tuner_.Tick(temp_valid, temp, now_s);
+        if (pid_tuner_.active()) {
+          std::fill(requested_duty.begin(), requested_duty.end(), 0.0);
+          if (ch >= 0 &&
+              static_cast<std::size_t>(ch) < requested_duty.size()) {
+            requested_duty[ch] = duty;
+          }
+          tune_commanded_duty_ = duty;
+          tune_active = true;
+          tune_channel_now = ch;
+          tune_duty_now = duty;
+        }
+      }
+      if (!tune_result_logged_ &&
+          (pid_tuner_.state() == PidAutoTuner::State::kDone ||
+           pid_tuner_.state() == PidAutoTuner::State::kFailed)) {
+        tune_result_logged_ = true;
+        if (pid_tuner_.state() == PidAutoTuner::State::kDone) {
+          const auto& r = pid_tuner_.result();
+          std::cerr << "[pid-tune] H" << tune_channel_ << " done: Ku=" << r.ku
+                    << " Tu=" << r.tu_s << "s a=" << r.amplitude_c
+                    << "C -> TL kp=" << r.kp << " ki=" << r.ki
+                    << " kd=" << r.kd << " (ZN kp=" << r.zn_kp
+                    << " ki=" << r.zn_ki << " kd=" << r.zn_kd << ")\n";
+        } else {
+          std::cerr << "[pid-tune] H" << tune_channel_
+                    << " FAILED: " << pid_tuner_.error() << '\n';
+        }
+      }
       if (heater_test_.active) {
         const bool motion_active =
             active_motion_lock_ != nullptr && active_motion_lock_->holder() != -1;
@@ -837,14 +960,14 @@ int SystemController::Run() {
                     [](const std::optional<double>& value) {
                       return value.has_value();
                     }) ||
-        debug_heat_requested;
+        debug_heat_requested || tune_active;
     const bool bench_open_loop_active =
         heaters_allowed &&
         config_.runtime.bench_mode &&
         debug_armed_.load() &&
         control_overrides.bench_open_loop_heaters;
     std::vector<double> scheduled_duty;
-    if (bench_open_loop_active) {
+    if (bench_open_loop_active && !tune_active) {
       scheduled_duty = requested_duty;
       for (double& duty : scheduled_duty) {
         duty = std::clamp(duty, 0.0, 1.0);
@@ -854,6 +977,13 @@ int SystemController::Run() {
           requested_duty,
           heaters_allowed && (any_flying_phase || manual_heat_requested),
           tick_duration.count());
+    }
+    if (tune_active && tune_channel_now >= 0 &&
+        static_cast<std::size_t>(tune_channel_now) < scheduled_duty.size() &&
+        scheduled_duty[tune_channel_now] + 1e-9 < tune_duty_now) {
+      std::lock_guard<std::mutex> lock(overrides_mu_);
+      pid_tuner_.Abort(
+          "scheduler clamped the tune duty (motion inhibit or power budget)");
     }
     COATHEAL_PERF_STAMP(perf_ts[5]);  // stage 4: heater scheduler
 
@@ -955,6 +1085,11 @@ int SystemController::Run() {
         [](double duty) { return duty > 0.0; }));
     record.ctrl.queue_depth = telemetry_queue_.size();
     record.ctrl.plan = FallbackPlanStateName();
+    // Effective arm: ARM_DEBUG requires bench_mode, and every debug gate
+    // re-checks both, so report what the gates will actually honour.
+    record.ctrl.debug_armed = config_.runtime.bench_mode && debug_armed_.load();
+    record.ctrl.tune =
+        tune_active ? ("H" + std::to_string(tune_channel_now)) : "-";
 
     const std::string line = SerializeTelemetryDataFrame(record, telemetry_client_.session_id());
     COATHEAL_PERF_STAMP(perf_ts[7]);  // stage 6: build+serialize telemetry
@@ -975,8 +1110,13 @@ int SystemController::Run() {
     COATHEAL_PERF_STAMP(perf_enqueue_end);  // sub-stage: enqueue-only latency
 
     std::string drain_error;
+    // DrainTelemetryQueue sets last_link_ok itself: false until a frame is
+    // acknowledged this tick, true from the first ACK on. A failure later
+    // in the same batch (a backlog frame the ground station will not
+    // acknowledge) is a drain error, not a dead link -- forcing link_ok
+    // false here used to engage link-loss fallback, after
+    // link_loss_fallback_s, over a perfectly working link.
     if (!DrainTelemetryQueue(&last_link_ok, &drain_error)) {
-      last_link_ok = false;
       // Log on transition only. While no ground station is reachable this
       // fails every tick, and one journal line per tick for the steady
       // state buries the lines that mark actual changes.
@@ -1028,7 +1168,14 @@ int SystemController::Run() {
           ps.start_pos = s.position_steps;
         } else if (ps.lock_held && !lock_held_now) {
           // Falling edge: pull completed; motor released the lock in
-          // StepperChannel::Tick once the retract leg finished.
+          // StepperChannel::Tick once the retract leg finished. A release
+          // by the thermal safety is an ABORT, not a completion — do not
+          // record it as a pull or feed the resistance simulator.
+          if (s.last_source == "safety:OVERTEMP") {
+            ps.lock_held = false;
+            ps.was_moving = false;
+            continue;
+          }
           HeatingPullEvent pev;
           pev.pull_id = next_pull_id_++;
           pev.motor_id = static_cast<int>(i);
@@ -1036,6 +1183,7 @@ int SystemController::Run() {
           pev.steps_moved = s.position_steps - ps.start_pos;
           pev.hold_s = s.hold_remaining_s;
           pev.samples = stepper_->SamplesForMotor(static_cast<int>(i));
+          pev.microstep = s.microstep;
 
           const std::string evt_line =
               SerializeTelemetryPullEventFrame(pev, telemetry_client_.session_id());
@@ -1103,9 +1251,25 @@ int SystemController::Run() {
     }
 #endif
 
-    const auto elapsed = std::chrono::steady_clock::now() - tick_start;
-    if (elapsed < tick_duration) {
-      std::this_thread::sleep_for(tick_duration - elapsed);
+    // Sleep out the rest of the tick in short slices and pet the watchdog
+    // on every slice. WatchdogSec is 10 s and SET_TICK_HZ (and
+    // runtime.tick_hz) allow 0.1 Hz -- a 10 s tick -- so one sleep per tick
+    // would miss the watchdog at the slow end of the permitted range and
+    // systemd would restart the flight software on every tick.
+    constexpr auto kSleepSlice = std::chrono::milliseconds(500);
+    for (;;) {
+      const auto remaining =
+          tick_duration - (std::chrono::steady_clock::now() - tick_start);
+      if (!running_ || remaining <= std::chrono::duration<double>::zero()) {
+        break;
+      }
+      if (remaining > kSleepSlice) {
+        std::this_thread::sleep_for(kSleepSlice);
+        SdNotifyWatchdog();
+      } else {
+        std::this_thread::sleep_for(remaining);
+        break;
+      }
     }
   }
 
@@ -1131,11 +1295,15 @@ bool SystemController::DrainTelemetryQueue(bool* link_ok, std::string* error) {
 
   // Rev C: limit drain to a small batch per tick so the control loop is not
   // blocked by a large backlog (the Pi was accumulating 12k+ frames). The
-  // batch bound is applied inside PendingFrames too: copying the entire
+  // batch bound is applied inside DrainBatch too: copying the entire
   // backlog out of the queue every tick is O(backlog) on the control loop.
+  // The batch is this tick's frame first, then the backlog oldest-first
+  // (see TelemetryQueue::DrainBatch), and every DATA line is stamped with
+  // its age on the wire so the ground station can tell live from replay
+  // without synchronised clocks.
   constexpr std::size_t kMaxDrainPerTick = 10;
   std::vector<QueuedTelemetryFrame> pending =
-      telemetry_queue_.PendingFrames(kMaxDrainPerTick);
+      telemetry_queue_.DrainBatch(kMaxDrainPerTick);
   if (pending.empty()) {
     if (link_ok != nullptr) {
       *link_ok = telemetry_client_.is_connected();
@@ -1144,11 +1312,14 @@ bool SystemController::DrainTelemetryQueue(bool* link_ok, std::string* error) {
   }
 
   std::size_t drained = 0;
+  const std::int64_t now_epoch = CurrentUnixEpochSeconds();
 
   for (const QueuedTelemetryFrame& frame : pending) {
     if (drained >= kMaxDrainPerTick) break;
+    const bool newest = drained == 0;
     TelemetryAck ack;
-    if (!telemetry_client_.SendFrameAwaitAck(frame.frame, &ack)) {
+    if (!telemetry_client_.SendFrameAwaitAck(
+            TagFrameForTransmit(frame.frame, frame.queued_epoch_s, now_epoch), &ack)) {
       if (error != nullptr) {
         *error = "failed to send telemetry frame";
       }
@@ -1177,7 +1348,13 @@ bool SystemController::DrainTelemetryQueue(bool* link_ok, std::string* error) {
       return false;
     }
 
-    if (!telemetry_queue_.Acknowledge(ack.session_id, ack.seq, error)) {
+    if (newest) {
+      // The live frame is out of order: a cumulative ack of its seq would
+      // discard every older frame still waiting in the queue.
+      if (!telemetry_queue_.AcknowledgeExact(frame, error)) {
+        return false;
+      }
+    } else if (!telemetry_queue_.Acknowledge(ack.session_id, ack.seq, error)) {
       return false;
     }
 
@@ -1193,10 +1370,16 @@ bool SystemController::DrainTelemetryQueue(bool* link_ok, std::string* error) {
 std::string SystemController::HandleCommandLine(const std::string& line,
                                                 const std::string& peer_ip) {
   if (!peer_ip.empty() && (config_.runtime.bench_mode || !IsLoopbackPeer(peer_ip))) {
+    // A loopback command peer (bench: `nc 127.0.0.1 5000` on the Pi) is a
+    // ground station of last resort only. At priority 1000 it used to
+    // hijack the telemetry target from a real, connected ground station on
+    // every local diagnostic command (bench, 2026-08-28), stalling the
+    // backlog drain; at priority 0 it is dialled only when nothing better
+    // has ever been heard.
     telemetry_client_.ObserveGroundStation(peer_ip,
                                            config_.comms.telemetry_port,
                                            config_.comms.command_port,
-                                           1000);
+                                           IsLoopbackPeer(peer_ip) ? 0 : 1000);
   }
 
   const CommandParseResult parsed = parser_.ParseLine(line);
@@ -1225,6 +1408,12 @@ std::string SystemController::HandleCommandLine(const std::string& line,
 
   auto require_debug_arm = [&]() -> bool {
     return config_.runtime.bench_mode && debug_armed_.load();
+  };
+  // While the relay auto-tune owns the heaters, competing heat commands
+  // would corrupt its measurement — they are refused, not queued.
+  auto tune_running = [&]() -> bool {
+    std::lock_guard<std::mutex> lock(overrides_mu_);
+    return pid_tuner_.active();
   };
 
   auto set_state_override = [&](auto fn) {
@@ -1493,18 +1682,36 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       return Ack(cmd_name, "control loop reset queued");
 
     case CommandType::kShutdownSafe:
-      // Graceful shutdown: heaters off, flush data, then stop the process.
-      // Unlike ENTER_SAFE, this actually triggers the STOPPED transition via
-      // state_overrides_.shutdown_safe, which StateManager handles.
+      // Safe for power-off: heaters off with every override cleared, motors
+      // stopped and de-energised, logs synced. The process keeps running
+      // and telemetry continues. It used to request the STOPPED phase
+      // instead, but that flag is only consumed by the link-loss phase
+      // tracker, so with a healthy link nothing happened -- and an actual
+      // exit only makes systemd (Restart=always) start a fresh, disarmed
+      // instance two seconds later.
       set_state_override([&]() {
         control_overrides_.heaters_off = true;
         heater_test_.active = false;
         control_overrides_.bench_open_loop_heaters = false;
-        state_overrides_.shutdown_safe = true;
+        control_overrides_.single_heater_override.reset();
+        control_overrides_.all_heaters_override.reset();
+        std::fill(control_overrides_.heater_duty_overrides.begin(),
+                  control_overrides_.heater_duty_overrides.end(), std::nullopt);
+        std::fill(control_overrides_.temp_targets_c.begin(),
+                  control_overrides_.temp_targets_c.end(), std::nullopt);
       });
       stop_all_sequences();
+      if (stepper_) {
+        std::string err;
+        for (std::size_t i = 0; i < stepper_->channel_count(); ++i) {
+          stepper_->Stop(static_cast<int>(i), &err);
+          stepper_->SetEnabled(static_cast<int>(i), false, &err);
+        }
+      }
       storage_manager_.FlushAndSync();
-      return Ack(cmd_name, "shutdown initiated");
+      return Ack(cmd_name,
+                 "safe for power-off: heaters off, motors disabled, logs"
+                 " synced; process keeps running");
 
     case CommandType::kEnterSafe:
       mode_.store(SystemMode::kSafe);
@@ -1598,6 +1805,9 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       if (mode_.load() != SystemMode::kRun) {
         return Nack(cmd_name, "RUN mode required");
       }
+      if (tune_running()) {
+        return Nack(cmd_name, "PID tune running; PID_TUNE_ABORT first");
+      }
       std::size_t index = 0;
       double duty = 0.0;
       if (!ParseIndex(command.args[0], &index) || !ParseDouble(command.args[1], &duty)) {
@@ -1608,6 +1818,11 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       }
       if (duty < 0.0 || duty > 1.0) {
         return Nack(cmd_name, "duty out of range [0,1]");
+      }
+      if (duty > config_.heaters.max_duty) {
+        return Nack(cmd_name, "duty exceeds heater.max_duty (" +
+                                  std::to_string(config_.heaters.max_duty) +
+                                  ")");
       }
       if (duty > 0.0) {
         std::string reason;
@@ -1630,12 +1845,20 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       if (mode_.load() != SystemMode::kRun) {
         return Nack(cmd_name, "RUN mode required");
       }
+      if (tune_running()) {
+        return Nack(cmd_name, "PID tune running; PID_TUNE_ABORT first");
+      }
       double duty = 0.0;
       if (!ParseDouble(command.args[0], &duty)) {
         return Nack(cmd_name, "invalid duty");
       }
       if (duty < 0.0 || duty > 1.0) {
         return Nack(cmd_name, "duty out of range [0,1]");
+      }
+      if (duty > config_.heaters.max_duty) {
+        return Nack(cmd_name, "duty exceeds heater.max_duty (" +
+                                  std::to_string(config_.heaters.max_duty) +
+                                  ")");
       }
       if (duty > 0.0) {
         std::string reason;
@@ -1660,6 +1883,9 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       if (!require_debug_arm()) {
         return Nack(cmd_name, "bench debug arm required");
       }
+      if (tune_running()) {
+        return Nack(cmd_name, "PID tune running; PID_TUNE_ABORT first");
+      }
       if (mode_.load() != SystemMode::kRun) {
         return Nack(cmd_name, "RUN mode required");
       }
@@ -1677,6 +1903,9 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       }
       if (duty < 0.0 || duty > config_.heaters.debug_max_duty) {
         return Nack(cmd_name, "duty exceeds heater.debug_max_duty");
+      }
+      if (duty > config_.heaters.max_duty) {
+        return Nack(cmd_name, "duty exceeds heater.max_duty");
       }
       if (seconds <= 0.0 || seconds > config_.heaters.debug_max_seconds) {
         return Nack(cmd_name, "duration exceeds heater.debug_max_seconds");
@@ -1725,9 +1954,135 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       return Ack(cmd_name, "pid override applied");
     }
 
+    case CommandType::kPidTuneStart: {
+      if (mode_.load() != SystemMode::kRun) {
+        return Nack(cmd_name, "RUN mode required");
+      }
+      std::size_t index = 0;
+      double setpoint = 0.0;
+      if (!ParseIndex(command.args[0], &index) ||
+          index >= config_.hardware.heater_count) {
+        return Nack(cmd_name, "heater index out of range");
+      }
+      if (!ParseDouble(command.args[1], &setpoint) ||
+          setpoint < config_.heater_safety.target_min_c ||
+          setpoint > config_.heater_safety.target_max_c) {
+        return Nack(cmd_name, "setpoint outside heater target limits");
+      }
+      double relay_duty = 0.5;
+      if (command.args.size() >= 3 &&
+          (!ParseDouble(command.args[2], &relay_duty) || relay_duty <= 0.0 ||
+           relay_duty > 1.0)) {
+        return Nack(cmd_name, "relay duty must be in (0, 1]");
+      }
+      relay_duty = std::min(relay_duty, config_.heaters.max_duty);
+      std::size_t cycles = 4;
+      if (command.args.size() >= 4 &&
+          (!ParseIndex(command.args[3], &cycles) || cycles < 1 ||
+           cycles > 10)) {
+        return Nack(cmd_name, "cycles must be 1..10");
+      }
+      std::string reason;
+      if (!heater_temperature_valid(index, &reason)) {
+        return Nack(cmd_name, reason);
+      }
+      std::lock_guard<std::mutex> lock(overrides_mu_);
+      if (pid_tuner_.active()) {
+        return Nack(cmd_name, "tune already running on H" +
+                                  std::to_string(tune_channel_) +
+                                  "; PID_TUNE_ABORT first");
+      }
+      if (heater_test_.active) {
+        return Nack(cmd_name, "HEATER_TEST running");
+      }
+      const bool overrides_active =
+          control_overrides_.all_heaters_override.has_value() ||
+          (index < control_overrides_.heater_duty_overrides.size() &&
+           control_overrides_.heater_duty_overrides[index].has_value()) ||
+          (index < control_overrides_.temp_targets_c.size() &&
+           control_overrides_.temp_targets_c[index].has_value());
+      if (overrides_active) {
+        return Nack(cmd_name,
+                    "duty/target override active on that heater; "
+                    "CLEAR_OVERRIDES first");
+      }
+      const auto latched = thermal_controller_.channel_latched();
+      if (index < latched.size() && latched[index]) {
+        return Nack(cmd_name, "overtemp latch tripped; RESET_CTRL first");
+      }
+      PidAutoTuner::Config tcfg;
+      tcfg.setpoint_c = setpoint;
+      tcfg.relay_duty = relay_duty;
+      tcfg.cycles = static_cast<int>(cycles);
+      tcfg.abort_ceiling_c =
+          std::min(setpoint + 15.0,
+                   config_.heater_safety.max_sample_temp_c - 5.0);
+      tune_channel_ = static_cast<int>(index);
+      tune_result_logged_ = false;
+      pid_tuner_.Start(tcfg, std::chrono::duration<double>(
+                                 std::chrono::steady_clock::now()
+                                     .time_since_epoch())
+                                 .count());
+      std::ostringstream body;
+      body << "tuning H" << index << " around " << setpoint << " C, relay "
+           << relay_duty << ", " << cycles << " cycles";
+      return Ack(cmd_name, body.str());
+    }
+
+    case CommandType::kPidTuneAbort: {
+      std::lock_guard<std::mutex> lock(overrides_mu_);
+      if (!pid_tuner_.active()) {
+        return Nack(cmd_name, "no tune running");
+      }
+      pid_tuner_.Abort("aborted by operator");
+      return Ack(cmd_name, "tune aborted");
+    }
+
+    case CommandType::kPidTuneStatus: {
+      std::lock_guard<std::mutex> lock(overrides_mu_);
+      const double now_s = std::chrono::duration<double>(
+                               std::chrono::steady_clock::now()
+                                   .time_since_epoch())
+                               .count();
+      std::ostringstream body;
+      const char* state = "idle";
+      switch (pid_tuner_.state()) {
+        case PidAutoTuner::State::kIdle: state = "idle"; break;
+        case PidAutoTuner::State::kRunning: state = "running"; break;
+        case PidAutoTuner::State::kDone: state = "done"; break;
+        case PidAutoTuner::State::kFailed: state = "failed"; break;
+      }
+      body << "state=" << state;
+      if (pid_tuner_.state() != PidAutoTuner::State::kIdle) {
+        const auto& cfg = pid_tuner_.config();
+        body << ";heater=" << tune_channel_
+             << ";setpoint_c=" << cfg.setpoint_c
+             << ";relay_duty=" << cfg.relay_duty
+             << ";hysteresis_c=" << cfg.hysteresis_c
+             << ";cycles=" << pid_tuner_.cycles_done() << '/' << cfg.cycles
+             << ";relay=" << (pid_tuner_.relay_on() ? "on" : "off")
+             << ";elapsed_s=" << static_cast<int>(pid_tuner_.elapsed_s(now_s));
+      }
+      if (pid_tuner_.state() == PidAutoTuner::State::kDone) {
+        const auto& r = pid_tuner_.result();
+        body << ";ku=" << r.ku << ";tu_s=" << r.tu_s
+             << ";amplitude_c=" << r.amplitude_c
+             << ";kp=" << r.kp << ";ki=" << r.ki << ";kd=" << r.kd
+             << ";zn_kp=" << r.zn_kp << ";zn_ki=" << r.zn_ki
+             << ";zn_kd=" << r.zn_kd;
+      }
+      if (pid_tuner_.state() == PidAutoTuner::State::kFailed) {
+        body << ";error=" << SanitizeForReply(pid_tuner_.error());
+      }
+      return Ack(cmd_name, body.str());
+    }
+
     case CommandType::kSetTempTarget: {
       if (mode_.load() != SystemMode::kRun) {
         return Nack(cmd_name, "RUN mode required");
+      }
+      if (tune_running()) {
+        return Nack(cmd_name, "PID tune running; PID_TUNE_ABORT first");
       }
       std::size_t index = 0;
       double target = 0.0;
@@ -1759,6 +2114,9 @@ std::string SystemController::HandleCommandLine(const std::string& line,
     case CommandType::kSetAllTempTargets: {
       if (mode_.load() != SystemMode::kRun) {
         return Nack(cmd_name, "RUN mode required");
+      }
+      if (tune_running()) {
+        return Nack(cmd_name, "PID tune running; PID_TUNE_ABORT first");
       }
       double target = 0.0;
       if (!ParseDouble(command.args[0], &target) ||
@@ -1901,6 +2259,11 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       MissionPhase requested = MissionPhase::kBoot;
       if (!ParseMissionPhase(command.args[0], &requested)) {
         return Nack(cmd_name, "invalid phase");
+      }
+      if (requested == MissionPhase::kStopped) {
+        // STOPPED ends the control loop (Run() returns) and systemd then
+        // starts a fresh, disarmed instance: not an operator phase.
+        return Nack(cmd_name, "STOPPED is not an operator phase; use SHUTDOWN_SAFE");
       }
       state_manager_.SetPhase(requested);
       std::ostringstream msg;
@@ -2090,9 +2453,7 @@ std::string SystemController::HandleCommandLine(const std::string& line,
         return Nack(cmd_name, "manual motion blocked during link-loss fallback");
       }
       std::int64_t steps = 0;
-      try {
-        steps = std::stoll(command.args[0]);
-      } catch (...) {
+      if (!ParseInt64(command.args[0], &steps)) {
         return Nack(cmd_name, "invalid steps");
       }
       std::string err;
@@ -2116,17 +2477,62 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       }
       std::int64_t steps = 0;
       double hold_s = 0.0;
-      try {
-        steps = std::stoll(command.args[0]);
-        if (command.args.size() == 2) {
-          hold_s = std::stod(command.args[1]);
-        }
-      } catch (...) {
+      if (!ParseInt64(command.args[0], &steps) ||
+          (command.args.size() == 2 &&
+           !ParseDouble(command.args[1], &hold_s))) {
         return Nack(cmd_name, "invalid args");
+      }
+      if (hold_s < 0.0 || hold_s > kMaxHoldSeconds) {
+        return Nack(cmd_name, "invalid hold_s (0..86400)");
       }
       std::string err;
       InhibitHeatersForMotion();
       if (!stepper_->MoveToSteps(command.motor_id, steps, hold_s, &err))
+        return Nack(cmd_name, err);
+      return Ack(cmd_name, "bend queued");
+    }
+
+    case CommandType::kStepperMoveMm: {
+      if (!stepper_) return Nack(cmd_name, "stepper unavailable");
+      if (mode_.load() != SystemMode::kRun) {
+        return Nack(cmd_name, "RUN mode required");
+      }
+      if (link_loss_fallback_active_) {
+        return Nack(cmd_name, "manual motion blocked during link-loss fallback");
+      }
+      double mm = 0.0;
+      if (!ParseDouble(command.args[0], &mm)) return Nack(cmd_name, "invalid mm");
+      std::string err;
+      InhibitHeatersForMotion();
+      if (!stepper_->MoveMillimeters(command.motor_id, mm, &err))
+        return Nack(cmd_name, err);
+      return Ack(cmd_name, "move queued");
+    }
+
+    case CommandType::kStepperMoveToMm: {
+      if (!stepper_) return Nack(cmd_name, "stepper unavailable");
+      if (mode_.load() != SystemMode::kRun) {
+        return Nack(cmd_name, "RUN mode required");
+      }
+      if (!motor_zeroed(command.motor_id)) {
+        return Nack(cmd_name, "motor must be zeroed first");
+      }
+      if (link_loss_fallback_active_) {
+        return Nack(cmd_name, "manual motion blocked during link-loss fallback");
+      }
+      double mm = 0.0;
+      double hold_s = 0.0;
+      if (!ParseDouble(command.args[0], &mm)) return Nack(cmd_name, "invalid mm");
+      if (command.args.size() == 2 &&
+          !ParseDouble(command.args[1], &hold_s)) {
+        return Nack(cmd_name, "invalid hold");
+      }
+      if (hold_s < 0.0 || hold_s > kMaxHoldSeconds) {
+        return Nack(cmd_name, "invalid hold_s (0..86400)");
+      }
+      std::string err;
+      InhibitHeatersForMotion();
+      if (!stepper_->MoveToMillimeters(command.motor_id, mm, hold_s, &err))
         return Nack(cmd_name, err);
       return Ack(cmd_name, "bend queued");
     }
@@ -2165,6 +2571,29 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       return Ack(cmd_name, "homing");
     }
 
+    case CommandType::kMotorDebug: {
+      if (!stepper_) return Nack(cmd_name, "stepper unavailable");
+      std::size_t motor = 0;
+      if (!ParseIndex(command.args[0], &motor) ||
+          !valid_motor(static_cast<int>(motor))) {
+        return Nack(cmd_name, "invalid motor id");
+      }
+      const StepperStatus st = stepper_->Snapshot(static_cast<int>(motor));
+      const std::string regs = stepper_->DebugRegisters(static_cast<int>(motor));
+      if (regs.empty()) {
+        return Nack(cmd_name, "debug registers unavailable (no SPI driver or bus error)");
+      }
+      std::ostringstream out;
+      out << "motor=" << motor << ";sw_pos=" << st.position_steps
+          << ";sw_tgt=" << st.target_steps << ";sw_hz=" << st.step_hz
+          << ";us=" << st.microstep << ";enabled=" << (st.enabled ? 1 : 0)
+          << ";moving=" << (st.moving ? 1 : 0)
+          << ";holding=" << (st.holding ? 1 : 0)
+          << ";pulses=" << st.pulses_total << ";missed=" << st.missed_deadlines
+          << ';' << regs;
+      return Ack(cmd_name, out.str());
+    }
+
     case CommandType::kStepperStop: {
       if (!stepper_) return Nack(cmd_name, "stepper unavailable");
       std::string err;
@@ -2180,6 +2609,35 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       if (!stepper_->SetSpeed(command.motor_id, hz, &err))
         return Nack(cmd_name, err);
       return Ack(cmd_name, "speed updated");
+    }
+
+    case CommandType::kStepperSetAccel: {
+      if (!stepper_) return Nack(cmd_name, "stepper unavailable");
+      double accel = 0.0;
+      if (!ParseDouble(command.args[0], &accel)) {
+        return Nack(cmd_name, "invalid accel");
+      }
+      std::string err;
+      if (!stepper_->SetAccel(command.motor_id, accel, &err))
+        return Nack(cmd_name, err);
+      return Ack(cmd_name, "accel updated");
+    }
+
+    case CommandType::kStepperSetCurrent: {
+      if (!stepper_) return Nack(cmd_name, "stepper unavailable");
+      double a_rms = 0.0;
+      if (!ParseDouble(command.args[0], &a_rms)) {
+        return Nack(cmd_name, "invalid current");
+      }
+      // Same flat backstop as config load: whatever the sense resistor
+      // could deliver, nothing on this rig runs above 3.1 A RMS.
+      if (a_rms <= 0.0 || a_rms > 3.1) {
+        return Nack(cmd_name, "current must be in (0, 3.1] A RMS");
+      }
+      std::string err;
+      if (!stepper_->SetRunCurrent(command.motor_id, a_rms, &err))
+        return Nack(cmd_name, SanitizeForReply(err));
+      return Ack(cmd_name, "current updated");
     }
 
     case CommandType::kStepperSetMicrostep: {
