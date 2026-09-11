@@ -1,3 +1,12 @@
+# Every test binary in this directory is assert()-based. A Release
+# configuration adds -DNDEBUG, which compiles each assert out and turns the
+# whole suite into a no-op that "passes" (a Release ctest run reported
+# 20/20 with nothing checked, 2026-09-08). Strip it for the test targets
+# only; the flight binary keeps its own configuration's flags.
+foreach(config RELEASE RELWITHDEBINFO MINSIZEREL)
+  string(REPLACE "-DNDEBUG" "" CMAKE_CXX_FLAGS_${config} "${CMAKE_CXX_FLAGS_${config}}")
+endforeach()
+
 add_executable(coatheal_unit_tests
   unit/test_suite.cpp
 )
@@ -214,3 +223,12 @@ target_include_directories(coatheal_sequent_rtd_tests PRIVATE
 )
 
 add_test(NAME coatheal_sequent_rtd_tests COMMAND coatheal_sequent_rtd_tests)
+
+# RtcAdapter derived clock-validity tests. No hardware required.
+add_executable(coatheal_rtc_adapter_tests
+  unit/test_rtc_adapter.cpp
+)
+
+target_link_libraries(coatheal_rtc_adapter_tests PRIVATE coatheal_onboard_core)
+
+add_test(NAME coatheal_rtc_adapter_tests COMMAND coatheal_rtc_adapter_tests)

@@ -641,6 +641,9 @@ void TestChipResetMidMoveIsRecoveredWithinTheCheckInterval() {
   }
   ExpectRead(&bus, kRegGSTAT, 0x1U);
   ScriptHealthyReinit(&bus, cfg, /*toff=*/3);  // enabled: chopper restored by the reinit itself
+  // The same 64-step check also samples DRV_STATUS (0x6F) for the die
+  // thermal flags before the step continues.
+  ExpectRead(&bus, 0x6F, 0U);
   ExpectWrite(&bus, kRegXTARGET, 64U);
   assert(driver->Step(true));
   assert(bus.mismatch_count() == 0);

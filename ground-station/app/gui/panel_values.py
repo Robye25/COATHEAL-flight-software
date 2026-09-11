@@ -115,8 +115,15 @@ class ValuesPanel(QScrollArea):
             f[f"m{m}_src"].setText(f"{motor.source or '—'} · {motor.seq_name or '-'}/{motor.seq_state or '-'}")
         f["fallback"].setText("—" if state.fallback is None else ("ACTIVE" if state.fallback else "inactive"))
         f["link_loss_s"].setText("—" if state.link_loss_s is None else f"{state.link_loss_s:.1f}")
-        f["energy"].setText("—" if state.energy_wh is None else
-                            f"{state.energy_wh:.2f} / {state.budget_wh:.0f}" + (" EXHAUSTED" if state.budget_exhausted else ""))
+        if state.energy_wh is None:
+            energy_text = "—"
+        elif state.budget_wh:
+            energy_text = f"{state.energy_wh:.2f} / {state.budget_wh:.0f}"
+        else:
+            energy_text = f"{state.energy_wh:.2f}"  # budget unreported or unlimited
+        if state.budget_exhausted:
+            energy_text += " EXHAUSTED"
+        f["energy"].setText(energy_text)
         f["heaters_active"].setText("—" if state.heaters_active is None else str(state.heaters_active))
         f["queue"].setText("—" if state.queue_depth is None else str(state.queue_depth))
         f["plan"].setText(state.plan_state or "—")

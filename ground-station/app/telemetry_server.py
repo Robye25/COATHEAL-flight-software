@@ -13,6 +13,7 @@ from .protocol import (
     HeatingCycleEvent,
     PullEvent,
     TelemetryParseError,
+    ack_for_raw_line,
     build_ack,
     parse_heating_cycle_event,
     parse_pull_event,
@@ -344,8 +345,9 @@ class TelemetryServer:
                 if line.startswith("EVT,CYCLE,"):
                     try:
                         event = parse_heating_cycle_event(line)
-                    except TelemetryParseError as exc:
-                        print(f"[telemetry][evt-parse-error] {exc}: {line}")
+                    except Exception as exc:  # parse error of any shape
+                        if not self._ack_unparseable(conn, line, exc):
+                            return
                         continue
                     self._last_packet_time = time.time()
                     self._append_cycle(event, line, rx_utc)
@@ -365,8 +367,9 @@ class TelemetryServer:
                 if line.startswith("EVT,PULL,"):
                     try:
                         pull = parse_pull_event(line)
-                    except TelemetryParseError as exc:
-                        print(f"[telemetry][evt-parse-error] {exc}: {line}")
+                    except Exception as exc:  # parse error of any shape
+                        if not self._ack_unparseable(conn, line, exc):
+                            return
                         continue
                     self._last_packet_time = time.time()
                     # EVT,PULL is keyed by (session, pull_id) so a replay
@@ -395,8 +398,11 @@ class TelemetryServer:
 
                 try:
                     packet = parse_telemetry_csv(line)
-                except TelemetryParseError as exc:
-                    print(f"[telemetry][parse-error] {exc}: {line}")
+                except Exception as exc:  # TelemetryParseError, or anything else
+                    # One bad line must not end the receiver: the un-ACKed
+                    # frame would be re-sent by the onboard on every reconnect.
+                    if not self._ack_unparseable(conn, line, exc):
+                        return
                     continue
 
                 self._last_packet_time = time.time()
@@ -459,6 +465,21 @@ class TelemetryServer:
                     f"P={pressure_text} Thot={hot_str}"
                 )
 
+    def _ack_unparseable(self, conn: socket.socket, line: str, exc: Exception) -> bool:
+        """Log an unparseable frame and ACK whatever identity can be read off
+        it so the onboard drops it from its queue. False when the socket is
+        gone."""
+        print(f"[telemetry][parse-error] {exc}: {line}")
+        self.logs.log_event("WARN", f"unparseable frame ({exc}): {line}")
+        ack = ack_for_raw_line(line)
+        if ack is None:
+            return True
+        try:
+            conn.sendall(ack.encode("utf-8"))
+        except OSError:
+            return False
+        return True
+
     def _append_cycle(self, event: HeatingCycleEvent, raw_line: str, rx_utc: str) -> None:
         writer = self._cycle_writer()
         if writer is None:
@@ -497,7 +518,8 @@ def add_subparser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
                              "under <root>/sessions/ (same layout as the GUI).")
     parser.add_argument("--plot", action="store_true", help="Enable live matplotlib plot")
     parser.add_argument("--alert-temp-c", type=float, default=80.0)
-    parser.add_argument("--timeout-s", type=float, default=10.0)
+    # Longer than the slowest legal tick (SET_TICK_HZ 0.1 = 10 s per frame).
+    parser.add_argument("--timeout-s", type=float, default=12.0)
     parser.add_argument("--discovery-enabled", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--discovery-port", type=int, default=4100)
     parser.add_argument("--command-port", type=int, default=5000)

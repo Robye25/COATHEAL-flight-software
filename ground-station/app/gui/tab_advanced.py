@@ -254,8 +254,12 @@ class AdvancedTab(QScrollArea):
             if hold < 0:
                 self.resp_seq.show_note(f"✖ step {row + 1}: hold must be non-negative", RED); return None
             # The BENDSEQ_LOAD wire format stays absolute µsteps; convert at
-            # the motor's live divisor (µ4 when telemetry has not arrived).
-            us = self.state.motor(self._seq_motor_id()).microstep or 4
+            # the motor's live divisor, never a guess: a sequence encoded at
+            # µ4 for a motor running µ16 bends four times short.
+            us = self._live_microstep(self._seq_motor_id())
+            if us is None:
+                self.resp_seq.show_note("✖ motor microstep unknown — wait for telemetry before loading", RED)
+                return None
             target = _mm_to_usteps(target_mm, us)
             step = f"{target}:{hold:g}"
             if speed_text:
@@ -310,9 +314,21 @@ class AdvancedTab(QScrollArea):
             self.resp_us.show_note(f"✖ {norm}", RED); return
         self._send(f"STEPPER_SET_MICROSTEP {int(self.us_motor.value() or 0)} {norm}")
 
+    def _live_microstep(self, motor_id: int) -> int | None:
+        """The motor's live divisor from telemetry, or None while the console
+        has not seen a STEPPER<n> segment for it. Absolute µstep targets
+        must never be encoded against a guessed divisor: the failsafe plan
+        executes on its own, with nobody there to notice a 4x short bend."""
+        motor = self.state.motor(motor_id)
+        return motor.microstep if motor.present and motor.microstep > 0 else None
+
     def _plan_load(self, motor_id: int) -> None:
         target, hold, speed, _btn = self.plan_rows[motor_id]
-        us = self.state.motor(motor_id).microstep or 4
+        us = self._live_microstep(motor_id)
+        if us is None:
+            self.resp_plan.show_note(
+                f"✖ M{motor_id} microstep unknown — wait for telemetry before loading the plan", RED)
+            return
         usteps = _mm_to_usteps(target.value(), us)
         self._send(f"FALLBACK_PLAN {motor_id} {usteps} {hold.value():g} {speed.value()}")
 

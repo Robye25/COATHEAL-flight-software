@@ -1442,6 +1442,37 @@ void TestFallbackConfigValidation() {
 
 }  // namespace
 
+// ---------------------------------------------------------------------------
+// Argument hardening (2026-09 flight-readiness review): NaN must never pass a
+// range check, STOPPED is not an operator phase, and SHUTDOWN_SAFE leaves the
+// process running.
+
+void TestCommandArgumentHardening() {
+  const std::filesystem::path queue_dir = FreshQueueDir("hardening");
+  coatheal::SystemController controller(LoadRadioTestConfig(queue_dir));
+
+  // "nan"/"inf" parse as numbers but compare false against every bound; a
+  // NaN tick rate used to become the 10 s floor and trip the watchdog.
+  assert(ContainsText(controller.HandleCommandLine("SET_TICK_HZ nan", ""), "NACK,SET_TICK_HZ"));
+  assert(ContainsText(controller.HandleCommandLine("SET_TICK_HZ inf", ""), "NACK,SET_TICK_HZ"));
+  assert(ContainsText(controller.HandleCommandLine("SET_TICK_HZ 0.5x", ""), "NACK,SET_TICK_HZ"));
+  assert(controller.HandleCommandLine("SET_TICK_HZ 0.5", "") == "ACK,SET_TICK_HZ,tick_hz=0.5");
+  assert(controller.HandleCommandLine("ARM", "").rfind("ACK,", 0) == 0);
+  assert(ContainsText(controller.HandleCommandLine("SET_HEATER_DUTY 0 nan", ""), "invalid args"));
+  assert(ContainsText(controller.HandleCommandLine("SET_ALL_DUTY nan", ""), "invalid duty"));
+  assert(ContainsText(controller.HandleCommandLine("SET_TEMP_TARGET 0 nan", ""), "invalid target args"));
+  assert(ContainsText(controller.HandleCommandLine("SET_PID ALL nan 0 0", ""), "invalid pid args"));
+
+  // STOPPED would end the control loop; the operator gets SHUTDOWN_SAFE,
+  // which makes the outputs safe and keeps the process (and telemetry) up.
+  assert(ContainsText(controller.HandleCommandLine("SET_PHASE STOPPED", ""), "not an operator phase"));
+  assert(controller.HandleCommandLine("SET_PHASE FLOAT", "") == "ACK,SET_PHASE,phase=FLOAT");
+  const std::string safe = controller.HandleCommandLine("SHUTDOWN_SAFE", "");
+  assert(safe.rfind("ACK,SHUTDOWN_SAFE", 0) == 0);
+  assert(ContainsText(safe, "process keeps running"));
+  assert(controller.HandleCommandLine("STATUS", "").rfind("ACK,STATUS,phase=FLOAT;", 0) == 0);
+}
+
 int main() {
   TestPidBoundsAndAntiWindup();
   TestHeaterSchedulerCap();
@@ -1477,6 +1508,7 @@ int main() {
   TestRadioSilenceGatesBeaconAndHelloReply();
   TestFallbackCommandParsing();
   TestFallbackPlanCommands();
+  TestCommandArgumentHardening();
   TestFallbackConfigValidation();
 
   std::cout << "All unit tests passed.\n";

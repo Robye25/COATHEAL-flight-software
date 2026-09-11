@@ -415,10 +415,56 @@ class ThermalTab(QScrollArea):
                                      AMBER if inhibited else GREEN)
             self.i_inhibit.set_color(AMBER if inhibited else GREEN)
 
+    # Accepted commands that clear every onboard target, whoever sent them
+    # (protocol.md: HEATERS_OFF "clears all duties and targets"; DISARM,
+    # ENTER_SAFE, SHUTDOWN_SAFE and CLEAR_OVERRIDES clear the same set;
+    # SET_ALL_DUTY replaces every target with a duty).
+    _CLEARS_ALL_TARGETS = frozenset({
+        "HEATERS_OFF", "DISARM", "ENTER_SAFE", "SHUTDOWN_SAFE", "CLEAR_OVERRIDES",
+        "CLEAR_TEMP_TARGETS", "SET_ALL_DUTY",
+    })
+
+    def _track_targets(self, verb: str, cmd: str) -> None:
+        """Mirror the onboard's targets from every accepted command that
+        changes them, from any tab or panel -- a row left saying "PID" after
+        the panic button would misreport closed-loop control as still alive."""
+        parts = cmd.split()
+        before = list(self._targets)
+        if verb in self._CLEARS_ALL_TARGETS:
+            self._targets = [None] * HEATER_COUNT
+        elif verb == "SET_ALL_TEMP_TARGETS" and len(parts) > 1:
+            try:
+                self._targets = [float(parts[1])] * HEATER_COUNT
+            except ValueError:
+                return
+        elif verb in ("SET_TEMP_TARGET", "CLEAR_TEMP_TARGET", "SET_HEATER_DUTY") and len(parts) > 1:
+            try:
+                index = int(parts[1])
+            except ValueError:
+                return
+            if not 0 <= index < HEATER_COUNT:
+                return
+            if verb == "SET_TEMP_TARGET":
+                try:
+                    self._targets[index] = float(parts[2])
+                except (IndexError, ValueError):
+                    return
+            else:
+                # CLEAR_TEMP_TARGET; a duty override also clears that
+                # channel's target onboard.
+                self._targets[index] = None
+        else:
+            return
+        if self._targets != before:
+            self._targets_updated()
+
     def on_response(self, cmd: str, resp: CommandResponse, ms: float, tag) -> None:
         verb = cmd.strip().split()[0].upper() if cmd.strip() else ""
-        if verb == "GET_THERMAL" and resp.ok:
-            self._absorb_get_thermal(resp.body)
+        if resp.ok:
+            if verb == "GET_THERMAL":
+                self._absorb_get_thermal(resp.body)
+            else:
+                self._track_targets(verb, cmd)
         if tag is not self:
             return
         if verb.startswith("PID_TUNE") or (verb == "SET_PID" and self._tune_result is not None):
@@ -426,22 +472,8 @@ class ThermalTab(QScrollArea):
             return
         if verb in ("SET_TEMP_TARGET", "CLEAR_TEMP_TARGET"):
             self.resp_heaters.show_response(cmd, resp, ms)
-            if resp.ok:
-                parts = cmd.split()
-                try:
-                    index = int(parts[1])
-                except (IndexError, ValueError):
-                    return
-                self._targets[index] = float(parts[2]) if verb == "SET_TEMP_TARGET" and len(parts) > 2 else None
-                self._targets_updated()
         elif verb in ("SET_ALL_TEMP_TARGETS", "CLEAR_TEMP_TARGETS", "GET_THERMAL"):
             self.resp_all.show_response(cmd, resp, ms)
-            if resp.ok and verb == "SET_ALL_TEMP_TARGETS":
-                self._targets = [float(cmd.split()[1])] * HEATER_COUNT
-                self._targets_updated()
-            elif resp.ok and verb == "CLEAR_TEMP_TARGETS":
-                self._targets = [None] * HEATER_COUNT
-                self._targets_updated()
         elif verb == "SET_PID":
             self.resp_preset.show_response(cmd, resp, ms)
 

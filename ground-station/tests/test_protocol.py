@@ -432,3 +432,48 @@ class TransmitStampTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ParserHardeningTests(unittest.TestCase):
+    """A frame the receiver cannot parse must surface as TelemetryParseError
+    (the receivers catch exactly that) and must still be acknowledgeable by
+    its raw identity, or the onboard re-sends it forever."""
+
+    _TAIL = "HEATER_DUTY=0|0|0|0|0|0,PHASE=FLOAT,STATUS=SD_OK"
+
+    def test_bad_prefix_numeric_is_a_parse_error(self) -> None:
+        line = f"DATA,s1,42,2026-01-01T00:00:00Z,1,abc,140.1,0.1,5,5,5,5,5,5,5,5,{self._TAIL}"
+        with self.assertRaises(TelemetryParseError):
+            parse_telemetry_csv(line)
+
+    def test_bad_sample_or_duty_is_a_parse_error(self) -> None:
+        with self.assertRaises(TelemetryParseError):
+            parse_telemetry_csv(f"DATA,s1,42,t,1,1.0,140.1,0.1,5,x,5,5,5,5,5,5,{self._TAIL}")
+        with self.assertRaises(TelemetryParseError):
+            parse_telemetry_csv("DATA,s1,42,t,1,1.0,140.1,0.1,5,5,5,5,5,5,5,5,HEATER_DUTY=0|q|0,PHASE=FLOAT,STATUS=SD_OK")
+
+    def test_nan_and_inf_still_parse(self) -> None:
+        pkt = parse_telemetry_csv(f"DATA,s1,42,t,1,nan,-nan,inf,nan,5,5,5,5,5,5,5,{self._TAIL}")
+        self.assertTrue(math.isnan(pkt.ambient_temp_c))
+        self.assertTrue(math.isnan(pkt.sample_temps_c[0]))
+
+    def test_ack_for_raw_line(self) -> None:
+        from app.protocol import ack_for_raw_line
+        self.assertEqual(ack_for_raw_line("DATA,sess-1,42,garbage,,"), "ACK,sess-1,42\n")
+        self.assertEqual(ack_for_raw_line("EVT,PULL,sess-1,7,junk"), "ACK,sess-1,0\n")
+        self.assertIsNone(ack_for_raw_line("DATA,sess-1,notanumber,x"))
+        self.assertIsNone(ack_for_raw_line("HELLO"))
+
+    def test_recv_reply_line_reassembles_split_replies(self) -> None:
+        from app.protocol import recv_reply_line
+
+        class FakeSock:
+            def __init__(self, chunks):
+                self._chunks = list(chunks)
+
+            def recv(self, _n):
+                return self._chunks.pop(0) if self._chunks else b""
+
+        self.assertEqual(recv_reply_line(FakeSock([b"ACK,STATUS,phase=FLO", b"AT;mode=RUN\n"])),
+                         "ACK,STATUS,phase=FLOAT;mode=RUN")
+        self.assertEqual(recv_reply_line(FakeSock([b"NACK,PING,x"])), "NACK,PING,x")

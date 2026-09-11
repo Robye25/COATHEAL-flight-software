@@ -1,6 +1,10 @@
-# Hardware Reference (Schematic v3 Final BOM)
+# Hardware Reference (Schematic v4 Final BOM)
 
-This document is the active hardware reference for the final component list.
+This document is the active hardware reference for the final component list
+(electrical schematic v4, 2026-08-29). v4 kept the v3 pin map and topology
+unchanged; it fixed the heater rail at 14.4 V (see the component table) and
+fits no pull resistors on the heater or motor-driver control lines (see
+[Boot-time GPIO states](#boot-time-gpio-states)).
 Use it with [sequent-rtd-bring-up.md](sequent-rtd-bring-up.md),
 [tmc5160-commissioning.md](tmc5160-commissioning.md), and
 `config/onboard.local.ini`.
@@ -95,10 +99,12 @@ Do not energize heaters or motors until these points are verified:
 2. Power each EKM014 driver supply within its specified 4.5-12 V range. Its
    control inputs accept Pi 3.3 V logic; do not power heater loads from the Pi.
 3. Add an external pull-down to every `HEAT_EN` input so all heaters remain off
-   while the Pi boots, reboots, or has its GPIO lines unclaimed.
+   while the Pi boots, reboots, or has its GPIO lines unclaimed. Schematic v4
+   fits none, so the [boot-time GPIO states](#boot-time-gpio-states) below
+   are what covers that window.
 4. Add an external pull-up to each active-low TMC5160 `EN` input so both motors
-   remain disabled during boot. Power TMC5160 `VIO` from 3.3 V and the motor
-   stage from the separate 12 V rail.
+   remain disabled during boot (also not fitted on v4; same mitigation). Power
+   TMC5160 `VIO` from 3.3 V and the motor stage from the separate 12 V rail.
 5. Tie Pi, EKM014, TMC5160, sensor, and regulator signal grounds together.
    Route heater and motor return current separately from sensor ground wiring.
 6. Power the Pi from one controlled 5 V source. If the 5 V header is used,
@@ -119,6 +125,52 @@ The ADS1115, DPS310, and Sequent RTD HAT share I2C-1 at addresses `0x48`,
 QT boards from 3.3 V so their I2C pull-ups cannot raise SDA or SCL above the
 Pi's 3.3 V GPIO domain. The Sequent RTD HAT is a 5 V board powered from the
 Pi's 5 V rail; its I2C signaling remains 3.3 V-safe.
+
+## Boot-time GPIO states
+
+Schematic v4 fits no pull resistors on the EKM014 heater inputs or on the
+TMC5160 chip-select and enable lines, so nothing on the board defines those
+levels while no software drives them. The BCM2711 powers on with pull-UP on
+BCM 0-8 and pull-DOWN on BCM 9-27, which for the final pin map means, from
+power-on until `coatheal-onboard` claims its lines:
+
+| Lines | BCM | Power-on pull | Consequence |
+|---|---|---|---|
+| Heaters H3, H4 | 6, 5 | up | driver inputs high: two heaters ON |
+| Heaters H1, H2, H5, H6 | 19, 13, 24, 23 | down | off |
+| TMC5160 CS0, CS1 | 22, 27 | down | both drivers selected: every SPI0 datagram (the MAX31865 clicks share the bus) is latched by both TMC5160s as a register write |
+| TMC5160 EN0, EN1 | 20, 21 | down | both drivers enabled (active-low `EN`) |
+
+Two software layers close that window; `deploy_onboard.sh` installs both.
+
+1. **Firmware boot to service start: a managed `gpio=` block in
+   `config.txt`.** `scripts/hardware_setup.py boot-gpio` derives it from the
+   same INI the service runs on (`heater.output_lines`/`heater.active_high`,
+   `motorN.cs_line`, `motorN.enable_line`/`enable_active_low`), so the two
+   can never disagree, and `deploy_onboard.sh` writes it between managed
+   marker comments in `/boot/firmware/config.txt` (idempotent; a changed
+   block needs a reboot, and the deploy says so). For the flight pin map:
+
+   ```
+   gpio=5,6,13,19,23,24=op,dl,pd
+   gpio=20,21,22,27=op,dh,pu
+   ```
+
+   `op,dl,pd` = output, driven low, pulled down; `op,dh,pu` = output, driven
+   high, pulled up. Print the block without installing it with
+   `python3 scripts/hardware_setup.py boot-gpio --config config/onboard.local.ini`.
+2. **Service running, stopped, or restarting: a pull bias on every claimed
+   line.** `RequestGpioOutput` (`hal/gpio_output.hpp`, `GpioBias`) requests
+   each heater line with a pull toward OFF and each CS/EN line with a pull
+   toward deselected/disabled. The SoC's pull register survives the line
+   being released (the pinctrl driver only reverts the function to input),
+   so after a service stop or crash the line rests at its safe level until
+   the next power cycle. A kernel or libgpiod without bias support still
+   gets the output, without the pull, and logs a warning.
+
+Independently of both, the service starts its MAX31865 workers only after
+each TMC5160 driver has claimed its chip-select line, so click traffic can no
+longer be clocked into a still-selected driver during start-up.
 
 ## Sensors
 
