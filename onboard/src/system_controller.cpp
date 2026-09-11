@@ -67,6 +67,29 @@ bool ParseDouble(const std::string& text, double* out) {
 // it the heater inhibit, for its whole duration.
 constexpr double kMaxHoldSeconds = 86400.0;
 
+// "<N> full-steps/s = <v> mm/s at lead <l> mm/rev": the speed ceiling every
+// motion path is held to, for ACK/NACK text. No commas: reply bodies are
+// comma-delimited.
+std::string SpeedCeilingText(const OnboardConfig& config) {
+  const double hz = EffectiveMaxStepHz(config);
+  std::ostringstream oss;
+  oss << hz << " full-steps/s = "
+      << hz / static_cast<double>(config.stepper.steps_per_rev) *
+             config.stepper.lead_mm_per_rev
+      << " mm/s at lead " << config.stepper.lead_mm_per_rev << " mm/rev";
+  return oss.str();
+}
+
+// NACK text for a raw-microstep command beyond stepper.max_direct_usteps.
+std::string DirectCapText(const OnboardConfig& config, const char* what) {
+  std::ostringstream oss;
+  oss << "|" << what << "| exceeds stepper.max_direct_usteps ("
+      << config.stepper.max_direct_usteps
+      << " microsteps at the live divisor); use STEPPER_MOVE_MM or"
+      << " STEPPER_MOVETO_MM for longer travel";
+  return oss.str();
+}
+
 bool ParseIndex(const std::string& text, std::size_t* out) {
   try {
     const unsigned long value = std::stoul(text);
@@ -223,13 +246,36 @@ bool SystemController::Initialize(std::string* error) {
   // Final BOM (schematic v3): two TMC5160-driven NEMA 17 ball-screw
   // actuators, SPI-only motion (no STEP/DIR lines exist). Motor channel,
   // sample mapping, SPI device, current, and GPIO lines come from onboard.ini.
+  // One speed ceiling for every motion path: the owner's linear limit
+  // (stepper.max_speed_mm_s at the ball-screw lead) or the legacy
+  // pull.max_step_hz, whichever is lower. Logged once so the journal shows
+  // which of the two binds.
+  const double max_step_hz = EffectiveMaxStepHz(config_);
+  {
+    std::ostringstream oss;
+    oss << "[stepper] speed ceiling " << SpeedCeilingText(config_)
+        << " (stepper.max_speed_mm_s=" << config_.stepper.max_speed_mm_s
+        << ", pull.max_step_hz=" << config_.pull.max_step_hz;
+    if (config_.pull.max_step_hz > max_step_hz + 1e-9) {
+      oss << " exceeds the linear limit and is clamped";
+    } else if (config_.stepper.LinearMaxStepHz() > max_step_hz + 1e-9) {
+      oss << " binds below the linear limit";
+    }
+    oss << "); raw microstep commands capped at |"
+        << config_.stepper.max_direct_usteps << "| usteps; chopper "
+        << (config_.motors[0].stealth_chop ? "stealthChop" : "spreadCycle")
+        << "/"
+        << (config_.motors[1].stealth_chop ? "stealthChop" : "spreadCycle")
+        << '\n';
+    std::cerr << oss.str();
+  }
   std::vector<StepperChannelConfig> channel_cfgs;
   channel_cfgs.reserve(config_.motors.size());
   for (std::size_t i = 0; i < config_.motors.size(); ++i) {
     StepperChannelConfig cfg;
     cfg.channel_id = static_cast<int>(i);
     cfg.full_steps_per_rev = config_.stepper.steps_per_rev;
-    cfg.max_step_hz = config_.pull.max_step_hz;
+    cfg.max_step_hz = max_step_hz;
     cfg.default_step_hz = config_.stepper.default_step_hz;
     cfg.accel_steps_per_s2 = config_.motors[i].accel_steps_per_s2 > 0.0
                                  ? config_.motors[i].accel_steps_per_s2
@@ -2318,8 +2364,9 @@ std::string SystemController::HandleCommandLine(const std::string& line,
         if (fields.size() == 3) {
           double speed = 0.0;
           if (!ParseDouble(fields[2], &speed) || speed <= 0.0 ||
-              speed > config_.pull.max_step_hz) {
-            return Nack(cmd_name, "invalid sequence speed");
+              speed > EffectiveMaxStepHz(config_)) {
+            return Nack(cmd_name, "invalid sequence speed (0 < hz <= " +
+                                      SpeedCeilingText(config_) + ")");
           }
           step.speed_hz = speed;
         }
@@ -2445,16 +2492,21 @@ std::string SystemController::HandleCommandLine(const std::string& line,
     }
 
     case CommandType::kStepperMove: {
+      // Argument checks first, so a malformed or over-long raw move is
+      // refused the same way whatever the mode or the driver state.
+      std::int64_t steps = 0;
+      if (!ParseInt64(command.args[0], &steps)) {
+        return Nack(cmd_name, "invalid steps");
+      }
+      if (std::abs(steps) > config_.stepper.max_direct_usteps) {
+        return Nack(cmd_name, DirectCapText(config_, "steps"));
+      }
       if (!stepper_) return Nack(cmd_name, "stepper unavailable");
       if (mode_.load() != SystemMode::kRun) {
         return Nack(cmd_name, "RUN mode required");
       }
       if (link_loss_fallback_active_) {
         return Nack(cmd_name, "manual motion blocked during link-loss fallback");
-      }
-      std::int64_t steps = 0;
-      if (!ParseInt64(command.args[0], &steps)) {
-        return Nack(cmd_name, "invalid steps");
       }
       std::string err;
       InhibitHeatersForMotion();
@@ -2465,6 +2517,20 @@ std::string SystemController::HandleCommandLine(const std::string& line,
 
     case CommandType::kStepperMoveTo:
     case CommandType::kStepperBend: {
+      // Argument checks first (see STEPPER_MOVE).
+      std::int64_t steps = 0;
+      double hold_s = 0.0;
+      if (!ParseInt64(command.args[0], &steps) ||
+          (command.args.size() == 2 &&
+           !ParseDouble(command.args[1], &hold_s))) {
+        return Nack(cmd_name, "invalid args");
+      }
+      if (std::abs(steps) > config_.stepper.max_direct_usteps) {
+        return Nack(cmd_name, DirectCapText(config_, "usteps"));
+      }
+      if (hold_s < 0.0 || hold_s > kMaxHoldSeconds) {
+        return Nack(cmd_name, "invalid hold_s (0..86400)");
+      }
       if (!stepper_) return Nack(cmd_name, "stepper unavailable");
       if (mode_.load() != SystemMode::kRun) {
         return Nack(cmd_name, "RUN mode required");
@@ -2474,16 +2540,6 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       }
       if (link_loss_fallback_active_) {
         return Nack(cmd_name, "manual motion blocked during link-loss fallback");
-      }
-      std::int64_t steps = 0;
-      double hold_s = 0.0;
-      if (!ParseInt64(command.args[0], &steps) ||
-          (command.args.size() == 2 &&
-           !ParseDouble(command.args[1], &hold_s))) {
-        return Nack(cmd_name, "invalid args");
-      }
-      if (hold_s < 0.0 || hold_s > kMaxHoldSeconds) {
-        return Nack(cmd_name, "invalid hold_s (0..86400)");
       }
       std::string err;
       InhibitHeatersForMotion();
@@ -2608,6 +2664,11 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       std::string err;
       if (!stepper_->SetSpeed(command.motor_id, hz, &err))
         return Nack(cmd_name, err);
+      if (hz > EffectiveMaxStepHz(config_)) {
+        // The channel clamps rather than refuses; say so instead of
+        // "updated", so the operator knows the speed they got.
+        return Ack(cmd_name, "speed clamped to " + SpeedCeilingText(config_));
+      }
       return Ack(cmd_name, "speed updated");
     }
 
@@ -2736,8 +2797,9 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       double speed_hz = 0.0;
       if (command.args.size() == 4) {
         if (!ParseDouble(command.args[3], &speed_hz) || speed_hz <= 0.0 ||
-            speed_hz > config_.pull.max_step_hz) {
-          return Nack(cmd_name, "invalid speed_hz (0 < hz <= pull.max_step_hz)");
+            speed_hz > EffectiveMaxStepHz(config_)) {
+          return Nack(cmd_name, "invalid speed_hz (0 < hz <= " +
+                                    SpeedCeilingText(config_) + ")");
         }
       }
       std::string error;

@@ -162,12 +162,14 @@ guessed range (section 9, gate 5 of the same bring-up doc).
 | Key | Default | Description |
 |---|---:|---|
 | `stepper.steps_per_rev` | `200` | NEMA 17 full-step count. |
-| `stepper.default_step_hz` | `100.0` | Default jog rate. |
+| `stepper.default_step_hz` | `50.0` | Default jog rate, full-steps/s (clamped to the speed ceiling). |
 | `stepper.max_position_steps` | `200000` | Absolute software travel limit. |
 | `stepper.enable_on_boot` | `false` | Keep drivers de-energized until commanded. |
 | `stepper.lead_mm_per_rev` | `2.0` | Ball-screw lead: linear travel per motor revolution. The mm command surface (`STEPPER_MOVE_MM`, `STEPPER_MOVETO_MM`) and the `mm`/`mm_tgt` telemetry keys convert through this value. Validated `(0, 100]`. |
 | `stepper.max_accel_steps_per_s2` | `5000.0` | Ceiling for `STEPPER_SET_ACCEL` and the per-motor accel overrides, full-steps/s². |
-| `pull.max_step_hz` | `100.0` | Pull cycle max rate. |
+| `stepper.max_speed_mm_s` | `0.5` | Linear speed ceiling for every motion path (jog, bend, sequences, fallback plan, pulls), in mm/s of ball-screw travel. Converted through `stepper.lead_mm_per_rev` and `stepper.steps_per_rev` into full-steps/s (0.5 mm/s = 50 full-steps/s at the 2 mm lead); the effective ceiling is the lower of this and `pull.max_step_hz`. Validated `(0, 100]`. Owner rule 2026-09-11. |
+| `stepper.max_direct_usteps` | `1000` | Longest raw-microstep command accepted: `\|steps\|` of `STEPPER_MOVE`, `\|target\|` of `STEPPER_MOVETO` / `STEPPER_BEND`, in microsteps at the live divisor (1000 = 1.25 rev = 2.5 mm at µ4 and the 2 mm lead). The mm commands, bend sequences and the fallback plan are bounded by `stepper.max_position_steps` instead. Validated `(0, stepper.max_position_steps]`. Owner rule 2026-09-11. |
+| `pull.max_step_hz` | `50.0` | Pull cycle rate and legacy speed ceiling, full-steps/s. The effective ceiling for every motion path is the lower of this and `stepper.max_speed_mm_s` converted through the lead; a higher value here is clamped (the start-up journal line `[stepper] speed ceiling …` says which binds). |
 | `pull.accel_steps_per_s2` | `200.0` | Trapezoidal acceleration/deceleration shared by all motion (not just pulls) unless a motor overrides it. Must be ≤ `stepper.max_accel_steps_per_s2`. |
 | `pull.microstep` | `4` | Microstep divisor programmed into each TMC5160. |
 | `pull.travel_full_steps` | `200` | Pull travel in full steps; calibrate to ball-screw lead. |
@@ -189,7 +191,7 @@ load as unknown motor keys, not merely deprecated.**
 | `motor*.enable_line` | `20` | `21` | EN GPIO. |
 | `motor*.run_current_a_rms` | `0.8` | `0.8` | Conservative commissioning current; increase only after thermal validation. Validated against both a flat `(0, 3.1]` A_rms ceiling and the sense resistor's physical current limit (below). `STEPPER_SET_CURRENT` changes it at runtime (same limits) until the service restarts. |
 | `motor*.hold_current_frac` | `0.30` | `0.30` | Hold current fraction, relative to the chosen IRUN. |
-| `motor*.stealth_chop` | `true` | `true` | StealthChop (GCONF `en_pwm_mode`, bit 2). `true` writes `GCONF=0x00000004`, `false` writes `GCONF=0x00000000`; the driver's GCONF readback verify confirms it during `Reinitialize()`. Quiet, low-vibration chopper at low speed; set `false` for spreadCycle's torque headroom. |
+| `motor*.stealth_chop` | `false` | `false` | Chopper mode (GCONF `en_pwm_mode`, bit 2). `false` — the flight setting since 2026-09-11 — writes `GCONF=0x00000000`: spreadCycle, full torque headroom for the ball-screw bend; `true` writes `GCONF=0x00000004`: StealthChop, the quiet low-speed chopper, bench opt-in only. The driver's GCONF readback verify confirms the mode during `Reinitialize()`, and `MOTOR_DEBUG` reports the live `stealth` flag. |
 | `motor*.spi_speed_hz` | `1000000` | `1000000` | SPI speed. |
 | `motor*.sense_resistor_ohm` | `0.075` | `0.075` | TMC5160 current-sense resistor value (Ω); feeds the GLOBALSCALER/IHOLD_IRUN current calculation. `0.075` is an assumed typical value for this board family — **read the actual value off the board at the bench** (see [TMC5160 Commissioning §6](tmc5160-commissioning.md#6-current-model-globalscaler--irun-two-regimes)). Validated `> 0.0 && < 1.0`. |
 | `motor*.retry_ms` | `2000` | `2000` | Idle driver re-probe interval after a fault. |

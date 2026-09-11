@@ -40,7 +40,7 @@ Registers this driver touches (all TMC5160 datasheet addresses):
 
 | Register | Address | Purpose |
 |---|---|---|
-| GCONF | `0x00` | Global config; `en_pwm_mode` (StealthChop) fixed on |
+| GCONF | `0x00` | Global config; `en_pwm_mode` (StealthChop) clear by default = spreadCycle, `motorN.stealth_chop=true` sets it |
 | IOIN | `0x04` | `VERSION` field, bits 31:24 |
 | GLOBALSCALER | `0x0B` | Current DAC coarse scale |
 | IHOLD_IRUN | `0x10` | Run/hold current + hold delay |
@@ -172,7 +172,7 @@ motor0.invert_direction=false
 motor0.enable_active_low=true
 motor0.run_current_a_rms=0.8
 motor0.hold_current_frac=0.30
-motor0.stealth_chop=true
+motor0.stealth_chop=false
 motor0.spi_speed_hz=1000000
 motor0.sense_resistor_ohm=0.075
 motor0.retry_ms=2000
@@ -188,14 +188,14 @@ motor1.invert_direction=false
 motor1.enable_active_low=true
 motor1.run_current_a_rms=0.8
 motor1.hold_current_frac=0.30
-motor1.stealth_chop=true
+motor1.stealth_chop=false
 motor1.spi_speed_hz=1000000
 motor1.sense_resistor_ohm=0.075
 motor1.retry_ms=2000
 motor1.samples=4,5,6,7
 
 pull.microstep=4
-pull.max_step_hz=100.0
+pull.max_step_hz=50.0
 pull.accel_steps_per_s2=200.0
 ```
 
@@ -203,14 +203,17 @@ pull.accel_steps_per_s2=200.0
 at load with an error naming it retired.
 
 `motor*.stealth_chop` selects GCONF's `en_pwm_mode` (StealthChop) bit:
-`true` (the default) writes `GCONF = 0x00000004`, `false` writes
-`GCONF = 0x00000000`. Every other GCONF bit stays at its reset value, so GCONF
-is exactly this bit or nothing. The value is carried through
-`Tmc5160Config::stealth_chop` and confirmed by the driver's existing GCONF
-readback verify during `Reinitialize()`, so a chip that does not accept it
-fails bring-up loudly rather than running in the wrong chopper mode. Set it to
-`false` when you need spreadCycle's torque headroom instead of StealthChop's
-quiet low-speed operation.
+`false` (the default since 2026-09-11) writes `GCONF = 0x00000000` —
+spreadCycle, with the CHOPCONF `TOFF`/`TBL`/`HSTRT` values above as its
+chopper parameters — and `true` writes `GCONF = 0x00000004`. Every other
+GCONF bit stays at its reset value, so GCONF is exactly this bit or nothing.
+The value is carried through `Tmc5160Config::stealth_chop` and confirmed by
+the driver's existing GCONF readback verify during `Reinitialize()`, so a
+chip that does not accept it fails bring-up loudly rather than running in the
+wrong chopper mode. The flight bend runs at ≤ 0.5 mm/s
+(`stepper.max_speed_mm_s`), where spreadCycle's torque headroom matters and
+StealthChop's silence does not; set `true` only for a bench experiment.
+`MOTOR_DEBUG` reports the live mode as `stealth=0|1`.
 
 `motor*.current_range_a_peak` and `motor*.pulse_high_us` no longer exist —
 the TMC5160 does not use TMC2240-style fixed peak-current ranges (section 6
@@ -299,14 +302,16 @@ Step(fwd) -> target_ += (fwd XOR invert_direction) ? +Δ : -Δ
 
 The ramp generator then smooths that single-microstep nudge into the actual
 coil drive waveform in hardware, at a demanded rate the pacing thread paces
-(≤`pull.max_step_hz`=100 Hz by default). `Δ = 256 / microstep_divisor`
+(≤ the speed ceiling: 50 full-steps/s = `stepper.max_speed_mm_s` 0.5 mm/s at
+the 2 mm lead, or `pull.max_step_hz` if that is lower). `Δ = 256 / microstep_divisor`
 because XTARGET always counts in the ramp generator's fixed 256
 internal-microsteps-per-fullstep resolution, regardless of the configured
 `MRES`/microstep divisor.
 
 **`VMAX` is set generously above the worst-case dribble demand so the ramp
-generator is never the limiting factor:** at `max_step_hz`=100 Hz, the
-worst-case XTARGET demand is `100 * 256` = 25,600 internal-microsteps/s.
+generator is never the limiting factor:** at the constant's 100 Hz sizing
+basis (twice the 50 Hz flight ceiling), the worst-case XTARGET demand is
+`100 * 256` = 25,600 internal-microsteps/s.
 `VMAX` is programmed to roughly 73,000 internal-microsteps/s — about a
 **2.9× margin** over that worst case (not the 4× the raw
 `kVmax = 4 * 100 * 256` constant's arithmetic might suggest; VMAX's register
@@ -319,7 +324,7 @@ for health/diagnostic cross-check; it is never the source of truth for
 `StepperChannel`'s own position tracking, `SET_POSITION_ZERO`, or bend
 sequences. This is a deliberate scope decision: letting the TMC5160 own
 motion profiles via its own XTARGET moves would have required rewriting
-`stepper_channel`/`stepper_controller` for no benefit at the ≤100 Hz rates
+`stepper_channel`/`stepper_controller` for no benefit at the ≤50 Hz rates
 this mechanism actually runs.
 
 ### XACTUAL/XTARGET Re-Init Transient (Known, Bounded)

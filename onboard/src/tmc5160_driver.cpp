@@ -51,7 +51,9 @@ constexpr std::uint32_t kIoinSdMode = 1U << 6;
 // GCONF bit2 (en_pwm_mode / StealthChop): quiet low-speed operation, at the
 // cost of torque headroom. Driven by Tmc5160Config::stealth_chop, which the
 // factory copies from motorN.stealth_chop -- every other GCONF bit stays at
-// its reset value of 0, so GCONF is exactly this bit or nothing.
+// its reset value of 0, so GCONF is exactly this bit or nothing. The flight
+// setting (2026-09-11) is the bit CLEAR: spreadCycle, with the CHOPCONF
+// TOFF/TBL/HSTRT values below as its chopper parameters.
 constexpr std::uint32_t kGconfEnPwmMode = 0x00000004U;
 
 // TMC5160 datasheet fixed full-scale sense voltage.
@@ -75,8 +77,10 @@ constexpr std::uint32_t kIholdDelay = 6U;
 // exposed in Tmc5160Config.
 constexpr std::uint32_t kTpowerdown = 10U;
 
-// VMAX: the pacing thread above this seam drives Step() at up to 100 Hz
-// (MotorConfig.max_step_hz); XTARGET moves in the ramp generator's fixed
+// VMAX: the pacing thread above this seam drives Step() at up to the
+// configured full-step ceiling (EffectiveMaxStepHz -- 50 full-steps/s at
+// the flight 0.5 mm/s; this constant keeps its original 100 Hz sizing, so
+// the margin only grew); XTARGET moves in the ramp generator's fixed
 // 256 internal-microsteps/fullstep units regardless of MRES, so a 100 Hz
 // dribble corresponds to a worst-case demand of 100*256 = 25600 internal-
 // microsteps/s. The VMAX register's unit is f_clk/2^24 internal-

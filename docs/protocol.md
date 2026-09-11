@@ -229,22 +229,22 @@ NACK,<COMMAND>,<reason>
 | `GET_THERMAL` | none | Return target, measured temperature, and duty for every heater |
 | `CLEAR_OVERRIDES` | none | Clear duty, target, and PID overrides |
 | `SET_POSITION_ZERO` | `<id>` | Set current physical position as software zero without motion |
-| `STEPPER_MOVE` | `<id> <steps>` | Relative motor move (`<steps>` are microsteps at the configured divisor: µ4 → 800 per revolution) |
-| `STEPPER_MOVETO` | `<id> <abs_usteps> [hold_s]` | Absolute move; motor must be zeroed. `hold_s` is `0..86400` (a hold keeps the MotionLock, and with it the heater inhibit, for its whole duration) |
+| `STEPPER_MOVE` | `<id> <steps>` | Relative motor move (`<steps>` are microsteps at the configured divisor: µ4 → 800 per revolution). `|steps|` ≤ `stepper.max_direct_usteps` (1000 = 1.25 rev at µ4); longer travel goes through `STEPPER_MOVE_MM` |
+| `STEPPER_MOVETO` | `<id> <abs_usteps> [hold_s]` | Absolute move; motor must be zeroed. `|abs_usteps|` ≤ `stepper.max_direct_usteps` (1000); `hold_s` is `0..86400` (a hold keeps the MotionLock, and with it the heater inhibit, for its whole duration) |
 | `STEPPER_MOVE_MM` | `<id> <mm>` | Relative move in millimetres of linear travel; converted onboard through `stepper.lead_mm_per_rev` (2 mm/rev default → `1.0` = half a revolution) at the current microstep divisor. The console's jog buttons use this |
 | `STEPPER_MOVETO_MM` | `<id> <mm> [hold_s]` | Absolute move in millimetres (zero = `SET_POSITION_ZERO` reference); motor must be zeroed. The console's BEND uses this |
 | `STEPPER_ROTATE` | `<id> <revs>` | Rotate by full revolutions |
-| `STEPPER_BEND` | `<id> <abs_usteps> [hold_s]` | Compatibility alias for absolute move; motor must be zeroed |
+| `STEPPER_BEND` | `<id> <abs_usteps> [hold_s]` | Compatibility alias for absolute move; motor must be zeroed; same `stepper.max_direct_usteps` cap as `STEPPER_MOVETO` |
 | `STEPPER_HOME` | `<id>` | Return to software zero; motor must be zeroed |
 | `STEPPER_STOP` | `<id>` | Stop motion and release `MotionLock` |
-| `STEPPER_SET_SPEED` | `<id> <hz>` | Set motor speed |
+| `STEPPER_SET_SPEED` | `<id> <hz>` | Set motor speed in full-steps/s. Clamped to the onboard speed ceiling — the lower of `pull.max_step_hz` and `stepper.max_speed_mm_s` converted through `stepper.lead_mm_per_rev` (flight: 0.5 mm/s = 50 full-steps/s at the 2 mm lead); a request above it is ACKed as `speed clamped to …` |
 | `STEPPER_SET_ACCEL` | `<id> <steps_s2>` | Set the trapezoidal ramp slope in full-steps/s², `(0, stepper.max_accel_steps_per_s2]`. Applies to the next ramp update, survives until restart |
 | `STEPPER_SET_CURRENT` | `<id> <a_rms>` | Set the motor run current in A RMS, `(0, 3.1]`. Rewrites `GLOBALSCALER`/`IHOLD_IRUN` on the live chip (hold current keeps its configured fraction) and persists across chip-reset recovery until the service restarts; NACKed when the sense resistor cannot deliver the request or the driver is unhealthy |
 | `STEPPER_SET_MICROSTEP` | `<id> <n>` | Set microstep divisor |
 | `STEPPER_ENABLE` / `STEPPER_DISABLE` | `<id>` | Enable or disable driver output |
 | `PULL_ARM` | `<id>` | Queue one pull cycle |
 | `PULL_EXECUTE` | `<id>` | Queue one pull cycle and report as executed |
-| `BENDSEQ_LOAD` | `<id> <name> <target>:<hold>[:<hz>] ...` | Load a runtime absolute-microstep sequence |
+| `BENDSEQ_LOAD` | `<id> <name> <target>:<hold>[:<hz>] ...` | Load a runtime absolute-microstep sequence; each `hz` must be within the speed ceiling (see `STEPPER_SET_SPEED`), each target within `stepper.max_position_steps` |
 | `BENDSEQ_RUN` | `<id> <name>` | Run a loaded sequence |
 | `BENDSEQ_PAUSE` / `BENDSEQ_RESUME` | `<id>` | Pause or resume the active sequence |
 | `BENDSEQ_STOP` / `BENDSEQ_STATUS` | `<id>` | Stop or inspect sequence state |
