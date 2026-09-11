@@ -207,10 +207,28 @@ struct StepperConfig {
   // surface (STEPPER_MOVE_MM / STEPPER_MOVETO_MM, mm telemetry keys)
   // converts through this single value; the microstep commands stay raw.
   double lead_mm_per_rev = 2.0;
+  // Linear speed ceiling for every motion path (jog, bend, sequences, the
+  // fallback plan, pulls), in mm/s of ball-screw travel. Converted through
+  // lead_mm_per_rev and steps_per_rev into full-steps/s (LinearMaxStepHz)
+  // and combined with pull.max_step_hz into the one ceiling every channel
+  // clamps to (EffectiveMaxStepHz). Owner rule 2026-09-11: 0.5 mm/s, i.e.
+  // 50 full-steps/s at the 2 mm lead.
+  double max_speed_mm_s = 0.5;
+  // Longest raw-microstep command accepted: |steps| of STEPPER_MOVE and
+  // |target| of STEPPER_MOVETO / STEPPER_BEND, in microsteps at the live
+  // divisor (1000 = 1.25 rev = 2.5 mm at u4 and the 2 mm lead). The mm
+  // surface and the mm-encoded sequences / fallback plan are bounded by
+  // max_position_steps instead. Owner rule 2026-09-11.
+  std::int64_t max_direct_usteps = 1000;
   // Ceiling for STEPPER_SET_ACCEL and motorN.accel_steps_per_s2, in
   // full-steps/s². Bounds runtime experimentation the same way
-  // pull.max_step_hz bounds STEPPER_SET_SPEED.
+  // the speed ceiling bounds STEPPER_SET_SPEED.
   double max_accel_steps_per_s2 = 5000.0;
+
+  // max_speed_mm_s expressed in full-steps per second at this lead.
+  double LinearMaxStepHz() const {
+    return max_speed_mm_s / lead_mm_per_rev * static_cast<double>(steps_per_rev);
+  }
 };
 
 struct PullConfig {
@@ -238,7 +256,11 @@ struct MotorConfig {
   // validation block.
   double run_current_a_rms = 0.8;
   double hold_current_frac = 0.30;
-  bool stealth_chop = true;
+  // Chopper mode. false = spreadCycle (GCONF en_pwm_mode clear): the
+  // flight setting since 2026-09-11 -- full torque headroom for the
+  // ball-screw bend at <= 0.5 mm/s, where stealthChop's silence buys
+  // nothing. true = stealthChop (bit 2 set), a bench opt-in only.
+  bool stealth_chop = false;
   std::uint32_t spi_speed_hz = 1000000;
   // TMC5160 current-sense resistor value (ohms); feeds the
   // GLOBALSCALER/IHOLD_IRUN current calculation.
@@ -287,5 +309,11 @@ struct OnboardConfig {
 };
 
 bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::string* error);
+
+// The full-steps/s ceiling every StepperChannel clamps to: the lower of
+// pull.max_step_hz and stepper.max_speed_mm_s converted through the lead
+// (StepperConfig::LinearMaxStepHz). SystemController applies it to the
+// channels and to STEPPER_SET_SPEED / BENDSEQ_LOAD / FALLBACK_PLAN.
+double EffectiveMaxStepHz(const OnboardConfig& config);
 
 }  // namespace coatheal

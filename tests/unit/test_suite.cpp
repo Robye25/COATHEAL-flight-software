@@ -640,7 +640,7 @@ std::string WriteTempConfig(const std::string& extra = "") {
   out << "motor0.enable_line=20\n";
   out << "motor0.run_current_a_rms=2.0\n";
   out << "motor0.hold_current_frac=0.30\n";
-  out << "motor0.stealth_chop=true\n";
+  out << "motor0.stealth_chop=false\n";
   out << "motor0.spi_speed_hz=1000000\n";
   out << "motor0.sense_resistor_ohm=0.075\n";
   out << "motor0.samples=0,1,2,3\n";
@@ -651,7 +651,7 @@ std::string WriteTempConfig(const std::string& extra = "") {
   out << "motor1.enable_line=21\n";
   out << "motor1.run_current_a_rms=2.0\n";
   out << "motor1.hold_current_frac=0.30\n";
-  out << "motor1.stealth_chop=true\n";
+  out << "motor1.stealth_chop=false\n";
   out << "motor1.spi_speed_hz=1000000\n";
   out << "motor1.sense_resistor_ohm=0.075\n";
   out << "motor1.samples=4,5,6,7\n";
@@ -1473,6 +1473,76 @@ void TestCommandArgumentHardening() {
   assert(controller.HandleCommandLine("STATUS", "").rfind("ACK,STATUS,phase=FLOAT;", 0) == 0);
 }
 
+// ---------------------------------------------------------------------------
+// Owner motion envelope (2026-09-11): spreadCycle by default, a 0.5 mm/s
+// linear ceiling derived through the ball-screw lead, raw microstep commands
+// capped at 1000.
+
+void TestMotionEnvelopeConfig() {
+  {
+    coatheal::OnboardConfig cfg;
+    std::string error;
+    assert(coatheal::LoadConfigFromIni(WriteTempConfig(), &cfg, &error));
+    assert(!cfg.motors[0].stealth_chop && !cfg.motors[1].stealth_chop);
+    assert(cfg.stepper.max_speed_mm_s == 0.5);
+    assert(cfg.stepper.max_direct_usteps == 1000);
+    // 0.5 mm/s at 2 mm/rev and 200 steps/rev = 50 full-steps/s, which
+    // binds below the fixture's pull.max_step_hz=100.
+    assert(std::abs(cfg.stepper.LinearMaxStepHz() - 50.0) < 1e-9);
+    assert(std::abs(coatheal::EffectiveMaxStepHz(cfg) - 50.0) < 1e-9);
+  }
+  {
+    // A looser linear limit lets pull.max_step_hz bind instead; the keys
+    // parse; a motor can opt back into stealthChop on its own.
+    coatheal::OnboardConfig cfg;
+    std::string error;
+    assert(coatheal::LoadConfigFromIni(
+        WriteTempConfig("stepper.max_speed_mm_s=2.0\nstepper.lead_mm_per_rev=4.0\n"
+                        "stepper.max_direct_usteps=800\nmotor0.stealth_chop=true\n"),
+        &cfg, &error));
+    assert(std::abs(cfg.stepper.LinearMaxStepHz() - 100.0) < 1e-9);
+    assert(std::abs(coatheal::EffectiveMaxStepHz(cfg) - 100.0) < 1e-9);
+    assert(cfg.stepper.max_direct_usteps == 800);
+    assert(cfg.motors[0].stealth_chop && !cfg.motors[1].stealth_chop);
+  }
+  for (const char* bad : {"stepper.max_speed_mm_s=0\n", "stepper.max_speed_mm_s=nan\n",
+                          "stepper.max_speed_mm_s=101\n", "stepper.max_direct_usteps=0\n",
+                          "stepper.max_direct_usteps=200001\n"}) {
+    coatheal::OnboardConfig cfg;
+    std::string error;
+    assert(!coatheal::LoadConfigFromIni(WriteTempConfig(bad), &cfg, &error));
+  }
+}
+
+void TestDirectMicrostepCapAndSpeedCeiling() {
+  const std::filesystem::path queue_dir = FreshQueueDir("envelope");
+  coatheal::SystemController controller(LoadRadioTestConfig(queue_dir));
+
+  // Refused on the argument alone, before the mode or driver checks, so the
+  // cap holds in STANDBY and on this bare (no stepper) controller.
+  const std::string over = controller.HandleCommandLine("STEPPER_MOVE 0 1001", "");
+  assert(over.rfind("NACK,STEPPER_MOVE", 0) == 0);
+  assert(ContainsText(over, "max_direct_usteps"));
+  assert(ContainsText(controller.HandleCommandLine("STEPPER_MOVE 1 -1001", ""), "max_direct_usteps"));
+  assert(ContainsText(controller.HandleCommandLine("STEPPER_MOVETO 0 1001 5", ""), "max_direct_usteps"));
+  assert(ContainsText(controller.HandleCommandLine("STEPPER_BEND 0 -1001", ""), "max_direct_usteps"));
+  // At the cap the argument passes; this controller then has no stepper.
+  const std::string at_cap = controller.HandleCommandLine("STEPPER_MOVE 0 1000", "");
+  assert(!ContainsText(at_cap, "max_direct_usteps"));
+  assert(ContainsText(at_cap, "stepper unavailable"));
+  assert(ContainsText(controller.HandleCommandLine("STEPPER_MOVETO 0 -1000", ""), "stepper unavailable"));
+
+  // Speed validation uses the derived 50 full-steps/s ceiling, not the
+  // fixture's pull.max_step_hz=100, and names it.
+  const std::string fast = controller.HandleCommandLine("FALLBACK_PLAN 0 800 5 60", "");
+  assert(ContainsText(fast, "invalid speed_hz"));
+  assert(ContainsText(fast, "50 full-steps/s = 0.5 mm/s"));
+  assert(controller.HandleCommandLine("FALLBACK_PLAN 0 800 5 50", "") ==
+         "ACK,FALLBACK_PLAN,motor=0;target=800;hold_s=5;speed_hz=50");
+
+  std::filesystem::remove_all(queue_dir);
+}
+
 int main() {
   TestPidBoundsAndAntiWindup();
   TestHeaterSchedulerCap();
@@ -1510,6 +1580,8 @@ int main() {
   TestFallbackPlanCommands();
   TestCommandArgumentHardening();
   TestFallbackConfigValidation();
+  TestMotionEnvelopeConfig();
+  TestDirectMicrostepCapAndSpeedCeiling();
 
   std::cout << "All unit tests passed.\n";
   return 0;

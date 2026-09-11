@@ -126,8 +126,9 @@ holding / healthy dots, position and target, speed, last command, sequence
 state, and the resistance readout: `R now`, `bend start` and `Δ %` for the
 card's monitored specimen — the bend confirmation. The selector (M0 | M1)
 drives the shared controls: `ENABLE`, `DISABLE`, `SET ZERO`, `HOME`, `STOP`
-· jog ±10/±100/±1000 µsteps (allowed before zeroing) · speed 1–100
-full-step Hz · **BEND** (`STEPPER_MOVETO <id> <target> <hold>`) and
+· jog ±0.1/±1/±5 mm (allowed before zeroing) · speed 1–50
+full-step Hz (the 0.5 mm/s ceiling at the 2 mm lead) · **BEND**
+(`STEPPER_MOVETO <id> <target> <hold>`) and
 **STANDARD PULL** (`PULL_EXECUTE <id>`, the config-defined pull). BEND and
 STANDARD PULL are disabled — with the reason shown — until the motor is
 enabled and zeroed, the mode is RUN, and neither radio silence nor
@@ -136,7 +137,7 @@ resistance at bend start; the idle→moving edge does the same automatically.
 
 ### Advanced tab
 Bend sequences (`BENDSEQ_LOAD/RUN/PAUSE/RESUME/STOP/STATUS/CLEAR`; step
-speed ≤ 100 Hz) · PID tuning · open-loop duty (`SET_HEATER_DUTY`,
+speed ≤ 50 Hz) · PID tuning · open-loop duty (`SET_HEATER_DUTY`,
 `SET_ALL_DUTY`, `CLEAR_OVERRIDES`) · microstep · preset management ·
 fallback plan (`FALLBACK_PLAN/ARM/DISARM/STATUS`, executed onboard only
 during link-loss fallback — see the redesign spec §10) · network (beacon
@@ -169,7 +170,7 @@ decodes the TMC5160's own registers:
   off; SD_MODE strap; DRIVER FAULT.
 - A plot of MSCNT and XACTUAL against seconds since the probe started.
 
-At the default 100 Hz a BEND of 800 µsteps at µ4 is one revolution in 2 s,
+At the 50 Hz ceiling a BEND of 800 µsteps at µ4 is one revolution in 4 s,
 about 1.5 mm -- invisible on a remote camera, unmistakable in MSCNT. The
 probe stops itself when radio silence starts or the link is lost.
 

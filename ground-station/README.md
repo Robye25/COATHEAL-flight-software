@@ -48,7 +48,7 @@ console is a fixed layout that scales to any screen from 1366×768 up
 | **Alarm strip** | Active alarms as chips (over-temperature, invalid heated channel, link-loss fallback, sequence paused, energy budget, motor failed, heaters inhibited, sensor faults, onboard backlog, stale link) with `ACK` |
 | **System tab** | Link status, `ARM` / `DISARM` / `ENTER SAFE` / `EXIT SAFE`, `SET PHASE`, `RADIO SILENCE` / `RADIO RESUME`, downlink rate, diagnostics (`PING` `STATUS` `COMPONENTS` `GET_THERMAL` `CHECK <component>` `RESET_CTRL`), `SHUTDOWN SAFE` |
 | **Thermal tab** | Energy budget, active heaters, six heater rows (measured sample, target, duty, state), all-channel targets, presets (`profiles/thermal_presets.json`) |
-| **Motion tab** | M0 / M1 cards (enabled, zeroed, moving, holding, healthy, position, resistance before/after the bend), `ENABLE` `DISABLE` `SET ZERO` `HOME` `STOP`, jog, speed 1–100 Hz, **BEND** (`STEPPER_MOVETO` with hold), **STANDARD PULL** (`PULL_EXECUTE`), recent pulls |
+| **Motion tab** | M0 / M1 cards (enabled, zeroed, moving, holding, healthy, position, resistance before/after the bend), `ENABLE` `DISABLE` `SET ZERO` `HOME` `STOP`, jog, speed 1–50 Hz (the 0.5 mm/s ceiling), **BEND** (`STEPPER_MOVETO` with hold), **STANDARD PULL** (`PULL_EXECUTE`), recent pulls |
 | **Advanced tab** | Bend sequences, PID tuning, open-loop duty, microstep, preset management, fallback plan, network |
 | **Plots** | Temperatures, Ambient (T + pressure + UV), Heaters, Resistance, Motors — mission-time axis, 5 m / 30 m / 2 h / all window, follow/pause, PNG/CSV export, full-session retention |
 | **Right column** | Health (every wire flag as a dot), Checkout (live go/no-go + `RUN CHECK ALL`), Values |
