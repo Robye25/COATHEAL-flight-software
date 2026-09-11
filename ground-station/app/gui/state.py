@@ -19,6 +19,11 @@ SAMPLE_COUNT = 8
 # flight config). Motor 0 pulls samples 0..3, motor 1 pulls 4..7.
 HEATER_SAMPLE = tuple(range(HEATER_COUNT))
 MOTOR_SAMPLES = ((0, 1, 2, 3), (4, 5, 6, 7))
+# Owner decision (2026-08-29): specimen resistance is measured on exactly
+# two samples, one per motor group, by the two MAX31865 RTD clicks —
+# mirrors the onboard's sensor.max31865_sample_indices=0,4 (click 1 -> S0,
+# click 2 -> S4). Every other RESISTANCE slot is always '-' on the wire.
+RESISTANCE_SAMPLES = (0, 4)
 
 
 @dataclass(frozen=True)
@@ -36,9 +41,18 @@ class MotorState:
     microstep: int = 0
     hold_s: float = 0.0
     pulses: int = 0
+    missed: int = 0                    # missed step-pulse deadlines since boot
     source: str = ""
     seq_name: str = ""
     seq_state: str = ""
+    # Drive-settings surface (2026-08-29). None: firmware predates it.
+    amps: Optional[float] = None       # run current, A RMS
+    accel: Optional[float] = None      # trapezoid slope, full-steps/s²
+    mm: Optional[float] = None         # lead-derived linear position
+    mm_tgt: Optional[float] = None
+    # Driver die thermal state: "ok" / "warn" (>=~120 °C) / "hot"
+    # (>=~150 °C, onboard safety disabled the motor). None: old firmware.
+    thermal: Optional[str] = None
 
     @property
     def samples(self) -> tuple:
@@ -70,9 +84,24 @@ class OnboardState:
     heaters_active: Optional[int] = None
     queue_depth: Optional[int] = None
     plan_state: Optional[str] = None
+    # Bench debug arm (ARM_DEBUG) active onboard: unlocks open-loop duty on
+    # channels without valid PT100 feedback. None: firmware predates the key.
+    debug_armed: Optional[bool] = None
+    # Active PID auto-tune channel ("H4"); None when idle or old firmware.
+    tune_channel: Optional[str] = None
     # Ground-side facts.
     silence: bool = False
     link_age_s: Optional[float] = None
+    # Replay of the onboard backlog in progress (frames arriving are hours
+    # old): the live snapshot above is the last LIVE frame, or empty.
+    replay: bool = False
+    replay_behind_s: float = 0.0
+    replay_eta_s: Optional[float] = None
+    # Live-first firmware: the panels ARE live during the replay; the backlog
+    # only fills plots and logs. `replay_backlog_frames` is the queue depth
+    # the last live frame reported.
+    replay_live_panels: bool = False
+    replay_backlog_frames: Optional[int] = None
 
     # -- derived -------------------------------------------------------------
     def flag(self, token: str) -> bool:
@@ -132,8 +161,12 @@ def state_from_packet(pkt: TelemetryPacket, *, silence: bool = False,
             position=int(snap.get("position", 0)), target=int(snap.get("target", 0)),
             hz=float(snap.get("hz", 0.0)), microstep=int(snap.get("microstep", 0)),
             hold_s=float(snap.get("hold_s", 0.0)), pulses=int(snap.get("pulses", 0)),
+            missed=int(snap.get("missed_deadlines", 0) or 0),
             source=str(snap.get("source", "")), seq_name=str(snap.get("seq_name", "")),
             seq_state=str(snap.get("seq_state", "")),
+            amps=snap.get("amps"), accel=snap.get("accel"),
+            mm=snap.get("mm"), mm_tgt=snap.get("mm_tgt"),
+            thermal=snap.get("thermal"),
         ))
     return OnboardState(
         have_packet=True, session_id=pkt.session_id, seq=pkt.seq,
@@ -149,5 +182,7 @@ def state_from_packet(pkt: TelemetryPacket, *, silence: bool = False,
         energy_wh=pkt.energy_wh, budget_wh=pkt.budget_wh,
         budget_exhausted=pkt.budget_exhausted, heaters_active=pkt.heaters_active,
         queue_depth=pkt.queue_depth, plan_state=pkt.plan_state,
+        debug_armed=pkt.debug_armed,
+        tune_channel=pkt.tune_channel,
         silence=silence, link_age_s=link_age_s,
     )

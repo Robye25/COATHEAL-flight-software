@@ -73,6 +73,15 @@ class TelemetryQueue {
   // whole backlog every tick.
   std::vector<QueuedTelemetryFrame> PendingFrames(std::size_t max_frames) const;
   std::vector<QueuedTelemetryFrame> PendingFrames() const;
+  // The batch the drain sends this tick: the NEWEST pending frame first
+  // (the one produced this tick -- what the operator needs to see now),
+  // then the backlog oldest-first. Draining strictly in order left the
+  // console blind to the present for the whole drain (bench 2026-08-29:
+  // ARM acknowledged, panels showed the STANDBY frame from boot for five
+  // minutes while 2,400 queued frames replayed at 10/s). The newest frame
+  // must be acknowledged with AcknowledgeExact: a cumulative Acknowledge
+  // of its seq would drop the entire backlog unsent.
+  std::vector<QueuedTelemetryFrame> DrainBatch(std::size_t max_frames) const;
   std::size_t size() const;
 
  private:

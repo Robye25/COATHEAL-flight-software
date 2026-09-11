@@ -219,5 +219,37 @@ class LogManagerTests(unittest.TestCase):
             self.assertFalse((Path(tmp) / "logs" / "sessions").exists())
 
 
+class InterleavedSessionTests(unittest.TestCase):
+    """The live-first drain interleaves the previous session's backlog with
+    the current session's live frames: both stay open, commands go to the
+    newest."""
+
+    def test_two_sessions_stay_open_and_the_newest_is_current(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mgr = LogManager(root, gs_info={"gs": "test"})
+            self.assertTrue(mgr.on_packet(parse_telemetry_csv(FRAME_B), rx_utc="rx1"))   # live (newer epoch)
+            self.assertTrue(mgr.on_packet(parse_telemetry_csv(FRAME_A), rx_utc="rx2"))   # backlog of the previous session
+            self.assertEqual(mgr.current_session_id, "coatheal-1787760900-2", "the newest session stays current")
+            self.assertFalse(mgr.on_packet(parse_telemetry_csv(FRAME_A.replace(",10,", ",11,")), rx_utc="rx3"))
+            self.assertFalse(mgr.on_packet(parse_telemetry_csv(FRAME_B.replace(",1,", ",2,")), rx_utc="rx4"))
+            mgr.log_command("ARM", True, 1.0, body="mode=RUN")
+            dir_a = mgr.dir_for("coatheal-1787760547-1")
+            dir_b = mgr.dir_for("coatheal-1787760900-2")
+            self.assertIsNotNone(dir_a); self.assertIsNotNone(dir_b)
+            self.assertEqual(dir_b, mgr.current_dir)
+            mgr.close()
+            rows_a = (dir_a / "telemetry.csv").read_text(encoding="utf-8").splitlines()
+            rows_b = (dir_b / "telemetry.csv").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(rows_a), 3, "header + two backlog rows")
+            self.assertEqual(len(rows_b), 3, "header + two live rows")
+            self.assertIn("ARM", (dir_b / "commands.csv").read_text(encoding="utf-8"))
+            self.assertTrue((dir_a / "session.json").exists() and (dir_b / "session.json").exists())
+
+    # MUTATION: restore the single-session `_switch_to` behaviour (close A
+    # when B opens) and confirm the test fails: FRAME_A's second row lands in
+    # a re-opened directory / the command lands in session A.
+
+
 if __name__ == "__main__":
     unittest.main()

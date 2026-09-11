@@ -70,6 +70,12 @@ std::string CommandTypeToString(CommandType type) {
       return "HEATER_TEST";
     case CommandType::kSetPid:
       return "SET_PID";
+    case CommandType::kPidTuneStart:
+      return "PID_TUNE_START";
+    case CommandType::kPidTuneAbort:
+      return "PID_TUNE_ABORT";
+    case CommandType::kPidTuneStatus:
+      return "PID_TUNE_STATUS";
     case CommandType::kSetTempTarget:
       return "SET_TEMP_TARGET";
     case CommandType::kSetAllTempTargets:
@@ -96,6 +102,10 @@ std::string CommandTypeToString(CommandType type) {
       return "STEPPER_MOVE";
     case CommandType::kStepperMoveTo:
       return "STEPPER_MOVETO";
+    case CommandType::kStepperMoveMm:
+      return "STEPPER_MOVE_MM";
+    case CommandType::kStepperMoveToMm:
+      return "STEPPER_MOVETO_MM";
     case CommandType::kStepperRotate:
       return "STEPPER_ROTATE";
     case CommandType::kStepperHome:
@@ -104,6 +114,10 @@ std::string CommandTypeToString(CommandType type) {
       return "STEPPER_STOP";
     case CommandType::kStepperSetSpeed:
       return "STEPPER_SET_SPEED";
+    case CommandType::kStepperSetAccel:
+      return "STEPPER_SET_ACCEL";
+    case CommandType::kStepperSetCurrent:
+      return "STEPPER_SET_CURRENT";
     case CommandType::kStepperSetMicrostep:
       return "STEPPER_SET_MICROSTEP";
     case CommandType::kStepperEnable:
@@ -140,6 +154,8 @@ std::string CommandTypeToString(CommandType type) {
       return "FALLBACK_DISARM";
     case CommandType::kFallbackStatus:
       return "FALLBACK_STATUS";
+    case CommandType::kMotorDebug:
+      return "MOTOR_DEBUG";
     case CommandType::kUnknown:
       return "UNKNOWN";
   }
@@ -202,6 +218,9 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
       {"SET_ALL_DUTY", CommandType::kSetAllDuty},
       {"HEATER_TEST", CommandType::kHeaterTest},
       {"SET_PID", CommandType::kSetPid},
+      {"PID_TUNE_START", CommandType::kPidTuneStart},
+      {"PID_TUNE_ABORT", CommandType::kPidTuneAbort},
+      {"PID_TUNE_STATUS", CommandType::kPidTuneStatus},
       {"SET_TEMP_TARGET", CommandType::kSetTempTarget},
       {"SET_ALL_TEMP_TARGETS", CommandType::kSetAllTempTargets},
       {"CLEAR_TEMP_TARGET", CommandType::kClearTempTarget},
@@ -215,10 +234,14 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
       {"SET_PHASE", CommandType::kSetPhase},
       {"STEPPER_MOVE", CommandType::kStepperMove},
       {"STEPPER_MOVETO", CommandType::kStepperMoveTo},
+      {"STEPPER_MOVE_MM", CommandType::kStepperMoveMm},
+      {"STEPPER_MOVETO_MM", CommandType::kStepperMoveToMm},
       {"STEPPER_ROTATE", CommandType::kStepperRotate},
       {"STEPPER_HOME", CommandType::kStepperHome},
       {"STEPPER_STOP", CommandType::kStepperStop},
       {"STEPPER_SET_SPEED", CommandType::kStepperSetSpeed},
+      {"STEPPER_SET_ACCEL", CommandType::kStepperSetAccel},
+      {"STEPPER_SET_CURRENT", CommandType::kStepperSetCurrent},
       {"STEPPER_SET_MICROSTEP", CommandType::kStepperSetMicrostep},
       {"STEPPER_ENABLE", CommandType::kStepperEnable},
       {"STEPPER_DISABLE", CommandType::kStepperDisable},
@@ -237,6 +260,7 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
       {"FALLBACK_ARM", CommandType::kFallbackArm},
       {"FALLBACK_DISARM", CommandType::kFallbackDisarm},
       {"FALLBACK_STATUS", CommandType::kFallbackStatus},
+      {"MOTOR_DEBUG", CommandType::kMotorDebug},
   };
 
   std::string cmd;
@@ -353,7 +377,16 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
     case CommandType::kFallbackArm:
     case CommandType::kFallbackDisarm:
     case CommandType::kFallbackStatus:
+    case CommandType::kPidTuneAbort:
+    case CommandType::kPidTuneStatus:
       if (!require_args(0)) {
+        return result;
+      }
+      break;
+    case CommandType::kPidTuneStart:
+      // <heater> <setpoint_c> [relay_duty] [cycles]
+      if (command.args.size() < 2 || command.args.size() > 4) {
+        result.error = "invalid argument count for " + command.name;
         return result;
       }
       break;
@@ -369,6 +402,7 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
     case CommandType::kBendSeqResume:
     case CommandType::kBendSeqStop:
     case CommandType::kBendSeqStatus:
+    case CommandType::kMotorDebug:
       if (!require_args(1)) {
         return result;
       }
@@ -424,8 +458,11 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
       }
       break;
     case CommandType::kStepperMove:
+    case CommandType::kStepperMoveMm:
     case CommandType::kStepperRotate:
     case CommandType::kStepperSetSpeed:
+    case CommandType::kStepperSetAccel:
+    case CommandType::kStepperSetCurrent:
     case CommandType::kStepperSetMicrostep:
       // Arity after id-peel: 1 (the value).
       maybe_extract_id(1, 1);
@@ -434,6 +471,7 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
       }
       break;
     case CommandType::kStepperMoveTo:
+    case CommandType::kStepperMoveToMm:
     case CommandType::kStepperBend:
       // Arity after id-peel: 1 or 2 (steps, [hold_s]).
       maybe_extract_id(1, 2);

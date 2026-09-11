@@ -25,6 +25,7 @@ namespace {
 // ---------------------------------------------------------------------
 
 constexpr std::uint8_t kRegGCONF = 0x00;
+constexpr std::uint8_t kRegGSTAT = 0x01;
 constexpr std::uint8_t kRegIOIN = 0x04;
 constexpr std::uint8_t kRegGLOBALSCALER = 0x0B;
 constexpr std::uint8_t kRegIHOLD_IRUN = 0x10;
@@ -41,6 +42,7 @@ constexpr std::uint8_t kRegD1 = 0x2A;
 constexpr std::uint8_t kRegVSTOP = 0x2B;
 constexpr std::uint8_t kRegXTARGET = 0x2D;
 constexpr std::uint8_t kRegCHOPCONF = 0x6C;
+constexpr std::uint8_t kRegDRV_STATUS = 0x6F;
 
 void ExpectWrite(FakeSpiBus* bus, std::uint8_t addr, std::uint32_t value) {
   std::vector<std::uint8_t> tx = {
@@ -70,7 +72,10 @@ void ExpectRead(FakeSpiBus* bus, std::uint8_t addr, std::uint32_t value) {
 }
 
 std::uint32_t Chopconf(int microstep, std::uint8_t toff) {
-  const std::uint8_t mres = Tmc5160Driver::EncodeMres(microstep);
+  // MRES is pinned to 0 (native 256 microsteps) whatever the firmware's
+  // divisor: the motion controller's units follow MRES (see EncodeChopconf).
+  (void)microstep;
+  const std::uint8_t mres = 0;
   return (static_cast<std::uint32_t>(mres) << 24) | (0x2U << 15) |
          (0x4U << 4) | static_cast<std::uint32_t>(toff & 0x0FU);
 }
@@ -91,7 +96,8 @@ std::uint32_t Chopconf(int microstep, std::uint8_t toff) {
 // everything after it unconsumed.
 void ScriptReinitSequence(FakeSpiBus* bus, const Tmc5160Config& cfg,
                           std::uint8_t ioin_version_byte,
-                          std::uint8_t ioin_pin_bits = 0) {
+                          std::uint8_t ioin_pin_bits = 0,
+                          std::uint8_t toff = 0) {
   std::uint32_t globalscaler = 0;
   std::uint8_t irun = 0;
   std::uint8_t ihold = 0;
@@ -105,7 +111,9 @@ void ScriptReinitSequence(FakeSpiBus* bus, const Tmc5160Config& cfg,
   // than hardcoded, so the stealth_chop fixtures below script what the
   // driver must actually write.
   const std::uint32_t gconf = cfg.stealth_chop ? 0x00000004U : 0x00000000U;
-  const std::uint32_t chopconf_run = Chopconf(cfg.microstep, /*toff=*/3);
+  // The chopper comes out of (re)initialisation in the motor's enabled
+  // state: TOFF=0 for a disabled motor (boot, CHECK), 3 when enabled.
+  const std::uint32_t chopconf_run = Chopconf(cfg.microstep, toff);
   const std::uint32_t gs_reg = globalscaler >= 256U ? 0U : globalscaler;
   const std::uint32_t ihold_irun =
       (static_cast<std::uint32_t>(ihold) & 0x1FU) |
@@ -132,15 +140,17 @@ void ScriptReinitSequence(FakeSpiBus* bus, const Tmc5160Config& cfg,
   ExpectWrite(bus, kRegXTARGET, 0U);
   ExpectRead(bus, kRegGCONF, gconf);
   ExpectRead(bus, kRegCHOPCONF, chopconf_run);
+  ExpectWrite(bus, kRegGSTAT, 0x7U);  // clear reset/drv_err/uv_cp: config is on the chip now
 }
 
 // Total Expect() entries ScriptReinitSequence() queues: IOIN (2) + 16
-// register writes + GCONF/CHOPCONF readback (2*2). Used to prove the
+// register writes + GCONF/CHOPCONF readback (2*2) + the GSTAT clear (1). Used to prove the
 // version-gate test stops exactly at IOIN, not "eventually, somehow".
-constexpr std::size_t kFullReinitExpectationCount = 22;
+constexpr std::size_t kFullReinitExpectationCount = 23;
 
-void ScriptHealthyReinit(FakeSpiBus* bus, const Tmc5160Config& cfg) {
-  ScriptReinitSequence(bus, cfg, /*ioin_version_byte=*/0x30);
+void ScriptHealthyReinit(FakeSpiBus* bus, const Tmc5160Config& cfg,
+                         std::uint8_t toff = 0) {
+  ScriptReinitSequence(bus, cfg, /*ioin_version_byte=*/0x30, /*ioin_pin_bits=*/0, toff);
 }
 
 std::unique_ptr<Tmc5160Driver> MakeHealthyDriver(FakeSpiBus* bus,
@@ -161,10 +171,14 @@ std::unique_ptr<Tmc5160Driver> MakeHealthyDriver(FakeSpiBus* bus,
   return driver;
 }
 
-// Scripts the single extra CHOPCONF(TOFF=3) write Enable(true) issues
-// unconditionally when the driver is already healthy_ (no Reinitialize()).
-void ScriptEnableTrueChopconf(FakeSpiBus* bus, const Tmc5160Config& cfg) {
+// Scripts the extra conversation Enable(true) issues unconditionally when
+// the driver is already healthy_ (no Reinitialize()): the CHOPCONF(TOFF=3)
+// write, then the DRV_STATUS thermal read that re-primes the ot/otpw
+// tracking after the shutdown latch is cleared (2026-08-29).
+void ScriptEnableTrueChopconf(FakeSpiBus* bus, const Tmc5160Config& cfg,
+                              std::uint32_t drv_status = 0) {
   ExpectWrite(bus, kRegCHOPCONF, Chopconf(cfg.microstep, /*toff=*/3));
+  ExpectRead(bus, kRegDRV_STATUS, drv_status);
 }
 
 // ---------------------------------------------------------------------
@@ -423,6 +437,7 @@ void TestStepForwardThenReverseAtDivisor4() {
   cfg.microstep = 4;  // Delta = 256/4 = 64
   auto driver = MakeHealthyDriver(&bus, cfg);
 
+  ExpectRead(&bus, kRegGSTAT, 0U);  // reset check first
   ScriptEnableTrueChopconf(&bus, cfg);
   assert(driver->Enable(true));
 
@@ -452,6 +467,7 @@ void TestStepHonoursInvertDirection() {
   cfg.invert_direction = true;
   auto driver = MakeHealthyDriver(&bus, cfg);
 
+  ExpectRead(&bus, kRegGSTAT, 0U);  // reset check first
   ScriptEnableTrueChopconf(&bus, cfg);
   assert(driver->Enable(true));
 
@@ -478,6 +494,7 @@ void TestEnableFalseFreezesInOrder() {
   Tmc5160Config cfg;
   auto driver = MakeHealthyDriver(&bus, cfg);
 
+  ExpectRead(&bus, kRegGSTAT, 0U);  // reset check first
   ScriptEnableTrueChopconf(&bus, cfg);
   assert(driver->Enable(true));
   assert(driver->enabled());
@@ -515,7 +532,8 @@ void TestEnableFalseDetectsIneffectiveEnableLine() {
   assert(driver->enable_line_effective());
   assert(driver->warning().empty());
 
-  // Enable(true): IOIN verify (DRV_ENN=0, enabled) then CHOPCONF TOFF=3.
+  // Enable(true): GSTAT reset check, IOIN verify (DRV_ENN=0, enabled), then CHOPCONF TOFF=3.
+  ExpectRead(&bus, kRegGSTAT, 0U);
   ExpectRead(&bus, kRegIOIN, 0x30000000U);
   ScriptEnableTrueChopconf(&bus, cfg);
   assert(driver->Enable(true));
@@ -535,6 +553,7 @@ void TestEnableFalseDetectsIneffectiveEnableLine() {
   assert(bus.remaining_expectations() == 0);
 
   // Same cycle with a working line: DRV_ENN=1 after disabling.
+  ExpectRead(&bus, kRegGSTAT, 0U);
   ExpectRead(&bus, kRegIOIN, 0x30000000U);
   ScriptEnableTrueChopconf(&bus, cfg);
   assert(driver->Enable(true));
@@ -549,12 +568,156 @@ void TestEnableFalseDetectsIneffectiveEnableLine() {
   assert(bus.remaining_expectations() == 0);
 
   // Enable(true) with DRV_ENN still HIGH is a refusal, as before.
+  ExpectRead(&bus, kRegGSTAT, 0U);
   ExpectRead(&bus, kRegIOIN, 0x30000010U);
   assert(!driver->Enable(true));
   assert(!driver->healthy());
   assert(driver->last_error().find("DRV_ENN still HIGH") != std::string::npos);
   assert(bus.mismatch_count() == 0);
   assert(bus.remaining_expectations() == 0);
+}
+
+// ---------------------------------------------------------------------
+// Chip reset detection (bench 2026-08-29: CHOPCONF read the power-on value
+// 0x10410150 while the firmware believed the motor was enabled -- VMAX=0,
+// so XTARGET moved and XACTUAL never did).
+// ---------------------------------------------------------------------
+
+void TestChipResetOnEnableIsRecovered() {
+  FakeSpiBus bus;
+  Tmc5160Config cfg;
+  auto driver = MakeHealthyDriver(&bus, cfg);
+  assert(bus.remaining_expectations() == 0);
+  // Enable(true): GSTAT says reset -> full re-initialisation, then TOFF=3.
+  ExpectRead(&bus, kRegGSTAT, 0x1U);
+  ScriptHealthyReinit(&bus, cfg);
+  ExpectWrite(&bus, kRegCHOPCONF, Chopconf(cfg.microstep, /*toff=*/3));
+  assert(driver->Enable(true));
+  assert(bus.mismatch_count() == 0);
+  assert(bus.remaining_expectations() == 0);
+  assert(driver->reset_count() == 1);
+  assert(driver->warning().find("chip reset 1x") != std::string::npos);
+  assert(driver->DebugRegisters().empty());  // no script -> nothing, but resets= is wired:
+  // MUTATION: make RecoverFromChipResetUnlocked ignore GSTAT bit 0 and
+  // confirm this test fails on mismatch_count (the reinit never happens).
+}
+
+void TestChipResetAtIdleIsRecoveredByPoll() {
+  FakeSpiBus bus;
+  Tmc5160Config cfg;
+  auto driver = MakeHealthyDriver(&bus, cfg);
+  // Disabled: Poll() does not touch the bus at all.
+  assert(driver->Poll());
+  assert(bus.remaining_expectations() == 0);
+  ExpectRead(&bus, kRegGSTAT, 0U);
+  ExpectWrite(&bus, kRegCHOPCONF, Chopconf(cfg.microstep, /*toff=*/3));
+  assert(driver->Enable(true));
+  // Enabled and idle: a reset since the last check is repaired in place,
+  // chopper restored (bench 2026-08-29: M1's chip reset right after its
+  // move ended and sat with TOFF=0, holding nothing).
+  ExpectRead(&bus, kRegGSTAT, 0x1U);
+  ScriptHealthyReinit(&bus, cfg, /*toff=*/3);  // enabled: chopper restored by the reinit itself
+  assert(driver->Poll());
+  assert(bus.mismatch_count() == 0);
+  assert(bus.remaining_expectations() == 0);
+  assert(driver->reset_count() == 1);
+  assert(driver->enabled());
+}
+
+void TestChipResetMidMoveIsRecoveredWithinTheCheckInterval() {
+  FakeSpiBus bus;
+  Tmc5160Config cfg;
+  cfg.microstep = 4;
+  auto driver = MakeHealthyDriver(&bus, cfg);
+  ExpectRead(&bus, kRegGSTAT, 0U);
+  ExpectWrite(&bus, kRegCHOPCONF, Chopconf(4, /*toff=*/3));
+  assert(driver->Enable(true));
+  // 63 plain steps, then the 64th re-reads GSTAT and finds the chip reset:
+  // configuration rewritten, chopper restored, and the step continues from
+  // the fresh XACTUAL=0 (target 64, not 64*64).
+  for (int i = 1; i <= 63; ++i) {
+    ExpectWrite(&bus, kRegXTARGET, static_cast<std::uint32_t>(64 * i));
+    assert(driver->Step(true));
+  }
+  ExpectRead(&bus, kRegGSTAT, 0x1U);
+  ScriptHealthyReinit(&bus, cfg, /*toff=*/3);  // enabled: chopper restored by the reinit itself
+  // The same 64-step check also samples DRV_STATUS (0x6F) for the die
+  // thermal flags before the step continues.
+  ExpectRead(&bus, 0x6F, 0U);
+  ExpectWrite(&bus, kRegXTARGET, 64U);
+  assert(driver->Step(true));
+  assert(bus.mismatch_count() == 0);
+  assert(bus.remaining_expectations() == 0);
+  assert(driver->target() == 64);
+  assert(driver->reset_count() == 1);
+  assert(driver->enabled());
+}
+
+// A disabled motor must come out of (re)initialisation with the chopper
+// OFF: on the motor-1 module EN does not reach DRV_ENN, so TOFF is the only
+// thing keeping its power stage de-energised at boot and after every CHECK.
+void TestReinitializeKeepsChopperOffWhileDisabled() {
+  FakeSpiBus bus;
+  Tmc5160Config cfg;
+  auto driver = MakeHealthyDriver(&bus, cfg);   // constructor: disabled -> TOFF=0 scripted
+  assert(bus.mismatch_count() == 0);
+  ScriptHealthyReinit(&bus, cfg, /*toff=*/0);
+  assert(driver->ActiveCheck());                // CHECK while disabled
+  assert(bus.mismatch_count() == 0);
+  assert(bus.remaining_expectations() == 0);
+  // MUTATION: hard-code toff=3 in ReinitializeUnlocked and confirm this
+  // test fails on mismatch_count.
+}
+
+// ---------------------------------------------------------------------
+// MOTOR_DEBUG register read-out
+// ---------------------------------------------------------------------
+
+void TestDebugRegistersDecodeMotionTruth() {
+  FakeSpiBus bus;
+  Tmc5160Config cfg;
+  auto driver = MakeHealthyDriver(&bus, cfg);
+  // The ten reads, in the order DebugRegisters() issues them.
+  ExpectRead(&bus, 0x21, 0xFFFFFFFBU);   // XACTUAL = -5
+  ExpectRead(&bus, 0x2D, 800U);          // XTARGET
+  ExpectRead(&bus, 0x22, 0x00FFFFFDU);   // VACTUAL 24-bit = -3
+  ExpectRead(&bus, 0x6A, 544U);          // MSCNT
+  // DRV_STATUS: stst=1, ola=1, cs_actual=9, stealth=1, sg_result=0x12
+  ExpectRead(&bus, 0x6F, (1U << 31) | (1U << 29) | (9U << 16) | (1U << 14) | 0x12U);
+  ExpectRead(&bus, 0x35, (1U << 10) | (1U << 9));  // RAMPSTAT vzero + position_reached
+  ExpectRead(&bus, 0x12, 1234U);         // TSTEP
+  ExpectRead(&bus, 0x04, 0x30000010U);   // IOIN: version 0x30, DRV_ENN=1
+  ExpectRead(&bus, 0x01, 0x5U);          // GSTAT reset + uv_cp
+  ExpectRead(&bus, 0x6C, 0x06010040U);   // CHOPCONF toff=0, mres=6 (µ4)
+  ExpectRead(&bus, 0x71, (0x1F0U << 16) | 0xFFU);  // PWM_SCALE: sum saturated, auto=-16
+  ExpectRead(&bus, 0x72, (0x0CU << 16) | 0x1EU);   // PWM_AUTO: grad 12, ofs 30
+  const std::string kv = driver->DebugRegisters();
+  assert(bus.mismatch_count() == 0);
+  assert(bus.remaining_expectations() == 0);
+  auto has = [&](const char* needle) { return kv.find(needle) != std::string::npos; };
+  assert(has("xactual=-5;"));
+  assert(has(";xtarget=800;"));
+  assert(has(";vactual=-3;"));
+  assert(has(";mscnt=544;"));
+  assert(has(";stst=1;"));
+  assert(has(";cs_actual=9;"));
+  assert(has(";sg_result=18;"));
+  assert(has(";ola=1;"));
+  assert(has(";olb=0;"));
+  assert(has(";stealth=1;"));
+  assert(has(";vzero=1;"));
+  assert(has(";pos_reached=1;"));
+  assert(has(";tstep=1234;"));
+  assert(has(";drv_enn=1;"));
+  assert(has(";sd_mode=0;"));
+  assert(has(";version=0x30;"));
+  assert(has(";gstat=0x5;"));
+  assert(has(";toff=0;"));
+  assert(has(";mres=6;usteps=4"));
+  assert(has(";pwm_scale_sum=255;pwm_scale_auto=-16;pwm_ofs_auto=30;pwm_grad_auto=12"));
+  // A bus failure mid-read yields nothing rather than a half-decoded lie.
+  bus.FailNextTransfers(1);
+  assert(driver->DebugRegisters().empty());
 }
 
 // ---------------------------------------------------------------------
@@ -613,6 +776,7 @@ void TestEachDatagramIsOneControllerLockHoldWithModeReapplied() {
   cfg.microstep = 4;
   auto driver = MakeHealthyDriver(&bus, cfg);
 
+  ExpectRead(&bus, kRegGSTAT, 0U);  // reset check first
   ScriptEnableTrueChopconf(&bus, cfg);
   assert(driver->Enable(true));
 
@@ -771,6 +935,108 @@ void TestSdModeGateAcceptsCorrectlyStrappedModule() {
 
 }  // namespace
 
+// ---------------------------------------------------------------------
+// SetRunCurrent (STEPPER_SET_CURRENT): live GLOBALSCALER + IHOLD_IRUN
+// rewrite, persisted into cfg_ so reconfiguration keeps the new value.
+// ---------------------------------------------------------------------
+
+// ---------------------------------------------------------------------
+// Thermal flags (DRV_STATUS otpw bit 26 / ot bit 25): otpw is live and
+// event-counted, ot latches until the next Enable(true). The TMC5160 has
+// no numeric temperature ADC — these threshold flags are the whole story.
+// ---------------------------------------------------------------------
+
+void TestThermalFlagsLatchAndClearOnReenable() {
+  FakeSpiBus bus;
+  Tmc5160Config cfg;
+  auto driver = MakeHealthyDriver(&bus, cfg);
+
+  ExpectRead(&bus, kRegGSTAT, 0U);
+  ScriptEnableTrueChopconf(&bus, cfg);
+  assert(driver->Enable(true));
+  assert(driver->thermal_state() == 0);
+
+  // Poll (enabled, idle): GSTAT clean, then otpw -> pre-warning, counted.
+  ExpectRead(&bus, kRegGSTAT, 0U);
+  ExpectRead(&bus, kRegDRV_STATUS, 1U << 26);
+  assert(driver->Poll());
+  assert(driver->thermal_state() == 1);
+  assert(driver->otpw_event_count() == 1);
+
+  // ot -> shutdown, latched.
+  ExpectRead(&bus, kRegGSTAT, 0U);
+  ExpectRead(&bus, kRegDRV_STATUS, 1U << 25);
+  assert(driver->Poll());
+  assert(driver->thermal_state() == 2);
+
+  // The chip's own flag clears as the die cools — the latch must NOT.
+  ExpectRead(&bus, kRegGSTAT, 0U);
+  ExpectRead(&bus, kRegDRV_STATUS, 0U);
+  assert(driver->Poll());
+  assert(driver->thermal_state() == 2);
+
+  // Operator re-enable releases the latch; the fresh read would re-latch
+  // a still-hot chip (scripted cool here).
+  ExpectRead(&bus, kRegGSTAT, 0U);
+  ScriptEnableTrueChopconf(&bus, cfg, /*drv_status=*/0U);
+  assert(driver->Enable(true));
+  assert(driver->thermal_state() == 0);
+  assert(driver->otpw_event_count() == 1);  // history survives
+  assert(bus.mismatch_count() == 0);
+  assert(bus.remaining_expectations() == 0);
+}
+
+void TestSetRunCurrentRewritesRegistersAndPersists() {
+  FakeSpiBus bus;
+  Tmc5160Config cfg;  // boot current 0.8 A RMS
+  auto driver = MakeHealthyDriver(&bus, cfg);
+
+  // Exactly two writes, derived the same way initialisation derives them.
+  std::uint32_t gs = 0;
+  std::uint8_t irun = 0;
+  std::uint8_t ihold = 0;
+  assert(Tmc5160Driver::CalculateCurrent(0.4, cfg.sense_resistor_ohm,
+                                         cfg.hold_current_frac, &gs, &irun,
+                                         &ihold));
+  const std::uint32_t gs_reg = gs >= 256U ? 0U : gs;
+  const std::uint32_t ihold_irun =
+      (static_cast<std::uint32_t>(ihold) & 0x1FU) |
+      ((static_cast<std::uint32_t>(irun) & 0x1FU) << 8) | (6U << 16);
+  ExpectWrite(&bus, kRegGLOBALSCALER, gs_reg);
+  ExpectWrite(&bus, kRegIHOLD_IRUN, ihold_irun);
+
+  std::string err;
+  assert(driver->SetRunCurrent(0.4, &err));
+  assert(bus.mismatch_count() == 0);
+  assert(bus.remaining_expectations() == 0);
+  assert(std::fabs(driver->run_current_a_rms() - 0.4) < 1e-12);
+
+  // A later reconfiguration (ActiveCheck, chip-reset recovery) must derive
+  // its current registers from the NEW value, not the boot config.
+  Tmc5160Config cfg_after = cfg;
+  cfg_after.run_current_a_rms = 0.4;
+  ScriptHealthyReinit(&bus, cfg_after);
+  assert(driver->ActiveCheck());
+  assert(bus.mismatch_count() == 0);
+  assert(bus.remaining_expectations() == 0);
+}
+
+void TestSetRunCurrentRejectsUnreachableTargetWithoutBusTraffic() {
+  FakeSpiBus bus;
+  Tmc5160Config cfg;  // 0.075 ohm sense: RMS ceiling ~3.06 A
+  auto driver = MakeHealthyDriver(&bus, cfg);
+
+  std::string err;
+  assert(!driver->SetRunCurrent(3.1, &err));
+  assert(!err.empty());
+  // Rejected before any datagram: no scripted expectations were needed.
+  assert(bus.mismatch_count() == 0);
+  assert(bus.remaining_expectations() == 0);
+  // The stored current is untouched, so recovery paths keep the old value.
+  assert(std::fabs(driver->run_current_a_rms() - cfg.run_current_a_rms) <
+         1e-12);
+}
+
 int main() {
   TestEncodeMresTable();
   TestEncodeMresRejectsInvalidDivisor();
@@ -793,9 +1059,17 @@ int main() {
   TestStepHonoursInvertDirection();
   TestEnableFalseFreezesInOrder();
   TestEnableFalseDetectsIneffectiveEnableLine();
+  TestReinitializeKeepsChopperOffWhileDisabled();
+  TestChipResetOnEnableIsRecovered();
+  TestChipResetAtIdleIsRecoveredByPoll();
+  TestChipResetMidMoveIsRecoveredWithinTheCheckInterval();
+  TestDebugRegistersDecodeMotionTruth();
   TestTransferFailureMarksUnhealthyAndActiveCheckReprobes();
   TestEachDatagramIsOneControllerLockHoldWithModeReapplied();
   TestStealthChopSelectsGconfEnPwmModeBit();
   TestSetMicrostepRejectsInvalidDivisor();
+  TestSetRunCurrentRewritesRegistersAndPersists();
+  TestSetRunCurrentRejectsUnreachableTargetWithoutBusTraffic();
+  TestThermalFlagsLatchAndClearOnReenable();
   return 0;
 }

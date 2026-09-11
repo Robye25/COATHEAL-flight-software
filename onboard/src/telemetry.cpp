@@ -29,7 +29,21 @@ void AppendStepperSegment(std::ostringstream& oss, const StepperStatus& st,
       // ignore unknown keys, keep working.
       << "|zeroed:" << (st.zeroed ? 1 : 0)
       << "|seq:" << (st.seq_name.empty() ? std::string("-") : st.seq_name)
-      << "|seqst:" << (st.seq_state.empty() ? std::string("idle") : st.seq_state);
+      << "|seqst:" << (st.seq_state.empty() ? std::string("idle") : st.seq_state)
+      // 2026-08-29 drive-settings surface: run current, ramp accel, and the
+      // ball-screw-lead-derived linear position. Appended last so older
+      // ground parsers, which ignore unknown keys, keep working.
+      << "|amps:" << std::setprecision(2) << st.run_current_a_rms
+      << "|acc:" << std::setprecision(1) << st.accel_steps_per_s2
+      << "|mm:" << std::setprecision(3) << st.position_mm
+      << "|mm_tgt:" << std::setprecision(3) << st.target_mm
+      // Driver die thermal state (TMC5160 DRV_STATUS threshold flags; the
+      // chip has no numeric temperature ADC): ok < ~120 °C, warn = otpw
+      // (>= ~120 °C), hot = ot shutdown latched (>= ~150 °C; the channel
+      // safety has disabled the motor).
+      << "|therm:"
+      << (st.thermal_state >= 2 ? "hot"
+                                : (st.thermal_state == 1 ? "warn" : "ok"));
 }
 
 void AppendCtrlSegment(std::ostringstream& oss, const CtrlStatus& ctrl) {
@@ -42,7 +56,11 @@ void AppendCtrlSegment(std::ostringstream& oss, const CtrlStatus& ctrl) {
       << "|budget_exhausted:" << (ctrl.budget_exhausted ? 1 : 0)
       << "|heaters_active:" << ctrl.heaters_active
       << "|queue:" << ctrl.queue_depth
-      << "|plan:" << (ctrl.plan.empty() ? std::string("none") : ctrl.plan);
+      << "|plan:" << (ctrl.plan.empty() ? std::string("none") : ctrl.plan)
+      // Appended last (2026-08-29/31) so older ground parsers, which
+      // ignore unknown keys, keep working.
+      << "|debug:" << (ctrl.debug_armed ? 1 : 0)
+      << "|tune:" << (ctrl.tune.empty() ? std::string("-") : ctrl.tune);
 }
 
 }  // namespace
@@ -146,6 +164,14 @@ std::string SerializeTelemetryDataFrame(const TelemetryRecord& record,
   return oss.str();
 }
 
+std::string TagFrameForTransmit(const std::string& frame,
+                                std::int64_t queued_epoch_s,
+                                std::int64_t now_epoch_s) {
+  if (frame.rfind("DATA,", 0) != 0) return frame;
+  const std::int64_t age = now_epoch_s > queued_epoch_s ? now_epoch_s - queued_epoch_s : 0;
+  return frame + ",TX=" + std::to_string(age);
+}
+
 std::string SerializeHeatingCycleEvent(const HeatingCycleEvent& event,
                                        const std::string& session_id) {
   std::ostringstream oss;
@@ -174,7 +200,7 @@ std::string SerializeTelemetryPullEventFrame(const HeatingPullEvent& event,
   oss << "EVT,PULL," << session_id << ',' << event.pull_id << ',' << event.motor_id
       << ',' << event.start_ts << ',' << event.steps_moved << ','
       << std::fixed << std::setprecision(2) << event.hold_s << ','
-      << samples.str();
+      << samples.str() << ',' << event.microstep;
   return oss.str();
 }
 

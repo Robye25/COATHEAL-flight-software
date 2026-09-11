@@ -41,6 +41,30 @@ void CloseSocket(int* fd) {
   *fd = -1;
 }
 
+#if !defined(_WIN32) && defined(MSG_NOSIGNAL)
+// A ground station that reset the connection must not raise SIGPIPE in the
+// flight process; EPIPE from send() is handled like any other send failure.
+constexpr int kSendFlags = MSG_NOSIGNAL;
+#else
+constexpr int kSendFlags = 0;
+#endif
+
+bool SetSocketSendTimeoutMs(int fd, int timeout_ms) {
+#ifdef _WIN32
+  const DWORD timeout = static_cast<DWORD>(timeout_ms);
+  return setsockopt(static_cast<SOCKET>(fd),
+                    SOL_SOCKET,
+                    SO_SNDTIMEO,
+                    reinterpret_cast<const char*>(&timeout),
+                    sizeof(timeout)) == 0;
+#else
+  timeval tv{};
+  tv.tv_sec = timeout_ms / 1000;
+  tv.tv_usec = (timeout_ms % 1000) * 1000;
+  return setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) == 0;
+#endif
+}
+
 bool SetSocketRecvTimeoutMs(int fd, int timeout_ms) {
 #ifdef _WIN32
   const DWORD timeout = static_cast<DWORD>(timeout_ms);
@@ -514,6 +538,9 @@ bool TelemetryClient::ConnectLocked() {
 
   socket_fd_ = fd;
   connected_ = true;
+  // The control loop sends from under mu_: a ground station that stops
+  // reading must time the send out, not block the tick (and the watchdog).
+  SetSocketSendTimeoutMs(socket_fd_, std::max(500, reconnect_ms_));
   active_host_ = host;
   command_port_ = cmd_port;
   recv_buffer_.clear();
@@ -538,7 +565,8 @@ bool TelemetryClient::SendAllLocked(const std::string& payload) {
     const int sent = send(static_cast<SOCKET>(socket_fd_), ptr,
                           static_cast<int>(remaining), 0);
 #else
-    const int sent = static_cast<int>(send(socket_fd_, ptr, remaining, 0));
+    const int sent =
+        static_cast<int>(send(socket_fd_, ptr, remaining, kSendFlags));
 #endif
     if (sent <= 0) {
       return false;
@@ -703,7 +731,10 @@ void TelemetryClient::ObserveGroundStation(const std::string& host,
   if (connected_ && host != active_host_ && priority >= current_priority_) {
     CloseLocked();
   }
-  if (!connected_) {
+  // A lower-priority peer never displaces a known target, connected or not
+  // -- a transient send failure must not let a loopback bench command
+  // redirect telemetry away from the real ground station.
+  if (!connected_ && (active_host_.empty() || priority >= current_priority_)) {
     active_host_ = host;
     current_priority_ = priority;
     // A ground station just made itself known; don't make it wait out a

@@ -427,15 +427,14 @@ including reporting "out of range," rather than assume a window in advance.
   cannot produce a valid reading on a specimen known to be in a sane state,
   not merely because the range turns out to be wide or saturates easily)*
 
-## 10. Sample-Index Mapping (`max31865_sample_indices`) — Placeholder, Fill In At Bench
+## 10. Sample-Index Mapping (`max31865_sample_indices`)
 
 `sensor.max31865_sample_indices` defaults to `0,4` — entry 0 feeds click 1 /
-SAMPLE1, entry 1 feeds click 2 / SAMPLE2. **This default is an
-owner-flagged placeholder**: `0,4` is simply "the first sample index of each
-motor's group" (`motor0.samples` starts at 0, `motor1.samples` starts at 4),
-chosen because *some* valid default was needed at config-load time, not
-because sample 0 and sample 4 are confirmed to be where the two click-wired
-specimens physically live.
+SAMPLE1, entry 1 feeds click 2 / SAMPLE2. **Owner decision (confirmed
+2026-08-29): specimen resistance is measured on exactly two samples, one per
+motor group, via the two MAX31865 RTD clicks** — `0,4` is the first sample
+index of each motor's group (`motor0.samples` starts at 0, `motor1.samples`
+starts at 4).
 
 Determining the real mapping is a bench/integration task, not a software
 task — record which physical specimen positions SAMPLE1 and SAMPLE2 actually
@@ -448,10 +447,10 @@ them.
 
 - Physical specimen position SAMPLE1 (click 1, CE1) actually measures, as a
   software sample index: `____` *(fill in at bench/integration —
-  placeholder default is `0`)*
+  decided default is `0`)*
 - Physical specimen position SAMPLE2 (click 2, CE0) actually measures, as a
   software sample index: `____` *(fill in at bench/integration —
-  placeholder default is `4`)*
+  decided default is `4`)*
 - Config line to set once confirmed:
   `sensor.max31865_sample_indices=____,____ ` *(fill in at bench)*
 
@@ -496,6 +495,50 @@ Note that `RTD_CLICK` selects the *retired* MAX31865 temperature path alias
 for `SEQUENT_RTD` — it is unrelated to the current, unrelated-purpose
 `MAX31865` selector below, which reads the two v3 sample-resistance clicks.
 
+### Per-channel harness diagnosis (`sequent_rtd_ch`)
+
+`COMPONENTS` and `CHECK SEQUENT_RTD` both carry a per-channel diagnosis
+(added 2026-08-29 after the bench read `DEGRADED` with zero usable
+channels):
+
+```text
+sequent_rtd_valid=0/8;sequent_rtd_ch=S0:ch1:OPEN:-366.0|S1:ch2:OPEN:366.0|S2:ch3:SHORT:0.2|...
+```
+
+Each entry is `S<sample>:ch<card channel>:<FAULT>:<ohms>` — the `ch<n>`
+number matches the HAT's terminal blocks. Fault classes:
+
+| Fault | Meaning | Typical cause |
+|---|---|---|
+| `OK` | Resistance in the plausible window and consistent with the card's own temperature | — |
+| `OPEN` | The card's ±366.000 Ω full-scale sentinel, an above-window reading, or a non-finite value | No probe on the terminals, broken lead, loose screw terminal |
+| `SHORT` | Below the plausible window (a PT100 never reads under ~80 Ω in the mission envelope) | Shorted leads, probe wired across the wrong terminals |
+| `MISMATCH` | In-window resistance whose PT100-derived temperature disagrees with the card's reading by more than `sensor.sequent_rtd_crosscheck_tol_c` | 2-wire probe on 3-wire terminals (or vice versa), wrong sensor type, drifting probe |
+
+Component-state semantics: the card polls fine but **zero** channels
+validate → `sequent_rtd=FAILED` (`NO_VALID_CHANNELS`); **some** validate →
+`DEGRADED` (`PARTIAL_CHANNELS`); all eight → `OK`. `CHECK SEQUENT_RTD`'s
+`sequent_rtd=OK` verdict remains a *bus/instrument conversation* check —
+read `sequent_rtd_valid=` in the same reply for probe health.
+
+The onboard also journals the diagnosis whenever the fault pattern changes
+(at most once a minute), so `journalctl -fu coatheal-onboard` shows each
+channel flip to `OK` live while the harness is being re-terminated.
+
+Bench state 2026-08-29: all 8 channels bad — `ch3` SHORT (0.2 Ω), the
+other seven OPEN (±366 Ω). A real PT100 reads ~109 Ω at room temperature.
+This is probe-harness wiring, not card or software. Later the same day the
+fifth pair (S4/ch5) landed and read `OK:111.2`.
+
+**2-wire probes on the 3-wire terminals** (bench practice, 2026-08-29): the
+harness uses 2-wire PT100s with a jumper across the two `−` pins of each
+3-wire terminal block. That is the standard 2-wire hookup for this card;
+the consequence is that the 3-wire lead compensation measures the jumper
+(≈0 Ω) instead of a real lead, so the reading includes BOTH lead
+resistances — it reads high by `2 × R_lead` (≈+0.5–2.5 °C for typical bench
+leads). Acceptable for bench work; keep leads short, and calibrate it out
+(§6) if the offset matters.
+
 MAX31865 sample-resistance click check:
 
 ```bash
@@ -527,7 +570,7 @@ sensor.sequent_rtd_crosscheck_tol_c=2.0
 # configurable.
 sensor.max31865_reference_ohm=470.0
 sensor.max31865_poll_ms=1000
-sensor.max31865_sample_indices=0,4           # OWNER-FLAGGED PLACEHOLDER, see section 10
+sensor.max31865_sample_indices=0,4           # one specimen per motor group, see section 10
 
 # max31865_click is the v3-shipped default -- coating/specimen resistance
 # from the two clicks. sequent_rtd (PT100 element resistance from the RTD

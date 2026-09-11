@@ -382,9 +382,9 @@ commanded travel:
 2. With `pull.microstep` at its configured value (default `4`) and
    `stepper.steps_per_rev=200`, command exactly
    `steps_per_rev * microstep` `Step()` calls in one direction
-   (`STEPPER_MOVE <id> <steps_per_rev*microstep>` using **full steps**, i.e.
-   `STEPPER_MOVE <id> 200` at the default microstep — the command takes full
-   steps, the driver internally multiplies by the microstep divisor).
+   (`STEPPER_MOVE <id> <steps_per_rev*microstep>` using **microsteps at the configured divisor** (µ4: 800 per revolution), i.e.
+   `STEPPER_MOVE <id> 800` at the default µ4 — the command takes microsteps;
+   nothing multiplies by the divisor for you).
 3. Confirm the mark returns to the same orientation — exactly one shaft
    revolution, no more, no less.
 4. Reverse and repeat to confirm the return trip also lands on the mark.
@@ -649,3 +649,71 @@ in the journal, without failing the motor. A boot-time
 `TMC5160_VERSION mismatch got=0x0` means the chip was unpowered (VS/12 V
 rail) when the service started; it is re-probed every `motorN.retry_ms`
 while idle and clears on its own once the rail is up.
+
+## Bench note 2026-08-29 — the chip resets and forgets its configuration
+
+Symptom: `STEPPER_ENABLE` and `STEPPER_MOVE` are acknowledged, telemetry
+position and `pulses` advance, `CHECK` says OK — and nothing turns.
+`MOTOR_DEBUG` showed `chopconf=0x10410150` (the TMC5160 **power-on reset
+value**, which the firmware never writes), `toff=0`, `xtarget` climbing
+while `xactual=0`, and `RAMPSTAT` with `velocity_reached=1` + `vzero=1`:
+the ramp generator was running at its target speed of **zero**, because a
+reset had wiped `VMAX`, `AMAX`, the currents and `TOFF`. The chip resets
+when VM (12 V) or VCC_IO dips — a bench supply on a low current limit is the
+usual cause once the coils draw run current.
+
+The firmware now clears `GSTAT` after configuring the chip and re-reads it
+on every `Enable(true)`, every 64 steps, and once a second while enabled
+and idle; on `GSTAT.reset` it rewrites
+the whole configuration, restores the chopper, logs
+`[tmc5160] … chip reset detected …`, counts it (`CHECK` → `motorN_warn`,
+`MOTOR_DEBUG` → `resets=`), and the console's Debug tab names it in the
+verdict. A motor that keeps stalling with a rising `resets` count is a
+power-supply problem, not a software one.
+
+## Bench note 2026-08-29 (later) — the actual root cause: motion-controller units
+
+**The TMC5160's XACTUAL/XTARGET/VMAX count in the microstep resolution
+selected by CHOPCONF.MRES, not in 1/256-full-step units.** The driver set
+MRES from the configured divisor (6 = ¼ step) and wrote `XTARGET += 256 /
+divisor = 64` per pulse, so every "one microstep" pulse commanded 64
+quarter-steps = **16 full steps (28.8°) in a ~7 ms slam** at AMAX=0xFFFF.
+No rotor can follow that: the motor buzzed in place, the position counter
+ran 64× ahead of reality, StallGuard sat near stall, the stealthChop
+regulator pinned at 255 and the shared 12 V rail collapsed under an
+8 rev/s demand, resetting both chips. The tell-tale in every trace:
+after each 64-unit hop `MSCNT` returned to exactly 32 — a hop of 4096
+sine-table counts — and the 2026-08-26 probe (+1000 units → MSCNT +512)
+fits only the MRES unit.
+
+Fix (`42588a7`): MRES is pinned to 0 (native 256 microsteps) so one unit is
+1/256 full step, `DeltaXtarget(divisor) = 256/divisor` is exactly one
+configured microstep and the chip interpolates in between — the
+datasheet's recommended use of the internal ramp generator. The configured
+divisor keeps its meaning as the firmware's step size, so telemetry
+positions, BEND distances and pull travel are unchanged.
+
+Verified with the fix, 0.8 A, stealthChop, both motors: `MSCNT` advances
+64 per pulse, `STEPPER_MOVE <id> 400` = half a revolution in 2.0 s,
+`800` = one revolution in 3 s at 100 full-steps/s, `pwm_scale_sum` 21–33
+throughout (was 255), no open-load flags, **no chip resets**. The earlier
+"12 V rail sags under 0.8 A" reading was a consequence of the over-speed
+demand, not a supply defect — re-check the supply only if `resets` climbs
+again at real speeds.
+
+Two more defects found on the way, both fixed:
+
+1. **The pulse thread accelerated per step, not per second**
+   (`StepperChannel::PulseThreadBody` fed the ramp a fixed 1 ms per
+   iteration while each iteration sleeps one pulse period) — a 5–7 s crawl
+   before reaching 100 Hz. Fixed in `d06319c`: the ramp integrates measured
+   time; 400 microsteps take 2.0 s.
+2. **(Re)initialisation always wrote TOFF=3**, so a disabled motor whose EN
+   pin does not reach DRV_ENN (motor 1) was energised at boot and after
+   every CHECK. Fixed in `42588a7`: TOFF follows the enabled state.
+
+Units reminder: `STEPPER_MOVE <id> <n>` and `STEPPER_MOVETO` take
+**microsteps at the configured divisor** (µ4: 800 = one revolution ≈ 1–2 mm
+of pull); `MOTOR_DEBUG` reports the chip's XACTUAL in 1/256 full steps
+(51,200 per revolution) and MSCNT in sine-table counts (1024 per 4 full
+steps).

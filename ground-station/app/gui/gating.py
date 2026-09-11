@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from .state import OnboardState
+from .state import HEATER_SAMPLE, OnboardState
 
 SILENCE = "radio silence active — send RADIO RESUME first"
 
@@ -55,17 +55,34 @@ def generic_reason(state: OnboardState) -> Optional[str]:
 
 
 def heater_reason(state: OnboardState, heater: int, *, needs_temperature: bool = True) -> Optional[str]:
+    """Closed-loop heater commands (SET_TEMP_TARGET): the onboard requires
+    valid PT100 feedback even while the bench debug arm is active."""
     if state.silence:
         return SILENCE
     reason = _mode_reason(state)
     if reason:
         return reason
     if needs_temperature and state.have_packet and not state.heater_temp_valid(heater):
-        return f"S{heater} has no valid temperature — heater H{heater} cannot run"
+        sample = HEATER_SAMPLE[heater] if heater < len(HEATER_SAMPLE) else heater
+        return f"S{sample} has no valid temperature — heater H{heater} cannot run"
     return None
 
 
+def duty_reason(state: OnboardState, heater: int) -> Optional[str]:
+    """Open-loop duty (SET_HEATER_DUTY): while the bench debug arm is
+    active the onboard accepts duty without PT100 feedback, so the ground
+    must not keep predicting a NACK that will not happen."""
+    if state.debug_armed:
+        return SILENCE if state.silence else _mode_reason(state)
+    reason = heater_reason(state, heater)
+    if reason and "no valid temperature" in reason:
+        return reason + " — ARM_DEBUG in the console unlocks open-loop bench duty"
+    return reason
+
+
 def all_heaters_reason(state: OnboardState) -> Optional[str]:
+    """SET_ALL_TEMP_TARGETS: every heated channel needs valid feedback,
+    debug arm or not."""
     if state.silence:
         return SILENCE
     reason = _mode_reason(state)
@@ -76,6 +93,17 @@ def all_heaters_reason(state: OnboardState) -> Optional[str]:
         if invalid:
             return "no valid temperature on S" + ", S".join(str(i) for i in invalid)
     return None
+
+
+def all_duty_reason(state: OnboardState) -> Optional[str]:
+    """SET_ALL_DUTY: open-loop, so the bench debug arm lifts the feedback
+    requirement exactly as the onboard does."""
+    if state.debug_armed:
+        return SILENCE if state.silence else _mode_reason(state)
+    reason = all_heaters_reason(state)
+    if reason and reason.startswith("no valid temperature"):
+        return reason + " — ARM_DEBUG in the console unlocks open-loop bench duty"
+    return reason
 
 
 def motion_reason(state: OnboardState, motor_id: int, *, needs_zero: bool,
@@ -92,6 +120,9 @@ def motion_reason(state: OnboardState, motor_id: int, *, needs_zero: bool,
     motor = state.motor(motor_id)
     if not motor.present:
         return None
+    if motor.thermal == "hot":
+        return (f"M{motor_id} driver over-temperature (≥150 °C) — disabled by the onboard safety; "
+                "let it cool, then ENABLE")
     if needs_enable and not motor.enabled:
         return f"M{motor_id} not enabled — press ENABLE"
     if needs_zero and motor.zeroed is False:

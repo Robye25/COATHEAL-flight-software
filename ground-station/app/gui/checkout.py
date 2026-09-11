@@ -46,7 +46,11 @@ def checkout_items(state: OnboardState, *, link_ok: bool, unacked_alarms: int = 
     else:
         items.append(CheckItem("link", "Telemetry link", GREEN, "" if age is None else f"{age:.1f} s"))
 
-    items.append(CheckItem("rtc", "RTC valid", GREEN if state.rtc_valid else RED))
+    # Not a flight no-go: the onboard has no RTC, and an unsynchronised clock
+    # only degrades the DATA timestamp (gs_rx_utc still stamps every row).
+    items.append(CheckItem("rtc", "Onboard clock synced",
+                           GREEN if state.rtc_valid else AMBER,
+                           "" if state.rtc_valid else "no NTP sync — GS time authoritative"))
 
     for key, label in (("DPS310", "DPS310 pressure/ambient"), ("ADS1115", "ADS1115 UV")):
         comp = _component(state, key)

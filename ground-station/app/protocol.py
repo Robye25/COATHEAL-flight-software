@@ -24,6 +24,17 @@ class StepperSnapshot:
     zeroed: Optional[bool] = None
     seq_name: str = ""
     seq_state: str = ""
+    # Added 2026-08-29 (drive-settings surface): run current, ramp accel,
+    # and the ball-screw-lead-derived linear position. None when the
+    # onboard predates them.
+    amps: Optional[float] = None
+    accel: Optional[float] = None
+    mm: Optional[float] = None
+    mm_tgt: Optional[float] = None
+    # Driver die thermal state (TMC5160 threshold flags — no numeric ADC):
+    # "ok" (< ~120 °C), "warn" (>= ~120 °C pre-warning), "hot" (>= ~150 °C
+    # shutdown; the onboard safety disabled the motor). None: old firmware.
+    thermal: Optional[str] = None
 
 
 @dataclass
@@ -57,6 +68,11 @@ class TelemetryPacket:
     # `CTRL=` block (redesign spec §8): raw key -> value strings. Empty when
     # the onboard predates it; every typed accessor below then returns None.
     ctrl: Dict[str, str] = field(default_factory=dict)
+    # `TX=<seconds>` is appended on the wire by the onboard drain (it is not
+    # part of the stored frame): how old the frame was when it was sent.
+    # 0-1 s means live; anything larger is the backlog being replayed. None
+    # when the onboard predates the stamp.
+    tx_age_s: Optional[float] = None
 
     # -- typed CTRL accessors ------------------------------------------------
     def _ctrl_bool(self, key: str) -> Optional[bool]:
@@ -115,6 +131,18 @@ class TelemetryPacket:
     def plan_state(self) -> Optional[str]:
         return self.ctrl.get("plan")
 
+    @property
+    def debug_armed(self) -> Optional[bool]:
+        """Bench debug arm (ARM_DEBUG) active onboard. None: old firmware."""
+        return self._ctrl_bool("debug")
+
+    @property
+    def tune_channel(self) -> Optional[str]:
+        """Active PID auto-tune channel ("H4") or None when idle / old
+        firmware."""
+        raw = self.ctrl.get("tune")
+        return raw if raw and raw != "-" else None
+
 
 class TelemetryParseError(ValueError):
     pass
@@ -159,6 +187,16 @@ def _parse_stepper_segment(value: str) -> StepperSnapshot:
                 s.seq_name = "" if raw == "-" else raw
             elif key == "seqst":
                 s.seq_state = raw
+            elif key == "amps":
+                s.amps = float(raw)
+            elif key == "acc":
+                s.accel = float(raw)
+            elif key == "mm":
+                s.mm = float(raw)
+            elif key == "mm_tgt":
+                s.mm_tgt = float(raw)
+            elif key == "therm":
+                s.thermal = raw
             # unknown keys silently ignored (forward-compat)
         except ValueError as exc:
             raise TelemetryParseError(f"invalid STEPPER {key}={raw!r}: {exc}") from exc
@@ -183,6 +221,11 @@ def _snapshot_to_dict(snap: StepperSnapshot, motor_id: int) -> Dict:
         "zeroed": snap.zeroed,
         "seq_name": snap.seq_name,
         "seq_state": snap.seq_state,
+        "amps": snap.amps,
+        "accel": snap.accel,
+        "mm": snap.mm,
+        "mm_tgt": snap.mm_tgt,
+        "thermal": snap.thermal,
     }
 
 
@@ -198,12 +241,20 @@ def parse_telemetry_csv(line: str) -> TelemetryPacket:
         raise TelemetryParseError("missing DATA prefix")
 
     session_id = parts[1]
-    seq = int(parts[2])
     timestamp = parts[3]
-    rtc_valid = int(parts[4])
-    ambient_temp_c = float(parts[5])
-    ambient_pressure_mbar = float(parts[6])
-    uv = float(parts[7])
+    # Every conversion below must surface as TelemetryParseError: the
+    # receivers catch exactly that, and a bare ValueError escaping here used
+    # to kill the receiver thread -- with the offending frame left
+    # unacknowledged at the head of the onboard queue, to be re-sent on
+    # every reconnect.
+    try:
+        seq = int(parts[2])
+        rtc_valid = int(parts[4])
+        ambient_temp_c = float(parts[5])
+        ambient_pressure_mbar = float(parts[6])
+        uv = float(parts[7])
+    except ValueError as exc:
+        raise TelemetryParseError(f"invalid DATA prefix field: {exc}") from exc
 
     heater_field_index = None
     for idx, token in enumerate(parts):
@@ -217,10 +268,16 @@ def parse_telemetry_csv(line: str) -> TelemetryPacket:
     # Everything between the fixed prefix (index 8) and HEATER_DUTY= is a
     # sample temperature. Sample count is inferred — works for any N.
     sample_tokens = parts[8:heater_field_index]
-    sample_temps_c = [float(x) for x in sample_tokens]
+    try:
+        sample_temps_c = [float(x) for x in sample_tokens]
+    except ValueError as exc:
+        raise TelemetryParseError(f"invalid sample temperature: {exc}") from exc
 
     heater_values_text = parts[heater_field_index].split('=', 1)[1]
-    heater_duty = [float(x) for x in heater_values_text.split('|') if x != ""]
+    try:
+        heater_duty = [float(x) for x in heater_values_text.split('|') if x != ""]
+    except ValueError as exc:
+        raise TelemetryParseError(f"invalid HEATER_DUTY value: {exc}") from exc
 
     phase = ""
     status = ""
@@ -235,6 +292,7 @@ def parse_telemetry_csv(line: str) -> TelemetryPacket:
     sensor_age_ms: Dict[str, int] = {}
     component_state: Dict[str, str] = {}
     ctrl: Dict[str, str] = {}
+    tx_age_s: Optional[float] = None
     for token in parts[heater_field_index + 1 :]:
         if token.startswith("PHASE="):
             phase = token.split('=', 1)[1]
@@ -291,6 +349,11 @@ def parse_telemetry_csv(line: str) -> TelemetryPacket:
                     continue
                 key, value = piece.split(":", 1)
                 ctrl[key] = value
+        elif token.startswith("TX="):
+            try:
+                tx_age_s = max(0.0, float(token[3:]))
+            except ValueError:
+                tx_age_s = None
         elif token.startswith("STEPPER="):
             legacy_stepper = _parse_stepper_segment(token.split('=', 1)[1])
         elif token.startswith("STEPPER"):
@@ -339,11 +402,46 @@ def parse_telemetry_csv(line: str) -> TelemetryPacket:
         steppers=steppers_list,
         stepper=primary_snapshot,
         ctrl=ctrl,
+        tx_age_s=tx_age_s,
     )
 
 
 def build_ack(session_id: str, seq: int) -> str:
     return f"ACK,{session_id},{seq}\n"
+
+
+def ack_for_raw_line(line: str) -> Optional[str]:
+    """The ACK for a frame that could not be parsed, when its identity can
+    still be read off the raw line: `DATA,<session>,<seq>,...` acks that
+    seq, `EVT,<kind>,<session>,...` acks seq 0 (the event convention).
+    None when not even that much is intact. Acknowledging what cannot be
+    parsed is what lets the onboard drop the frame from its durable queue
+    instead of re-sending it on every reconnect for the rest of the
+    flight; the raw line goes to the event log so nothing is lost."""
+    parts = [p.strip() for p in line.strip().split(",")]
+    if len(parts) >= 3 and parts[0] == "DATA" and parts[1] and parts[2].isdigit():
+        return build_ack(parts[1], int(parts[2]))
+    if len(parts) >= 3 and parts[0] == "EVT" and parts[2]:
+        return build_ack(parts[2], 0)
+    return None
+
+
+def recv_reply_line(sock, max_bytes: int = 65536) -> str:
+    """Read one newline-terminated command reply. A single recv() can return
+    a partial reply (the longer CHECK/STATUS/MOTOR_DEBUG bodies), so read
+    until the newline, EOF, or `max_bytes`. Socket timeouts propagate."""
+    chunks: list[bytes] = []
+    total = 0
+    while total < max_bytes:
+        data = sock.recv(4096)
+        if not data:
+            break
+        chunks.append(data)
+        total += len(data)
+        if b"\n" in data:
+            break
+    raw = b"".join(chunks).decode("utf-8", errors="replace")
+    return raw.split("\n", 1)[0].strip()
 
 
 def build_command(command: str) -> str:
@@ -372,6 +470,9 @@ KNOWN_COMMANDS = {
     "SET_ALL_DUTY",
     "HEATER_TEST",
     "SET_PID",
+    "PID_TUNE_START",
+    "PID_TUNE_ABORT",
+    "PID_TUNE_STATUS",
     "SET_TEMP_TARGET",
     "SET_ALL_TEMP_TARGETS",
     "CLEAR_TEMP_TARGET",
@@ -389,10 +490,14 @@ KNOWN_COMMANDS = {
     "EXIT_SAFE",
     "STEPPER_MOVE",
     "STEPPER_MOVETO",
+    "STEPPER_MOVE_MM",
+    "STEPPER_MOVETO_MM",
     "STEPPER_ROTATE",
     "STEPPER_HOME",
     "STEPPER_STOP",
     "STEPPER_SET_SPEED",
+    "STEPPER_SET_ACCEL",
+    "STEPPER_SET_CURRENT",
     "STEPPER_SET_MICROSTEP",
     "STEPPER_ENABLE",
     "STEPPER_DISABLE",
@@ -411,6 +516,7 @@ KNOWN_COMMANDS = {
     "FALLBACK_ARM",
     "FALLBACK_DISARM",
     "FALLBACK_STATUS",
+    "MOTOR_DEBUG",
 }
 
 
@@ -503,9 +609,11 @@ class PullEvent:
 
     Wire format (newline-terminated):
         EVT,PULL,<session>,<pull_id>,<motor_id>,<start_ts>,<steps_moved>,
-            <hold_s>,<samples>
+            <hold_s>,<samples>[,<microstep>]
     where <samples> is pipe-separated specimen indices (e.g. ``0|1|2|3``)
-    or ``-`` for no specimens.
+    or ``-`` for no specimens. <microstep> (added 2026-08-30) is the
+    divisor the pull ran at — steps_moved is in µsteps at THAT divisor, so
+    mm reconstruction must use it; None on old firmware.
     """
 
     session_id: str
@@ -515,6 +623,7 @@ class PullEvent:
     steps_moved: int
     hold_s: float
     samples: List[int] = field(default_factory=list)
+    microstep: Optional[int] = None
 
 
 def parse_pull_event(line: str) -> PullEvent:
@@ -542,6 +651,7 @@ def parse_pull_event(line: str) -> PullEvent:
             start_ts=parts[5],
             steps_moved=int(parts[6]),
             hold_s=float(parts[7]),
+            microstep=int(parts[9]) if len(parts) > 9 and parts[9] else None,
             samples=samples,
         )
     except ValueError as exc:
@@ -675,3 +785,52 @@ def validate_revolutions(revs: float) -> Tuple[bool, str]:
     if abs(r) > 1e6:
         return False, "revs unrealistically large"
     return True, f"{r:.4f}"
+
+
+def validate_move_mm(mm: float, max_mm: float = 500.0) -> Tuple[bool, str]:
+    """Validate a linear move distance/target in millimetres.
+
+    The default bound mirrors the onboard travel limit: 200000 microsteps at
+    the commissioning defaults (u4, 200 full-steps/rev, 2 mm lead) is
+    500 mm. The onboard still enforces max_position_steps after conversion.
+    """
+    try:
+        v = float(mm)
+    except (TypeError, ValueError):
+        return False, "mm must be numeric"
+    if v != v or v in (float("inf"), float("-inf")):
+        return False, "mm must be finite"
+    if abs(v) > max_mm:
+        return False, f"mm exceeds max_mm {max_mm:g}"
+    return True, f"{v:.3f}"
+
+
+def validate_current_a(a_rms: float, max_a: float = 3.1) -> Tuple[bool, str]:
+    """Validate a motor run current in A RMS.
+
+    Mirrors the onboard's flat (0, 3.1] backstop; the onboard additionally
+    NACKs anything the sense resistor cannot deliver.
+    """
+    try:
+        v = float(a_rms)
+    except (TypeError, ValueError):
+        return False, "current must be numeric"
+    if v <= 0.0 or v > max_a:
+        return False, f"current must be in (0, {max_a}] A RMS"
+    return True, f"{v:.3f}"
+
+
+def validate_accel(accel: float, max_accel: float = 5000.0) -> Tuple[bool, str]:
+    """Validate a trapezoid acceleration in full-steps/s².
+
+    The onboard clamps STEPPER_SET_ACCEL against
+    stepper.max_accel_steps_per_s2 (5000 by default); refuse out-of-range
+    values up front, like validate_speed_hz does for speed.
+    """
+    try:
+        v = float(accel)
+    except (TypeError, ValueError):
+        return False, "accel must be numeric"
+    if v <= 0.0 or v > max_accel:
+        return False, f"accel must be in (0, {max_accel:g}] full-steps/s^2"
+    return True, f"{v:.1f}"

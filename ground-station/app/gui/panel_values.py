@@ -8,7 +8,7 @@ from typing import Dict
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget
 
 from ..protocol import TelemetryPacket
-from .state import OnboardState
+from .state import RESISTANCE_SAMPLES, OnboardState
 from .widgets import MONO_CSS, MUTED, SectionLabel
 
 
@@ -30,9 +30,11 @@ class ValuesPanel(QScrollArea):
         self._section("Samples °C")
         for i in range(8):
             self._row(f"sample_{i}", f"S{i}")
-        self._section("Resistance Ω")
-        for i in range(8):
-            self._row(f"resistance_{i}", f"R{i}")
+        # Only the two click-monitored specimens (owner decision 2026-08-29,
+        # one per motor group); the other RESISTANCE slots are always '-'.
+        self._section("Resistance Ω (MAX31865 clicks)")
+        for click, i in enumerate(RESISTANCE_SAMPLES):
+            self._row(f"resistance_{i}", f"S{i} · click {click + 1} · M{click}")
         self._section("Heaters duty")
         for i in range(6):
             self._row(f"heater_{i}", f"H{i}")
@@ -75,11 +77,12 @@ class ValuesPanel(QScrollArea):
         f["rtc_valid"].setText("1" if pkt.rtc_valid else "0")
         f["phase"].setText(pkt.phase)
         f["mode"].setText(pkt.mode or "—")
-        f["ambient_temp_c"].setText(reading("AT", pkt.ambient_temp_c, 2))
+        f["ambient_temp_c"].setText(reading("AT", pkt.ambient_temp_c, 1))
         f["ambient_pressure_mbar"].setText(reading("AP", pkt.ambient_pressure_mbar, 1))
         f["uv"].setText(reading("UV", pkt.uv, 3))
         for i in range(8):
-            f[f"sample_{i}"].setText(reading(f"S{i}", pkt.sample_temps_c[i], 2) if i < len(pkt.sample_temps_c) else "N/A")
+            f[f"sample_{i}"].setText(reading(f"S{i}", pkt.sample_temps_c[i], 1) if i < len(pkt.sample_temps_c) else "N/A")
+        for i in RESISTANCE_SAMPLES:
             r = pkt.sample_resistance_ohm[i] if i < len(pkt.sample_resistance_ohm) else None
             f[f"resistance_{i}"].setText("—" if r is None else f"{r:.2f}")
         for i in range(6):
@@ -90,19 +93,37 @@ class ValuesPanel(QScrollArea):
                 for k in ("state", "cfg", "flags", "src"):
                     f[f"m{m}_{k}"].setText("—")
                 continue
-            f[f"m{m}_state"].setText(f"{motor.position} / {motor.target}")
-            f[f"m{m}_cfg"].setText(f"{motor.hz:.0f} Hz · µ{motor.microstep}")
+            if motor.mm is not None and motor.mm_tgt is not None:
+                f[f"m{m}_state"].setText(f"{motor.mm:.3f} / {motor.mm_tgt:.3f} mm")
+                f[f"m{m}_state"].setToolTip(f"{motor.position} / {motor.target} µsteps")
+            else:
+                f[f"m{m}_state"].setText(f"{motor.position} / {motor.target} µst")
+            cfg = f"{motor.hz:.0f} Hz · µstep 1/{motor.microstep}"
+            if motor.amps is not None:
+                cfg += f" · {motor.amps:.2f} A"
+            f[f"m{m}_cfg"].setText(cfg)
             flags = []
             flags.append("EN" if motor.enabled else "dis")
             flags.append("zeroed" if motor.zeroed else ("zero?" if motor.zeroed is None else "unzeroed"))
             flags.append("MOVING" if motor.moving else ("HOLD" if motor.holding else "idle"))
             flags.append("ok" if motor.healthy else "FAILED")
+            if motor.thermal == "hot":
+                flags.append("DRV OVERTEMP")
+            elif motor.thermal == "warn":
+                flags.append("drv ≥120 °C")
             f[f"m{m}_flags"].setText(" · ".join(flags))
             f[f"m{m}_src"].setText(f"{motor.source or '—'} · {motor.seq_name or '-'}/{motor.seq_state or '-'}")
         f["fallback"].setText("—" if state.fallback is None else ("ACTIVE" if state.fallback else "inactive"))
         f["link_loss_s"].setText("—" if state.link_loss_s is None else f"{state.link_loss_s:.1f}")
-        f["energy"].setText("—" if state.energy_wh is None else
-                            f"{state.energy_wh:.2f} / {state.budget_wh:.0f}" + (" EXHAUSTED" if state.budget_exhausted else ""))
+        if state.energy_wh is None:
+            energy_text = "—"
+        elif state.budget_wh:
+            energy_text = f"{state.energy_wh:.2f} / {state.budget_wh:.0f}"
+        else:
+            energy_text = f"{state.energy_wh:.2f}"  # budget unreported or unlimited
+        if state.budget_exhausted:
+            energy_text += " EXHAUSTED"
+        f["energy"].setText(energy_text)
         f["heaters_active"].setText("—" if state.heaters_active is None else str(state.heaters_active))
         f["queue"].setText("—" if state.queue_depth is None else str(state.queue_depth))
         f["plan"].setText(state.plan_state or "—")

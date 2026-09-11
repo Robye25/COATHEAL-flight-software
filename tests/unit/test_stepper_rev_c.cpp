@@ -8,8 +8,12 @@
 //   (e) MotionLock: two motors TryAcquire -> second returns false.
 
 #include <cassert>
+#include <chrono>
+#include <cmath>
+#include <thread>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -55,6 +59,34 @@ std::unique_ptr<StepperChannel> MakeChannel(int id, MotionLock* lock = nullptr) 
 // ustep rate, which under a trapezoidal profile should: rise, plateau near
 // max, then fall. We assert the (smoothed) rate profile is non-decreasing
 // up to a peak and non-increasing afterwards.
+// The pulse thread must ramp in REAL time. It used to feed the ramp a fixed
+// 1 ms per iteration while each iteration is one pulse plus a sleep of one
+// pulse period, so acceleration was applied per step: a 400-microstep move
+// at 100 Hz / 200 steps/s^2 took ~7 s of crawl instead of ~1.3 s (bench,
+// 2026-08-29: "the motors never move").
+void TestPulseThreadRampsInRealTime() {
+  StepperChannelConfig cfg = MakeChannelCfg(0);
+  cfg.use_pulse_thread = true;
+  auto ch = std::make_unique<StepperChannel>(cfg, std::make_unique<SimulatedStepperDriver>(), nullptr);
+  std::string err;
+  const auto t0 = std::chrono::steady_clock::now();
+  assert(ch->MoveToSteps(400, 0.0, &err));
+  double elapsed = 0.0;
+  while (elapsed < 6.0) {
+    ch->Tick(0.05);  // the control loop only wakes the thread in this mode
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    if (ch->Snapshot().position_steps == 400) break;
+  }
+  assert(ch->Snapshot().position_steps == 400);
+  // 100 full steps: 0.5 s ramp covering 25 steps, ~75 steps at 100 Hz, a
+  // short brake -- about 1.3 s. Per-step acceleration needed ~7 s.
+  assert(elapsed > 0.8);
+  assert(elapsed < 3.0);
+  // MUTATION: restore `UpdateRampSpeed(0.001, ...)` in PulseThreadBody and
+  // confirm this test fails on `elapsed < 3.0`.
+}
+
 void TestTrapezoidalRamp() {
   auto ch = MakeChannel(0);
   std::string err;
@@ -589,6 +621,175 @@ void TestSimulatedBackendReportsBusHealthy() {
   assert(ctl->SpiBusOk());
 }
 
+// 2026-08-29 drive-settings surface: mm move commands, per-motor current,
+// runtime accel.
+
+// Parser: the mm and drive-settings commands take the same optional-id
+// shape as their microstep siblings.
+void TestParserMmAndDriveCommands() {
+  CommandParser parser;
+
+  auto r = parser.ParseLine("STEPPER_MOVE_MM 1 -2.5");
+  assert(r.ok);
+  assert(r.command.type == CommandType::kStepperMoveMm);
+  assert(r.command.motor_id == 1);
+  assert(r.command.args.size() == 1);
+  assert(r.command.args[0] == "-2.5");
+
+  // Legacy no-id form: a decimal payload is never a plausible motor id.
+  auto r2 = parser.ParseLine("STEPPER_MOVE_MM 1.5");
+  assert(r2.ok);
+  assert(r2.command.motor_id == 0);
+  assert(r2.command.args.size() == 1);
+  assert(r2.command.args[0] == "1.5");
+
+  auto r3 = parser.ParseLine("STEPPER_MOVETO_MM 0 4.0 5");
+  assert(r3.ok);
+  assert(r3.command.type == CommandType::kStepperMoveToMm);
+  assert(r3.command.motor_id == 0);
+  assert(r3.command.args.size() == 2);
+  assert(r3.command.args[0] == "4.0");
+  assert(r3.command.args[1] == "5");
+
+  auto r4 = parser.ParseLine("STEPPER_SET_CURRENT 1 0.4");
+  assert(r4.ok);
+  assert(r4.command.type == CommandType::kStepperSetCurrent);
+  assert(r4.command.motor_id == 1);
+  assert(r4.command.args.size() == 1);
+  assert(r4.command.args[0] == "0.4");
+
+  auto r5 = parser.ParseLine("STEPPER_SET_ACCEL 0 400");
+  assert(r5.ok);
+  assert(r5.command.type == CommandType::kStepperSetAccel);
+  assert(r5.command.motor_id == 0);
+  assert(r5.command.args.size() == 1);
+  assert(r5.command.args[0] == "400");
+}
+
+// mm -> microstep conversion goes through the ball-screw lead at the
+// CURRENT divisor, and tracks a microstep change.
+void TestMoveMillimetersConversion() {
+  auto ch = MakeChannel(0);  // lead 2 mm/rev, 200 full-steps, u4
+  std::string err;
+
+  // 2 mm = 1 revolution = 200 x 4 = 800 microsteps.
+  assert(ch->MoveMillimeters(2.0, &err));
+  assert(ch->Snapshot().target_steps == 800);
+  assert(ch->Snapshot().last_source == "cmd:MOVE_MM");
+
+  ch->Stop();
+  ch->SetPositionZero();
+
+  // Absolute: -1 mm = -400 microsteps.
+  assert(ch->MoveToMillimeters(-1.0, 0.0, &err));
+  assert(ch->Snapshot().target_steps == -400);
+  assert(ch->Snapshot().last_source == "cmd:BEND_MM");
+
+  ch->Stop();
+  ch->SetPositionZero();
+
+  // After a microstep change the same distance lands on the same shaft
+  // angle: 1 mm at u8 = 800 microsteps.
+  assert(ch->SetMicrostep(8, &err));
+  assert(ch->MoveToMillimeters(1.0, 0.0, &err));
+  assert(ch->Snapshot().target_steps == 800);
+
+  // Non-finite distance is refused.
+  assert(!ch->MoveMillimeters(std::numeric_limits<double>::infinity(), &err));
+
+  // Distance beyond max_position_steps is refused by the shared core.
+  ch->Stop();
+  assert(!ch->MoveToMillimeters(1e6, 0.0, &err));
+}
+
+// Snapshot reports the lead-derived linear position once a move completes.
+void TestSnapshotReportsMillimeters() {
+  auto ch = MakeChannel(0);
+  std::string err;
+  assert(ch->MoveMillimeters(2.0, &err));
+  for (int i = 0; i < 20000; ++i) {
+    ch->Tick(0.001);
+    if (!ch->Snapshot().moving) break;
+  }
+  const StepperStatus s = ch->Snapshot();
+  assert(s.position_steps == 800);
+  assert(std::fabs(s.position_mm - 2.0) < 1e-9);
+  assert(std::fabs(s.target_mm - 2.0) < 1e-9);
+}
+
+// SetAccel: applied within (0, max_accel_steps_per_s2], rejected outside,
+// and visible in the snapshot (and thus telemetry).
+void TestSetAccelBounds() {
+  auto ch = MakeChannel(0);  // max_accel default 5000
+  std::string err;
+
+  assert(ch->Snapshot().accel_steps_per_s2 == 200.0);
+  assert(ch->SetAccel(500.0, &err));
+  assert(ch->Snapshot().accel_steps_per_s2 == 500.0);
+
+  assert(!ch->SetAccel(0.0, &err));
+  assert(!ch->SetAccel(-10.0, &err));
+  assert(!ch->SetAccel(5001.0, &err));
+  assert(ch->Snapshot().accel_steps_per_s2 == 500.0);  // unchanged by rejects
+}
+
+// Controller-level current dispatch: routed by id, stored by the backend,
+// reported in the snapshot.
+void TestControllerSetRunCurrent() {
+  std::vector<StepperChannelConfig> cfgs;
+  cfgs.push_back(MakeChannelCfg(0, {0, 1, 2, 3}));
+  cfgs.push_back(MakeChannelCfg(1, {4, 5, 6, 7}));
+  std::vector<std::unique_ptr<StepperDriver>> drvs;
+  drvs.emplace_back(std::make_unique<SimulatedStepperDriver>());
+  drvs.emplace_back(std::make_unique<SimulatedStepperDriver>());
+  StepperController ctl(std::move(cfgs), std::move(drvs));
+
+  std::string err;
+  assert(ctl.SetRunCurrent(1, 0.4, &err));
+  assert(std::fabs(ctl.Snapshot(1).run_current_a_rms - 0.4) < 1e-12);
+  assert(ctl.Snapshot(0).run_current_a_rms == 0.0);  // untouched
+
+  assert(!ctl.SetRunCurrent(0, -0.1, &err));
+  assert(!ctl.SetRunCurrent(9, 0.4, &err));  // unknown id
+}
+
+// Driver over-temperature shutdown (thermal_state() == 2) must stop
+// motion, de-energise the channel, and release the MotionLock — a driver
+// whose chip cut its own outputs must not stay "enabled" against a dead
+// power stage. Re-enable is the operator's re-arm path.
+void TestThermalShutdownDisablesChannelAndReleasesLock() {
+  class OverheatingDriver : public SimulatedStepperDriver {
+   public:
+    int thermal = 0;
+    int thermal_state() const override { return thermal; }
+  };
+
+  MotionLock lock;
+  auto owned = std::make_unique<OverheatingDriver>();
+  OverheatingDriver* drv = owned.get();
+  auto ch = std::make_unique<StepperChannel>(MakeChannelCfg(0),
+                                             std::move(owned), &lock);
+  std::string err;
+  assert(ch->MoveSteps(400, &err));
+  ch->Tick(0.001);
+  assert(ch->Snapshot().moving);
+  assert(lock.holder() == 0);
+
+  drv->thermal = 2;
+  ch->Tick(0.001);
+  const StepperStatus s = ch->Snapshot();
+  assert(!s.enabled);
+  assert(!s.moving);
+  assert(s.thermal_state == 2);
+  assert(s.last_source == "safety:OVERTEMP");
+  assert(lock.holder() == -1);
+
+  // Cooled down: STEPPER_ENABLE re-arms and motion works again.
+  drv->thermal = 0;
+  assert(ch->SetEnabled(true));
+  assert(ch->MoveSteps(100, &err));
+}
+
 }  // namespace
 
 int main() {
@@ -598,6 +799,7 @@ int main() {
   TestRefusedEnableCarriesDriverReason();
   TestRefusedEnableWithoutReasonLeavesErrorUntouched();
   TestTrapezoidalRamp();
+  TestPulseThreadRampsInRealTime();
   TestParserIdArgument();
   TestParserLegacyDefault();
   TestBendArityDisambiguation();
@@ -607,6 +809,12 @@ int main() {
   TestSetEnabledTrueFailureLeavesChannelDisabled();
   TestPullCycleAcquiresLock();
   TestControllerMultiChannelDispatch();
+  TestParserMmAndDriveCommands();
+  TestMoveMillimetersConversion();
+  TestSnapshotReportsMillimeters();
+  TestSetAccelBounds();
+  TestControllerSetRunCurrent();
+  TestThermalShutdownDisablesChannelAndReleasesLock();
   std::cout << "Rev C stepper tests passed" << std::endl;
   return 0;
 }

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iostream>
 #include <sstream>
 #include <utility>
 
@@ -158,6 +159,38 @@ void StepperChannel::Tick(double dt_s) {
         }
       }
     }
+  } else if (driver_ != nullptr && enabled_ &&
+             (mode_ == Mode::kIdle || mode_ == Mode::kHolding)) {
+    // Once per tick while energised but not stepping: lets the driver
+    // notice a chip that lost its configuration (supply dip) and restore
+    // it, so an "enabled" motor really holds and the next move works.
+    driver_->Poll();
+  }
+
+  // Thermal safety: a driver that latched over-temperature shutdown
+  // (>= ~150 °C die — the chip has already cut its outputs) is stopped and
+  // de-energised here rather than left "enabled" against a dead power
+  // stage. Mirrors the IssuePulses failure teardown (SetEnabled would
+  // re-take mu_). Self-limiting: once enabled_ drops this cannot repeat,
+  // and the operator re-arms with STEPPER_ENABLE after cool-down.
+  if (driver_ != nullptr && enabled_ && driver_->thermal_state() >= 2) {
+    std::cerr << "[stepper] motor " << cfg_.channel_id
+              << ": driver over-temperature shutdown -- stopping motion and"
+              << " disabling the channel; STEPPER_ENABLE re-arms after"
+              << " cool-down\n";
+    driver_->Enable(false);
+    enabled_ = false;
+    target_ = position_;
+    retract_target_ = position_;
+    moving_ = false;
+    mode_ = Mode::kIdle;
+    hold_remaining_s_ = 0.0;
+    retract_after_hold_ = false;
+    current_step_hz_ = 0.0;
+    fractional_steps_ = 0.0;
+    last_source_ = "safety:OVERTEMP";
+    ReleaseLockIfHeld();
+    return;
   }
 
   if (mode_ == Mode::kHolding) {
@@ -254,6 +287,7 @@ void StepperChannel::PulseThreadBody() {
   // wall-clock jumps don't disturb spacing.
   using clock = std::chrono::steady_clock;
   auto next_pulse = clock::now();
+  auto last_ramp_update = clock::now();
 
   while (pulse_thread_run_.load()) {
     std::unique_lock<std::mutex> lock(mu_);
@@ -261,6 +295,7 @@ void StepperChannel::PulseThreadBody() {
       // Nothing to pulse — sleep briefly and re-check.
       cv_.wait_for(lock, std::chrono::milliseconds(5));
       next_pulse = clock::now();
+      last_ramp_update = next_pulse;
       continue;
     }
     const std::int64_t remaining_usteps = std::abs(target_ - position_);
@@ -269,8 +304,19 @@ void StepperChannel::PulseThreadBody() {
       continue;
     }
     // Time-slice: update ramp at 1 kHz, so advance ~1 ms at a time.
-    constexpr double dt_tick = 0.001;
-    UpdateRampSpeed(dt_tick, remaining_usteps);
+    // The ramp integrates real elapsed time. This used to pass a fixed
+    // 1 ms per iteration, but an iteration is one pulse followed by a sleep
+    // of one pulse period, so the acceleration was applied per STEP, not
+    // per second: from standstill the motor crawled at a few microsteps
+    // per second and needed ~500 pulses (5-7 s) to reach 100 Hz -- the
+    // "motors never move" seen on the bench, 2026-08-29. Capped so a
+    // scheduling hiccup cannot jump the speed.
+    const auto now_ramp = clock::now();
+    double dt_s = std::chrono::duration<double>(now_ramp - last_ramp_update).count();
+    last_ramp_update = now_ramp;
+    if (dt_s < 0.0) dt_s = 0.0;
+    if (dt_s > 0.05) dt_s = 0.05;
+    UpdateRampSpeed(dt_s, remaining_usteps);
     const double ustep_rate =
         current_step_hz_ * static_cast<double>(microstep_);
     if (ustep_rate < 1.0) {
@@ -294,6 +340,11 @@ void StepperChannel::PulseThreadBody() {
 
 bool StepperChannel::MoveSteps(std::int64_t delta_usteps, std::string* error) {
   std::lock_guard<std::mutex> lock(mu_);
+  return MoveStepsUnlocked(delta_usteps, error);
+}
+
+bool StepperChannel::MoveStepsUnlocked(std::int64_t delta_usteps,
+                                       std::string* error) {
   if (!enabled_) {
     if (error) *error = "channel disabled";
     return false;
@@ -319,6 +370,11 @@ bool StepperChannel::MoveSteps(std::int64_t delta_usteps, std::string* error) {
 bool StepperChannel::MoveToSteps(std::int64_t absolute_usteps, double hold_s,
                                  std::string* error) {
   std::lock_guard<std::mutex> lock(mu_);
+  return MoveToStepsUnlocked(absolute_usteps, hold_s, error);
+}
+
+bool StepperChannel::MoveToStepsUnlocked(std::int64_t absolute_usteps,
+                                         double hold_s, std::string* error) {
   if (!enabled_) {
     if (error) *error = "channel disabled";
     return false;
@@ -347,6 +403,39 @@ bool StepperChannel::MoveToSteps(std::int64_t absolute_usteps, double hold_s,
   }
   moving_ = (mode_ == Mode::kMoving);
   last_source_ = "cmd:BEND";
+  return true;
+}
+
+bool StepperChannel::MoveMillimeters(double delta_mm, std::string* error) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (!std::isfinite(delta_mm)) {
+    if (error) *error = "distance must be finite";
+    return false;
+  }
+  const double usteps = delta_mm * UstepsPerMm();
+  if (std::fabs(usteps) > 9.0e15) {  // llround overflow guard
+    if (error) *error = "distance too large";
+    return false;
+  }
+  if (!MoveStepsUnlocked(std::llround(usteps), error)) return false;
+  last_source_ = "cmd:MOVE_MM";
+  return true;
+}
+
+bool StepperChannel::MoveToMillimeters(double absolute_mm, double hold_s,
+                                       std::string* error) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (!std::isfinite(absolute_mm)) {
+    if (error) *error = "distance must be finite";
+    return false;
+  }
+  const double usteps = absolute_mm * UstepsPerMm();
+  if (std::fabs(usteps) > 9.0e15) {
+    if (error) *error = "distance too large";
+    return false;
+  }
+  if (!MoveToStepsUnlocked(std::llround(usteps), hold_s, error)) return false;
+  last_source_ = "cmd:BEND_MM";
   return true;
 }
 
@@ -417,6 +506,34 @@ bool StepperChannel::SetSpeed(double full_step_hz, std::string* error) {
   std::lock_guard<std::mutex> lock(mu_);
   step_hz_ = ClampHz(full_step_hz);
   return true;
+}
+
+bool StepperChannel::SetAccel(double accel_steps_per_s2, std::string* error) {
+  if (!std::isfinite(accel_steps_per_s2) || accel_steps_per_s2 <= 0.0) {
+    if (error) *error = "accel must be > 0 full-steps/s^2";
+    return false;
+  }
+  if (accel_steps_per_s2 > cfg_.max_accel_steps_per_s2) {
+    if (error) {
+      std::ostringstream msg;
+      msg << "accel exceeds stepper.max_accel_steps_per_s2 ("
+          << cfg_.max_accel_steps_per_s2 << ")";
+      *error = msg.str();
+    }
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(mu_);
+  cfg_.accel_steps_per_s2 = accel_steps_per_s2;
+  return true;
+}
+
+bool StepperChannel::SetRunCurrent(double a_rms, std::string* error) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (driver_ == nullptr) {
+    if (error) *error = "no driver";
+    return false;
+  }
+  return driver_->SetRunCurrent(a_rms, error);
 }
 
 bool StepperChannel::SetMicrostep(int divisor, std::string* error) {
@@ -545,6 +662,14 @@ StepperStatus StepperChannel::Snapshot() const {
   s.target_steps = target_;
   s.step_hz = step_hz_;
   s.microstep = microstep_;
+  s.accel_steps_per_s2 = cfg_.accel_steps_per_s2;
+  s.run_current_a_rms = driver_ ? driver_->run_current_a_rms() : 0.0;
+  s.thermal_state = driver_ ? driver_->thermal_state() : 0;
+  const double usteps_per_mm = UstepsPerMm();
+  if (usteps_per_mm > 0.0) {
+    s.position_mm = static_cast<double>(position_) / usteps_per_mm;
+    s.target_mm = static_cast<double>(target_) / usteps_per_mm;
+  }
   s.enabled = enabled_;
   s.healthy = driver_ != nullptr && driver_->healthy();
   s.moving = moving_;

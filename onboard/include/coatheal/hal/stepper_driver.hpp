@@ -20,6 +20,29 @@ class StepperDriver {
   virtual bool healthy() const = 0;
   virtual bool ActiveCheck() { return healthy(); }
 
+  // Runtime run-current change (STEPPER_SET_CURRENT). Backends with a real
+  // current DAC validate against their sense-resistor limits, apply the new
+  // value to the chip, and keep it across reconfigurations; backends with
+  // no power stage just record it. False = not applied (with an
+  // operator-readable reason in *error).
+  virtual bool SetRunCurrent(double a_rms, std::string* error) {
+    (void)a_rms;
+    (void)error;
+    return true;
+  }
+  // The run current the backend is configured for, in A RMS. 0 when the
+  // backend has no notion of current.
+  virtual double run_current_a_rms() const { return 0.0; }
+
+  // Driver die thermal state, best-available over the backend's bus. The
+  // TMC5160 has no numeric temperature ADC; it reports two DRV_STATUS
+  // threshold flags, which map to: 0 = nominal, 1 = over-temperature
+  // pre-warning (die >= ~120 °C, otpw), 2 = over-temperature shutdown
+  // seen (die >= ~150 °C, ot) — 2 is LATCHED by the backend until the
+  // next Enable(true) so the channel safety that acts on it cannot race a
+  // self-clearing chip flag. Backends with no thermal telemetry report 0.
+  virtual int thermal_state() const { return 0; }
+
   // Transport health, deliberately separate from healthy().
   //
   // healthy() answers "can this motor be driven" -- a module strapped for
@@ -40,6 +63,15 @@ class StepperDriver {
   // (today: the enable line has no effect on the chip, so STEPPER_DISABLE
   // cannot de-energise the power stage through EN). Empty when all clear.
   virtual std::string warning() const { return {}; }
+  // Live read of the chip's motion-truth registers for MOTOR_DEBUG, as a
+  // `key=value;` string (empty when the backend has no chip to ask or the
+  // bus failed). The software position counters can advance while a motor
+  // never turns (bench, 2026-08-26); these registers cannot lie about it.
+  virtual std::string DebugRegisters() { return {}; }
+  // Called about once a second while the motor is enabled and idle: a
+  // chance to notice that the chip lost its configuration (TMC5160 reset
+  // on a supply dip) while nothing was stepping. Default: nothing to do.
+  virtual bool Poll() { return true; }
   virtual std::uint64_t pulses_issued() const = 0;
 };
 
@@ -52,6 +84,8 @@ class SimulatedStepperDriver : public StepperDriver {
   void SetMicrostep(int divisor) override;
   bool healthy() const override { return true; }
   std::uint64_t pulses_issued() const override { return pulses_; }
+  bool SetRunCurrent(double a_rms, std::string* error) override;
+  double run_current_a_rms() const override { return run_current_a_rms_; }
 
   bool enabled() const { return enabled_; }
   int microstep() const { return microstep_; }
@@ -61,6 +95,7 @@ class SimulatedStepperDriver : public StepperDriver {
   bool enabled_ = false;
   bool last_dir_ = true;
   int microstep_ = 1;
+  double run_current_a_rms_ = 0.0;
   std::uint64_t pulses_ = 0;
 };
 

@@ -486,6 +486,65 @@ void TestCrosscheckToleranceIsRespected() {
   assert(!reading.channel_valid[1]);  // 2.5 degC off: outside tolerance
 }
 
+void TestOpenSentinelClassifiedOpenNotMismatch() {
+  // The card writes exactly ±366.000 Ω into a channel with no conducting
+  // probe (bench 2026-08-24/29: 7 of 8 harness channels). +366 sits INSIDE
+  // the default [60, 390] window, so without the sentinel check it is only
+  // caught by the temperature cross-check and would classify as MISMATCH —
+  // this test fails if the sentinel branch is removed. The card's own
+  // temperature for a +366 channel (≈690.9 °C) is deliberately used so the
+  // cross-check WOULD fire, proving OPEN wins.
+  float temps[8] = {690.909f, -1210.39f, -259.2f, 25.0f,
+                    20.0f, 20.0f, 20.0f, 20.0f};
+  float res[8] = {366.0f, -366.0f, 0.2f, 109.735f,
+                  107.794f, 107.794f, 107.794f, 107.794f};
+
+  FakeI2cBus bus;
+  bus.SetImage(ImageWithChannels(temps, res));
+
+  SequentRtdAdapter adapter(&bus, SequentRtdAdapter::Options{});
+  SequentRtdAdapter::Reading reading;
+  std::string error;
+  assert(adapter.ReadAll(&reading, &error));
+
+  assert(!reading.channel_valid[0]);
+  assert(reading.channel_fault[0] == RtdChannelFault::kOpen);   // +366
+  assert(!reading.channel_valid[1]);
+  assert(reading.channel_fault[1] == RtdChannelFault::kOpen);   // -366
+  assert(!reading.channel_valid[2]);
+  assert(reading.channel_fault[2] == RtdChannelFault::kShort);  // 0.2 Ω
+  assert(reading.channel_valid[3]);
+  assert(reading.channel_fault[3] == RtdChannelFault::kNone);   // real probe
+}
+
+void TestFaultClassificationNamesEveryPath() {
+  // ch1: NaN resistance -> OPEN; ch2: 395 Ω above window -> OPEN;
+  // ch3: in-window resistance whose card temperature disagrees -> MISMATCH;
+  // ch4: -50 Ω (negative, not the sentinel) -> OPEN, never SHORT.
+  float temps[8] = {20.0f, 20.0f, 60.0f, 20.0f, 20.0f, 20.0f, 20.0f, 20.0f};
+  float res[8] = {107.794f, 395.0f, 107.794f, -50.0f,
+                  107.794f, 107.794f, 107.794f, 107.794f};
+  temps[0] = std::numeric_limits<float>::quiet_NaN();
+
+  FakeI2cBus bus;
+  bus.SetImage(ImageWithChannels(temps, res));
+
+  SequentRtdAdapter adapter(&bus, SequentRtdAdapter::Options{});
+  SequentRtdAdapter::Reading reading;
+  std::string error;
+  assert(adapter.ReadAll(&reading, &error));
+
+  assert(reading.channel_fault[0] == RtdChannelFault::kOpen);
+  assert(reading.channel_fault[1] == RtdChannelFault::kOpen);
+  assert(reading.channel_fault[2] == RtdChannelFault::kMismatch);
+  assert(reading.channel_fault[3] == RtdChannelFault::kOpen);
+  for (int i = 0; i < 4; ++i) assert(!reading.channel_valid[i]);
+  for (int i = 4; i < 8; ++i) {
+    assert(reading.channel_valid[i]);
+    assert(reading.channel_fault[i] == RtdChannelFault::kNone);
+  }
+}
+
 void TestPt100ConversionMatchesLegacyBehaviour() {
   double temp = 0.0;
   assert(Pt100TemperatureFromOhms(100.0, &temp));
@@ -523,6 +582,8 @@ int main() {
   TestResistanceWindowRejectsOutOfWindowChannels();
   TestCrosscheckMismatchMarkedInvalid();
   TestCrosscheckToleranceIsRespected();
+  TestOpenSentinelClassifiedOpenNotMismatch();
+  TestFaultClassificationNamesEveryPath();
   TestPt100ConversionMatchesLegacyBehaviour();
   return 0;
 }

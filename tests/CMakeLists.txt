@@ -1,3 +1,12 @@
+# Every test binary in this directory is assert()-based. A Release
+# configuration adds -DNDEBUG, which compiles each assert out and turns the
+# whole suite into a no-op that "passes" (a Release ctest run reported
+# 20/20 with nothing checked, 2026-09-08). Strip it for the test targets
+# only; the flight binary keeps its own configuration's flags.
+foreach(config RELEASE RELWITHDEBINFO MINSIZEREL)
+  string(REPLACE "-DNDEBUG" "" CMAKE_CXX_FLAGS_${config} "${CMAKE_CXX_FLAGS_${config}}")
+endforeach()
+
 add_executable(coatheal_unit_tests
   unit/test_suite.cpp
 )
@@ -192,6 +201,16 @@ target_link_libraries(coatheal_pwm_slice_tests PRIVATE coatheal_onboard_core)
 
 add_test(NAME coatheal_pwm_slice_tests COMMAND coatheal_pwm_slice_tests)
 
+# Relay PID auto-tuner tests: convergence, abort paths, and the tuned
+# gains closing the loop on the same simulated plant.
+add_executable(coatheal_pid_autotune_tests
+  unit/test_pid_autotune.cpp
+)
+
+target_link_libraries(coatheal_pid_autotune_tests PRIVATE coatheal_onboard_core)
+
+add_test(NAME coatheal_pid_autotune_tests COMMAND coatheal_pid_autotune_tests)
+
 # Sequent RTD HAT register-conversation tests. No hardware required.
 add_executable(coatheal_sequent_rtd_tests
   unit/test_sequent_rtd_adapter.cpp
@@ -204,3 +223,12 @@ target_include_directories(coatheal_sequent_rtd_tests PRIVATE
 )
 
 add_test(NAME coatheal_sequent_rtd_tests COMMAND coatheal_sequent_rtd_tests)
+
+# RtcAdapter derived clock-validity tests. No hardware required.
+add_executable(coatheal_rtc_adapter_tests
+  unit/test_rtc_adapter.cpp
+)
+
+target_link_libraries(coatheal_rtc_adapter_tests PRIVATE coatheal_onboard_core)
+
+add_test(NAME coatheal_rtc_adapter_tests COMMAND coatheal_rtc_adapter_tests)

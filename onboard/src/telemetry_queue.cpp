@@ -191,6 +191,19 @@ std::vector<QueuedTelemetryFrame> TelemetryQueue::PendingFrames(
                                            frames_.begin() + count);
 }
 
+std::vector<QueuedTelemetryFrame> TelemetryQueue::DrainBatch(
+    std::size_t max_frames) const {
+  std::lock_guard<std::mutex> lock(mu_);
+  std::vector<QueuedTelemetryFrame> batch;
+  if (frames_.empty() || max_frames == 0) return batch;
+  batch.reserve(std::min(max_frames, frames_.size()));
+  batch.push_back(frames_.back());
+  for (std::size_t i = 0; i + 1 < frames_.size() && batch.size() < max_frames; ++i) {
+    batch.push_back(frames_[i]);
+  }
+  return batch;
+}
+
 std::vector<QueuedTelemetryFrame> TelemetryQueue::PendingFrames() const {
   std::lock_guard<std::mutex> lock(mu_);
   return std::vector<QueuedTelemetryFrame>(frames_.begin(), frames_.end());

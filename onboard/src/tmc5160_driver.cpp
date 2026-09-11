@@ -13,7 +13,15 @@ namespace coatheal {
 namespace {
 
 constexpr std::uint8_t kRegGCONF = 0x00;
+constexpr std::uint8_t kRegGSTAT = 0x01;
 constexpr std::uint8_t kRegIOIN = 0x04;
+constexpr std::uint8_t kRegTSTEP = 0x12;
+constexpr std::uint8_t kRegVACTUAL = 0x22;
+constexpr std::uint8_t kRegRAMPSTAT = 0x35;
+constexpr std::uint8_t kRegMSCNT = 0x6A;
+constexpr std::uint8_t kRegDRV_STATUS = 0x6F;
+constexpr std::uint8_t kRegPWM_SCALE = 0x71;
+constexpr std::uint8_t kRegPWM_AUTO = 0x72;
 constexpr std::uint8_t kRegGLOBALSCALER = 0x0B;
 constexpr std::uint8_t kRegIHOLD_IRUN = 0x10;
 constexpr std::uint8_t kRegTPOWERDOWN = 0x11;
@@ -79,6 +87,14 @@ constexpr std::uint32_t kTpowerdown = 10U;
 // generator from ever becoming the limiting factor at any configured
 // microstep divisor.
 constexpr std::uint32_t kVmax = 4U * 100U * 256U;
+
+// GSTAT flags (write 1 to clear): bit 0 reset, bit 1 drv_err, bit 2 uv_cp.
+constexpr std::uint32_t kGstatReset = 0x1U;
+constexpr std::uint32_t kGstatClearAll = 0x7U;
+// Step() re-reads GSTAT this often. One 5-byte datagram per 64 steps is
+// noise next to the XTARGET write every step, and a brown-out that wiped
+// the chip mid-move is caught within 0.64 s at 100 Hz.
+constexpr std::uint32_t kResetCheckInterval = 64U;
 
 bool IsSupportedMicrostep(int divisor) {
   return Tmc5160Driver::EncodeMres(divisor) != Tmc5160Driver::kInvalidMres;
@@ -231,10 +247,22 @@ bool Tmc5160Driver::CalculateCurrent(double a_rms, double sense_ohm,
 }
 
 std::uint32_t Tmc5160Driver::EncodeChopconf(std::uint8_t toff) const {
-  const std::uint8_t mres = EncodeMres(microstep_);
-  const std::uint8_t safe_mres = (mres == kInvalidMres) ? 0x06U : mres;
+  // MRES is pinned to 0 = native 256 microsteps. The TMC5160's motion
+  // controller counts XACTUAL/XTARGET/VMAX in the microstep resolution
+  // selected by MRES, NOT in 1/256-full-step units. With MRES set from the
+  // configured divisor (6 = 1/4 step) every "one microstep" XTARGET write of
+  // 256/divisor = 64 units commanded 64 quarter-steps = 16 FULL steps in a
+  // ~7 ms slam: the rotor could not follow, the motor buzzed in place, the
+  // position counter ran 64x ahead of reality and the supply rail collapsed
+  // under an 8 rev/s demand (bench 2026-08-29; MSCNT returned to 32 after
+  // every hop, i.e. a hop of 4096 sine-table counts). At MRES=0 one unit is
+  // 1/256 full step, DeltaXtarget(divisor) = 256/divisor is exactly one
+  // configured microstep, and the chip commutates smoothly in between --
+  // the datasheet's recommended way to use the internal ramp generator.
+  // The configured divisor keeps its meaning as the firmware's step size.
+  (void)microstep_;
   std::uint32_t chopconf = 0;
-  chopconf |= static_cast<std::uint32_t>(safe_mres) << 24;
+  chopconf |= 0x0U << 24;  // MRES = 0 -> 256 microsteps
   chopconf |= kChopconfTbl;
   chopconf |= kChopconfHstrt;
   chopconf |= static_cast<std::uint32_t>(toff & 0x0FU);
@@ -246,11 +274,21 @@ bool Tmc5160Driver::OpenGpio() {
     gpio_healthy_ = true;
     return true;
   }
+  // Both lines carry a pull toward their safe level (CS deselected, EN off)
+  // for the windows when nothing drives them: schematic v4 fits no
+  // external pull-ups, and BCM 20/21/22/27 power on with the SoC's default
+  // pull-DOWN, i.e. both drivers selected and enabled until this request
+  // lands. Anything clocked on SPI0 meanwhile (the MAX31865 clicks share the
+  // bus) would be latched by the TMC5160s as a datagram. See GpioBias.
   cs_handle_ = RequestGpioOutput(cfg_.gpio_chip, cfg_.cs_line,
-                                 "coatheal-tmc5160-cs", /*initial_value=*/true);
+                                 "coatheal-tmc5160-cs", /*initial_value=*/true,
+                                 GpioBias::kPullUp);
   const bool en_initial = cfg_.enable_active_low;  // active-low: HIGH=off
   enable_handle_ = RequestGpioOutput(cfg_.gpio_chip, cfg_.enable_line,
-                                     "coatheal-tmc5160-en", en_initial);
+                                     "coatheal-tmc5160-en", en_initial,
+                                     cfg_.enable_active_low
+                                         ? GpioBias::kPullUp
+                                         : GpioBias::kPullDown);
   if (cs_handle_ == nullptr || enable_handle_ == nullptr) {
     std::cerr << "[tmc5160] GPIO request failed on " << cfg_.gpio_chip
               << " cs=" << cfg_.cs_line << " en=" << cfg_.enable_line << '\n';
@@ -449,7 +487,11 @@ bool Tmc5160Driver::ReinitializeUnlocked() {
   }
 
   const std::uint32_t gconf = cfg_.stealth_chop ? kGconfEnPwmMode : 0U;
-  const std::uint32_t chopconf = EncodeChopconf(/*toff=*/3);
+  // The chopper follows enabled_: a disabled motor must come out of
+  // (re)initialisation with TOFF=0. On a module whose EN pin does not reach
+  // DRV_ENN (motor 1, bench 2026-08-28) TOFF is the only thing keeping the
+  // power stage off at boot and after every CHECK.
+  const std::uint32_t chopconf = EncodeChopconf(enabled_ ? 3 : 0);
   // GLOBALSCALER register convention: 0 means "256" (full scale); 256 never
   // appears on the wire as itself.
   const std::uint32_t gs_reg = (globalscaler >= 256U) ? 0U : globalscaler;
@@ -532,6 +574,13 @@ bool Tmc5160Driver::ReinitializeUnlocked() {
     return false;
   }
   if (!ReadRegister(kRegCHOPCONF, &verify) || verify != chopconf) {
+    healthy_ = false;
+    return false;
+  }
+  // The configuration is on the chip now: clear the reset/drv_err/uv_cp
+  // flags so that GSTAT.reset from here on means exactly "the chip lost its
+  // configuration since this point".
+  if (!WriteRegister(kRegGSTAT, kGstatClearAll)) {
     std::cerr << "[tmc5160] CHOPCONF verify failed on " << cfg_.spi_device
               << '\n';
     healthy_ = false;
@@ -547,6 +596,52 @@ void Tmc5160Driver::ReportError(const std::string& message) {
   if (message == last_error_message_) return;
   last_error_message_ = message;
   std::cerr << "[tmc5160] " << message << '\n';
+}
+
+bool Tmc5160Driver::SetRunCurrent(double a_rms, std::string* error) {
+  std::lock_guard<std::mutex> lock(io_mu_);
+  std::uint32_t globalscaler = 0;
+  std::uint8_t irun = 0;
+  std::uint8_t ihold = 0;
+  if (!CalculateCurrent(a_rms, cfg_.sense_resistor_ohm,
+                        cfg_.hold_current_frac, &globalscaler, &irun,
+                        &ihold)) {
+    if (error) {
+      std::ostringstream msg;
+      msg << "current " << a_rms << " A_rms not deliverable with"
+          << " sense_resistor_ohm=" << cfg_.sense_resistor_ohm
+          << " (peak ceiling " << (kVfs / cfg_.sense_resistor_ohm)
+          << " A)";
+      *error = msg.str();
+    }
+    return false;
+  }
+  if (!healthy_) {
+    if (error) {
+      *error = "driver unhealthy; recover the module before changing current";
+    }
+    return false;
+  }
+  const std::uint32_t gs_reg = (globalscaler >= 256U) ? 0U : globalscaler;
+  const std::uint32_t ihold_irun =
+      (static_cast<std::uint32_t>(ihold) & 0x1FU) |
+      ((static_cast<std::uint32_t>(irun) & 0x1FU) << 8) |
+      (kIholdDelay << 16);
+  if (!WriteRegister(kRegGLOBALSCALER, gs_reg) ||
+      !WriteRegister(kRegIHOLD_IRUN, ihold_irun)) {
+    healthy_ = false;
+    if (error) *error = "SPI write failed while setting current";
+    return false;
+  }
+  // Stored last: ActiveCheck / chip-reset recovery re-derive the registers
+  // from cfg_, so from here on the new current survives reconfiguration.
+  cfg_.run_current_a_rms = a_rms;
+  return true;
+}
+
+double Tmc5160Driver::run_current_a_rms() const {
+  std::lock_guard<std::mutex> lock(io_mu_);
+  return cfg_.run_current_a_rms;
 }
 
 bool Tmc5160Driver::Enable(bool enable) {
@@ -629,6 +724,10 @@ bool Tmc5160Driver::EnableUnlocked(bool enable) {
   if (!healthy_ && !ReinitializeUnlocked()) {
     return false;
   }
+  if (!RecoverFromChipResetUnlocked("enable")) {
+    return false;
+  }
+  steps_since_reset_check_ = 0;
   // Prove the enable line actually reached the chip. DRV_ENN is mirrored
   // in IOIN, so a broken or unrouted enable trace is detectable over SPI
   // -- and it has to be, because it presents exactly like a healthy motor
@@ -659,20 +758,197 @@ bool Tmc5160Driver::EnableUnlocked(bool enable) {
     return false;
   }
   enabled_ = true;
+  // A successful operator re-enable is the release path for the thermal
+  // shutdown latch (the chip's own ot flag clears once the die cools; the
+  // latch exists so the channel safety cannot race that self-clear). Read
+  // the flags fresh so a still-hot chip immediately re-latches.
+  ot_latched_ = false;
+  otpw_now_ = false;
+  CheckThermalUnlocked();
   return true;
 }
 
+bool Tmc5160Driver::Poll() {
+  std::lock_guard<std::mutex> lock(io_mu_);
+  if (bus_ == nullptr || !spi_open_ || !healthy_ || !enabled_) return healthy_;
+  const bool ok = RecoverFromChipResetUnlocked("idle");
+  if (ok) CheckThermalUnlocked();
+  return ok;
+}
+
+void Tmc5160Driver::CheckThermalUnlocked() {
+  std::uint32_t drv = 0;
+  if (!ReadRegister(kRegDRV_STATUS, &drv)) return;
+  const bool otpw = ((drv >> 26) & 1U) != 0U;
+  const bool ot = ((drv >> 25) & 1U) != 0U;
+  if (otpw && !otpw_now_) {
+    ++otpw_events_;
+    std::cerr << "[tmc5160] " << cfg_.spi_device << " cs=" << cfg_.cs_line
+              << ": over-temperature PRE-WARNING (die >= ~120 C, otpw), event #"
+              << otpw_events_ << " -- reduce run current or duty cycle\n";
+  }
+  otpw_now_ = otpw;
+  if (ot && !ot_latched_) {
+    ot_latched_ = true;
+    std::cerr << "[tmc5160] " << cfg_.spi_device << " cs=" << cfg_.cs_line
+              << ": over-temperature SHUTDOWN (die >= ~150 C, ot) -- the chip"
+              << " has cut its outputs; latching until the next"
+              << " STEPPER_ENABLE\n";
+  }
+}
+
+int Tmc5160Driver::thermal_state() const {
+  std::lock_guard<std::mutex> lock(io_mu_);
+  if (ot_latched_) return 2;
+  return otpw_now_ ? 1 : 0;
+}
+
+std::uint32_t Tmc5160Driver::otpw_event_count() const {
+  std::lock_guard<std::mutex> lock(io_mu_);
+  return otpw_events_;
+}
+
+std::string Tmc5160Driver::DebugRegisters() {
+  std::lock_guard<std::mutex> lock(io_mu_);
+  if (bus_ == nullptr || !spi_open_) return {};
+  struct Reg { const char* name; std::uint8_t addr; std::uint32_t value; };
+  Reg regs[] = {
+      {"xactual", kRegXACTUAL, 0}, {"xtarget", kRegXTARGET, 0},
+      {"vactual", kRegVACTUAL, 0}, {"mscnt", kRegMSCNT, 0},
+      {"drv_status", kRegDRV_STATUS, 0}, {"rampstat", kRegRAMPSTAT, 0},
+      {"tstep", kRegTSTEP, 0}, {"ioin", kRegIOIN, 0},
+      {"gstat", kRegGSTAT, 0}, {"chopconf", kRegCHOPCONF, 0},
+      // stealthChop's own view of the coils: PWM_SCALE_SUM is the PWM
+      // amplitude the current regulator needs to reach the target. Pinned
+      // at 255 = it cannot get there (VM too low, coil open/too resistive,
+      // wrong sense resistor); a moderate value = current really flows.
+      {"pwm_scale", kRegPWM_SCALE, 0}, {"pwm_auto", kRegPWM_AUTO, 0},
+  };
+  for (Reg& reg : regs) {
+    if (!ReadRegister(reg.addr, &reg.value)) return {};
+  }
+  const std::uint32_t xactual = regs[0].value, xtarget = regs[1].value,
+                      vactual = regs[2].value, mscnt = regs[3].value,
+                      drv = regs[4].value, ramp = regs[5].value,
+                      tstep = regs[6].value, ioin = regs[7].value,
+                      gstat = regs[8].value, chop = regs[9].value,
+                      pwm_scale = regs[10].value, pwm_auto = regs[11].value;
+  std::int32_t pwm_scale_auto = static_cast<std::int32_t>((pwm_scale >> 16) & 0x1FFU);
+  if (pwm_scale_auto & 0x100) pwm_scale_auto -= 0x200;  // 9-bit signed
+  // VACTUAL is a 24-bit two's-complement value in 1/256-step units per
+  // 2^24/fCLK seconds; XACTUAL/XTARGET are 32-bit signed 1/256-step counts.
+  std::int32_t v24 = static_cast<std::int32_t>(vactual & 0xFFFFFFU);
+  if (v24 & 0x800000) v24 -= 0x1000000;
+  const unsigned mres = (chop >> 24) & 0xFU;
+  std::ostringstream out;
+  out << "xactual=" << static_cast<std::int32_t>(xactual)
+      << ";xtarget=" << static_cast<std::int32_t>(xtarget)
+      << ";vactual=" << v24
+      << ";mscnt=" << (mscnt & 0x3FFU)
+      << ";tstep=" << (tstep & 0xFFFFFU)
+      << ";drv_status=0x" << std::hex << drv << std::dec
+      << ";stst=" << ((drv >> 31) & 1U)
+      << ";cs_actual=" << ((drv >> 16) & 0x1FU)
+      << ";sg_result=" << (drv & 0x3FFU)
+      << ";stallguard=" << ((drv >> 24) & 1U)
+      << ";ot=" << ((drv >> 25) & 1U) << ";otpw=" << ((drv >> 26) & 1U)
+      << ";s2ga=" << ((drv >> 27) & 1U) << ";s2gb=" << ((drv >> 28) & 1U)
+      << ";ola=" << ((drv >> 29) & 1U) << ";olb=" << ((drv >> 30) & 1U)
+      << ";s2vsa=" << ((drv >> 12) & 1U) << ";s2vsb=" << ((drv >> 13) & 1U)
+      << ";stealth=" << ((drv >> 14) & 1U) << ";fsactive=" << ((drv >> 15) & 1U)
+      << ";rampstat=0x" << std::hex << (ramp & 0x3FFFU) << std::dec
+      << ";vzero=" << ((ramp >> 10) & 1U)
+      << ";pos_reached=" << ((ramp >> 9) & 1U)
+      << ";vel_reached=" << ((ramp >> 8) & 1U)
+      << ";status_sg=" << ((ramp >> 13) & 1U)
+      << ";ioin=0x" << std::hex << ioin << std::dec
+      << ";drv_enn=" << ((ioin & kIoinDrvEnn) ? 1 : 0)
+      << ";sd_mode=" << ((ioin & kIoinSdMode) ? 1 : 0)
+      << ";version=0x" << std::hex << (ioin >> 24) << std::dec
+      << ";gstat=0x" << std::hex << (gstat & 0x7U) << std::dec
+      << ";chopconf=0x" << std::hex << chop << std::dec
+      << ";toff=" << (chop & 0xFU)
+      << ";mres=" << mres << ";usteps=" << (256U >> mres)
+      << ";resets=" << reset_count_
+      << ";pwm_scale_sum=" << (pwm_scale & 0xFFU)
+      << ";pwm_scale_auto=" << pwm_scale_auto
+      << ";pwm_ofs_auto=" << (pwm_auto & 0xFFU)
+      << ";pwm_grad_auto=" << ((pwm_auto >> 16) & 0xFFU);
+  return out.str();
+}
+
 std::string Tmc5160Driver::warning() const {
-  if (enable_line_effective_) return {};
-  return "enable line " + std::to_string(cfg_.enable_line) +
-         " has no effect on DRV_ENN (cs=" + std::to_string(cfg_.cs_line) +
-         "): the power stage cannot be de-energised through EN; STEPPER_DISABLE"
-         " stops the chopper only";
+  // The thermal fields (and reset_count_/enable_line_effective_) are
+  // written under io_mu_ from the pulse thread; reading them unlocked from
+  // the CHECK handler is a data race.
+  std::lock_guard<std::mutex> lock(io_mu_);
+  std::string text;
+  if (!enable_line_effective_) {
+    text = "enable line " + std::to_string(cfg_.enable_line) +
+           " has no effect on DRV_ENN (cs=" + std::to_string(cfg_.cs_line) +
+           "): the power stage cannot be de-energised through EN; STEPPER_DISABLE"
+           " stops the chopper only";
+  }
+  if (reset_count_ > 0) {
+    if (!text.empty()) text += "; ";
+    text += "chip reset " + std::to_string(reset_count_) +
+            "x since boot (cs=" + std::to_string(cfg_.cs_line) +
+            "): VM or VCC_IO dropped and the configuration was lost -- restored"
+            " each time, but the motor stalls until then; check the 12 V motor"
+            " supply and its current limit";
+  }
+  if (ot_latched_) {
+    if (!text.empty()) text += "; ";
+    text += "driver OVER-TEMPERATURE shutdown (die >= ~150 C, cs=" +
+            std::to_string(cfg_.cs_line) +
+            "): outputs cut and channel disabled; let it cool, then"
+            " STEPPER_ENABLE to re-arm";
+  } else if (otpw_now_ || otpw_events_ > 0) {
+    if (!text.empty()) text += "; ";
+    text += "driver over-temperature pre-warning (die >= ~120 C) " +
+            std::string(otpw_now_ ? "ACTIVE" : "seen") + " " +
+            std::to_string(otpw_events_) + "x (cs=" +
+            std::to_string(cfg_.cs_line) +
+            "): reduce run current or duty cycle";
+  }
+  return text;
+}
+
+bool Tmc5160Driver::RecoverFromChipResetUnlocked(const char* where) {
+  std::uint32_t gstat = 0;
+  if (!ReadRegister(kRegGSTAT, &gstat)) {
+    ReportError(cfg_.spi_device + " cs=" + std::to_string(cfg_.cs_line) +
+                ": GSTAT read failed (" + where + ")");
+    healthy_ = false;
+    return false;
+  }
+  if ((gstat & kGstatReset) == 0U) return true;
+  ++reset_count_;
+  std::cerr << "[tmc5160] " << cfg_.spi_device << " cs=" << cfg_.cs_line
+            << ": chip reset detected on " << where
+            << " (GSTAT=0x" << std::hex << gstat << std::dec
+            << ") -- VM or VCC_IO dropped since the chip was configured;"
+            << " VMAX/TOFF/currents were back at reset defaults, so the motor"
+            << " could not move. Re-initialising (reset #" << reset_count_
+            << " since boot). Check the 12 V motor supply.\n";
+  if (!ReinitializeUnlocked()) {
+    healthy_ = false;
+    return false;
+  }
+  target_ = 0;  // Reinitialize zeroed XACTUAL/XTARGET; the stall lost the position anyway.
+  // ReinitializeUnlocked restored TOFF=3 iff enabled_.
+  return true;
 }
 
 bool Tmc5160Driver::Step(bool direction_forward) {
   std::lock_guard<std::mutex> lock(io_mu_);
   if (!healthy_ || !enabled_) return false;
+
+  if (++steps_since_reset_check_ >= kResetCheckInterval) {
+    steps_since_reset_check_ = 0;
+    if (!RecoverFromChipResetUnlocked("step")) return false;
+    CheckThermalUnlocked();
+  }
 
   const bool physical_forward = direction_forward != cfg_.invert_direction;
   const std::int64_t delta =
