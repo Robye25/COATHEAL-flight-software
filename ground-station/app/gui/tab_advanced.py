@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
 
 from ..protocol import (
     CommandResponse, validate_duty, validate_microstep, validate_move_mm, validate_pid_gains,
-    validate_speed_hz,
+    MAX_SPEED_HZ, validate_speed_hz,
 )
 from ..thermal_presets import PresetStore
 from . import gating
@@ -167,7 +167,7 @@ class AdvancedTab(QScrollArea):
             target = QDoubleSpinBox(); target.setRange(-500.0, 500.0); target.setDecimals(2)
             target.setValue(2.0); target.setSuffix(" mm")
             hold = QDoubleSpinBox(); hold.setRange(0.0, 3600.0); hold.setDecimals(1); hold.setValue(5.0); hold.setSuffix(" s")
-            speed = QSpinBox(); speed.setRange(1, 100); speed.setValue(100); speed.setSuffix(" Hz")
+            speed = QSpinBox(); speed.setRange(1, int(MAX_SPEED_HZ)); speed.setValue(int(MAX_SPEED_HZ)); speed.setSuffix(" Hz")
             for spin, width in ((target, 84), (hold, 60), (speed, 64)):
                 spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
                 spin.setFixedWidth(width)

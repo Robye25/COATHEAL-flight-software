@@ -345,13 +345,17 @@ class ValidatorTests(unittest.TestCase):
         self.assertFalse(validate_tick_hz(5.01)[0])
 
     def test_speed_hz(self) -> None:
-        # The onboard motion envelope is pull.max_step_hz = 100 full-step
-        # Hz; anything above it would be silently clamped onboard, so the
-        # ground station refuses it up front (redesign spec §3 item 2).
+        # The onboard motion envelope is 0.5 mm/s (stepper.max_speed_mm_s),
+        # 50 full-steps/s at the 2 mm lead; anything above it would be
+        # clamped onboard, so the ground station refuses it up front
+        # (redesign spec §3 item 2; owner rule 2026-09-11).
+        from app.protocol import MAX_SPEED_HZ
+        self.assertEqual(MAX_SPEED_HZ, 50.0)
         self.assertTrue(validate_speed_hz(1)[0])
-        self.assertTrue(validate_speed_hz(100)[0])
+        self.assertTrue(validate_speed_hz(50)[0])
         self.assertFalse(validate_speed_hz(0)[0])
-        self.assertFalse(validate_speed_hz(100.5)[0])
+        self.assertFalse(validate_speed_hz(50.5)[0])
+        self.assertFalse(validate_speed_hz(100)[0], "the pre-2026-09-11 100 Hz ceiling must be rejected")
         self.assertFalse(validate_speed_hz(400)[0], "the old Rev-A 400 Hz default must be rejected")
         # Explicit ceiling still honoured for bench use.
         self.assertTrue(validate_speed_hz(400, max_hz=5000.0)[0])
@@ -363,9 +367,13 @@ class ValidatorTests(unittest.TestCase):
             self.assertFalse(validate_microstep(n)[0], msg=f"{n}")
 
     def test_stepper_move(self) -> None:
+        # Raw microstep moves are capped at stepper.max_direct_usteps (1000)
+        # onboard; the mm commands carry longer travel.
         self.assertTrue(validate_stepper_move(100)[0])
-        self.assertTrue(validate_stepper_move(-200000)[0])
-        self.assertFalse(validate_stepper_move(300000)[0])
+        self.assertTrue(validate_stepper_move(-1000)[0])
+        self.assertFalse(validate_stepper_move(1001)[0])
+        self.assertFalse(validate_stepper_move(-200000)[0])
+        self.assertTrue(validate_stepper_move(-200000, max_range=200000)[0])
         self.assertFalse(validate_stepper_move("abc")[0])
 
     def test_revolutions(self) -> None:
