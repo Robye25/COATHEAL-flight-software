@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
 
 from ..protocol import (
     CommandResponse, PullEvent, validate_accel, validate_current_a,
-    validate_move_mm, validate_speed_hz,
+    LEAD_MM_PER_REV, MAX_SPEED_HZ, MAX_SPEED_MM_S, validate_move_mm, validate_speed_hz,
 )
 from ..telemetry_log import utc_now_iso
 from . import gating
@@ -37,7 +37,7 @@ MOTOR_COLORS = ("#2ecc71", "#e67e22")
 # stepper.lead_mm_per_rev). At the commissioning defaults (2 mm lead) the
 # largest jog is 2.5 revolutions.
 JOG_MM = (-0.1, -1.0, -5.0, 0.1, 1.0, 5.0)
-DEFAULT_SPEED_HZ = 100
+DEFAULT_SPEED_HZ = int(MAX_SPEED_HZ)   # the onboard ceiling: 0.5 mm/s at the 2 mm lead
 DEFAULT_BEND_MM = 2.0   # one revolution at the 2 mm default lead
 DEFAULT_HOLD_S = 5.0
 DEFAULT_CURRENT_A = 0.8
@@ -244,9 +244,10 @@ class MotionTab(QScrollArea):
         outer.addWidget(frame)
 
         frame, lay = group_box("Drive settings (per motor)")
-        self.speed = QSpinBox(); self.speed.setRange(1, 100); self.speed.setValue(DEFAULT_SPEED_HZ); self.speed.setSuffix(" Hz")
+        self.speed = QSpinBox(); self.speed.setRange(1, int(MAX_SPEED_HZ)); self.speed.setValue(DEFAULT_SPEED_HZ); self.speed.setSuffix(" Hz")
         self.btn_speed = make_button("SET SPEED", "primary", sends="STEPPER_SET_SPEED <motor_id> <hz>", min_height=24, slot=self._set_speed)
-        s_lbl = QLabel("full-step Hz, 1–100 (pull.max_step_hz) · 100 Hz = 1.0 mm/s at the 2 mm lead"); s_lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
+        s_lbl = QLabel(f"full-step Hz, 1–{int(MAX_SPEED_HZ)} · {int(MAX_SPEED_HZ)} Hz = {MAX_SPEED_MM_S:g} mm/s at the "
+                       f"{LEAD_MM_PER_REV:g} mm lead (stepper.max_speed_mm_s ceiling)"); s_lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         s_lbl.setWordWrap(True)
         lay.addWidget(hrow(self.speed, self.btn_speed, stretch_last=True))
         lay.addWidget(s_lbl)

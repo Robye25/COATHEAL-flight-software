@@ -434,6 +434,10 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
       if (!parse_double(key, value, &config->stepper.lead_mm_per_rev, line_no)) return false;
     } else if (key == "stepper.max_accel_steps_per_s2") {
       if (!parse_double(key, value, &config->stepper.max_accel_steps_per_s2, line_no)) return false;
+    } else if (key == "stepper.max_speed_mm_s") {
+      if (!parse_double(key, value, &config->stepper.max_speed_mm_s, line_no)) return false;
+    } else if (key == "stepper.max_direct_usteps") {
+      if (!parse_i64(key, value, &config->stepper.max_direct_usteps, line_no)) return false;
 
     } else if (key == "pull.max_step_hz") {
       if (!parse_double(key, value, &config->pull.max_step_hz, line_no)) return false;
@@ -840,6 +844,28 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
     return false;
   }
 
+  // Linear speed ceiling: (0, 100] mm/s. Zero would forbid all motion;
+  // anything above 100 mm/s is no ball-screw bend and almost certainly a
+  // unit mix-up (full-steps/s typed into the mm/s key).
+  if (!std::isfinite(config->stepper.max_speed_mm_s) ||
+      config->stepper.max_speed_mm_s <= 0.0 ||
+      config->stepper.max_speed_mm_s > 100.0) {
+    if (error != nullptr) {
+      *error = "stepper.max_speed_mm_s must be in (0, 100] mm/s";
+    }
+    return false;
+  }
+
+  // Raw-microstep command cap: positive, and never wider than the travel
+  // limit it sits inside.
+  if (config->stepper.max_direct_usteps <= 0 ||
+      config->stepper.max_direct_usteps > config->stepper.max_position_steps) {
+    if (error != nullptr) {
+      *error = "stepper.max_direct_usteps must be in (0, stepper.max_position_steps]";
+    }
+    return false;
+  }
+
   if (config->pull.max_step_hz <= 0.0 || config->pull.accel_steps_per_s2 <= 0.0 ||
       config->pull.accel_steps_per_s2 > config->stepper.max_accel_steps_per_s2 ||
       (config->pull.microstep != 1 && config->pull.microstep != 2 &&
@@ -1020,6 +1046,10 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
   }
 
   return true;
+}
+
+double EffectiveMaxStepHz(const OnboardConfig& config) {
+  return std::min(config.pull.max_step_hz, config.stepper.LinearMaxStepHz());
 }
 
 }  // namespace coatheal

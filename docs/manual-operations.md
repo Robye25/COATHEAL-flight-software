@@ -85,15 +85,15 @@ The position in telemetry is the firmware's own counter and advances even
 when the motor does not (a module strapped for STEP/DIR, or a power stage
 that is off). The chip cannot lie: `MOTOR_DEBUG <id>` reads its registers
 live. `mscnt` (0..1023, the microstep sine-table index) advances only when
-the sequencer really steps -- 256 counts per full step, so at 100 full-step
-Hz it wraps about every 4 s; `xactual`/`vactual` are the ramp generator's
+the sequencer really steps -- 256 counts per full step, so it wraps every
+four full steps; `xactual`/`vactual` are the ramp generator's
 position and velocity; `stst=1` means standstill; `drv_enn=1` or `toff=0`
 means the power stage is off; `ola`/`olb` are open-load flags (only valid
 at standstill), `s2ga`/`s2gb` short-to-ground. The console's **Debug tab**
 polls this twice a second and turns the deltas into full-steps/s, rev/s and
 mm/s (using the ball-screw lead you enter), with a verdict line. Expected:
-one revolution = 200 full steps ≈ 1–2 mm of pull; at the default 100 Hz a
-BEND of 800 µsteps (µ4) takes 2 s and moves about 1.5 mm -- easy to miss on
+one revolution = 200 full steps ≈ 1–2 mm of pull; at the 50 Hz ceiling a
+BEND of 800 µsteps (µ4) takes 4 s and moves about 1.5 mm -- easy to miss on
 a camera, obvious in `mscnt`.
 
 ```powershell

@@ -744,13 +744,27 @@ def validate_tick_hz(hz: float) -> Tuple[bool, str]:
     return True, f"{v:.3f}"
 
 
-def validate_speed_hz(hz: float, max_hz: float = 100.0) -> Tuple[bool, str]:
+# Owner motion envelope (2026-09-11), mirrored from the onboard config:
+# stepper.max_speed_mm_s = 0.5 mm/s of ball-screw travel, which at the 2 mm
+# lead and 200 full steps/rev is 50 full-steps/s, and
+# stepper.max_direct_usteps = 1000, the longest raw-microstep move
+# (STEPPER_MOVE / STEPPER_MOVETO / STEPPER_BEND) the onboard accepts.
+# Change these together with config/onboard.example.ini.
+MAX_SPEED_MM_S = 0.5
+LEAD_MM_PER_REV = 2.0
+FULL_STEPS_PER_REV = 200
+MAX_SPEED_HZ = MAX_SPEED_MM_S / LEAD_MM_PER_REV * FULL_STEPS_PER_REV  # 50.0
+MAX_DIRECT_USTEPS = 1000
+
+
+def validate_speed_hz(hz: float, max_hz: float = MAX_SPEED_HZ) -> Tuple[bool, str]:
     """Validate a motor speed in full-step Hz.
 
-    The onboard clamps `STEPPER_SET_SPEED` to `pull.max_step_hz` (100 Hz in
-    the flight config) and NACKs `BENDSEQ_LOAD` speeds above it, so the
-    ground station refuses anything above that bound up front instead of
-    letting a 400 Hz request silently become 100 Hz.
+    The onboard clamps `STEPPER_SET_SPEED` to its speed ceiling (50
+    full-steps/s = 0.5 mm/s at the 2 mm lead in the flight config) and
+    NACKs `BENDSEQ_LOAD` / `FALLBACK_PLAN` speeds above it, so the ground
+    station refuses anything above that bound up front instead of letting
+    a 100 Hz request silently become 50 Hz.
     """
     try:
         v = float(hz)
@@ -767,7 +781,12 @@ def validate_microstep(divisor: int) -> Tuple[bool, str]:
     return True, str(divisor)
 
 
-def validate_stepper_move(steps: int, max_range: int = 200000) -> Tuple[bool, str]:
+def validate_stepper_move(steps: int, max_range: int = MAX_DIRECT_USTEPS) -> Tuple[bool, str]:
+    """Validate a raw-microstep move (STEPPER_MOVE / STEPPER_MOVETO target).
+
+    The onboard refuses anything beyond stepper.max_direct_usteps (1000);
+    longer travel goes through the mm commands.
+    """
     try:
         n = int(steps)
     except (TypeError, ValueError):

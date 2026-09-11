@@ -162,6 +162,10 @@ if "heater.max_duty" in values:
             bad.append(f"heater.max_duty={values['heater.max_duty']} (flight: 1.0)")
     except ValueError:
         bad.append(f"heater.max_duty={values['heater.max_duty']} (unparseable)")
+# Owner rule 2026-09-11: the TMC5160s fly in spreadCycle.
+for key in ("motor0.stealth_chop", "motor1.stealth_chop"):
+    if key in values and truthy(values[key]):
+        bad.append(f"{key}={values[key]} (flight: false = spreadCycle)")
 print("\n".join(bad))
 PY
 )"
@@ -176,7 +180,7 @@ if [[ -n "$FLIGHT_VIOLATIONS" ]]; then
   fi
   printf '\033[1;33m  bench deploy: pass --flight to refuse these values\033[0m\n'
 else
-  echo "    all flight invariants hold (bench mode and simulated backends off, heater.max_duty 1.0)"
+  echo "    all flight invariants hold (bench mode and simulated backends off, heater.max_duty 1.0, spreadCycle)"
 fi
 
 # --- 5b. Boot-time GPIO safe states. Schematic v4 fits no pull resistors on
