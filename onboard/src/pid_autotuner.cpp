@@ -64,6 +64,14 @@ double PidAutoTuner::Tick(bool temp_valid, double temp_c, double now_s) {
   const double high = cfg_.setpoint_c + cfg_.hysteresis_c;
   const double low = cfg_.setpoint_c - cfg_.hysteresis_c;
 
+  // The sample that trips a switch belongs to BOTH phases: it closes the
+  // phase that just ended and is the first sample of the one that starts.
+  // Seeding the new phase's extreme with it (rather than with +/-infinity
+  // and waiting for the next tick) is what makes the measured amplitude the
+  // real one. Started from infinity, the first sample the new phase ever
+  // saw was one whole tick later -- on a plant that moves ~1 °C per tick
+  // that under-read the half-amplitude by about a degree on each side,
+  // and Ku = 4d/(pi*a) then came out far too large (aggressive gains).
   if (relay_on_) {
     trough_c_ = std::min(trough_c_, temp_c);
     if (temp_c >= high) {
@@ -75,7 +83,7 @@ double PidAutoTuner::Tick(bool temp_valid, double temp_c, double now_s) {
       }
       first_on_phase_ = false;
       relay_on_ = false;
-      peak_c_ = std::numeric_limits<double>::lowest();
+      peak_c_ = temp_c;
     }
   } else {
     peak_c_ = std::max(peak_c_, temp_c);
@@ -89,7 +97,7 @@ double PidAutoTuner::Tick(bool temp_valid, double temp_c, double now_s) {
       have_on_switch_ = true;
       last_on_switch_s_ = now_s;
       relay_on_ = true;
-      trough_c_ = std::numeric_limits<double>::max();
+      trough_c_ = temp_c;
 
       const int need = std::max(1, cfg_.cycles);
       if (static_cast<int>(periods_s_.size()) >= need &&

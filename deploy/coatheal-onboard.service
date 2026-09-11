@@ -1,9 +1,11 @@
 [Unit]
 Description=COATHEAL Onboard Flight Software
-After=network-online.target systemd-time-wait-sync.service
+After=network-online.target
 Wants=network-online.target
-# Integration can flap a lot; don't let systemd give up.
-StartLimitIntervalSec=300
+# Never give up: a hung bus or a config that trips the watchdog on every
+# start would otherwise exhaust the burst and leave the unit failed (no
+# heater control, no telemetry) for the rest of the flight.
+StartLimitIntervalSec=0
 StartLimitBurst=20
 
 [Service]

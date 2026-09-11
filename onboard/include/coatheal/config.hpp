@@ -253,8 +253,10 @@ struct MotorConfig {
 };
 
 struct HalConfig {
-  // The final pinout has no status LEDs. Keep both disabled so their old
-  // defaults, BCM 17 and BCM 27, remain available for heater channels.
+  // The final pinout (schematic v4) has no status LEDs. Keep both disabled:
+  // their old default lines now belong to other owners -- BCM 17 is the
+  // Sequent RTD HAT's RS485_DIR (reserved) and BCM 27 is motor 1's
+  // chip-select (motor1.cs_line) -- so enabling either would collide.
   bool status_led_enabled = false;
   bool mode_led_enabled = false;
   std::size_t status_led_line = 17;  // heartbeat

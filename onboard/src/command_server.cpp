@@ -33,6 +33,40 @@ void CloseFd(int* fd) {
   *fd = -1;
 }
 
+// A client gets this long to deliver its one command line, and this long
+// again to take the reply. The server is single-threaded: without a bound,
+// a peer that connects and goes quiet -- a link drop mid-command, a laptop
+// that went to sleep, an `nc` left open -- would hold the listener for the
+// rest of the flight and every later command (HEATERS_OFF included) would
+// queue behind it, unanswered.
+constexpr int kClientTimeoutMs = 5000;
+// Longest command line accepted before the client is dropped.
+constexpr std::size_t kMaxLineBytes = 4096;
+
+#if !defined(_WIN32) && defined(MSG_NOSIGNAL)
+// A peer that reset the connection must not raise SIGPIPE in the flight
+// process; EPIPE from send() is handled like any other write failure.
+constexpr int kSendFlags = MSG_NOSIGNAL;
+#else
+constexpr int kSendFlags = 0;
+#endif
+
+void SetClientTimeouts(int fd) {
+#ifdef _WIN32
+  const DWORD timeout = static_cast<DWORD>(kClientTimeoutMs);
+  setsockopt(static_cast<SOCKET>(fd), SOL_SOCKET, SO_RCVTIMEO,
+             reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+  setsockopt(static_cast<SOCKET>(fd), SOL_SOCKET, SO_SNDTIMEO,
+             reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+#else
+  timeval tv{};
+  tv.tv_sec = kClientTimeoutMs / 1000;
+  tv.tv_usec = (kClientTimeoutMs % 1000) * 1000;
+  setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+  setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+#endif
+}
+
 }  // namespace
 
 CommandServer::CommandServer(int port) : port_(port) {
@@ -135,6 +169,13 @@ void CommandServer::RunLoop() {
 }
 
 void CommandServer::HandleClient(int client_fd, const std::string& peer_ip) {
+  // One command per connection, exactly as docs/protocol.md promises: read
+  // one line, reply once, return (the caller closes the socket). Every
+  // ground-station client already opens a fresh connection per command;
+  // bounding each connection this way is what keeps one stuck client from
+  // wedging the command path for the whole flight.
+  SetClientTimeouts(client_fd);
+
   std::string buffer;
   buffer.reserve(1024);
 
@@ -146,40 +187,44 @@ void CommandServer::HandleClient(int client_fd, const std::string& peer_ip) {
     const int n = static_cast<int>(recv(client_fd, chunk, sizeof(chunk), 0));
 #endif
     if (n <= 0) {
-      break;
+      return;  // peer closed, error, or the receive timeout expired
     }
 
     buffer.append(chunk, chunk + n);
-
-    std::size_t pos = 0;
-    while ((pos = buffer.find('\n')) != std::string::npos) {
-      std::string line = buffer.substr(0, pos);
-      buffer.erase(0, pos + 1);
-      if (!line.empty() && line.back() == '\r') {
-        line.pop_back();
+    const std::size_t pos = buffer.find('\n');
+    if (pos == std::string::npos) {
+      if (buffer.size() > kMaxLineBytes) {
+        return;  // no newline in 4 KiB: not a command line
       }
-
-      std::string response = "NACK,UNKNOWN,internal error";
-      if (handler_) {
-        response = handler_(line, peer_ip);
-      }
-      response.push_back('\n');
-
-      const char* ptr = response.c_str();
-      std::size_t remain = response.size();
-      while (remain > 0) {
-#ifdef _WIN32
-        const int sent = send(static_cast<SOCKET>(client_fd), ptr, static_cast<int>(remain), 0);
-#else
-        const int sent = static_cast<int>(send(client_fd, ptr, remain, 0));
-#endif
-        if (sent <= 0) {
-          return;
-        }
-        ptr += sent;
-        remain -= static_cast<std::size_t>(sent);
-      }
+      continue;
     }
+
+    std::string line = buffer.substr(0, pos);
+    if (!line.empty() && line.back() == '\r') {
+      line.pop_back();
+    }
+
+    std::string response = "NACK,UNKNOWN,internal error";
+    if (handler_) {
+      response = handler_(line, peer_ip);
+    }
+    response.push_back('\n');
+
+    const char* ptr = response.c_str();
+    std::size_t remain = response.size();
+    while (remain > 0) {
+#ifdef _WIN32
+      const int sent = send(static_cast<SOCKET>(client_fd), ptr, static_cast<int>(remain), 0);
+#else
+      const int sent = static_cast<int>(send(client_fd, ptr, remain, kSendFlags));
+#endif
+      if (sent <= 0) {
+        return;
+      }
+      ptr += sent;
+      remain -= static_cast<std::size_t>(sent);
+    }
+    return;  // replied once; the caller closes the connection
   }
 }
 

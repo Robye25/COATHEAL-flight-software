@@ -5,6 +5,22 @@ if(PkgConfig_FOUND)
   pkg_check_modules(LIBGPIOD QUIET libgpiod)
 endif()
 
+# A flight build must not silently lose GPIO: without libgpiod the heater and
+# motor HALs compile to stubs and the binary "runs" with no outputs at all.
+# deploy_onboard.sh configures with -DCOATHEAL_REQUIRE_LIBGPIOD=ON; desktop
+# builds and the unit tests keep the optional behaviour.
+option(COATHEAL_REQUIRE_LIBGPIOD "Fail to configure when libgpiod is not found" OFF)
+if(COATHEAL_REQUIRE_LIBGPIOD AND NOT LIBGPIOD_FOUND)
+  message(FATAL_ERROR
+    "libgpiod not found (pkg-config libgpiod). Install libgpiod-dev and pkg-config, "
+    "or configure with -DCOATHEAL_REQUIRE_LIBGPIOD=OFF for a no-hardware build.")
+endif()
+if(LIBGPIOD_FOUND)
+  message(STATUS "libgpiod ${LIBGPIOD_VERSION}: GPIO outputs enabled")
+else()
+  message(WARNING "libgpiod not found: building WITHOUT GPIO (heaters/motors are stubs)")
+endif()
+
 add_library(coatheal_onboard_core
   src/command_parser.cpp
   src/command_server.cpp
@@ -64,6 +80,12 @@ if(LIBGPIOD_FOUND)
   target_compile_definitions(coatheal_onboard_core PUBLIC COATHEAL_HAS_LIBGPIOD=1)
   if(LIBGPIOD_VERSION VERSION_GREATER_EQUAL "2.0")
     target_compile_definitions(coatheal_onboard_core PUBLIC COATHEAL_LIBGPIOD_V2=1)
+  endif()
+  # Pull-bias request flags arrived in libgpiod 1.5 (v2 has them in the
+  # line-settings API). Older v1 builds still get the outputs, just without
+  # the pull -- see GpioBias in hal/gpio_output.hpp.
+  if(LIBGPIOD_VERSION VERSION_GREATER_EQUAL "1.5")
+    target_compile_definitions(coatheal_onboard_core PUBLIC COATHEAL_LIBGPIOD_HAS_BIAS=1)
   endif()
   target_include_directories(coatheal_onboard_core PUBLIC ${LIBGPIOD_INCLUDE_DIRS})
   target_link_libraries(coatheal_onboard_core PUBLIC ${LIBGPIOD_LIBRARIES})

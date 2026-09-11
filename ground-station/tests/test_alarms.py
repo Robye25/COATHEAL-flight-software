@@ -74,6 +74,19 @@ class EvaluateTests(unittest.TestCase):
         # Under 80 %: quiet.
         low = {a.key for a in evaluate(state(ctrl="fallback:0|queue:0|energy_wh:10.0|budget_wh:130.0"))}
         self.assertNotIn("ENERGY", low)
+        # rtc_valid=1 in the frame: no clock alarm.
+        self.assertNotIn("RTC", low)
+
+    def test_unsynchronised_onboard_clock_is_an_amber_alarm(self) -> None:
+        # The onboard derives rtc_valid (no RTC on schematic v4); 0 means
+        # its clock has not been NTP-synced since boot -- a warning, since
+        # gs_rx_utc keeps the log timeline, never a red.
+        unsynced = frame().replace(",2026-08-28T00:00:00Z,1,", ",2026-08-28T00:00:00Z,0,", 1)
+        st = state_from_packet(parse_telemetry_csv(unsynced), link_age_s=0.5)
+        self.assertFalse(st.rtc_valid)
+        alarms = {a.key: a for a in evaluate(st)}
+        self.assertEqual(alarms["RTC"].severity, "amber")
+        self.assertIn("gs_rx_utc", alarms["RTC"].text)
 
     def test_pid_tune_raises_amber_chip(self) -> None:
         tuning = {a.key: a for a in evaluate(state(ctrl="fallback:0|queue:0|tune:H4"))}

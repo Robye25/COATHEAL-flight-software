@@ -1,5 +1,6 @@
 #include "coatheal/hal/gpio_output.hpp"
 
+#include <iostream>
 #include <memory>
 
 #ifdef COATHEAL_HAS_LIBGPIOD
@@ -20,10 +21,93 @@ struct GpioOutput {
 #endif
 };
 
+namespace {
+
+#ifdef COATHEAL_HAS_LIBGPIOD
+
+void WarnBiasUnsupported(const std::string& chip_path, std::size_t offset) {
+  std::cerr << "[gpio] " << chip_path << " line " << offset
+            << ": pull bias not supported by this kernel/libgpiod; line"
+            << " claimed without it (its idle level while unclaimed now"
+            << " depends on config.txt gpio= alone)" << '\n';
+}
+
+#ifdef COATHEAL_LIBGPIOD_V2
+
+// One request attempt with (or without) a bias. Returns null on failure and
+// leaves the chip open for the caller to retry or close.
+gpiod_line_request* RequestOutputV2(gpiod_chip* chip,
+                                    unsigned int line_offset,
+                                    const char* consumer,
+                                    bool initial_value,
+                                    GpioBias bias) {
+  auto* settings = gpiod_line_settings_new();
+  auto* line_config = gpiod_line_config_new();
+  auto* request_config = gpiod_request_config_new();
+  gpiod_line_request* request = nullptr;
+  if (settings != nullptr && line_config != nullptr &&
+      request_config != nullptr) {
+    const auto initial = initial_value ? GPIOD_LINE_VALUE_ACTIVE
+                                       : GPIOD_LINE_VALUE_INACTIVE;
+    bool configured =
+        gpiod_line_settings_set_direction(
+            settings, GPIOD_LINE_DIRECTION_OUTPUT) == 0 &&
+        gpiod_line_settings_set_output_value(settings, initial) == 0;
+    if (configured && bias != GpioBias::kAsIs) {
+      configured = gpiod_line_settings_set_bias(
+                       settings, bias == GpioBias::kPullUp
+                                     ? GPIOD_LINE_BIAS_PULL_UP
+                                     : GPIOD_LINE_BIAS_PULL_DOWN) == 0;
+    }
+    configured = configured &&
+                 gpiod_line_config_add_line_settings(
+                     line_config, &line_offset, 1, settings) == 0;
+    gpiod_request_config_set_consumer(request_config, consumer);
+    if (configured) {
+      request = gpiod_chip_request_lines(chip, request_config, line_config);
+    }
+  }
+  if (request_config != nullptr) gpiod_request_config_free(request_config);
+  if (line_config != nullptr) gpiod_line_config_free(line_config);
+  if (settings != nullptr) gpiod_line_settings_free(settings);
+  return request;
+}
+
+#else  // libgpiod v1
+
+int RequestOutputV1(gpiod_line* line,
+                    const char* consumer,
+                    bool initial_value,
+                    GpioBias bias,
+                    bool* bias_applied) {
+  *bias_applied = false;
+#ifdef COATHEAL_LIBGPIOD_HAS_BIAS
+  if (bias != GpioBias::kAsIs) {
+    const int flags = bias == GpioBias::kPullUp
+                          ? GPIOD_LINE_REQUEST_FLAG_BIAS_PULL_UP
+                          : GPIOD_LINE_REQUEST_FLAG_BIAS_PULL_DOWN;
+    if (gpiod_line_request_output_flags(line, consumer, flags,
+                                        initial_value ? 1 : 0) == 0) {
+      *bias_applied = true;
+      return 0;
+    }
+  }
+#else
+  (void)bias;
+#endif
+  return gpiod_line_request_output(line, consumer, initial_value ? 1 : 0);
+}
+
+#endif  // COATHEAL_LIBGPIOD_V2
+#endif  // COATHEAL_HAS_LIBGPIOD
+
+}  // namespace
+
 GpioOutput* RequestGpioOutput(const std::string& chip_path,
                               std::size_t offset,
                               const char* consumer,
-                              bool initial_value) {
+                              bool initial_value,
+                              GpioBias bias) {
 #ifdef COATHEAL_HAS_LIBGPIOD
   auto output = std::make_unique<GpioOutput>();
   output->chip = gpiod_chip_open(chip_path.c_str());
@@ -32,42 +116,16 @@ GpioOutput* RequestGpioOutput(const std::string& chip_path,
   }
 
 #ifdef COATHEAL_LIBGPIOD_V2
-  auto* settings = gpiod_line_settings_new();
-  auto* line_config = gpiod_line_config_new();
-  auto* request_config = gpiod_request_config_new();
-  if (settings == nullptr || line_config == nullptr || request_config == nullptr) {
-    if (request_config != nullptr) {
-      gpiod_request_config_free(request_config);
-    }
-    if (line_config != nullptr) {
-      gpiod_line_config_free(line_config);
-    }
-    if (settings != nullptr) {
-      gpiod_line_settings_free(settings);
-    }
-    gpiod_chip_close(output->chip);
-    return nullptr;
-  }
-
-  const auto initial = initial_value ? GPIOD_LINE_VALUE_ACTIVE
-                                     : GPIOD_LINE_VALUE_INACTIVE;
   const unsigned int line_offset = static_cast<unsigned int>(offset);
-  const bool configured =
-      gpiod_line_settings_set_direction(
-          settings, GPIOD_LINE_DIRECTION_OUTPUT) == 0 &&
-      gpiod_line_settings_set_output_value(settings, initial) == 0 &&
-      gpiod_line_config_add_line_settings(
-          line_config, &line_offset, 1, settings) == 0;
-  gpiod_request_config_set_consumer(request_config, consumer);
-  if (configured) {
-    output->request =
-        gpiod_chip_request_lines(output->chip, request_config, line_config);
-    output->offset = line_offset;
+  output->request = RequestOutputV2(output->chip, line_offset, consumer,
+                                    initial_value, bias);
+  if (output->request == nullptr && bias != GpioBias::kAsIs) {
+    // Best effort (see the header): keep the output, lose the pull.
+    output->request = RequestOutputV2(output->chip, line_offset, consumer,
+                                      initial_value, GpioBias::kAsIs);
+    if (output->request != nullptr) WarnBiasUnsupported(chip_path, offset);
   }
-
-  gpiod_request_config_free(request_config);
-  gpiod_line_config_free(line_config);
-  gpiod_line_settings_free(settings);
+  output->offset = line_offset;
   if (output->request == nullptr) {
     gpiod_chip_close(output->chip);
     return nullptr;
@@ -75,11 +133,15 @@ GpioOutput* RequestGpioOutput(const std::string& chip_path,
 #else
   output->line =
       gpiod_chip_get_line(output->chip, static_cast<unsigned int>(offset));
+  bool bias_applied = false;
   if (output->line == nullptr ||
-      gpiod_line_request_output(output->line, consumer,
-                                initial_value ? 1 : 0) < 0) {
+      RequestOutputV1(output->line, consumer, initial_value, bias,
+                      &bias_applied) < 0) {
     gpiod_chip_close(output->chip);
     return nullptr;
+  }
+  if (bias != GpioBias::kAsIs && !bias_applied) {
+    WarnBiasUnsupported(chip_path, offset);
   }
 #endif
 
@@ -89,6 +151,7 @@ GpioOutput* RequestGpioOutput(const std::string& chip_path,
   (void)offset;
   (void)consumer;
   (void)initial_value;
+  (void)bias;
   return nullptr;
 #endif
 }

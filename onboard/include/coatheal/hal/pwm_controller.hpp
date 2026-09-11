@@ -8,6 +8,8 @@
 #include <thread>
 #include <vector>
 
+#include "coatheal/hal/gpio_output.hpp"
+
 namespace coatheal {
 
 // Renders ONE software-PWM period of `slices` slices across `channels`
@@ -110,6 +112,13 @@ class LibgpiodPwmController : public PwmController {
   bool WriteLine(std::size_t channel, bool on);
   void RetryMissingLines();
   void AllOff();
+  // Pull toward the heater-OFF level so an unclaimed line (service stopped
+  // or restarting) cannot float into ON: schematic v4 has no external
+  // pull-downs on the EKM014 inputs, and BCM 5/6 (H4/H3) power on with the
+  // SoC's default pull-UP. See GpioBias in hal/gpio_output.hpp.
+  GpioBias OffBias() const {
+    return active_high_ ? GpioBias::kPullDown : GpioBias::kPullUp;
+  }
 };
 
 }  // namespace coatheal

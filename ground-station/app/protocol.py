@@ -241,12 +241,20 @@ def parse_telemetry_csv(line: str) -> TelemetryPacket:
         raise TelemetryParseError("missing DATA prefix")
 
     session_id = parts[1]
-    seq = int(parts[2])
     timestamp = parts[3]
-    rtc_valid = int(parts[4])
-    ambient_temp_c = float(parts[5])
-    ambient_pressure_mbar = float(parts[6])
-    uv = float(parts[7])
+    # Every conversion below must surface as TelemetryParseError: the
+    # receivers catch exactly that, and a bare ValueError escaping here used
+    # to kill the receiver thread -- with the offending frame left
+    # unacknowledged at the head of the onboard queue, to be re-sent on
+    # every reconnect.
+    try:
+        seq = int(parts[2])
+        rtc_valid = int(parts[4])
+        ambient_temp_c = float(parts[5])
+        ambient_pressure_mbar = float(parts[6])
+        uv = float(parts[7])
+    except ValueError as exc:
+        raise TelemetryParseError(f"invalid DATA prefix field: {exc}") from exc
 
     heater_field_index = None
     for idx, token in enumerate(parts):
@@ -260,10 +268,16 @@ def parse_telemetry_csv(line: str) -> TelemetryPacket:
     # Everything between the fixed prefix (index 8) and HEATER_DUTY= is a
     # sample temperature. Sample count is inferred — works for any N.
     sample_tokens = parts[8:heater_field_index]
-    sample_temps_c = [float(x) for x in sample_tokens]
+    try:
+        sample_temps_c = [float(x) for x in sample_tokens]
+    except ValueError as exc:
+        raise TelemetryParseError(f"invalid sample temperature: {exc}") from exc
 
     heater_values_text = parts[heater_field_index].split('=', 1)[1]
-    heater_duty = [float(x) for x in heater_values_text.split('|') if x != ""]
+    try:
+        heater_duty = [float(x) for x in heater_values_text.split('|') if x != ""]
+    except ValueError as exc:
+        raise TelemetryParseError(f"invalid HEATER_DUTY value: {exc}") from exc
 
     phase = ""
     status = ""
@@ -394,6 +408,40 @@ def parse_telemetry_csv(line: str) -> TelemetryPacket:
 
 def build_ack(session_id: str, seq: int) -> str:
     return f"ACK,{session_id},{seq}\n"
+
+
+def ack_for_raw_line(line: str) -> Optional[str]:
+    """The ACK for a frame that could not be parsed, when its identity can
+    still be read off the raw line: `DATA,<session>,<seq>,...` acks that
+    seq, `EVT,<kind>,<session>,...` acks seq 0 (the event convention).
+    None when not even that much is intact. Acknowledging what cannot be
+    parsed is what lets the onboard drop the frame from its durable queue
+    instead of re-sending it on every reconnect for the rest of the
+    flight; the raw line goes to the event log so nothing is lost."""
+    parts = [p.strip() for p in line.strip().split(",")]
+    if len(parts) >= 3 and parts[0] == "DATA" and parts[1] and parts[2].isdigit():
+        return build_ack(parts[1], int(parts[2]))
+    if len(parts) >= 3 and parts[0] == "EVT" and parts[2]:
+        return build_ack(parts[2], 0)
+    return None
+
+
+def recv_reply_line(sock, max_bytes: int = 65536) -> str:
+    """Read one newline-terminated command reply. A single recv() can return
+    a partial reply (the longer CHECK/STATUS/MOTOR_DEBUG bodies), so read
+    until the newline, EOF, or `max_bytes`. Socket timeouts propagate."""
+    chunks: list[bytes] = []
+    total = 0
+    while total < max_bytes:
+        data = sock.recv(4096)
+        if not data:
+            break
+        chunks.append(data)
+        total += len(data)
+        if b"\n" in data:
+            break
+    raw = b"".join(chunks).decode("utf-8", errors="replace")
+    return raw.split("\n", 1)[0].strip()
 
 
 def build_command(command: str) -> str:

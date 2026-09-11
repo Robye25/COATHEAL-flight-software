@@ -141,6 +141,28 @@ class ConsoleTabTests(unittest.TestCase):
         self.assertIsNone(self.win._thermal.targets()[1])
         self.assertEqual(self.win._thermal.rows[0].target.maximum(), 60.0, "limits come from GET_THERMAL")
 
+    def test_thermal_targets_follow_external_clears(self) -> None:
+        from app.protocol import CommandResponse
+        self.feed()
+        thermal = self.win._thermal
+        disp = self.win._dispatcher
+        ok = lambda verb, body="ok": CommandResponse(ok=True, command=verb, body=body, raw="")  # noqa: E731
+        disp.response_received.emit("SET_ALL_TEMP_TARGETS 30", ok("SET_ALL_TEMP_TARGETS"), 5.0, self.win._system)
+        self.assertEqual(thermal.targets(), [30.0] * 6, "targets set from another tab must be mirrored")
+        # The panic button lives on the top panel: its ACK clears every
+        # target onboard (protocol.md), so no row may keep saying PID.
+        disp.response_received.emit("HEATERS_OFF", ok("HEATERS_OFF", "all heaters disabled"), 5.0, self.win._top)
+        self.assertEqual(thermal.targets(), [None] * 6)
+        disp.response_received.emit("SET_TEMP_TARGET 2 25", ok("SET_TEMP_TARGET"), 5.0, thermal)
+        self.assertEqual(thermal.targets()[2], 25.0)
+        disp.response_received.emit("SET_HEATER_DUTY 2 0.100", ok("SET_HEATER_DUTY"), 5.0, self.win._system)
+        self.assertIsNone(thermal.targets()[2], "a duty override clears that channel's target onboard")
+        # A NACK changes nothing.
+        disp.response_received.emit("SET_ALL_TEMP_TARGETS 40",
+                                    CommandResponse(ok=False, command="SET_ALL_TEMP_TARGETS", error="RUN mode required", raw=""),
+                                    5.0, thermal)
+        self.assertEqual(thermal.targets(), [None] * 6)
+
     # ── System tab ──
     def test_mode_buttons_follow_mode(self) -> None:
         system = self.win._system

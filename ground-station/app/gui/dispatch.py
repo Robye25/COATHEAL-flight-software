@@ -26,10 +26,12 @@ from ..protocol import (
     PullEvent,
     TelemetryPacket,
     TelemetryParseError,
+    ack_for_raw_line,
     build_ack,
     parse_command_response,
     parse_pull_event,
     parse_telemetry_csv,
+    recv_reply_line,
     timeout_for,
 )
 from ..reply_format import parse_kv_body
@@ -67,7 +69,10 @@ class TelemetryReceiver(QThread):
     session_opened     = pyqtSignal(str, str)  # (session_id, directory path)
 
     _STALE_EMIT_S   = 5.0  # emit "stale" status when DATA frames older than this
-    _DATA_TIMEOUT_S = 8.0  # idle window before we force-close the onboard socket
+    # Idle window before the onboard socket is force-closed. Must exceed the
+    # slowest legal tick (SET_TICK_HZ 0.1 = one frame per 10 s) or the
+    # receiver would drop a healthy connection between every two frames.
+    _DATA_TIMEOUT_S = 12.0
     # The ACK cursor used to be rewritten on every frame (5 writes/s at the
     # top tick rate); once a second is plenty for a crash-recovery hint.
     _CURSOR_MIN_INTERVAL_S = 1.0
@@ -216,9 +221,9 @@ class TelemetryReceiver(QThread):
                 if line.startswith("EVT,PULL,"):
                     try:
                         ev = parse_pull_event(line)
-                    except TelemetryParseError as exc:
-                        self.parse_errors += 1
-                        self.log_message.emit(f"[parse-error] {exc}")
+                    except Exception as exc:  # parse error of any shape
+                        if not self._ack_unparseable(conn, line, exc):
+                            return
                         continue
                     try:
                         conn.sendall(build_ack(ev.session_id, 0).encode("utf-8"))
@@ -234,9 +239,12 @@ class TelemetryReceiver(QThread):
                     continue
                 try:
                     pkt = parse_telemetry_csv(line)
-                except TelemetryParseError as exc:
-                    self.parse_errors += 1
-                    self.log_message.emit(f"[parse-error] {exc}")
+                except Exception as exc:  # TelemetryParseError, or anything else
+                    # Never let one bad line take the receiver down: the
+                    # thread would die, and the un-ACKed frame would be
+                    # re-sent by the onboard on every reconnect.
+                    if not self._ack_unparseable(conn, line, exc):
+                        return
                     continue
 
                 seen = self._received_by_session.get(pkt.session_id)
@@ -266,6 +274,22 @@ class TelemetryReceiver(QThread):
 
                 self.packet_received.emit(pkt)
 
+    def _ack_unparseable(self, conn: socket.socket, line: str, exc: Exception) -> bool:
+        """Log an unparseable frame, keep its raw text, and ACK whatever
+        identity can be read off it so the onboard drops it from its queue.
+        Returns False only when the socket is gone."""
+        self.parse_errors += 1
+        self.log_message.emit(f"[parse-error] {exc}")
+        self._logs.log_event("WARN", f"unparseable frame ({exc}): {line}")
+        ack = ack_for_raw_line(line)
+        if ack is None:
+            return True
+        try:
+            conn.sendall(ack.encode("utf-8"))
+        except OSError:
+            return False
+        return True
+
 
 # ── async command dispatcher ─────────────────────────────────────────────────
 @dataclass
@@ -294,8 +318,7 @@ class _SendJob(QRunnable):
         try:
             with socket.create_connection((self._host, self._port), timeout=self._timeout) as s:
                 s.sendall(payload)
-                data = s.recv(4096)
-            raw = data.decode("utf-8", errors="replace").strip()
+                raw = recv_reply_line(s)
             resp = parse_command_response(raw) if raw else CommandResponse(
                 ok=False, command=self._cmd, error="empty reply", raw="")
         except Exception as exc:

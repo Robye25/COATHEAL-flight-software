@@ -38,7 +38,17 @@ class CheckoutTests(unittest.TestCase):
         self.assertEqual(it["energy"].note, "12.4 / 130 Wh")
         self.assertEqual(it["mode"].color, "green")
         self.assertEqual(it["alarms"].color, "green")
+        self.assertEqual(it["rtc"].color, "green")
         self.assertGreaterEqual(len(greens), 9)
+
+    def test_unsynchronised_clock_is_amber_not_a_no_go(self) -> None:
+        # rtc_valid is derived onboard (no RTC exists); a bench without an
+        # NTP source reports 0 for the whole session. Amber with a note, so
+        # the operator sees it without the checklist reading as a no-go.
+        line = GOOD.replace(",2026-08-28T00:00:00Z,1,", ",2026-08-28T00:00:00Z,0,", 1)
+        it = items(line)
+        self.assertEqual(it["rtc"].color, "amber")
+        self.assertIn("GS time authoritative", it["rtc"].note)
 
     def test_degradations(self) -> None:
         line = GOOD.replace("MODE=RUN", "MODE=STANDBY").replace("1,2,3,4,5,6,7,8,", "1,nan,3,4,5,6,7,8,") \

@@ -20,7 +20,9 @@ from .widgets import (
     group_box, hrow, make_button,
 )
 
-PHASES = ["BOOT", "ASCENT", "PRE_FLOAT", "FLOAT", "DESCENT", "LANDED", "STOPPED"]
+# STOPPED is deliberately absent: the onboard refuses it (it would end the
+# control loop and systemd would restart a disarmed instance).
+PHASES = ["BOOT", "ASCENT", "PRE_FLOAT", "FLOAT", "DESCENT", "LANDED"]
 CHECK_TARGETS = ["ALL", "DPS310", "ADS1115", "SEQUENT_RTD", "MAX31865", "PWM", "MOTOR0", "MOTOR1", "STORAGE", "COMMS"]
 
 
@@ -145,7 +147,8 @@ class SystemTab(QScrollArea):
         # -- Shutdown --------------------------------------------------------
         frame, lay = group_box("Shutdown")
         self.btn_shutdown = make_button("SHUTDOWN SAFE", "danger", sends="SHUTDOWN_SAFE", slot=self._shutdown)
-        lbl = QLabel("bench / post-landing only — flushes logs and stops the onboard process")
+        lbl = QLabel("safe for power-off: heaters off, overrides cleared, motors disabled, logs synced "
+                     "(the onboard keeps running)")
         lbl.setWordWrap(True); lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(hrow(self.btn_shutdown, lbl, stretch_last=True))
         self.resp_shutdown = ResponseLine()
@@ -199,7 +202,9 @@ class SystemTab(QScrollArea):
             self._send("RESET_CTRL")
 
     def _shutdown(self) -> None:
-        if confirm(self, "Shut down the onboard?", "Send SHUTDOWN_SAFE? Heaters off, logs flushed, onboard process stops."):
+        if confirm(self, "Make the onboard safe for power-off?",
+                   "Send SHUTDOWN_SAFE? Heaters off and every override cleared, motors stopped and disabled, "
+                   "logs synced. The onboard process keeps running."):
             self._send("SHUTDOWN_SAFE")
 
     # -- inputs ------------------------------------------------------------------

@@ -1,10 +1,21 @@
 #include "coatheal/config.hpp"
 #include "coatheal/system_controller.hpp"
 
+#include <csignal>
 #include <iostream>
 #include <string>
 
 int main(int argc, char** argv) {
+#ifndef _WIN32
+  // A peer that resets a TCP connection makes the next write on that socket
+  // raise SIGPIPE, whose default action terminates the process. The flight
+  // software must survive a ground station going away mid-write: ignore the
+  // signal so send() reports EPIPE and the socket is closed like any other
+  // failure. (The socket code also passes MSG_NOSIGNAL where available;
+  // this is the belt to that pair of braces.)
+  std::signal(SIGPIPE, SIG_IGN);
+#endif
+
   std::string config_path = "config/onboard.example.ini";
   bool check_config = false;
 

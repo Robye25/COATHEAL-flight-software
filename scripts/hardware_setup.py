@@ -47,12 +47,14 @@ FINAL_PIN_VALUES = {
     "sensor.sequent_rtd_resistance_min_ohm": "60.0",
     "sensor.sequent_rtd_resistance_max_ohm": "390.0",
     "sensor.sequent_rtd_crosscheck_tol_c": "2.0",
-    # MAX31865 dual-click sample-resistance instrument (schematic v3).
+    # MAX31865 dual-click sample-resistance instrument (schematic v3/v4).
     # Device paths are fixed by hardware (CE1/GP07 = click 0 = SAMPLE1 =
     # /dev/spidev0.1; CE0/GP08 = click 1 = SAMPLE2 = /dev/spidev0.0), not
-    # configurable. sample_indices "0,4" is an OWNER-FLAGGED PLACEHOLDER:
-    # first specimen of each motor group -- update once the real
-    # commissioning mapping from the coating bench is known.
+    # configurable. sample_indices "0,4" is the owner decision of
+    # 2026-08-29: resistance is measured on exactly two specimens, the first
+    # of each motor group (S0 on motor 0, S4 on motor 1). The ground
+    # station mirrors the same pair in app/gui/state.py RESISTANCE_SAMPLES;
+    # change both together.
     "sensor.max31865_reference_ohm": "470.0",
     "sensor.max31865_poll_ms": "1000",
     "sensor.max31865_sample_indices": "0,4",
@@ -508,6 +510,133 @@ def _load_config(path: Path) -> tuple[str, dict[str, str]]:
     return text, _ini_values(text)
 
 
+# --- Boot-time GPIO states (config.txt `gpio=` directives) -----------------
+#
+# Schematic v4 fits no external pull resistors to the EKM014 heater inputs
+# or the TMC5160 CS/EN lines, and the Pi powers on with pull-UP on BCM 0-8
+# and pull-DOWN on BCM 9-27. So until the service claims its lines, HEATER3
+# and HEATER4 (BCM 6/5) idle HIGH and both motor chip-selects and enables
+# (BCM 22/27, 20/21) idle LOW -- heaters that may be on, drivers selected and
+# enabled. The firmware applies `gpio=` lines from config.txt before the
+# kernel boots, which is the earliest anything under software control can
+# act. These helpers derive that block from the same INI the service runs
+# on, so the two can never disagree; deploy_onboard.sh installs it.
+
+BOOT_GPIO_BEGIN = "# >>> COATHEAL boot-time GPIO states (managed by deploy_onboard.sh; hand edits are overwritten) >>>"
+BOOT_GPIO_END = "# <<< COATHEAL boot-time GPIO states <<<"
+
+
+def _ini_bool(values: dict[str, str], key: str, default: bool) -> bool:
+    raw = values.get(key)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def boot_gpio_lines(values: dict[str, str]) -> list[str]:
+    """`gpio=` directives holding every heater OFF and every TMC5160
+    deselected + disabled from firmware boot, derived from the INI values.
+
+    Output/level/pull are set together on one line per state so a line is
+    self-contained: `op,dl,pd` = output, driven low, pulled down (the pull
+    is what keeps the level after the kernel's pinctrl reverts a released
+    line to input)."""
+    by_state: dict[str, set[int]] = {}
+
+    def add(pin_text: str, key: str, state: str) -> None:
+        pin = int(pin_text.strip(), 0)
+        if not 0 <= pin <= 27:
+            raise ValueError(f"{key}: BCM {pin} is outside the 40-pin header range 0-27")
+        by_state.setdefault(state, set()).add(pin)
+
+    heater_lines = values.get("heater.output_lines", "")
+    if not heater_lines.strip():
+        raise ValueError("heater.output_lines is missing; cannot derive boot GPIO states")
+    heater_off = "op,dl,pd" if _ini_bool(values, "heater.active_high", True) else "op,dh,pu"
+    for piece in heater_lines.split(","):
+        if piece.strip():
+            add(piece, "heater.output_lines", heater_off)
+
+    for motor in ("motor0", "motor1"):
+        cs = values.get(f"{motor}.cs_line", "").strip()
+        en = values.get(f"{motor}.enable_line", "").strip()
+        if cs:
+            add(cs, f"{motor}.cs_line", "op,dh,pu")       # CS is active-low: deselected
+        if en:
+            en_off = ("op,dh,pu" if _ini_bool(values, f"{motor}.enable_active_low", True)
+                      else "op,dl,pd")
+            add(en, f"{motor}.enable_line", en_off)
+
+    lines: list[str] = []
+    for state in ("op,dl,pd", "op,dh,pu", "op,dh,pd", "op,dl,pu"):
+        pins = by_state.get(state)
+        if pins:
+            lines.append(f"gpio={','.join(str(p) for p in sorted(pins))}={state}")
+    return lines
+
+
+def render_boot_gpio_block(lines: list[str]) -> str:
+    body = "\n".join([
+        BOOT_GPIO_BEGIN,
+        "# Schematic v4 has no external pull resistors: hold the EKM014 heater inputs",
+        "# OFF and the TMC5160 chip-selects/enables deselected/disabled from firmware",
+        "# boot until coatheal-onboard claims them. Derived from config/onboard.local.ini",
+        "# by `scripts/hardware_setup.py boot-gpio`; rerun coatheal-deploy after a pin change.",
+        *lines,
+        BOOT_GPIO_END,
+    ])
+    return body + "\n"
+
+
+def upsert_boot_gpio_block(config_txt: str, block: str) -> str:
+    """Replace the managed block in a config.txt text (or append one)."""
+    out: list[str] = []
+    inside = False
+    for line in config_txt.splitlines():
+        if line.strip() == BOOT_GPIO_BEGIN:
+            inside = True
+            continue
+        if line.strip() == BOOT_GPIO_END:
+            inside = False
+            continue
+        if not inside:
+            out.append(line)
+    # Trim trailing blank lines so the block always sits after one blank line.
+    while out and not out[-1].strip():
+        out.pop()
+    text = "\n".join(out)
+    if text:
+        text += "\n\n"
+    return text + block
+
+
+def boot_gpio(args: argparse.Namespace) -> int:
+    if not args.config.exists():
+        print(f"Config missing: {args.config}", file=sys.stderr)
+        return 2
+    _, values = _load_config(args.config)
+    try:
+        block = render_boot_gpio_block(boot_gpio_lines(values))
+    except ValueError as error:
+        print(f"boot-gpio: {error}", file=sys.stderr)
+        return 1
+    if args.install is None:
+        sys.stdout.write(block)
+        return 0
+    target: Path = args.install
+    if not target.exists():
+        print(f"boot-gpio: {target} does not exist", file=sys.stderr)
+        return 2
+    current = target.read_text(encoding="utf-8")
+    updated = upsert_boot_gpio_block(current, block)
+    if updated == current:
+        print(f"boot-gpio: {target} already carries the current block")
+        return 0
+    atomic_write(target, updated)
+    print(f"boot-gpio: {target} updated -- a reboot is required for the new boot states to apply")
+    return 0
+
+
 def pin_check(args: argparse.Namespace) -> int:
     if not args.config.exists():
         print(f"Config missing: {args.config}", file=sys.stderr)
@@ -594,7 +723,17 @@ def wizard(args: argparse.Namespace) -> int:
 def send_command(command: str, host: str = "127.0.0.1", port: int = 5000) -> str:
     with socket.create_connection((host, port), timeout=3.0) as connection:
         connection.sendall((command + "\n").encode())
-        return connection.recv(4096).decode(errors="replace").strip()
+        # Read the whole reply line: one recv() may return only part of a
+        # long CHECK/STATUS body.
+        chunks: list[bytes] = []
+        while len(b"".join(chunks)) < 65536:
+            data = connection.recv(4096)
+            if not data:
+                break
+            chunks.append(data)
+            if b"\n" in data:
+                break
+        return b"".join(chunks).decode(errors="replace").split("\n", 1)[0].strip()
 
 
 def motor_test(args: argparse.Namespace) -> int:
@@ -777,6 +916,15 @@ def parser() -> argparse.ArgumentParser:
     pins = commands.add_parser("pin-check")
     pins.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     pins.set_defaults(handler=pin_check)
+
+    boot = commands.add_parser(
+        "boot-gpio",
+        help="print (or --install into config.txt) the gpio= block that holds heaters "
+             "off and motor drivers deselected from firmware boot")
+    boot.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    boot.add_argument("--install", type=Path, default=None,
+                      help="config.txt to update in place (idempotent); omit to print")
+    boot.set_defaults(handler=boot_gpio)
 
     doctor_cmd = commands.add_parser("doctor")
     doctor_cmd.add_argument("--config", type=Path, default=DEFAULT_CONFIG)

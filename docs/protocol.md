@@ -181,7 +181,9 @@ to that command peer IP.
 
 Commands are sent from the ground station to the onboard over TCP port `5000`.
 Each command is one newline-terminated line. The onboard replies once and closes
-the connection.
+the connection; a client that has not delivered a complete line within 5 s is
+dropped, so one stalled connection can never block the command path.
+Numeric arguments must be finite (`nan`/`inf` are refused) and whole tokens.
 
 Success:
 
@@ -205,12 +207,12 @@ NACK,<COMMAND>,<reason>
 | `CHECK` | `[ALL\|DPS310\|ADS1115\|SEQUENT_RTD\|DAQ132M\|RTD_CLICK\|MAX31865\|PWM\|MOTOR0\|MOTOR1\|STORAGE\|COMMS]` | Active probe of all or one selected component. `DAQ132M`/`RTD_CLICK` are accepted as legacy aliases for `SEQUENT_RTD` (the retired temperature path). `MAX31865` selects the two v3 sample-resistance clicks — a command-argument addition only, no `COMPONENT_STATE`/frame-format change. Non-fatal driver warnings are appended as `motorN_warn=` (e.g. an enable line that never reaches `DRV_ENN`) |
 | `ARM` | none | Enable manual flight outputs |
 | `DISARM` | none | Disable outputs, clear heater overrides, stop steppers |
-| `SET_PHASE` | `<phase>` | Set `BOOT`, `ASCENT`, `PRE_FLOAT`, `FLOAT`, `DESCENT`, `LANDED`, or `STOPPED` |
+| `SET_PHASE` | `<phase>` | Set `BOOT`, `ASCENT`, `PRE_FLOAT`, `FLOAT`, `DESCENT`, or `LANDED`. `STOPPED` is refused (`NACK,SET_PHASE,STOPPED is not an operator phase; use SHUTDOWN_SAFE`): it would end the control loop |
 | `FORCE_START` | none | Manual-first alias for `SET_PHASE ASCENT` |
 | `FORCE_STOP` | none | Manual-first alias for `SET_PHASE DESCENT` and stepper stop |
 | `HEATERS_OFF` | none | Emergency heater shutoff |
-| `RESET_CTRL` | none | Reset PID integrators |
-| `SHUTDOWN_SAFE` | none | Flush logs and stop process |
+| `RESET_CTRL` | none | Reset PID integrators and clear the over-temperature latch; if the heater energy latch (`CTRL` `budget_exhausted`) has tripped, clear it too — the Wh tally restarts at 0 against `power.energy_budget_wh` |
+| `SHUTDOWN_SAFE` | none | Safe for power-off: heaters off with every duty/target override cleared, motors stopped and disabled, logs synced. The onboard process keeps running and telemetry continues (an actual exit would only make systemd start a fresh, disarmed instance) |
 | `SET_TICK_HZ` | `<hz>` | Runtime tick/downlink rate, `0.1..5.0` Hz |
 | `RADIO_SILENCE` | none | Stop every onboard-originated transmission while keeping the queue — see [Radio silence](#radio-silence) |
 | `RADIO_RESUME` | none | Resume transmission and drain the queued frames |
@@ -228,7 +230,7 @@ NACK,<COMMAND>,<reason>
 | `CLEAR_OVERRIDES` | none | Clear duty, target, and PID overrides |
 | `SET_POSITION_ZERO` | `<id>` | Set current physical position as software zero without motion |
 | `STEPPER_MOVE` | `<id> <steps>` | Relative motor move (`<steps>` are microsteps at the configured divisor: µ4 → 800 per revolution) |
-| `STEPPER_MOVETO` | `<id> <abs_usteps> [hold_s]` | Absolute move; motor must be zeroed |
+| `STEPPER_MOVETO` | `<id> <abs_usteps> [hold_s]` | Absolute move; motor must be zeroed. `hold_s` is `0..86400` (a hold keeps the MotionLock, and with it the heater inhibit, for its whole duration) |
 | `STEPPER_MOVE_MM` | `<id> <mm>` | Relative move in millimetres of linear travel; converted onboard through `stepper.lead_mm_per_rev` (2 mm/rev default → `1.0` = half a revolution) at the current microstep divisor. The console's jog buttons use this |
 | `STEPPER_MOVETO_MM` | `<id> <mm> [hold_s]` | Absolute move in millimetres (zero = `SET_POSITION_ZERO` reference); motor must be zeroed. The console's BEND uses this |
 | `STEPPER_ROTATE` | `<id> <revs>` | Rotate by full revolutions |
@@ -275,7 +277,10 @@ persisted as an empty flag file `<storage.queue_dir>/radio_silence`, created
 by `RADIO_SILENCE` and removed by `RADIO_RESUME`, so an onboard restart during
 a mandated silence starts silent. Frames produced while silent stay in the
 durable queue and are delivered in order after `RADIO_RESUME` (`CTRL` `queue`
-shows the backlog draining).
+shows the backlog draining). The link-loss clock (`CTRL` `link_loss_s`) is
+held at zero while silent: link-loss fallback can only engage after
+`manual.link_loss_fallback_s` of unanswered frames following `RADIO_RESUME`,
+never on the resume itself.
 
 ### Link-loss failsafe plan
 

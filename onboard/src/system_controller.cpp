@@ -47,13 +47,25 @@ std::string Nack(const std::string& command, const std::string& message) {
 
 bool ParseDouble(const std::string& text, double* out) {
   try {
-    const double value = std::stod(text);
+    std::size_t consumed = 0;
+    const double value = std::stod(text, &consumed);
+    // Whole token and finite. "nan"/"inf" parse as numbers, yet a NaN passes
+    // every `x < lo || x > hi` range check below (all comparisons with NaN
+    // are false): a NaN duty or target poisons the heater energy tally, a
+    // NaN tick rate becomes the 10 s floor and trips the watchdog, a NaN
+    // speed parks a motor mid-move with the MotionLock held.
+    if (consumed != text.size() || !std::isfinite(value)) return false;
     *out = value;
     return true;
   } catch (...) {
     return false;
   }
 }
+
+// Longest hold accepted on any absolute move (STEPPER_MOVETO/_MM, STEPPER_BEND,
+// sequence steps, the fallback plan). A hold keeps the MotionLock, and with
+// it the heater inhibit, for its whole duration.
+constexpr double kMaxHoldSeconds = 86400.0;
 
 bool ParseIndex(const std::string& text, std::size_t* out) {
   try {
@@ -181,7 +193,8 @@ bool IsSequenceNameValid(const std::string& name) {
 }
 
 bool SystemController::Initialize(std::string* error) {
-  sensor_manager_.Start();
+  // The sensor manager is started only after the TMC5160 drivers below
+  // have claimed their chip-select lines (see the note past stepper_).
   if (config_.runtime.use_simulated_pwm) {
     pwm_ = std::make_unique<SimulatedPwmController>(config_.hardware.heater_count);
   } else {
@@ -286,6 +299,16 @@ bool SystemController::Initialize(std::string* error) {
   }
   stepper_ = std::make_unique<StepperController>(
       std::move(channel_cfgs), std::move(drivers));
+
+  // Only now start the sensor workers. Max31865Loop transacts on SPI0 the
+  // moment it starts, and until each Tmc5160Driver above has requested its
+  // CS line HIGH those lines sit at the SoC's power-on pull-DOWN (BCM 22/27,
+  // schematic v4 has no external pull-ups): both drivers selected, so every
+  // click datagram would also be clocked into them and latched on the CS
+  // edge as a register write the init sequence never rewrites. Starting the
+  // clicks first (the order until 2026-09) made that a race on every
+  // service start.
+  sensor_manager_.Start();
 
   // SPI_OK describes the BUS, not the motors on it. A module that answers
   // every datagram but is unusable (wrong TMC5160 version, SD_MODE
@@ -753,16 +776,38 @@ int SystemController::Run() {
 
     if (state_overrides.reset_control) {
       thermal_controller_.Reset();
+      // The heater energy latch is documented (protocol.md, CTRL
+      // budget_exhausted) as "heaters stay off until RESET_CTRL", and this
+      // is the only place that can honour it. HeaterScheduler::Reset() is
+      // what clears the latch, and it also restarts the tally, so it is
+      // called only once the latch has actually tripped: an ordinary
+      // RESET_CTRL (overtemp latch, PID integrators) leaves the running
+      // energy count alone.
+      if (scheduler_.is_budget_exhausted()) {
+        std::cerr << "[energy] budget latch cleared by RESET_CTRL after "
+                  << scheduler_.energy_consumed_wh() << " Wh; tally restarts"
+                  << " at 0 against " << config_.power.energy_budget_wh
+                  << " Wh\n";
+        scheduler_.Reset();
+      }
     }
 
     const SystemMode current_mode = mode_.load();
-    if (last_link_ok) {
+    const bool transmit_enabled = telemetry_client_.transmit_enabled();
+    if (!transmit_enabled) {
+      // Radio silence: the link is down on purpose, so the outage clock
+      // must not run. Otherwise the first tick after RADIO_RESUME already
+      // carries link_loss_s_ >= the fallback threshold and engages
+      // link-loss fallback for a tick -- stopping manual motion, running
+      // floor heating and, with a plan armed at PRE_FLOAT/FLOAT, starting
+      // the failsafe bend -- before the ground station could answer once.
+      link_loss_s_ = 0.0;
+    } else if (last_link_ok) {
       link_seen_ = true;
       link_loss_s_ = 0.0;
     } else if (link_seen_) {
       link_loss_s_ += tick_duration.count();
     }
-    const bool transmit_enabled = telemetry_client_.transmit_enabled();
     link_loss_fallback_active_ =
         config_.manual.manual_first &&
         config_.manual.link_loss_fallback_enabled &&
@@ -1065,8 +1110,13 @@ int SystemController::Run() {
     COATHEAL_PERF_STAMP(perf_enqueue_end);  // sub-stage: enqueue-only latency
 
     std::string drain_error;
+    // DrainTelemetryQueue sets last_link_ok itself: false until a frame is
+    // acknowledged this tick, true from the first ACK on. A failure later
+    // in the same batch (a backlog frame the ground station will not
+    // acknowledge) is a drain error, not a dead link -- forcing link_ok
+    // false here used to engage link-loss fallback, after
+    // link_loss_fallback_s, over a perfectly working link.
     if (!DrainTelemetryQueue(&last_link_ok, &drain_error)) {
-      last_link_ok = false;
       // Log on transition only. While no ground station is reachable this
       // fails every tick, and one journal line per tick for the steady
       // state buries the lines that mark actual changes.
@@ -1201,9 +1251,25 @@ int SystemController::Run() {
     }
 #endif
 
-    const auto elapsed = std::chrono::steady_clock::now() - tick_start;
-    if (elapsed < tick_duration) {
-      std::this_thread::sleep_for(tick_duration - elapsed);
+    // Sleep out the rest of the tick in short slices and pet the watchdog
+    // on every slice. WatchdogSec is 10 s and SET_TICK_HZ (and
+    // runtime.tick_hz) allow 0.1 Hz -- a 10 s tick -- so one sleep per tick
+    // would miss the watchdog at the slow end of the permitted range and
+    // systemd would restart the flight software on every tick.
+    constexpr auto kSleepSlice = std::chrono::milliseconds(500);
+    for (;;) {
+      const auto remaining =
+          tick_duration - (std::chrono::steady_clock::now() - tick_start);
+      if (!running_ || remaining <= std::chrono::duration<double>::zero()) {
+        break;
+      }
+      if (remaining > kSleepSlice) {
+        std::this_thread::sleep_for(kSleepSlice);
+        SdNotifyWatchdog();
+      } else {
+        std::this_thread::sleep_for(remaining);
+        break;
+      }
     }
   }
 
@@ -1616,18 +1682,36 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       return Ack(cmd_name, "control loop reset queued");
 
     case CommandType::kShutdownSafe:
-      // Graceful shutdown: heaters off, flush data, then stop the process.
-      // Unlike ENTER_SAFE, this actually triggers the STOPPED transition via
-      // state_overrides_.shutdown_safe, which StateManager handles.
+      // Safe for power-off: heaters off with every override cleared, motors
+      // stopped and de-energised, logs synced. The process keeps running
+      // and telemetry continues. It used to request the STOPPED phase
+      // instead, but that flag is only consumed by the link-loss phase
+      // tracker, so with a healthy link nothing happened -- and an actual
+      // exit only makes systemd (Restart=always) start a fresh, disarmed
+      // instance two seconds later.
       set_state_override([&]() {
         control_overrides_.heaters_off = true;
         heater_test_.active = false;
         control_overrides_.bench_open_loop_heaters = false;
-        state_overrides_.shutdown_safe = true;
+        control_overrides_.single_heater_override.reset();
+        control_overrides_.all_heaters_override.reset();
+        std::fill(control_overrides_.heater_duty_overrides.begin(),
+                  control_overrides_.heater_duty_overrides.end(), std::nullopt);
+        std::fill(control_overrides_.temp_targets_c.begin(),
+                  control_overrides_.temp_targets_c.end(), std::nullopt);
       });
       stop_all_sequences();
+      if (stepper_) {
+        std::string err;
+        for (std::size_t i = 0; i < stepper_->channel_count(); ++i) {
+          stepper_->Stop(static_cast<int>(i), &err);
+          stepper_->SetEnabled(static_cast<int>(i), false, &err);
+        }
+      }
       storage_manager_.FlushAndSync();
-      return Ack(cmd_name, "shutdown initiated");
+      return Ack(cmd_name,
+                 "safe for power-off: heaters off, motors disabled, logs"
+                 " synced; process keeps running");
 
     case CommandType::kEnterSafe:
       mode_.store(SystemMode::kSafe);
@@ -2176,6 +2260,11 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       if (!ParseMissionPhase(command.args[0], &requested)) {
         return Nack(cmd_name, "invalid phase");
       }
+      if (requested == MissionPhase::kStopped) {
+        // STOPPED ends the control loop (Run() returns) and systemd then
+        // starts a fresh, disarmed instance: not an operator phase.
+        return Nack(cmd_name, "STOPPED is not an operator phase; use SHUTDOWN_SAFE");
+      }
       state_manager_.SetPhase(requested);
       std::ostringstream msg;
       msg << "phase=" << ToString(requested);
@@ -2364,9 +2453,7 @@ std::string SystemController::HandleCommandLine(const std::string& line,
         return Nack(cmd_name, "manual motion blocked during link-loss fallback");
       }
       std::int64_t steps = 0;
-      try {
-        steps = std::stoll(command.args[0]);
-      } catch (...) {
+      if (!ParseInt64(command.args[0], &steps)) {
         return Nack(cmd_name, "invalid steps");
       }
       std::string err;
@@ -2390,13 +2477,13 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       }
       std::int64_t steps = 0;
       double hold_s = 0.0;
-      try {
-        steps = std::stoll(command.args[0]);
-        if (command.args.size() == 2) {
-          hold_s = std::stod(command.args[1]);
-        }
-      } catch (...) {
+      if (!ParseInt64(command.args[0], &steps) ||
+          (command.args.size() == 2 &&
+           !ParseDouble(command.args[1], &hold_s))) {
         return Nack(cmd_name, "invalid args");
+      }
+      if (hold_s < 0.0 || hold_s > kMaxHoldSeconds) {
+        return Nack(cmd_name, "invalid hold_s (0..86400)");
       }
       std::string err;
       InhibitHeatersForMotion();
@@ -2439,6 +2526,9 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       if (command.args.size() == 2 &&
           !ParseDouble(command.args[1], &hold_s)) {
         return Nack(cmd_name, "invalid hold");
+      }
+      if (hold_s < 0.0 || hold_s > kMaxHoldSeconds) {
+        return Nack(cmd_name, "invalid hold_s (0..86400)");
       }
       std::string err;
       InhibitHeatersForMotion();

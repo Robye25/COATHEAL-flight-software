@@ -40,7 +40,7 @@ LibgpiodPwmController::LibgpiodPwmController(
   for (std::size_t channel = 0; channel < output_lines_.size(); ++channel) {
     const std::size_t offset = output_lines_[channel];
     auto* line = RequestGpioOutput(
-        chip_, offset, "coatheal-heater", off_value != 0);
+        chip_, offset, "coatheal-heater", off_value != 0, OffBias());
     if (line == nullptr) {
       all_ok = false;
       continue;
@@ -130,7 +130,7 @@ void LibgpiodPwmController::RetryMissingLines() {
     if (line_handles_[channel] == nullptr) {
       line_handles_[channel] = RequestGpioOutput(
           chip_, output_lines_[channel], "coatheal-heater",
-          off_value != 0);
+          off_value != 0, OffBias());
     }
     all_ok = all_ok && line_handles_[channel] != nullptr;
   }

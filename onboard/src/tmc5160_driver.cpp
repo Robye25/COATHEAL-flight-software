@@ -274,11 +274,21 @@ bool Tmc5160Driver::OpenGpio() {
     gpio_healthy_ = true;
     return true;
   }
+  // Both lines carry a pull toward their safe level (CS deselected, EN off)
+  // for the windows when nothing drives them: schematic v4 fits no
+  // external pull-ups, and BCM 20/21/22/27 power on with the SoC's default
+  // pull-DOWN, i.e. both drivers selected and enabled until this request
+  // lands. Anything clocked on SPI0 meanwhile (the MAX31865 clicks share the
+  // bus) would be latched by the TMC5160s as a datagram. See GpioBias.
   cs_handle_ = RequestGpioOutput(cfg_.gpio_chip, cfg_.cs_line,
-                                 "coatheal-tmc5160-cs", /*initial_value=*/true);
+                                 "coatheal-tmc5160-cs", /*initial_value=*/true,
+                                 GpioBias::kPullUp);
   const bool en_initial = cfg_.enable_active_low;  // active-low: HIGH=off
   enable_handle_ = RequestGpioOutput(cfg_.gpio_chip, cfg_.enable_line,
-                                     "coatheal-tmc5160-en", en_initial);
+                                     "coatheal-tmc5160-en", en_initial,
+                                     cfg_.enable_active_low
+                                         ? GpioBias::kPullUp
+                                         : GpioBias::kPullDown);
   if (cs_handle_ == nullptr || enable_handle_ == nullptr) {
     std::cerr << "[tmc5160] GPIO request failed on " << cfg_.gpio_chip
               << " cs=" << cfg_.cs_line << " en=" << cfg_.enable_line << '\n';

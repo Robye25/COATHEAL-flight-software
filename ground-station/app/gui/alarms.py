@@ -64,7 +64,12 @@ def evaluate(state: OnboardState) -> List[Alarm]:
             alarms.append(Alarm("ENERGY", f"heater energy {state.energy_wh:.1f} Wh ≥ 80 % of the "
                                           f"{state.budget_wh:.0f} Wh budget — reduce targets or duty", AMBER))
         if not state.rtc_valid:
-            alarms.append(Alarm("RTC", "RTC invalid — onboard timestamps unreliable (logs affected)", AMBER))
+            # No RTC on schematic v4: the onboard derives rtc_valid from its
+            # system clock (past the firmware build date AND NTP-synced since
+            # boot). A bench with no time source sits here permanently; the
+            # GS receive stamp (gs_rx_utc) is the authoritative timeline.
+            alarms.append(Alarm("RTC", "Onboard clock unsynchronised — no NTP sync since boot; "
+                                       "DATA timestamps untrusted (gs_rx_utc is authoritative)", AMBER))
         if state.debug_armed:
             alarms.append(Alarm("DEBUG_ARM", "DEBUG ARM active — open-loop heater duty allowed "
                                              "without PT100 feedback (DISARM_DEBUG to end)", AMBER))
