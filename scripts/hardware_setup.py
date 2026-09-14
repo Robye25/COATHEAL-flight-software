@@ -24,6 +24,10 @@ LEGACY_CONFIG = ROOT / "config" / "onboard.ini"
 FINAL_PIN_VALUES = {
     # v3 GPIO map (BCM), single source of truth: heaters H1..H6.
     "heater.output_lines": "19,13,6,5,24,23",
+    # Heater i always reads logical sample i (the ground station pairs them
+    # the same way). Which RTD card terminal each sample's PT100 landed on is
+    # bench wiring, so sensor.sequent_rtd_channels is deliberately NOT pinned
+    # here: migration keeps the map scripts/associate_heaters.py measured.
     "heater.temperature_channels": "0,1,2,3,4,5",
     "hal.status_led_enabled": "false",
     "hal.mode_led_enabled": "false",
@@ -41,7 +45,6 @@ FINAL_PIN_VALUES = {
     "motor1.enable_line": "21",
     "motor1.sense_resistor_ohm": "0.075",
     "sensor.sequent_rtd_stack": "0",
-    "sensor.sequent_rtd_channels": "1,2,3,4,5,6,7,8",
     "sensor.sequent_rtd_poll_ms": "1000",
     "sensor.sequent_rtd_expect_sensor_type": "pt100",
     "sensor.sequent_rtd_resistance_min_ohm": "60.0",
@@ -646,7 +649,6 @@ def pin_check(args: argparse.Namespace) -> int:
     for key, expected in FINAL_PIN_VALUES.items():
         if key.startswith("sensor.") and key not in {
                 "sensor.sequent_rtd_stack",
-                "sensor.sequent_rtd_channels",
                 "sensor.sequent_rtd_poll_ms",
                 "sensor.sequent_rtd_expect_sensor_type",
                 "sensor.sequent_rtd_resistance_min_ohm",

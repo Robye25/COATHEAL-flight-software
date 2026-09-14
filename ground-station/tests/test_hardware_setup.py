@@ -580,6 +580,32 @@ class HardwareSetupTests(unittest.TestCase):
             self.assertEqual(
                 values["sensor.sequent_rtd_channels"], "1,2,3,4,5,6,7,8")
 
+    def test_migrate_config_keeps_the_measured_rtd_terminal_map(self) -> None:
+        # scripts/associate_heaters.py writes the bench wiring into
+        # sensor.sequent_rtd_channels; every coatheal-deploy migrates the
+        # local config, and must not reset that map to the schematic order.
+        # heater.temperature_channels stays pinned: heater i reads sample i.
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "onboard.local.ini"
+            source.write_text(hardware_setup.replace_ini(
+                hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8"),
+                {"sensor.sequent_rtd_channels": "3,1,6,2,8,5,4,7",
+                 "heater.temperature_channels": "1,0,2,3,4,5"}), encoding="utf-8")
+            values = migrated_values(source)
+            self.assertEqual(values["sensor.sequent_rtd_channels"], "3,1,6,2,8,5,4,7")
+            self.assertEqual(values["heater.temperature_channels"], "0,1,2,3,4,5")
+
+    def test_pin_check_leaves_the_rtd_terminal_map_to_the_bench(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "onboard.local.ini"
+            config.write_text(hardware_setup.replace_ini(
+                hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8"),
+                {"sensor.sequent_rtd_channels": "3,1,6,2,8,5,4,7"}), encoding="utf-8")
+            with mock.patch("builtins.print") as printed:
+                hardware_setup.pin_check(argparse.Namespace(config=config))
+            complaints = " ".join(str(call.args[0]) for call in printed.call_args_list)
+            self.assertNotIn("sequent_rtd_channels", complaints)
+
     def test_migrate_config_drops_retired_motor_keys(self) -> None:
         # Same pattern as test_migrate_config_drops_retired_sensor_keys:
         # step_line/dir_line/pulse_high_us no longer exist (v3 has no

@@ -80,7 +80,7 @@ fallback at `PRE_FLOAT`/`FLOAT`.
 | `sensor.dps310_poll_ms`, `ads1115_poll_ms` | `1000` | Independent worker polling intervals. |
 | `sensor.stale_after_ms` | `3000` | Age after which a last-good failed reading is `STALE`. |
 | `sensor.sequent_rtd_stack` | `0` | Sequent RTD HAT DIP-switch stack level, `0..7` -> I2C `0x40..0x47`. |
-| `sensor.sequent_rtd_channels` | `1,2,3,4,5,6,7,8` | Card channel (1-indexed) supplying each logical sample; must have exactly `hardware.sample_count` entries, each `1..8`, no duplicates. |
+| `sensor.sequent_rtd_channels` | `1,2,3,4,5,6,7,8` | Card channel (1-indexed) supplying each logical sample; must have exactly `hardware.sample_count` entries, each `1..8`, no duplicates. This is the bench wiring map: `scripts/associate_heaters.py` measures it (one heater at a time, watching which terminal warms) so that sample `i` is the specimen heater `i` warms, and `migrate-config` — every `coatheal-deploy` — keeps it from the local config. |
 | `sensor.sequent_rtd_poll_ms` | `1000` | RTD worker polling interval. |
 | `sensor.sequent_rtd_expect_sensor_type` | `pt100` | Expected card-configured sensor type. **`pt100` is the only accepted value**; `Probe()` refuses on mismatch with the card. `pt1000` is recognised and rejected at config load: the card and `Probe()` handle it, but the card-vs-CVD cross-check hardcodes the PT100 Callendar-Van Dusen curve and the resistance window below is a PT100 window, so a `pt1000` config would load and then mark every channel invalid forever — every heater clamped, no diagnostic. |
 | `sensor.sequent_rtd_resistance_min_ohm` | `60.0` | Lower plausibility bound for per-channel resistance; must be below `_max_ohm`. |
@@ -118,7 +118,7 @@ guessed range (section 9, gate 5 of the same bring-up doc).
 | `heater.target_min_c` | `0.0` | Lowest accepted manual PID target. |
 | `heater.target_max_c` | `80.0` | Highest accepted manual PID target; must stay below the overtemperature latch. |
 | `heater.output_lines` | `19,13,6,5,24,23` | BCM GPIO lines for HEAT_EN1..6 (schematic v3 map). |
-| `heater.temperature_channels` | `0,1,2,3,4,5` | DAQ sample supplying feedback for H0..H5. |
+| `heater.temperature_channels` | `0,1,2,3,4,5` | DAQ sample supplying feedback for H0..H5. Keep `0,1,2,3,4,5`: the ground station pairs heater `i` with sample `i`, and `migrate-config` pins this value. Remap PT100 wiring through `sensor.sequent_rtd_channels`. |
 | `heater.pwm_frequency_hz` | `1.0` | Requested heater PWM frequency. v3: film heaters have high thermal inertia and no hardware PWM channel is wired, so 1 Hz software PWM is the owner-confirmed rate (was 10.0 pre-v3). The software PWM period is divided into 100 slices and the duty is re-read every slice, so a `SetDuty(0)` from the motion heater-inhibit reaches the GPIO within one slice — 1000/100 = **10 ms** at 1 Hz — not one whole period. |
 | `heater.active_high` | `true` | MOSFET input polarity. |
 | `heater.debug_max_duty` | `0.25` | Bench-only maximum `HEATER_TEST` duty. |

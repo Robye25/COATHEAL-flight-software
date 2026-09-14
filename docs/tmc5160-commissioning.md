@@ -468,8 +468,9 @@ multi-heater operation. See
    - the correct physical GPIO line toggles (meter or LED on the expected
      BCM line only);
    - the correct EKM014 channel switches;
-   - the correct physical sample position warms (thermally or via the
-     mapped PT100 in `heater.temperature_channels`).
+   - the correct physical sample position warms (thermally, or via its
+     PT100: `scripts/associate_heaters.py` measures and writes that pairing
+     as `sensor.sequent_rtd_channels`).
 3. Confirm no *other* heater or GPIO activates during any single-heater test.
 4. **Heater-inhibit latency — scope check (BLOCKING).** With one heater
    energised at a duty that is clearly ON (say 0.5), command a PULL on the
