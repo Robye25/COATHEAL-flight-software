@@ -15,6 +15,12 @@ sample i is the specimen heater i warms, and heater.temperature_channels
 stays 0..5: the ground station and the thermal alarms pair heater i with
 sample i. migrate-config (every coatheal-deploy) keeps this map.
 
+A heater that warms nothing is usually wired to a GPIO the config does not
+list (bench 2026-09-14: H2 was not on BCM 6). The script then offers to try
+every unclaimed header line for it -- each try puts the line into
+heater.output_lines, restarts the service and pulses the heater through the
+firmware exactly as above -- and keeps the line that warmed a terminal.
+
 Run it once on the Pi, heaters and PT100s connected, motors idle:
 
     python3 scripts/associate_heaters.py --check   # preflight only, no heat
@@ -73,7 +79,11 @@ class Settings:
     noise_c: float = 0.5
     evidence_s: float = 10.0
     abort_c: float = 50.0         # any terminal this hot ends the run
-    max_heat_s: float = 300.0
+    # Bench 2026-09-14: every wired heater moved its PT100 by +1 C within
+    # 4 s and +4..6 C within 10 s at duty 0.25. A heater that has moved
+    # nothing after this long is not on that line.
+    max_heat_s: float = 120.0
+    scan_heat_s: float = 60.0     # per candidate line while searching for a heater
     # HEATER_TEST length. Re-sent every pulse_s / 2.5, so the heater drops
     # within pulse_s of this script dying.
     pulse_s: float = 5.0
@@ -265,16 +275,18 @@ class Survey:
     def say(self, message: str) -> None:
         self.out(f"[{self.clock() - self.t0:6.0f}s] {message}")
 
-    def run(self) -> list[HeaterResult]:
+    def run(self, heaters: Optional[list[int]] = None,
+            max_heat_s: Optional[float] = None) -> list[HeaterResult]:
         self.onboard.ack("HEATERS_OFF")
         self.say("heaters off (any operator targets cleared); waiting for a steady baseline")
         self.settle("baseline")
         base = self.baseline()
         results = []
-        for heater, line in enumerate(self.heater_lines):
+        for heater in (range(len(self.heater_lines)) if heaters is None else heaters):
+            line = self.heater_lines[heater]
             first = len(self.samples)
             self.say(f"H{heater} (BCM {line}) on at duty {self.s.duty:g}")
-            stopped, heat_s = self.heat(heater, base)
+            stopped, heat_s = self.heat(heater, base, max_heat_s)
             self.onboard.ack("HEATERS_OFF")
             self.say(f"H{heater} off after {heat_s:.0f} s ({stopped}); letting it cool")
             self.settle(f"H{heater}")
@@ -429,7 +441,9 @@ class Survey:
                 self.say(f"{label}: a terminal is still warming; waiting")
                 last_report = now
 
-    def heat(self, heater: int, base: Baseline) -> tuple[str, float]:
+    def heat(self, heater: int, base: Baseline,
+             max_heat_s: Optional[float] = None) -> tuple[str, float]:
+        limit = self.s.max_heat_s if max_heat_s is None else max_heat_s
         # repr, not :g -- a rounded-up duty would exceed heater.debug_max_duty.
         command = f"HEATER_TEST {heater} {self.s.duty!r} {self.s.pulse_s!r}"
         refresh_s = max(self.s.poll_s, self.s.pulse_s / 2.5)
@@ -483,7 +497,7 @@ class Survey:
                         self.say(f"H{heater}: {elapsed:.0f} s, warmest "
                                  + ", ".join(f"ch{c} {v:+.1f} C" for c, v in ranked[:3]))
                         last_report = now
-            if elapsed >= self.s.max_heat_s:
+            if elapsed >= limit:
                 return "time limit", elapsed
 
     def _pulse(self, command: str) -> None:
@@ -626,10 +640,12 @@ def complete_association(results: list[HeaterResult], dominance: float,
     # A probe that came off its specimen leaves the specimen next door as the
     # warmest terminal. If that neighbour is unheated nothing else catches
     # it, but conducted heat arrives far slower than direct heat -- and the
-    # specimens and heaters are all alike, so a laggard is a harness fault.
+    # specimens and heaters are all alike (bench 2026-09-14: 8, 8, 8, 9, 9 s),
+    # so a laggard is a harness fault. The +10 s keeps poll jitter from
+    # flagging anything when the median itself is a few seconds.
     typical_s = statistics.median(r.heat_s for r in results) if len(results) >= 3 else 0.0
     slow = [r for r in results if r.verdict == "ok" and typical_s > 0.0
-            and r.heat_s > max(3.0 * typical_s, typical_s + 60.0)]
+            and r.heat_s > max(3.0 * typical_s, typical_s + 10.0)]
     if not problems and not shared and not slow:
         return {r.heater: r.channel for r in results if r.channel is not None}
     out("\nNo trustworthy map, so nothing was written:")
@@ -670,55 +686,191 @@ def compose_channel_map(association: dict[int, int], current_map: list[int],
     return heated + rest[:sample_count - len(heated)]
 
 
-def write_config(path: Path, new_map: list[int], heater_count: int, yes: bool,
+def _validated(text: str, changes: dict[str, str],
+               out: Callable[[str], None]) -> Optional[str]:
+    """The INI text with `changes` applied, or None (reasons printed) when the
+    validator or the onboard binary rejects it."""
+    candidate = hardware_setup.replace_ini(text, changes)
+    errors = hardware_setup.validate_candidate(candidate)
+    for error in errors:
+        out(f"  configuration error: {error}")
+    if errors:
+        return None
+    if hardware_setup._check_with_binary(candidate) != 0:
+        out("  the onboard binary rejected that config")
+        return None
+    return candidate
+
+
+def _write_ini(path: Path, text: str) -> None:
+    owner = path.stat()
+    hardware_setup.atomic_write(path, text)
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        os.chown(path, owner.st_uid, owner.st_gid)  # keep it editable by coatheal after sudo
+
+
+def write_config(path: Path, new_map: list[int], heater_lines: list[str], yes: bool,
                  ask: Callable[[str], str] = input,
                  out: Callable[[str], None] = print) -> bool:
     text = path.read_text(encoding="utf-8")
     values = hardware_setup._ini_values(text)
     wanted = {
+        "heater.output_lines": ",".join(heater_lines),
         "sensor.sequent_rtd_channels": ",".join(str(c) for c in new_map),
-        # Heater i reads sample i; the wiring lives in the terminal map above.
-        "heater.temperature_channels": ",".join(str(i) for i in range(heater_count)),
+        # Heater i reads sample i; the wiring lives in the two maps above.
+        "heater.temperature_channels": ",".join(str(i) for i in range(len(heater_lines))),
     }
     changes = {k: v for k, v in wanted.items() if values.get(k) != v}
     if not changes:
         out(f"{path} already carries this map; nothing to write.")
         return True
-    candidate = hardware_setup.replace_ini(text, changes)
-    errors = hardware_setup.validate_candidate(candidate)
-    if errors:
-        for error in errors:
-            out(f"Configuration error: {error}")
-        return False
-    if hardware_setup._check_with_binary(candidate) != 0:
-        out("The onboard binary rejected the new config; nothing written.")
+    candidate = _validated(text, changes, out)
+    if candidate is None:
+        out("Nothing written.")
         return False
     for key, value in changes.items():
         out(f"  {key}: {values.get(key, '(unset)')} -> {value}")
     if not yes and ask(f"Write this to {path}? [y/N]: ").strip().lower() not in ("y", "yes"):
         out("No files changed.")
         return False
-    owner = path.stat()
     backup = hardware_setup._backup_path(path)
     shutil.copy2(path, backup)
-    hardware_setup.atomic_write(path, candidate)
-    if hasattr(os, "geteuid") and os.geteuid() == 0:
-        os.chown(path, owner.st_uid, owner.st_gid)  # keep it editable by coatheal after sudo
+    _write_ini(path, candidate)
     out(f"Backed up {path} -> {backup}")
     out(f"Wrote {path}")
     return True
+
+
+def _privileged(command: list[str]) -> list[str]:
+    return command if os.geteuid() == 0 else ["sudo", "-n", *command]
+
+
+def restart_service(out: Callable[[str], None] = print) -> bool:
+    command = _privileged(["systemctl", "restart", SERVICE])
+    out(f"Restarting: {' '.join(command)}")
+    if subprocess.run(command, check=False).returncode != 0:
+        out(f"Restart failed; run it by hand: sudo systemctl restart {SERVICE}")
+        return False
+    return True
+
+
+def wait_ready(onboard: Onboard, heater: int,
+               clock: Callable[[], float], sleep: Callable[[float], None],
+               timeout_s: float = 60.0) -> Optional[str]:
+    """After a restart: heater `heater` claimed and every RTD terminal reading.
+    Returns what is still wrong after timeout_s, or None once ready."""
+    deadline = clock() + timeout_s
+    problem = "no reply"
+    while clock() < deadline:
+        sleep(2.0)
+        try:
+            components = onboard.ack("COMPONENTS")
+        except (OSError, AssociationError) as error:
+            problem = str(error)
+            continue
+        if components.get(f"heater{heater}") != "OK":
+            problem = f"heater{heater}={components.get(f'heater{heater}', '?')}"
+            continue
+        if components.get("sequent_rtd_error") not in FRESH_RTD_ERRORS:
+            problem = f"sequent_rtd_error={components.get('sequent_rtd_error', '?')}"
+            continue
+        terminals = parse_terminals(components.get("sequent_rtd_ch", ""))
+        if not terminals or not all(t.conducting for t in terminals):
+            problem = "not every RTD terminal is reading"
+            continue
+        return None
+    return problem
+
+
+# Lines the buses own regardless of config: HAT EEPROM, I2C-1, SPI0 data/clock.
+BUS_LINES = frozenset({0, 1, 2, 3, 9, 10, 11})
+
+
+def free_lines(values: dict[str, str], heater_lines: list[str]) -> list[int]:
+    """Header GPIOs nothing in the config or on the HAT claims: where a heater
+    wired off the schematic can be. BCM 9-27 idle pulled DOWN at boot, so a
+    heater there is off whenever its line is unclaimed; BCM 0-8 idle pulled
+    UP and are tried last."""
+    used = {int(line, 0) for line in heater_lines}
+    for key in ("motor0.cs_line", "motor0.enable_line",
+                "motor1.cs_line", "motor1.enable_line"):
+        if values.get(key, "").strip():
+            used.add(int(values[key], 0))
+    for led in ("status", "mode"):
+        if hardware_setup._ini_bool(values, f"hal.{led}_led_enabled", False):
+            used.add(int(values.get(f"hal.{led}_led_line", "-1"), 0))
+    used |= {line for line, _ in hardware_setup.RESERVED_GPIO_LINES} | BUS_LINES
+    return sorted((line for line in range(28) if line not in used),
+                  key=lambda line: (line <= 8, line))
+
+
+def hold_down(line: int, out: Callable[[str], None]) -> None:
+    """Persistent in-pad pull-down on `line`, so a heater on it stays off in
+    the gap between two service claims (a restart) and afterwards, if the
+    line turns out not to be the one and nothing claims it again."""
+    command = _privileged(["pinctrl", "set", str(line), "pd"])
+    try:
+        ok = subprocess.run(command, check=False, capture_output=True).returncode == 0
+    except OSError:
+        ok = False
+    if not ok:
+        out(f"  (pinctrl could not set a pull-down on BCM {line}; while unclaimed it "
+            "keeps its boot-time pull)")
+
+
+def write_lines(config_path: Path, lines: list[str],
+                out: Callable[[str], None]) -> bool:
+    text = config_path.read_text(encoding="utf-8")
+    candidate = _validated(text, {"heater.output_lines": ",".join(lines)}, out)
+    if candidate is None:
+        return False
+    _write_ini(config_path, candidate)
+    return True
+
+
+def find_line(survey: Survey, onboard: Onboard, config_path: Path, heater: int,
+              candidates: list[int], token: str,
+              clock: Callable[[], float], sleep: Callable[[float], None],
+              out: Callable[[str], None] = print) -> Optional[HeaterResult]:
+    """Try each candidate GPIO as heater `heater`'s output line: write it into
+    the config, restart the service, warm the heater through the firmware as
+    usual. The config and the running service keep the line that warmed a
+    terminal (its result is returned); otherwise the original line is put
+    back and None returned."""
+    original = list(survey.heater_lines)
+    for line in candidates:
+        lines = list(original)
+        lines[heater] = str(line)
+        out(f"\nH{heater}: trying BCM {line}")
+        if not write_lines(config_path, lines, out):
+            out(f"  BCM {line} skipped")
+            continue
+        hold_down(line, out)
+        if not restart_service(out):
+            raise AssociationError(f"could not restart {SERVICE} with BCM {line} as H{heater}")
+        problem = wait_ready(onboard, heater, clock, sleep)
+        if problem is not None:
+            out(f"  the service did not come up with BCM {line} as H{heater} ({problem}); skipped")
+            continue
+        onboard.ack(f"ARM_DEBUG {token}")
+        onboard.ack("ARM")
+        survey.heater_lines[heater] = str(line)
+        result = survey.run([heater], max_heat_s=survey.s.scan_heat_s)[0]
+        onboard.ack("HEATERS_OFF")
+        if result.verdict != "no response":
+            return result
+    out(f"\nH{heater}: none of those lines warmed anything; restoring BCM {original[heater]}")
+    survey.heater_lines[:] = original
+    if write_lines(config_path, original, out) and restart_service(out):
+        wait_ready(onboard, heater, clock, sleep)
+    return None
 
 
 def restart_and_verify(onboard: Onboard, new_map: list[int],
                        clock: Callable[[], float] = time.monotonic,
                        sleep: Callable[[float], None] = time.sleep,
                        out: Callable[[str], None] = print) -> bool:
-    command = ["systemctl", "restart", SERVICE]
-    if os.geteuid() != 0:
-        command = ["sudo", "-n", *command]
-    out(f"Restarting: {' '.join(command)}")
-    if subprocess.run(command, check=False).returncode != 0:
-        out(f"Restart failed; run it by hand: sudo systemctl restart {SERVICE}")
+    if not restart_service(out):
         return False
     deadline = clock() + 60.0
     terminals: list[Terminal] = []
@@ -791,6 +943,11 @@ def parser() -> argparse.ArgumentParser:
                       help="write the config and restart the service without asking")
     root.add_argument("--no-restart", action="store_true",
                       help="write the config but leave the service on the old map")
+    root.add_argument("--lines", default=None,
+                      help="BCM lines to try for a heater that warms nothing, e.g. 12,16 "
+                           "(default: every header line nothing in the config claims)")
+    root.add_argument("--no-find-lines", action="store_true",
+                      help="never search other GPIO lines for a heater that warms nothing")
     defaults = Settings()
     root.add_argument("--duty", type=float, default=defaults.duty,
                       help="heater duty during a test (capped by heater.debug_max_duty "
@@ -876,6 +1033,7 @@ def main(argv: Optional[list[str]] = None, *,
     armed_debug = armed_run = False
     failure = None
     results: list[HeaterResult] = []
+    original_lines = list(heater_lines)
     try:
         if status.get("debug_armed") != "1":
             onboard.ack(f"ARM_DEBUG {token}")
@@ -884,6 +1042,30 @@ def main(argv: Optional[list[str]] = None, *,
             onboard.ack("ARM")
             armed_run = True
         results = survey.run()
+        missing = [r.heater for r in results if r.verdict == "no response"]
+        if missing and not args.no_find_lines:
+            candidates = ([int(p, 0) for p in args.lines.split(",") if p.strip()]
+                          if args.lines else free_lines(values, heater_lines))
+            print("\n" + ", ".join(f"H{h} (BCM {heater_lines[h]})" for h in missing)
+                  + " warmed no terminal. A heater wired to a GPIO the config does not"
+                  " list looks exactly like this. Unclaimed header lines, in the order"
+                  " they would be tried: " + (", ".join(f"BCM {c}" for c in candidates)
+                                             or "none (pass --lines)"))
+            if candidates and (args.yes or ask(
+                    f"Try them now? Each try rewrites heater.output_lines and restarts "
+                    f"{SERVICE}; a wrong line drives nothing. [y/N]: ").strip().lower()
+                    in ("y", "yes")):
+                backup = hardware_setup._backup_path(config_path)
+                shutil.copy2(config_path, backup)
+                print(f"Backed up {config_path} -> {backup}")
+                armed_debug = armed_run = True  # every restart is re-armed by find_line
+                for heater in missing:
+                    found = find_line(survey, onboard, config_path, heater, candidates,
+                                      token, clock, sleep)
+                    if found is not None:
+                        results[heater] = found
+                        candidates = [c for c in candidates if c != int(found.line, 0)]
+                heater_lines = list(survey.heater_lines)
     except AssociationError as error:
         failure = str(error)
     except OSError as error:
@@ -917,13 +1099,21 @@ def main(argv: Optional[list[str]] = None, *,
     print("  Heat cannot tell which unheated terminal is which, or which motor group /\n"
           "  MAX31865 click a specimen belongs to: check motorN.samples and\n"
           "  sensor.max31865_sample_indices against the harness.")
+    lines_changed = heater_lines != original_lines
+    if lines_changed:
+        print(f"  heater.output_lines: {','.join(original_lines)} -> {','.join(heater_lines)}"
+              " (already written and running)")
     if args.dry_run:
-        print("\n--dry-run: nothing written.")
+        print("\n--dry-run: the terminal map is not written."
+              + (" heater.output_lines stays as found." if lines_changed else ""))
         return 0
-    if not write_config(config_path, new_map, len(heater_lines), args.yes, ask):
+    if not write_config(config_path, new_map, heater_lines, args.yes, ask):
         return 1
     print("Then prove one loop from the ground station: a small SET_TEMP_TARGET on H<i> "
           "must move S<i>, and only S<i>.")
+    if lines_changed:
+        print("heater.output_lines changed: run coatheal-deploy afterwards so config.txt "
+              "holds the new line OFF from boot (it will say REBOOT REQUIRED).")
     if not runs_this_config:
         print(f"\nThe service loads {service_path}, not {config_path}: copy the map there "
               f"(or repoint COATHEAL_CONFIG), then restart {SERVICE}.")
