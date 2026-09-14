@@ -315,6 +315,17 @@ together, a heater warms nothing, or one heater needs far longer than the
 rest (a probe off its specimen reads its neighbour's heat). Every reading is
 logged to `logs/heater-association-<time>.csv`.
 
+A heater that warms nothing is usually on a GPIO the config does not list
+(bench 2026-09-14: H2 was not on BCM 6). The script then offers to try every
+header line nothing in the config or on the HAT claims — BCM 12, 16, 18, 25,
+then 4 on the v3 map; `--lines 12,16` narrows it — one at a time: the line
+goes into `heater.output_lines`, the service restarts, the heater is pulsed
+through the firmware exactly as above, and the line that warms a terminal is
+kept. BCM 0–8 idle pulled up at boot, so those are tried last and held down
+with `pinctrl` while unclaimed. After a line change, run `coatheal-deploy` so
+the boot-time GPIO block in `config.txt` holds the new line off (it will say
+REBOOT REQUIRED). `--no-find-lines` disables the search.
+
 Heat cannot tell which unheated terminal is `S6` and which `S7`, nor which
 motor group or MAX31865 click a specimen belongs to — check
 `motor*.samples` and `sensor.max31865_sample_indices` against the harness.

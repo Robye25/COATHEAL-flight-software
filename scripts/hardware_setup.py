@@ -22,12 +22,13 @@ DEFAULT_CONFIG = ROOT / "config" / "onboard.local.ini"
 EXAMPLE_CONFIG = ROOT / "config" / "onboard.example.ini"
 LEGACY_CONFIG = ROOT / "config" / "onboard.ini"
 FINAL_PIN_VALUES = {
-    # v3 GPIO map (BCM), single source of truth: heaters H1..H6.
-    "heater.output_lines": "19,13,6,5,24,23",
     # Heater i always reads logical sample i (the ground station pairs them
-    # the same way). Which RTD card terminal each sample's PT100 landed on is
-    # bench wiring, so sensor.sequent_rtd_channels is deliberately NOT pinned
-    # here: migration keeps the map scripts/associate_heaters.py measured.
+    # the same way). Which GPIO drives each heater and which RTD card terminal
+    # each sample's PT100 landed on are bench wiring (2026-09-14: neither
+    # follows the schematic), so heater.output_lines and
+    # sensor.sequent_rtd_channels are deliberately NOT pinned here: migration
+    # keeps what scripts/associate_heaters.py measured, and validate_candidate
+    # still checks the lines it finds in the INI.
     "heater.temperature_channels": "0,1,2,3,4,5",
     "hal.status_led_enabled": "false",
     "hal.mode_led_enabled": "false",

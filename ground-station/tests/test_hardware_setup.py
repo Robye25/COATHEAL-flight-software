@@ -580,31 +580,44 @@ class HardwareSetupTests(unittest.TestCase):
             self.assertEqual(
                 values["sensor.sequent_rtd_channels"], "1,2,3,4,5,6,7,8")
 
-    def test_migrate_config_keeps_the_measured_rtd_terminal_map(self) -> None:
+    def test_migrate_config_keeps_the_measured_wiring(self) -> None:
         # scripts/associate_heaters.py writes the bench wiring into
-        # sensor.sequent_rtd_channels; every coatheal-deploy migrates the
-        # local config, and must not reset that map to the schematic order.
-        # heater.temperature_channels stays pinned: heater i reads sample i.
+        # heater.output_lines and sensor.sequent_rtd_channels; every
+        # coatheal-deploy migrates the local config, and must not reset either
+        # to the schematic order. heater.temperature_channels stays pinned:
+        # heater i reads sample i.
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "onboard.local.ini"
             source.write_text(hardware_setup.replace_ini(
                 hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8"),
-                {"sensor.sequent_rtd_channels": "3,1,6,2,8,5,4,7",
+                {"heater.output_lines": "19,13,16,5,24,23",
+                 "sensor.sequent_rtd_channels": "3,1,6,2,8,5,4,7",
                  "heater.temperature_channels": "1,0,2,3,4,5"}), encoding="utf-8")
             values = migrated_values(source)
+            self.assertEqual(values["heater.output_lines"], "19,13,16,5,24,23")
             self.assertEqual(values["sensor.sequent_rtd_channels"], "3,1,6,2,8,5,4,7")
             self.assertEqual(values["heater.temperature_channels"], "0,1,2,3,4,5")
 
-    def test_pin_check_leaves_the_rtd_terminal_map_to_the_bench(self) -> None:
+    def test_pin_check_leaves_the_measured_wiring_to_the_bench(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "onboard.local.ini"
             config.write_text(hardware_setup.replace_ini(
                 hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8"),
-                {"sensor.sequent_rtd_channels": "3,1,6,2,8,5,4,7"}), encoding="utf-8")
+                {"heater.output_lines": "19,13,16,5,24,23",
+                 "sensor.sequent_rtd_channels": "3,1,6,2,8,5,4,7"}), encoding="utf-8")
             with mock.patch("builtins.print") as printed:
                 hardware_setup.pin_check(argparse.Namespace(config=config))
             complaints = " ".join(str(call.args[0]) for call in printed.call_args_list)
             self.assertNotIn("sequent_rtd_channels", complaints)
+            self.assertNotIn("output_lines", complaints)
+            # A line the validator must still refuse (reserved by the HAT).
+            config.write_text(hardware_setup.replace_ini(
+                hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8"),
+                {"heater.output_lines": "19,13,17,5,24,23"}), encoding="utf-8")
+            with mock.patch("builtins.print") as printed:
+                self.assertEqual(hardware_setup.pin_check(argparse.Namespace(config=config)), 1)
+            complaints = " ".join(str(call.args[0]) for call in printed.call_args_list)
+            self.assertIn("line 17", complaints)
 
     def test_migrate_config_drops_retired_motor_keys(self) -> None:
         # Same pattern as test_migrate_config_drops_retired_sensor_keys:
