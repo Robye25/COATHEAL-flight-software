@@ -284,34 +284,43 @@ requested.
 
 ## 10. Changing Heater-to-PT100 Mapping
 
-GPIO assignment and temperature-feedback assignment are separate:
+Heater `Hi` always takes its feedback from sample `Si`:
 
 ```ini
 heater.temperature_channels=0,1,2,3,4,5
 ```
 
-The value at each list position is the zero-based DAQ sample used by that
-heater:
+Leave that at `0,1,2,3,4,5` — the ground station pairs heater `i` with sample
+`i`, and `migrate-config` (every `coatheal-deploy`) pins it. When the PT100s
+are not wired to the card terminals the schematic shows, remap the terminals
+instead (`sensor.sequent_rtd_channels`, section 14), so that `Si` is the
+specimen `Hi` warms.
 
-```text
-H0 -> S0
-H1 -> S1
-H2 -> S2
-H3 -> S3
-H4 -> S4
-H5 -> S5
+Measure that map rather than tracing the harness. On the Pi, service running
+with `runtime.bench_mode=true`, all eight PT100s reading and the motors idle:
+
+```bash
+python3 scripts/associate_heaters.py --check   # preflight only, no heat
+python3 scripts/associate_heaters.py           # measure, write, restart
 ```
 
-Example: if H0 physically heats the sample measured by DAQ channel `S3` and H3
-heats `S0`, swap the mappings:
+It warms one heater at a time with bench `HEATER_TEST` pulses (each lapses
+within 5 s on its own, so a dead script cannot leave a heater on), pairs the
+heater with the RTD card terminal that warms, and writes
+`sensor.sequent_rtd_channels` only when every heater paired clearly with its
+own terminal: a config backup is kept beside the file, and the service is
+restarted and checked against the new map. It stops for a terminal reaching
+50 °C or a probe dropping out, and refuses to write when two terminals warm
+together, a heater warms nothing, or one heater needs far longer than the
+rest (a probe off its specimen reads its neighbour's heat). Every reading is
+logged to `logs/heater-association-<time>.csv`.
 
-```ini
-heater.temperature_channels=3,1,2,0,4,5
-```
-
-Every mapped channel must be less than `hardware.sample_count`. Use one unique
-PT100 per heater. A heater whose mapped sample is invalid or stale remains
-physically off.
+Heat cannot tell which unheated terminal is `S6` and which `S7`, nor which
+motor group or MAX31865 click a specimen belongs to — check
+`motor*.samples` and `sensor.max31865_sample_indices` against the harness.
+Afterwards prove one loop from the ground station: a small temperature target
+on `Hi` must move `Si`, and only `Si`. A heater whose mapped sample is invalid
+or stale remains physically off.
 
 ## 11. Changing Motor GPIO Pins
 
@@ -465,7 +474,9 @@ sensor.sequent_rtd_channels=1,2,8,4,5,6,7,3
 ```
 
 Every entry must be `1..8`, there must be exactly `hardware.sample_count`
-entries, and entries must not repeat.
+entries, and entries must not repeat. When the harness does not follow the
+schematic, let `scripts/associate_heaters.py` (section 10) write this map;
+`coatheal-deploy` keeps it.
 
 Configure:
 
