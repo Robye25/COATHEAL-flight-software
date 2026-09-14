@@ -117,7 +117,7 @@ guessed range (section 9, gate 5 of the same bring-up doc).
 | `heater.max_sample_temp_c` | `85.0` | Per-sample overtemperature latch. |
 | `heater.target_min_c` | `0.0` | Lowest accepted manual PID target. |
 | `heater.target_max_c` | `80.0` | Highest accepted manual PID target; must stay below the overtemperature latch. |
-| `heater.output_lines` | `19,13,6,5,24,23` | BCM GPIO lines for HEAT_EN1..6 (schematic v3 map). |
+| `heater.output_lines` | `19,13,6,5,24,23` | BCM GPIO lines for HEAT_EN1..6 (schematic v3 map). Bench wiring may differ: `scripts/associate_heaters.py` finds a heater on an unlisted line by trying the unclaimed header lines and writes the one that warms a terminal; `migrate-config` keeps the value from the local config (it is validated, not pinned). The boot-time `gpio=` block is derived from it — redeploy (and reboot) after a change. |
 | `heater.temperature_channels` | `0,1,2,3,4,5` | DAQ sample supplying feedback for H0..H5. Keep `0,1,2,3,4,5`: the ground station pairs heater `i` with sample `i`, and `migrate-config` pins this value. Remap PT100 wiring through `sensor.sequent_rtd_channels`. |
 | `heater.pwm_frequency_hz` | `1.0` | Requested heater PWM frequency. v3: film heaters have high thermal inertia and no hardware PWM channel is wired, so 1 Hz software PWM is the owner-confirmed rate (was 10.0 pre-v3). The software PWM period is divided into 100 slices and the duty is re-read every slice, so a `SetDuty(0)` from the motion heater-inhibit reaches the GPIO within one slice — 1000/100 = **10 ms** at 1 Hz — not one whole period. |
 | `heater.active_high` | `true` | MOSFET input polarity. |

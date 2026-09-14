@@ -4,6 +4,7 @@ import contextlib
 import importlib.util
 import io
 import random
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -38,12 +39,14 @@ class FakeClock:
 class FakeOnboard:
     """coatheal-onboard as seen through port 5000: eight specimens in a row
     (lumped heat capacity, loss to the room, some conduction to each
-    neighbour), each PT100 lagging its specimen, behind a shuffled harness."""
+    neighbour), each PT100 lagging its specimen, behind a shuffled harness.
+    Sized like the bench of 2026-09-14: +1 C within 4 s and +4..6 C within
+    10 s of a duty-0.25 pulse, a neighbour picking up a few tenths."""
 
-    CAPACITY_J_PER_K = 15.0
+    CAPACITY_J_PER_K = 4.0
     LOSS_W_PER_K = 0.06
     NEIGHBOUR_W_PER_K = 0.02
-    PROBE_LAG_S = 8.0
+    PROBE_LAG_S = 3.0
     HEATER_W = 5.0
     ROOM_DRIFT_C_PER_S = 0.1 / 60.0
     STEP_S = 0.25
@@ -53,7 +56,13 @@ class FakeOnboard:
         self.harness = list(harness)          # specimen -> RTD card terminal
         self.running_map = list(range(1, 9))  # the service's sequent_rtd_channels
         self.bench_mode = bench_mode
-        self.heats = {h: [(h, 1.0)] for h in range(6)}  # heater -> [(specimen, share)]
+        # The service's heater.output_lines, re-read from config_path on every
+        # (fake) restart, and what each BCM line physically drives.
+        self.output_lines = ["19", "13", "6", "5", "24", "23"]
+        self.line_heats = {line: [(h, 1.0)] for h, line in enumerate(self.output_lines)}
+        self.config_path: Path | None = None
+        self.restarts = 0
+        self.pulls: list[str] = []
         self.links = {s: [n for n in (s - 1, s + 1) if 0 <= n < 8] for s in range(8)}
         self.detached: set[int] = set()  # specimens whose probe hangs off them, reading the room
         self.faults: dict[int, tuple[float, str, float]] = {}  # terminal -> (from, fault, ohms)
@@ -78,7 +87,7 @@ class FakeOnboard:
         heater, duty = self.active()
         power = [0.0] * 8
         if heater is not None:
-            for specimen, share in self.heats[heater]:
+            for specimen, share in self.line_heats.get(self.output_lines[heater], []):
                 power[specimen] += self.HEATER_W * duty * share
         flows = []
         for s in range(8):
@@ -93,6 +102,21 @@ class FakeOnboard:
         self.hottest_probe = max(self.hottest_probe, *self.probe)
         self.room += self.ROOM_DRIFT_C_PER_S * self.STEP_S
         self._last += self.STEP_S
+
+    def restart(self) -> None:
+        """systemctl restart: a fresh process, disarmed, on the config as written."""
+        self.restarts += 1
+        self.mode, self.debug_armed, self.test = "STANDBY", False, None
+        if self.config_path is not None:
+            values = hardware_setup._ini_values(self.config_path.read_text(encoding="utf-8"))
+            self.output_lines = [p.strip() for p in values["heater.output_lines"].split(",")]
+
+    def subprocess_run(self, args, **kwargs):
+        if "systemctl" in args:
+            self.restart()
+        elif "pinctrl" in args:
+            self.pulls.append(" ".join(args))
+        return subprocess.CompletedProcess(args, 0)
 
     def _terminal(self, terminal: int) -> tuple[str, float]:
         fault = self.faults.get(terminal)
@@ -183,6 +207,7 @@ class AssociateHeatersEndToEndTests(unittest.TestCase):
             hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8"),
             {"runtime.bench_mode": "true", "heater.max_duty": "0.25"}), encoding="utf-8")
         self.original = self.config.read_text(encoding="utf-8")
+        self.rig.config_path = self.config
 
     def run_script(self, *extra: str) -> tuple[int, str]:
         argv = ["--config", str(self.config), "--yes", "--no-restart",
@@ -190,6 +215,7 @@ class AssociateHeatersEndToEndTests(unittest.TestCase):
         output = io.StringIO()
         with mock.patch.object(associate_heaters, "service_config", return_value=None), \
                 mock.patch.object(hardware_setup, "_check_with_binary", return_value=0), \
+                mock.patch.object(associate_heaters.subprocess, "run", self.rig.subprocess_run), \
                 contextlib.redirect_stdout(output):
             rc = associate_heaters.main(argv, send=self.rig.send,
                                         clock=self.clock.time, sleep=self.clock.sleep)
@@ -222,15 +248,49 @@ class AssociateHeatersEndToEndTests(unittest.TestCase):
         self.assert_left_safe()
 
     def test_a_heater_that_warms_nothing_blocks_the_write(self) -> None:
-        self.rig.heats[2] = []
-        rc, output = self.run_script()
+        self.rig.line_heats["6"] = []
+        rc, output = self.run_script("--no-find-lines")
         self.assertEqual(rc, 1, output)
         self.assertIn("H2: no terminal warmed", output)
         self.assertEqual(self.config.read_text(encoding="utf-8"), self.original)
+        self.assertEqual(self.rig.restarts, 0)
+        self.assert_left_safe()
+
+    def test_a_heater_on_an_unlisted_line_is_found_by_trying_the_free_lines(self) -> None:
+        # Bench 2026-09-14: H2 warmed nothing on BCM 6. Here its heater sits
+        # on BCM 16; BCM 12 comes first in the candidate order and drives
+        # nothing, so the search must survive one dead candidate.
+        self.rig.line_heats["6"] = []
+        self.rig.line_heats["16"] = [(2, 1.0)]
+        rc, output = self.run_script()
+        self.assertEqual(rc, 0, output)
+        self.assertIn("H2: trying BCM 12", output)
+        self.assertIn("H2: trying BCM 16", output)
+        self.assertNotIn("trying BCM 18", output)
+        values = hardware_setup._ini_values(self.config.read_text(encoding="utf-8"))
+        self.assertEqual(values["heater.output_lines"], "19,13,16,5,24,23")
+        self.assertEqual(values["sensor.sequent_rtd_channels"], "3,1,6,2,8,5,4,7")
+        self.assertEqual(self.rig.output_lines, ["19", "13", "16", "5", "24", "23"])
+        self.assertEqual(self.rig.restarts, 2)
+        self.assertIn("pinctrl set 16 pd", " | ".join(self.rig.pulls))
+        self.assertIn("coatheal-deploy", output)  # config.txt boot block needs the new line
+        self.assert_left_safe()
+
+    def test_a_heater_on_no_free_line_puts_the_config_back(self) -> None:
+        self.rig.line_heats["6"] = []
+        rc, output = self.run_script()
+        self.assertEqual(rc, 1, output)
+        for line in (12, 16, 18, 25, 4):
+            self.assertIn(f"H2: trying BCM {line}", output)
+        self.assertIn("restoring BCM 6", output)
+        self.assertIn("H2: no terminal warmed", output)
+        self.assertEqual(self.config.read_text(encoding="utf-8"), self.original)
+        self.assertEqual(self.rig.output_lines, ["19", "13", "6", "5", "24", "23"])
+        self.assertEqual(self.rig.restarts, 6)  # five tries + the restore
         self.assert_left_safe()
 
     def test_a_heater_warming_two_specimens_is_ambiguous(self) -> None:
-        self.rig.heats[3] = [(3, 0.5), (4, 0.5)]
+        self.rig.line_heats["5"] = [(3, 0.5), (4, 0.5)]
         rc, output = self.run_script()
         self.assertEqual(rc, 1, output)
         self.assertRegex(output, r"H3: ch(2|8) warmed to \d+% of ch(2|8)'s rise")
@@ -292,6 +352,15 @@ class AssociateHeatersEndToEndTests(unittest.TestCase):
         self.assertEqual(rc, 2, output)
         self.assertIn("runtime.bench_mode is off", output)
         self.assertFalse([c for c in self.rig.sent if c.split()[0] in {"ARM", "ARM_DEBUG", "HEATER_TEST"}])
+
+    def test_free_lines_are_the_unclaimed_header_lines_pull_down_first(self) -> None:
+        values = hardware_setup._ini_values(self.config.read_text(encoding="utf-8"))
+        self.assertEqual(associate_heaters.free_lines(values, ["19", "13", "6", "5", "24", "23"]),
+                         [12, 16, 18, 25, 4])
+        values["hal.status_led_enabled"] = "true"
+        values["hal.status_led_line"] = "12"
+        self.assertEqual(associate_heaters.free_lines(values, ["19", "13", "16", "5", "24", "23"]),
+                         [18, 25, 4, 6])
 
     def test_refuses_while_any_terminal_reads_no_probe(self) -> None:
         # Even an unheated specimen's probe: with a heater's own probe
