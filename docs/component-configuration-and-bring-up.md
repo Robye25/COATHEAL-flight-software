@@ -252,9 +252,15 @@ power.max_active_heaters=3
 power.max_thermal_w=15.0
 ```
 
-Test each output with an LED or meter before attaching heaters. A missing GPIO
-disables only that heater channel. Any invalid mapped PT100 forces duty to
-zero, including manual-duty commands. `power.max_active_heaters=3` is an
+Test each output with an LED or meter before attaching heaters. Once heaters
+and PT100s are connected, pair them by measurement — this matters whenever the
+harness does not follow the schematic — with
+`python3 scripts/associate_heaters.py` on the Pi (bench mode, all eight probes
+reading; see [Instruction Manual §10](rev-c-instruction-manual.md#10-changing-heater-to-pt100-mapping)).
+It writes `sensor.sequent_rtd_channels` so `Si` is the specimen `Hi` warms.
+
+A missing GPIO disables only that heater channel. Any invalid mapped PT100
+forces duty to zero, including manual-duty commands. `power.max_active_heaters=3` is an
 owner power-budget rule — the scheduler never energises a fourth heater
 regardless of demand; see
 [TMC5160 Commissioning §8, gate 7](tmc5160-commissioning.md#gate-7--max-3-heaters-ceiling-under-load)
