@@ -22,7 +22,7 @@ from .motor_debug import MotionEstimate, MotionEstimator, MotorDebugSample
 from .state import OnboardState
 from .widgets import (
     AMBER, GREEN, MONO_CSS, MUTED, RED, ResponseLine, Segmented, group_box, hrow, make_button,
-    soft_breaks,
+    soft_breaks, with_unit,
 )
 
 _COLORS = {"green": GREEN, "amber": AMBER, "red": RED, "gray": MUTED}
@@ -71,10 +71,9 @@ class DebugTab(QScrollArea):
                                      slot=self.toggle_probe)
         self.btn_once = make_button("READ ONCE", "neutral", sends="MOTOR_DEBUG <motor_id>", min_height=28, slot=self.read_once)
         self.interval = QSpinBox(); self.interval.setRange(200, 5000); self.interval.setSingleStep(100); self.interval.setValue(500)
-        self.interval.setSuffix(" ms")
         il = QLabel("poll every"); il.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(hrow(self.selector, self.btn_probe, self.btn_once))
-        lay.addWidget(hrow(il, self.interval, stretch_last=True))
+        lay.addWidget(hrow(il, with_unit(self.interval, "ms"), stretch_last=True))
 
         # Driver health at a glance: thermal state, faults, resets, PWM
         # saturation. This is the line the operator scans first.

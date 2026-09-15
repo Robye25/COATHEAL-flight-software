@@ -119,7 +119,7 @@ STATUS=SD_OK|USB_OK|I2C_OK|SPI_OK|LINK_OK|T_AMBIENT_OK|P_AMBIENT_OK|UNIFORMITY_O
 | `ENERGY_OK` / `ENERGY_FAIL` | Heater energy budget not exhausted |
 | `PWM_OK` / `PWM_FAIL` | Heater GPIO/PWM backend health |
 | `STEPPER_OK` / `STEPPER_FAIL` | Both motor backends healthy |
-| `SAMPLE_TEMP_OK` / `SAMPLE_TEMP_FAIL` | Every sample channel a heater controls (`heater.temperature_channels`) is valid and fresh; unheated channels are ignored, and an empty or out-of-range mapping fails closed |
+| `SAMPLE_TEMP_OK` / `SAMPLE_TEMP_FAIL` | Every sample channel a heater reads (the heated specimens of `motor0.specimens` / `motor1.specimens`, see `GET_LAYOUT`) is valid and fresh; unheated channels are ignored, and an empty or out-of-range mapping fails closed |
 | `SIMULATED` / `REAL_SENSORS` | Explicit sensor mode |
 | `SEQ_PAUSED` / `SEQ_READY` | At least one bend sequence is paused/faulted, or no sequence fault is active |
 | `HEATER_ACTIVE` / `HEATER_INHIBITED` | Heaters are inhibited while a motor holds `MotionLock` |
@@ -135,7 +135,7 @@ EVT,PULL,<session_id>,<pull_id>,<motor_id>,<start_ts>,<steps_moved>,<hold_s>,<sa
 
 | Field | Meaning |
 |---|---|
-| `motor_id` | `0` = samples 0..3, `1` = samples 4..7 |
+| `motor_id` | The motor that pulled; its samples are listed in `samples` (motor 0's specimens are S0.., motor 1's follow — `GET_LAYOUT`; the schematic groups are 0..3 and 4..7) |
 | `steps_moved` | Signed final position minus start position |
 | `hold_s` | Time held at the target |
 | `samples` | Pipe-separated sample indices, for example `0|1|2|3` |
@@ -218,7 +218,7 @@ NACK,<COMMAND>,<reason>
 | `RADIO_RESUME` | none | Resume transmission and drain the queued frames |
 | `SET_HEATER_DUTY` | `<index> <duty>` | Set one heater duty, index `0..5`, duty ≤ `heater.max_duty`. Normal mode requires valid mapped temperature feedback; bench/debug arm allows open-loop duty on channels without feedback or scheduler clamping. |
 | `SET_ALL_DUTY` | `<duty>` | Set all heater duties (≤ `heater.max_duty`). Normal mode requires valid temperature feedback for every heater; bench/debug arm allows open-loop duty on all channels without feedback or scheduler clamping. |
-| `SET_TEMP_TARGET` | `<index> <temp_c>` | Set one closed-loop target within configured limits |
+| `SET_TEMP_TARGET` | `<index> <temp_c>` | Set one closed-loop target within `heater.target_min_c..heater.target_max_c` (flight `0..75` °C, 5 °C under the `heater.max_sample_temp_c` overtemperature latch of 80 °C). The console asks for confirmation before any target above 40 °C |
 | `SET_ALL_TEMP_TARGETS` | `<temp_c>` | Set all six closed-loop targets |
 | `CLEAR_TEMP_TARGET` | `<index>` | Clear one target |
 | `CLEAR_TEMP_TARGETS` | none | Clear every target |
@@ -227,6 +227,7 @@ NACK,<COMMAND>,<reason>
 | `PID_TUNE_ABORT` | none | Abort the running tune (heater off) |
 | `PID_TUNE_STATUS` | none | `state=idle\|running\|done\|failed` plus progress (`heater`, `cycles a/b`, `relay`, `elapsed_s`); on `done` the measured `ku`/`tu_s`/`amplitude_c` and suggested `kp/ki/kd` (Tyreus–Luyben) + `zn_kp/zn_ki/zn_kd`; on `failed` the reason. Gains are **suggested only** — apply with `SET_PID` (the console's APPLY GAINS does this) |
 | `GET_THERMAL` | none | Return target, measured temperature, and duty for every heater |
+| `GET_LAYOUT` | none | The motor groups and the wiring behind them, derived from `motor0.specimens` / `motor1.specimens`: `samples=8;heaters=6;motor0=0,1,2,3;motor1=4,5,6,7;heater_samples=0,1,2,4,5,6;clicks=0,4;rtd_channels=8,2,3,4,5,7,1,6;heater_lines=19,13,6,5,24,23`. `motorN` = the sample indices that motor pulls; `heater_samples[h]` = the sample heater `h` reads; `clicks` = the samples MAX31865 click 1 and click 2 read (the first specimen of each motor); `rtd_channels[s]` = the RTD card terminal of sample `s`; `heater_lines[h]` = the BCM line of heater `h`. The console asks it on the first live frame of every onboard session and groups its panels, plots and `session.json` by it; firmware before 2026-09-15 NACKs it and the console keeps the schematic groups |
 | `CLEAR_OVERRIDES` | none | Clear duty, target, and PID overrides |
 | `SET_POSITION_ZERO` | `<id>` | Set current physical position as software zero without motion |
 | `STEPPER_MOVE` | `<id> <steps>` | Relative motor move (`<steps>` are microsteps at the configured divisor: µ4 → 800 per revolution). `|steps|` ≤ `stepper.max_direct_usteps` (1000 = 1.25 rev at µ4); longer travel goes through `STEPPER_MOVE_MM` |
@@ -237,8 +238,8 @@ NACK,<COMMAND>,<reason>
 | `STEPPER_BEND` | `<id> <abs_usteps> [hold_s]` | Compatibility alias for absolute move; motor must be zeroed; same `stepper.max_direct_usteps` cap as `STEPPER_MOVETO` |
 | `STEPPER_HOME` | `<id>` | Return to software zero; motor must be zeroed |
 | `STEPPER_STOP` | `<id>` | Stop motion and release `MotionLock` |
-| `STEPPER_SET_SPEED` | `<id> <hz>` | Set motor speed in full-steps/s. Clamped to the onboard speed ceiling — the lower of `pull.max_step_hz` and `stepper.max_speed_mm_s` converted through `stepper.lead_mm_per_rev` (flight: 0.5 mm/s = 50 full-steps/s at the 2 mm lead); a request above it is ACKed as `speed clamped to …` |
-| `STEPPER_SET_ACCEL` | `<id> <steps_s2>` | Set the trapezoidal ramp slope in full-steps/s², `(0, stepper.max_accel_steps_per_s2]`. Applies to the next ramp update, survives until restart |
+| `STEPPER_SET_SPEED` | `<id> <hz>` | Set motor speed in full-steps/s. Clamped to the onboard speed ceiling — the lower of `pull.max_step_hz` and `stepper.max_speed_mm_s` converted through `stepper.lead_mm_per_rev` (flight: 0.5 mm/s = 50 full-steps/s at the 2 mm lead); a request above it is ACKed as `speed clamped to …`. The console takes mm/s and sends ×100 (full steps per mm at the 2 mm lead) |
+| `STEPPER_SET_ACCEL` | `<id> <steps_s2>` | Set the trapezoidal ramp slope in full-steps/s², `(0, stepper.max_accel_steps_per_s2]`. Applies to the next ramp update, survives until restart. The console takes mm/s² and sends ×100 |
 | `STEPPER_SET_CURRENT` | `<id> <a_rms>` | Set the motor run current in A RMS, `(0, 3.1]`. Rewrites `GLOBALSCALER`/`IHOLD_IRUN` on the live chip (hold current keeps its configured fraction) and persists across chip-reset recovery until the service restarts; NACKed when the sense resistor cannot deliver the request or the driver is unhealthy |
 | `STEPPER_SET_MICROSTEP` | `<id> <n>` | Set microstep divisor |
 | `STEPPER_ENABLE` / `STEPPER_DISABLE` | `<id>` | Enable or disable driver output |

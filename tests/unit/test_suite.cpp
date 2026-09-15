@@ -560,7 +560,9 @@ void TestDrainBatchSendsTheNewestFrameFirst() {
 // `extra` appended so a test can override or add individual keys. Returns
 // the path. The INI parser is last-assignment-wins, so an appended line
 // overrides the same key in the baseline.
-std::string WriteTempConfig(const std::string& extra = "") {
+// legacy_layout=false leaves out the index-based layout keys, for a config
+// that sets motor0.specimens / motor1.specimens instead.
+std::string WriteTempConfig(const std::string& extra = "", bool legacy_layout = true) {
   static int counter = 0;
   const std::filesystem::path cfg_path =
       std::filesystem::temp_directory_path() /
@@ -610,7 +612,7 @@ std::string WriteTempConfig(const std::string& extra = "") {
   out << "hardware.sample_count=8\n";
   out << "hardware.heater_count=6\n";
   out << "heater.target_min_c=0.0\n";
-  out << "heater.target_max_c=80.0\n";
+  out << "heater.target_max_c=75.0\n";
   out << "sensor.pressure_source=dps310\n";
   out << "sensor.dps310_i2c_addr=0x77\n";
   out << "sensor.uv_source=guva_s12sd_ads1115\n";
@@ -620,8 +622,10 @@ std::string WriteTempConfig(const std::string& extra = "") {
   out << "sensor.resistance_source=disabled\n";
   out << "sensor.max31865_reference_ohm=470.0\n";
   out << "sensor.max31865_poll_ms=1000\n";
-  out << "sensor.max31865_sample_indices=0,4\n";
-  out << "heater.output_lines=19,13,6,5,24,23\n";
+  if (legacy_layout) {
+    out << "sensor.max31865_sample_indices=0,4\n";
+    out << "heater.output_lines=19,13,6,5,24,23\n";
+  }
   out << "heater.pwm_frequency_hz=1.0\n";
   out << "heater.active_high=true\n";
   out << "heater.debug_max_duty=0.25\n";
@@ -643,7 +647,7 @@ std::string WriteTempConfig(const std::string& extra = "") {
   out << "motor0.stealth_chop=false\n";
   out << "motor0.spi_speed_hz=1000000\n";
   out << "motor0.sense_resistor_ohm=0.075\n";
-  out << "motor0.samples=0,1,2,3\n";
+  if (legacy_layout) out << "motor0.samples=0,1,2,3\n";
   out << "motor1.driver=tmc5160\n";
   out << "motor1.gpio_chip=/dev/gpiochip0\n";
   out << "motor1.spi_device=/dev/spidev0.0\n";
@@ -654,7 +658,7 @@ std::string WriteTempConfig(const std::string& extra = "") {
   out << "motor1.stealth_chop=false\n";
   out << "motor1.spi_speed_hz=1000000\n";
   out << "motor1.sense_resistor_ohm=0.075\n";
-  out << "motor1.samples=4,5,6,7\n";
+  if (legacy_layout) out << "motor1.samples=4,5,6,7\n";
   out << extra;
   out.close();
 
@@ -687,7 +691,9 @@ void TestConfigParsesReliabilityFields() {
   assert(std::fabs(cfg.power.max_thermal_w - 15.0) < 1e-9);
   assert(cfg.power.max_active_heaters == 3U);
   assert(std::fabs(cfg.heater_safety.target_min_c - 0.0) < 1e-9);
-  assert(std::fabs(cfg.heater_safety.target_max_c - 80.0) < 1e-9);
+  assert(std::fabs(cfg.heater_safety.target_max_c - 75.0) < 1e-9);
+  // Owner rule 2026-09-15: the latch defaults to 80 C.
+  assert(std::fabs(cfg.heater_safety.max_sample_temp_c - 80.0) < 1e-9);
   assert(cfg.sensors.dps310_i2c_addr == 0x77);
   assert(cfg.sensors.ads1115_i2c_addr == 0x48);
   assert(cfg.sensors.uv_ads1115_channel == 0);
@@ -1543,6 +1549,116 @@ void TestDirectMicrostepCapAndSpeedCeiling() {
   std::filesystem::remove_all(queue_dir);
 }
 
+
+// ---------------------------------------------------------------------------
+// Motor-group layout (owner request 2026-09-15): motorN.specimens lists each
+// motor's specimens as PT100 card terminal and heater BCM line, and every
+// index map the onboard runs on is derived from it.
+
+const char* kSpecimens = "motor0.specimens=ch8:19,ch2:13,ch3:6,ch4:5\n"
+                         "motor1.specimens=ch5:24,ch7:23,ch1,ch6\n";
+
+void TestSpecimenListsDeriveTheLayout() {
+  {
+    coatheal::OnboardConfig cfg;
+    std::string error;
+    assert(coatheal::LoadConfigFromIni(WriteTempConfig(kSpecimens, false), &cfg, &error));
+    assert(cfg.sensors.sequent_rtd_channels == std::vector<std::size_t>({8, 2, 3, 4, 5, 7, 1, 6}));
+    assert(cfg.heaters.output_lines == std::vector<std::size_t>({19, 13, 6, 5, 24, 23}));
+    assert(cfg.heaters.temperature_channels == std::vector<std::size_t>({0, 1, 2, 3, 4, 5}));
+    assert(cfg.motors[0].samples == std::vector<std::size_t>({0, 1, 2, 3}));
+    assert(cfg.motors[1].samples == std::vector<std::size_t>({4, 5, 6, 7}));
+    assert(cfg.sensors.max31865_sample_indices == std::vector<std::size_t>({0, 4}));
+  }
+  {
+    // Uneven groups: three heated and one unheated specimen per motor. The
+    // heater numbering follows the specimens, so H3 reads S4.
+    coatheal::OnboardConfig cfg;
+    std::string error;
+    assert(coatheal::LoadConfigFromIni(
+        WriteTempConfig("motor0.specimens=CH8:BCM19, ch2:13, ch3:6, ch4\n"
+                        "motor1.specimens=ch5:5,ch7:24,ch1:23,ch6\n", false),
+        &cfg, &error));
+    assert(cfg.heaters.output_lines == std::vector<std::size_t>({19, 13, 6, 5, 24, 23}));
+    assert(cfg.heaters.temperature_channels == std::vector<std::size_t>({0, 1, 2, 4, 5, 6}));
+    assert(cfg.sensors.sequent_rtd_channels == std::vector<std::size_t>({8, 2, 3, 4, 5, 7, 1, 6}));
+    assert(cfg.motors[1].samples == std::vector<std::size_t>({4, 5, 6, 7}));
+  }
+  {
+    // Five specimens on motor 0: its click stays on S0, motor 1's moves to S5.
+    coatheal::OnboardConfig cfg;
+    std::string error;
+    assert(coatheal::LoadConfigFromIni(
+        WriteTempConfig("motor0.specimens=ch8:19,ch2:13,ch3:6,ch4:5,ch1\n"
+                        "motor1.specimens=ch5:24,ch7:23,ch6\n", false),
+        &cfg, &error));
+    assert(cfg.motors[0].samples == std::vector<std::size_t>({0, 1, 2, 3, 4}));
+    assert(cfg.motors[1].samples == std::vector<std::size_t>({5, 6, 7}));
+    assert(cfg.sensors.max31865_sample_indices == std::vector<std::size_t>({0, 5}));
+  }
+}
+
+void TestSpecimenListsRejectWhatCannotRun() {
+  struct Case { std::string body; bool legacy; const char* fragment; };
+  const Case cases[] = {
+    {"motor0.specimens=ch8:19,ch2:13,ch3:6,ch4:5\n", false,
+     "motor0.specimens and motor1.specimens must be set together"},
+    {kSpecimens, true, "sensor.max31865_sample_indices is derived from motor0.specimens / motor1.specimens: remove it"},
+    {std::string(kSpecimens) + "sensor.sequent_rtd_channels=1,2,3,4,5,6,7,8\n", false,
+     "sensor.sequent_rtd_channels is derived from"},
+    {"motor0.specimens=ch9:19,ch2:13,ch3:6,ch4:5\nmotor1.specimens=ch5:24,ch7:23,ch1,ch6\n", false,
+     "motor0.specimens: ch9 is not a card terminal"},
+    {"motor0.specimens=ch8:19,ch2:13,ch3:6,ch4:5\nmotor1.specimens=ch5:24,ch8:23,ch1,ch6\n", false,
+     "ch8 is listed twice"},
+    {"motor0.specimens=ch8:19,ch2:19,ch3:6,ch4:5\nmotor1.specimens=ch5:24,ch7:23,ch1,ch6\n", false,
+     "BCM 19 heats two specimens"},
+    {"motor0.specimens=ch8:19,ch2:13,ch3:6,ch4:5\nmotor1.specimens=ch5:24,ch7:23,ch1\n", false,
+     "list 7 specimens; hardware.sample_count is 8"},
+    {"motor0.specimens=ch8:19,ch2:13,ch3:6,ch4\nmotor1.specimens=ch5:24,ch7:23,ch1,ch6\n", false,
+     "list 5 heated specimens; hardware.heater_count is 6"},
+    {"motor0.specimens=8:19,ch2:13,ch3:6,ch4:5\nmotor1.specimens=ch5:24,ch7:23,ch1,ch6\n", false,
+     "invalid motor0.specimens at line"},
+    {"motor0.specimens=ch8:x,ch2:13,ch3:6,ch4:5\nmotor1.specimens=ch5:24,ch7:23,ch1,ch6\n", false,
+     "invalid motor0.specimens at line"},
+    {"motor0.specimens=\nmotor1.specimens=ch5:24,ch7:23,ch1,ch6\n", false,
+     "invalid motor0.specimens at line"},
+    // A heater line the Sequent HAT or a motor owns still fails the GPIO
+    // claim check, naming the heater and the list it is in.
+    {"motor0.specimens=ch8:19,ch2:13,ch3:17,ch4:5\nmotor1.specimens=ch5:24,ch7:23,ch1,ch6\n", false,
+     "line 17 assigned to both reserved: sequent_hat rs485_dir and heater H2 (motor0.specimens)"},
+    {"motor0.specimens=ch8:19,ch2:13,ch3:6,ch4:5\nmotor1.specimens=ch5:24,ch7:21,ch1,ch6\n", false,
+     "line 21 assigned to both heater H5 (motor1.specimens) and motor1.enable_line"},
+  };
+  for (const Case& c : cases) {
+    coatheal::OnboardConfig cfg;
+    std::string error;
+    assert(!coatheal::LoadConfigFromIni(WriteTempConfig(c.body, c.legacy), &cfg, &error));
+    if (error.find(c.fragment) == std::string::npos) {
+      std::cerr << "expected '" << c.fragment << "', got '" << error << "'\n";
+      assert(false);
+    }
+  }
+}
+
+void TestGetLayoutReportsTheGroups() {
+  const std::filesystem::path queue_dir = FreshQueueDir("layout");
+  coatheal::OnboardConfig cfg;
+  std::string error;
+  assert(coatheal::LoadConfigFromIni(
+      WriteTempConfig("motor0.specimens=ch8:19,ch2:13,ch3:6,ch4\n"
+                      "motor1.specimens=ch5:5,ch7:24,ch1:23,ch6\n", false),
+      &cfg, &error));
+  cfg.storage.queue_dir = queue_dir.string();
+  coatheal::SystemController controller(cfg);
+  assert(controller.HandleCommandLine("GET_LAYOUT", "") ==
+         "ACK,GET_LAYOUT,samples=8;heaters=6;motor0=0,1,2,3;motor1=4,5,6,7;"
+         "heater_samples=0,1,2,4,5,6;clicks=0,4;rtd_channels=8,2,3,4,5,7,1,6;"
+         "heater_lines=19,13,6,5,24,23");
+  assert(ContainsText(controller.HandleCommandLine("GET_LAYOUT extra", ""),
+                      "invalid argument count for GET_LAYOUT"));
+  std::filesystem::remove_all(queue_dir);
+}
+
 int main() {
   TestPidBoundsAndAntiWindup();
   TestHeaterSchedulerCap();
@@ -1582,6 +1698,9 @@ int main() {
   TestFallbackConfigValidation();
   TestMotionEnvelopeConfig();
   TestDirectMicrostepCapAndSpeedCeiling();
+  TestSpecimenListsDeriveTheLayout();
+  TestSpecimenListsRejectWhatCannotRun();
+  TestGetLayoutReportsTheGroups();
 
   std::cout << "All unit tests passed.\n";
   return 0;

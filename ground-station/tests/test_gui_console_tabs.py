@@ -71,9 +71,12 @@ class ConsoleTabTests(unittest.TestCase):
         motion.current.setValue(0.4)
         motion.btn_current.click()
         self.assertEqual(sent[-1], "STEPPER_SET_CURRENT 0 0.400")
-        motion.accel.setValue(400)
+        motion.accel.setValue(4.0)          # mm/s², sent as full-steps/s²
         motion.btn_accel.click()
         self.assertEqual(sent[-1], "STEPPER_SET_ACCEL 0 400.0")
+        motion.speed.setValue(0.25)         # mm/s, sent as full-steps/s
+        motion.btn_speed.click()
+        self.assertEqual(sent[-1], "STEPPER_SET_SPEED 0 25.000")
 
     def test_motion_gating_reasons(self) -> None:
         self.feed()
@@ -350,7 +353,8 @@ class ConsoleTabTests(unittest.TestCase):
     def test_pid_autotune_start_and_result_flow(self) -> None:
         from app.protocol import CommandResponse
         sent = []
-        self.win._dispatcher.send = lambda cmd, tag=None, timeout=None, quiet=False: sent.append((cmd, quiet))
+        self.win._dispatcher.send = lambda cmd, tag=None, timeout=None, quiet=False: (
+            cmd != "GET_LAYOUT" and sent.append((cmd, quiet)))
         thermal = self.win._thermal
         self.feed()
         thermal.tune_heater.setCurrentIndex(4)

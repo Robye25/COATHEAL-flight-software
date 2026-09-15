@@ -10,9 +10,11 @@ from __future__ import annotations
 
 from typing import Optional
 
-from .state import HEATER_SAMPLE, OnboardState
+from .state import OnboardState
 
 SILENCE = "radio silence active — send RADIO RESUME first"
+# Owner rule 2026-09-15: a heater target above this asks the operator first.
+CONFIRM_ABOVE_C = 40.0
 
 
 def _mode_reason(state: OnboardState) -> Optional[str]:
@@ -63,8 +65,8 @@ def heater_reason(state: OnboardState, heater: int, *, needs_temperature: bool =
     if reason:
         return reason
     if needs_temperature and state.have_packet and not state.heater_temp_valid(heater):
-        sample = HEATER_SAMPLE[heater] if heater < len(HEATER_SAMPLE) else heater
-        return f"S{sample} has no valid temperature — heater H{heater} cannot run"
+        sample = state.layout.sample_of_heater(heater)
+        return f"S{heater if sample is None else sample} has no valid temperature — heater H{heater} cannot run"
     return None
 
 
@@ -89,9 +91,10 @@ def all_heaters_reason(state: OnboardState) -> Optional[str]:
     if reason:
         return reason
     if state.have_packet:
-        invalid = [i for i in range(len(state.heater_duty)) if not state.heater_temp_valid(i)]
+        invalid = [state.layout.sample_of_heater(i) for i in range(len(state.heater_duty))
+                   if not state.heater_temp_valid(i)]
         if invalid:
-            return "no valid temperature on S" + ", S".join(str(i) for i in invalid)
+            return "no valid temperature on S" + ", S".join(str(s) for s in invalid if s is not None)
     return None
 
 
@@ -150,3 +153,25 @@ def sequence_run_reason(state: OnboardState, motor_id: int) -> Optional[str]:
     if motor.seq_state == "run":
         return f"M{motor_id} already running sequence {motor.seq_name or ''}".rstrip()
     return None
+
+
+def heating_question(command: str) -> Optional[str]:
+    """The confirmation to ask before `command` when it sets a heater
+    target above CONFIRM_ABOVE_C (SET_TEMP_TARGET, SET_ALL_TEMP_TARGETS, the
+    PID_TUNE_START setpoint), else None. Owner rule 2026-09-15."""
+    parts = command.split()
+    verb = parts[0].upper() if parts else ""
+    try:
+        if verb == "SET_TEMP_TARGET" and len(parts) >= 3:
+            target, question = float(parts[2]), f"Heat H{parts[1]} to {{}} °C?"
+        elif verb == "SET_ALL_TEMP_TARGETS" and len(parts) >= 2:
+            target, question = float(parts[1]), "Heat every heater to {} °C?"
+        elif verb == "PID_TUNE_START" and len(parts) >= 3:
+            target, question = float(parts[2]), f"Autotune H{parts[1]} around {{}} °C?"
+        else:
+            return None
+    except ValueError:
+        return None
+    if not target > CONFIRM_ABOVE_C:
+        return None
+    return f"{question.format(f'{target:g}')} That is above {CONFIRM_ABOVE_C:g} °C."

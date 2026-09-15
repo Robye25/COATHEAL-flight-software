@@ -294,6 +294,14 @@ class SessionLogs:
     def write_event(self, level: str, message: str, ts_utc: Optional[str] = None) -> None:
         self.events.write(format_event_line(level, message, ts_utc))
 
+    def set_layout(self, layout: Dict[str, Any]) -> None:
+        """The onboard's motor groups for this session (GET_LAYOUT), kept in
+        session.json so every S<i>/H<i> column can be traced to its motor
+        and wiring afterwards."""
+        self._meta["layout"] = dict(layout)
+        self._meta["layout_utc"] = utc_now_iso()
+        self._write_meta()
+
     def close(self) -> None:
         self._meta["closed_utc"] = utc_now_iso()
         self._write_meta()
@@ -405,6 +413,14 @@ class LogManager:
                 self._pending_commands.append(record)
             else:
                 self._logs.write_command(**record)
+
+    def record_layout(self, session_id: str, layout: Dict[str, Any]) -> None:
+        """Keep the layout the onboard reported in that session's
+        session.json (ignored when the session has no open directory)."""
+        with self._lock:
+            logs = self._open.get(session_id)
+            if logs is not None and not self._closed:
+                logs.set_layout(layout)
 
     def log_event(self, level: str, message: str, ts_utc: Optional[str] = None) -> None:
         record = {"level": level, "message": message, "ts_utc": ts_utc or utc_now_iso()}

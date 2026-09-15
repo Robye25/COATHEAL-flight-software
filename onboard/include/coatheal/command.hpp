@@ -36,6 +36,9 @@ enum class CommandType {
   kClearTempTarget,
   kClearTempTargets,
   kGetThermal,
+  // GET_LAYOUT: which samples and heaters each motor group has, the click
+  // samples, and the wiring behind them (card terminal, heater BCM line).
+  kGetLayout,
   kClearOverrides,
   kSetBenchMode,
   kSetTickHz,

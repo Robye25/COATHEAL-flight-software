@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,15 +23,10 @@ DEFAULT_CONFIG = ROOT / "config" / "onboard.local.ini"
 EXAMPLE_CONFIG = ROOT / "config" / "onboard.example.ini"
 LEGACY_CONFIG = ROOT / "config" / "onboard.ini"
 FINAL_PIN_VALUES = {
-    # Heater i always reads logical sample i (the ground station pairs them
-    # the same way). Which GPIO drives each heater and which RTD card terminal
-    # each sample's PT100 landed on are bench wiring (2026-09-14: neither
-    # follows the schematic), so heater.output_lines and
-    # sensor.sequent_rtd_channels are deliberately NOT pinned here: migration
-    # keeps the lines set for the harness and the terminal map
-    # scripts/associate_heaters.py measured, and validate_candidate still
-    # checks the lines it finds in the INI.
-    "heater.temperature_channels": "0,1,2,3,4,5",
+    # Which heater and which PT100 belong to which motor group is bench wiring
+    # (2026-09-14: the harness does not follow the schematic), so
+    # motor0.specimens / motor1.specimens are deliberately NOT pinned here:
+    # migration keeps them, and validate_candidate still checks them.
     "hal.status_led_enabled": "false",
     "hal.mode_led_enabled": "false",
     # v3: TMC5160, SPI-only motion - no STEP/DIR lines exist.
@@ -40,6 +36,10 @@ FINAL_PIN_VALUES = {
     "motor0.cs_line": "22",
     "motor0.enable_line": "20",
     "motor0.sense_resistor_ohm": "0.075",
+    # Owner 2026-09-15: motor 0 turns the other way from motor 1 for the
+    # same command; the driver flips every step so "+" means the same
+    # physical direction on both.
+    "motor0.invert_direction": "true",
     "motor1.driver": "tmc5160",
     "motor1.gpio_chip": "/dev/gpiochip0",
     "motor1.spi_device": "/dev/spidev0.0",
@@ -55,15 +55,16 @@ FINAL_PIN_VALUES = {
     # MAX31865 dual-click sample-resistance instrument (schematic v3/v4).
     # Device paths are fixed by hardware (CE1/GP07 = click 0 = SAMPLE1 =
     # /dev/spidev0.1; CE0/GP08 = click 1 = SAMPLE2 = /dev/spidev0.0), not
-    # configurable. sample_indices "0,4" is the owner decision of
-    # 2026-08-29: resistance is measured on exactly two specimens, the first
-    # of each motor group (S0 on motor 0, S4 on motor 1). The ground
-    # station mirrors the same pair in app/gui/state.py RESISTANCE_SAMPLES;
-    # change both together.
+    # configurable. Owner decision 2026-08-29: resistance is measured on
+    # exactly two specimens, one per motor group -- the first specimen of
+    # each motor's specimens list (the onboard derives which samples).
     "sensor.max31865_reference_ohm": "470.0",
     "sensor.max31865_poll_ms": "1000",
-    "sensor.max31865_sample_indices": "0,4",
     "sensor.resistance_source": "max31865_click",
+    # Owner rule 2026-09-15: nothing above 80 C; targets stay 5 C under the
+    # latch because a film heater overshoots its target.
+    "heater.max_sample_temp_c": "80.0",
+    "heater.target_max_c": "75.0",
     # Owner hard rule (schematic v3 power budget): never more than 3 heaters
     # energised, never more than 15 W thermal. Tracked here so `pin-check`
     # and the wizard pin the owner's values, and validated in
@@ -72,7 +73,20 @@ FINAL_PIN_VALUES = {
     "power.max_active_heaters": "3",
     "power.max_thermal_w": "15.0",
 }
+# motorN.specimens (2026-09-15) replaced these index-based layout keys: the
+# onboard derives them from the two specimen lists and refuses an INI that
+# sets both, and migrate-config converts an INI written before.
+LAYOUT_KEYS = (
+    "heater.output_lines",
+    "heater.temperature_channels",
+    "sensor.sequent_rtd_channels",
+    "sensor.max31865_sample_indices",
+    "motor0.samples",
+    "motor1.samples",
+)
+SPECIMEN_KEYS = ("motor0.specimens", "motor1.specimens")
 OBSOLETE_CONFIG_KEYS = {
+    *LAYOUT_KEYS,
     "stepper.microstep",
     "stepper.microsteps",
     "stepper.max_step_hz",
@@ -217,25 +231,176 @@ def _number_list(value: str) -> list[int]:
     return [int(piece.strip(), 0) for piece in value.split(",") if piece.strip()]
 
 
+@dataclass(frozen=True)
+class Specimen:
+    """One specimen of a motor group: the Sequent RTD card terminal its
+    PT100 is on, and the BCM line of its heater (None when unheated)."""
+    channel: int
+    line: int | None = None
+
+
+def parse_specimens(text: str) -> list[Specimen]:
+    """`ch8:19,ch2:13,ch1` -> specimens, in order. ValueError names a bad
+    entry. Mirrors config.cpp ParseSpecimenList."""
+    items = text.split(",")
+    if items and not items[-1].strip():
+        items.pop()
+    specimens = []
+    for item in items:
+        terminal, sep, heater = (part.strip().lower() for part in item.partition(":"))
+        heater = heater.removeprefix("bcm")
+        if not (terminal.startswith("ch") and terminal[2:].isdigit()) or (
+                sep and not heater.isdigit()):
+            raise ValueError(f"{item.strip()!r}: give a PT100 terminal and its heater's "
+                             "BCM line, like ch8:19, or the terminal alone for an "
+                             "unheated specimen")
+        specimens.append(Specimen(int(terminal[2:]), int(heater) if sep else None))
+    return specimens
+
+
+def format_specimens(specimens) -> str:
+    return ",".join(f"ch{s.channel}" + (f":{s.line}" if s.line is not None else "")
+                    for s in specimens)
+
+
+@dataclass(frozen=True)
+class Layout:
+    """Each motor's specimens in sample order, and the index maps the onboard
+    derives from them (config.cpp DeriveLayoutFromSpecimens): motor 0's
+    specimens are S0.., motor 1's follow, heated specimens are H0.. in the
+    same order, and each motor's first specimen is on its MAX31865 click."""
+    motors: tuple[tuple[Specimen, ...], ...]
+
+    @property
+    def specimens(self) -> list[Specimen]:
+        return [specimen for group in self.motors for specimen in group]
+
+    @property
+    def channels(self) -> list[int]:
+        return [specimen.channel for specimen in self.specimens]
+
+    @property
+    def heater_lines(self) -> list[int]:
+        return [specimen.line for specimen in self.specimens if specimen.line is not None]
+
+    @property
+    def heater_count(self) -> int:
+        return len(self.heater_lines)
+
+    @property
+    def sample_count(self) -> int:
+        return len(self.specimens)
+
+    @property
+    def heater_samples(self) -> list[int]:
+        return [sample for sample, specimen in enumerate(self.specimens)
+                if specimen.line is not None]
+
+    @property
+    def motor_samples(self) -> list[list[int]]:
+        groups, start = [], 0
+        for group in self.motors:
+            groups.append(list(range(start, start + len(group))))
+            start += len(group)
+        return groups
+
+    @property
+    def clicks(self) -> list[int]:
+        return [samples[0] for samples in self.motor_samples if samples]
+
+    def heater_of(self, sample: int) -> int | None:
+        samples = self.heater_samples
+        return samples.index(sample) if sample in samples else None
+
+    def motor_of(self, sample: int) -> int | None:
+        return next((motor for motor, samples in enumerate(self.motor_samples)
+                     if sample in samples), None)
+
+
+def layout_from_values(values: dict[str, str]) -> Layout:
+    """The motor groups an INI describes: motorN.specimens, or, for an INI
+    written before those keys, converted from the index-based layout keys
+    (each motor's click sample first, so the clicks read the same
+    specimens). ValueError says what does not read."""
+    present = [key for key in SPECIMEN_KEYS if key in values]
+    if present:
+        if len(present) != len(SPECIMEN_KEYS):
+            raise ValueError("motor0.specimens and motor1.specimens must be set together")
+        legacy = [key for key in values if key in LAYOUT_KEYS]
+        if legacy:
+            raise ValueError(f"{legacy[0]} is derived from motor0.specimens / "
+                             "motor1.specimens: remove it")
+        return Layout(tuple(tuple(parse_specimens(values[key])) for key in SPECIMEN_KEYS))
+
+    sample_count = int(values.get("hardware.sample_count", "8"))
+    lines = _number_list(values.get("heater.output_lines", "19,13,6,5,24,23"))
+    feedback = _number_list(values.get(
+        "heater.temperature_channels", ",".join(str(i) for i in range(len(lines)))))
+    channels = _number_list(values.get(
+        "sensor.sequent_rtd_channels", ",".join(str(c) for c in range(1, sample_count + 1))))
+    groups = [_number_list(values.get(f"motor{motor}.samples", default))
+              for motor, default in enumerate(("0,1,2,3", "4,5,6,7"))]
+    clicks = _number_list(values.get("sensor.max31865_sample_indices", "0,4"))
+    if len(feedback) != len(lines):
+        raise ValueError("heater.temperature_channels count must match heater.output_lines")
+    if sorted(s for samples in groups for s in samples) != list(range(len(channels))):
+        raise ValueError("motor0.samples and motor1.samples must list every sample "
+                         "of sensor.sequent_rtd_channels once")
+    line_of: dict[int, int] = {}
+    for heater, sample in enumerate(feedback):
+        if sample in line_of or not 0 <= sample < len(channels):
+            raise ValueError("heater.temperature_channels must name distinct samples")
+        line_of[sample] = lines[heater]
+    motors = []
+    for motor, samples in enumerate(groups):
+        order = sorted(samples)
+        if motor < len(clicks) and clicks[motor] in order:
+            order.remove(clicks[motor])
+            order.insert(0, clicks[motor])
+        motors.append(tuple(Specimen(channels[s], line_of.get(s)) for s in order))
+    return Layout(tuple(motors))
+
+
+def layout_errors(layout: Layout, sample_count: int, heater_count: int) -> list[str]:
+    """What the onboard refuses in these motor groups (config.cpp)."""
+    errors = []
+    for motor, group in enumerate(layout.motors):
+        if not group:
+            errors.append(f"motor{motor}.specimens lists no specimen")
+    channels = layout.channels
+    for motor, group in enumerate(layout.motors):
+        for specimen in group:
+            if not 1 <= specimen.channel <= 8:
+                errors.append(f"motor{motor}.specimens: ch{specimen.channel} is not a card "
+                              "terminal (ch1..ch8)")
+    for channel in sorted({c for c in channels if channels.count(c) > 1}):
+        errors.append(f"ch{channel} is listed twice in motor0.specimens / motor1.specimens")
+    lines = layout.heater_lines
+    for line in sorted({n for n in lines if lines.count(n) > 1}):
+        errors.append(f"BCM {line} heats two specimens in motor0.specimens / motor1.specimens")
+    if len(channels) != sample_count:
+        errors.append(f"motor0.specimens and motor1.specimens list {len(channels)} specimens; "
+                      f"hardware.sample_count is {sample_count}")
+    if len(lines) != heater_count:
+        errors.append(f"motor0.specimens and motor1.specimens list {len(lines)} heated "
+                      f"specimens; hardware.heater_count is {heater_count}")
+    return errors
+
+
 def validate_candidate(text: str) -> list[str]:
     values = _ini_values(text)
     errors: list[str] = []
     try:
         samples = int(values["hardware.sample_count"])
         heaters = int(values["hardware.heater_count"])
-        output_lines = _number_list(values["heater.output_lines"])
-        temperature_channels = _number_list(values["heater.temperature_channels"])
     except (KeyError, ValueError) as exc:
         return [f"invalid required mapping: {exc}"]
-    if len(output_lines) != heaters:
-        errors.append("heater.output_lines count must match hardware.heater_count")
-    if len(temperature_channels) != heaters:
-        errors.append(
-            "heater.temperature_channels count must match hardware.heater_count")
-    if len(set(temperature_channels)) != len(temperature_channels):
-        errors.append("heater temperature mappings must be unique")
-    if any(channel < 0 or channel >= samples for channel in temperature_channels):
-        errors.append("sensor channel mapping is outside hardware.sample_count")
+    try:
+        layout = layout_from_values(values)
+    except ValueError as exc:
+        return [str(exc)]
+    errors.extend(layout_errors(layout, samples, heaters))
+    output_lines = layout.heater_lines
 
     stack = values.get("sensor.sequent_rtd_stack")
     try:
@@ -245,21 +410,6 @@ def validate_candidate(text: str) -> list[str]:
     else:
         if not 0 <= stack_int <= 7:
             errors.append("sensor.sequent_rtd_stack must be 0..7")
-
-    raw_channels = values.get("sensor.sequent_rtd_channels", "")
-    channels = [c.strip() for c in raw_channels.split(",") if c.strip()]
-    # Mirror config.cpp's check exactly: it compares against the *variable*
-    # hardware.sample_count, not a literal 8. `samples` is already parsed
-    # from that same key above (part of the required-mapping check at the
-    # top of this function), so it is guaranteed present here.
-    if len(channels) != samples:
-        errors.append(
-            "sensor.sequent_rtd_channels must list hardware.sample_count "
-            "entries")
-    elif len(set(channels)) != len(channels):
-        errors.append("sensor.sequent_rtd_channels contains duplicates")
-    elif any(not c.isdigit() or not 1 <= int(c) <= 8 for c in channels):
-        errors.append("sensor.sequent_rtd_channels entries must be 1..8")
 
     # pt100 only, mirroring config.cpp. The card and the adapter's Probe()
     # both handle pt1000, but ApplyValidation's card-temperature cross-check
@@ -311,29 +461,6 @@ def validate_candidate(text: str) -> list[str]:
         if max31865_poll_ms <= 0:
             errors.append("sensor.max31865_poll_ms must be > 0")
 
-    raw_max31865_indices = values.get("sensor.max31865_sample_indices", "")
-    raw_max31865_pieces = [
-        c.strip() for c in raw_max31865_indices.split(",") if c.strip()]
-    if len(raw_max31865_pieces) != 2:
-        errors.append(
-            "sensor.max31865_sample_indices must have exactly two entries")
-    elif any(not c.isdigit() for c in raw_max31865_pieces):
-        # Mirrors config.cpp's ParseSizeList failure -- a non-numeric entry
-        # is a parse error, kept distinct from the range message below.
-        errors.append("sensor.max31865_sample_indices must be numeric")
-    else:
-        # Parse before comparing, matching config.cpp (which compares the
-        # parsed std::size_t values, not the raw INI text): a raw-string
-        # comparison would miss "0" vs "00" as a duplicate even though both
-        # parse to the same index.
-        max31865_indices = [int(c) for c in raw_max31865_pieces]
-        if len(set(max31865_indices)) != len(max31865_indices):
-            errors.append(
-                "sensor.max31865_sample_indices entries must be distinct")
-        elif any(index >= samples for index in max31865_indices):
-            errors.append("sensor.max31865_sample_indices entries must be "
-                          "less than hardware.sample_count")
-
     # Owner hard rule, mirroring config.cpp's power-cap block: <= 3 active
     # heaters and <= 15.0 W thermal. This is a deliberate, narrow reversal of
     # the "validator scope asymmetry by design" note -- that note said this
@@ -362,10 +489,18 @@ def validate_candidate(text: str) -> list[str]:
     # Reserved lines are claimed first, mirroring config.cpp's claim order,
     # so a heater or motor line colliding with one fails with the reserved
     # owner named in the error.
+    from_specimens = any(key in values for key in SPECIMEN_KEYS)
+
+    def heater_owner(index: int) -> str:
+        # Name the key the INI has (config.cpp does the same).
+        if not from_specimens:
+            return f"heater.output_lines[{index}]"
+        return f"heater H{index} (motor{layout.motor_of(layout.heater_samples[index])}.specimens)"
+
     gpio_keys = [
         (runtime_chip, owner, line) for line, owner in RESERVED_GPIO_LINES
     ] + [
-        (runtime_chip, f"heater.output_lines[{index}]", line)
+        (runtime_chip, heater_owner(index), line)
         for index, line in enumerate(output_lines)
     ]
     for motor in (0, 1):
@@ -448,7 +583,15 @@ def _candidate_from_existing(existing: Path | None) -> str:
     template_keys = set(_ini_values(template))
     updates: dict[str, str] = {}
     if existing is not None and existing.exists():
-        for key, value in _ini_values(existing.read_text(encoding="utf-8")).items():
+        existing_values = _ini_values(existing.read_text(encoding="utf-8"))
+        # An INI from before motorN.specimens: carry its wiring over in the
+        # new form (the layout keys themselves are not in the template).
+        if (not any(key in existing_values for key in SPECIMEN_KEYS)
+                and any(key in existing_values for key in LAYOUT_KEYS)):
+            layout = layout_from_values(existing_values)
+            for key, group in zip(SPECIMEN_KEYS, layout.motors):
+                updates[key] = format_specimens(group)
+        for key, value in existing_values.items():
             # `key in template_keys` is the primary mechanism today: a
             # retired key can only survive into `updates` if it is also
             # present in EXAMPLE_CONFIG. RETIRED_SENSOR_KEYS is a backstop
@@ -486,7 +629,12 @@ def migrate_config(args: argparse.Namespace) -> int:
     source = args.migrate_from
     if source is not None and not source.exists():
         source = None
-    text = _candidate_from_existing(source)
+    try:
+        text = _candidate_from_existing(source)
+    except ValueError as error:
+        print(f"Configuration error: cannot convert {source}'s heater/PT100 layout "
+              f"to motor0.specimens / motor1.specimens: {error}", file=sys.stderr)
+        return 2
     errors = validate_candidate(text)
     if errors:
         for error in errors:
@@ -554,13 +702,16 @@ def boot_gpio_lines(values: dict[str, str]) -> list[str]:
             raise ValueError(f"{key}: BCM {pin} is outside the 40-pin header range 0-27")
         by_state.setdefault(state, set()).add(pin)
 
-    heater_lines = values.get("heater.output_lines", "")
-    if not heater_lines.strip():
-        raise ValueError("heater.output_lines is missing; cannot derive boot GPIO states")
+    if any(key in values for key in SPECIMEN_KEYS):
+        heater_lines = [str(line) for line in layout_from_values(values).heater_lines]
+    else:
+        heater_lines = [p for p in values.get("heater.output_lines", "").split(",") if p.strip()]
+    if not heater_lines:
+        raise ValueError("motor0.specimens / motor1.specimens list no heater; cannot "
+                         "derive boot GPIO states")
     heater_off = "op,dl,pd" if _ini_bool(values, "heater.active_high", True) else "op,dh,pu"
-    for piece in heater_lines.split(","):
-        if piece.strip():
-            add(piece, "heater.output_lines", heater_off)
+    for piece in heater_lines:
+        add(piece, "heater line", heater_off)
 
     for motor in ("motor0", "motor1"):
         cs = values.get(f"{motor}.cs_line", "").strip()
@@ -615,6 +766,43 @@ def upsert_boot_gpio_block(config_txt: str, block: str) -> str:
     return text + block
 
 
+BOOT_CONFIG_PATHS = (Path("/boot/firmware/config.txt"), Path("/boot/config.txt"))
+
+
+def boot_block_problem(values: dict[str, str],
+                       config_txt: Path | None = None) -> str | None:
+    """Why the managed gpio= block in config.txt does not hold every line
+    this INI drives off from boot -- None when it does, or when there is no
+    config.txt here to check (not a Pi)."""
+    path = config_txt or next((p for p in BOOT_CONFIG_PATHS if p.exists()), None)
+    if path is None:
+        return None
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    wanted = boot_gpio_lines(values)
+    found: list[str] = []
+    inside = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped == BOOT_GPIO_BEGIN:
+            inside = True
+        elif stripped == BOOT_GPIO_END:
+            inside = False
+        elif inside and stripped.startswith("gpio="):
+            found.append(stripped)
+    if found == wanted:
+        return None
+    if not found:
+        return (f"{path} has no COATHEAL boot-time GPIO block, so nothing holds the "
+                "heater lines low from boot: run coatheal-deploy, then reboot")
+    held = " ".join(line for line in found if line not in wanted) or "nothing more"
+    needed = " ".join(line for line in wanted if line not in found)
+    return (f"{path} holds {held} from boot, but this config needs {needed}: "
+            "run coatheal-deploy, then reboot")
+
+
 def boot_gpio(args: argparse.Namespace) -> int:
     if not args.config.exists():
         print(f"Config missing: {args.config}", file=sys.stderr)
@@ -658,7 +846,6 @@ def pin_check(args: argparse.Namespace) -> int:
                 "sensor.sequent_rtd_crosscheck_tol_c",
                 "sensor.max31865_reference_ohm",
                 "sensor.max31865_poll_ms",
-                "sensor.max31865_sample_indices",
                 "sensor.resistance_source"}:
             continue
         actual = values.get(key)
@@ -837,6 +1024,14 @@ def doctor(args: argparse.Namespace) -> int:
     rc = pin_check(argparse.Namespace(config=args.config))
     print(json.dumps(discover(), indent=2))
     failures = rc != 0
+    if args.config.exists():
+        try:
+            problem = boot_block_problem(_load_config(args.config)[1])
+        except ValueError as error:
+            problem = f"cannot derive the boot-time GPIO states: {error}"
+        if problem is not None:
+            print(f"boot-gpio: {problem}", file=sys.stderr)
+            failures = True
     for command in ("COMPONENTS", "CHECK SEQUENT_RTD", "CHECK PWM",
                     "CHECK MOTOR0", "CHECK MOTOR1"):
         try:

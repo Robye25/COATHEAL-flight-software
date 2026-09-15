@@ -3,27 +3,31 @@
 config: measure the heater/PT100 pairs by heat, debug one heater or the live
 readings, or set the whole assignment by hand.
 
-The software pairs heater H<i> with logical sample S<i>, pulls S0-S3 with
-motor 0 and S4-S7 with motor 1 (S6 and S7 unheated), and reads the MAX31865
-clicks on S0 and S4 -- and the ground station assumes the same. The harness
-does not follow the schematic, so a specimen is placed in that frame through
-two wiring maps: the BCM line of its heater goes into heater.output_lines[i]
-and the card terminal of its PT100 into sensor.sequent_rtd_channels[i].
-migrate-config (every coatheal-deploy) keeps both.
+The config lists each motor group's specimens, each a PT100's Sequent RTD
+card terminal and, when heated, its heater's BCM line:
+
+    motor0.specimens=ch8:19,ch2:13,ch3:6,ch4:5
+    motor1.specimens=ch5:24,ch7:23,ch1,ch6
+
+The onboard numbers them in that order -- motor 0's specimens are S0.., motor
+1's follow, the heated ones are H0.. -- and each motor's first specimen is
+the one its MAX31865 click reads. The ground station asks the onboard for
+that layout (GET_LAYOUT). migrate-config (every coatheal-deploy) keeps both
+lists.
 
 Run it on the Pi with coatheal-onboard running:
 
-    python3 scripts/associate_heaters.py show      # the assignment, live readings
+    python3 scripts/associate_heaters.py show      # the groups, live readings
     python3 scripts/associate_heaters.py watch     # every PT100 once a second
     python3 scripts/associate_heaters.py heat H2   # one heater on, every PT100 printed
     python3 scripts/associate_heaters.py auto      # measure every pair, write (default)
     python3 scripts/associate_heaters.py assign \\
         --motor0 ch8:19,ch2:13,ch3:6,ch4:5 --motor1 ch5:24,ch7:23,ch1,ch6
 
-assign takes each motor's specimens as a PT100 card terminal and, for a
-heated specimen, the BCM line of its heater. Heated specimens take the
-motor's heated samples in the order given, so list the specimen on the
-MAX31865 click first; `show` prints the command for the current config.
+assign writes the two lists as given; `show` prints the command for the
+current config. Groups need not be even (three heated and one unheated
+specimen per motor is fine), but the totals must match hardware.sample_count
+and hardware.heater_count.
 
 Heating (heat, auto) needs runtime.bench_mode=true and the motors idle. Each
 HEATER_TEST pulse lapses within seconds on its own, so a dead script cannot
@@ -31,10 +35,9 @@ leave a heater on. auto, per heater: waits until no PT100 is still warming,
 heats until one terminal has warmed by 2 C while the others have not, and
 switches the heater off. The pairs that resolve are written even when a
 heater is left out (it warms nothing, warms two terminals alike, shares one
-with another heater, or is far slower than the rest); its sample keeps its
-terminal unless a paired heater took it. Heat cannot tell motor groups,
-which unheated terminal is S6, or where the clicks are: fix those with
-assign.
+with another heater, or is far slower than the rest); its specimen keeps its
+terminal unless a paired heater took it. Heat cannot tell motor groups or
+where the clicks are: fix those with assign.
 """
 
 from __future__ import annotations
@@ -62,11 +65,8 @@ SERVICE = "coatheal-onboard.service"
 SCRIPT = "python3 scripts/associate_heaters.py"
 COMMANDS = ("show", "watch", "heat", "auto", "assign")
 CARD_TERMINALS = tuple(range(1, 9))
-MOTOR_COUNT = 2
-# What the ground station assumes (ground-station/app/gui/state.py:
-# MOTOR_SAMPLES and RESISTANCE_SAMPLES; HEATER_SAMPLE is heater i -> sample i).
-GS_MOTOR_SAMPLES = ((0, 1, 2, 3), (4, 5, 6, 7))
-GS_CLICK_SAMPLES = (0, 4)
+Layout = hardware_setup.Layout
+Specimen = hardware_setup.Specimen
 # Faults whose resistance still comes from a conducting probe. MISMATCH (the
 # card's temperature disagrees with its own resistance) still tracks heat;
 # OPEN and SHORT report a sentinel that cannot.
@@ -139,29 +139,6 @@ class HeaterResult:
     rise_c: float                         # its rise over the reading at switch-on
     runner_up: Optional[tuple[int, float]]
     seconds: float                        # heating time
-
-
-@dataclass
-class Mapping:
-    """The wiring the config states, per logical sample."""
-    heater_lines: list[int]            # heater.output_lines: BCM line of H<i>
-    channels: list[int]                # sensor.sequent_rtd_channels: card terminal of S<i>
-    motors: list[list[int]]            # motor<n>.samples
-    clicks: list[int]                  # sensor.max31865_sample_indices
-    temperature_channels: list[int]    # heater.temperature_channels
-
-    @property
-    def heater_count(self) -> int:
-        return len(self.heater_lines)
-
-    def motor_of(self, sample: int) -> Optional[int]:
-        return next((m for m, samples in enumerate(self.motors) if sample in samples), None)
-
-
-@dataclass(frozen=True)
-class Specimen:
-    channel: int             # card terminal of its PT100
-    line: Optional[int]      # BCM line of its heater; None when unheated
 
 
 def reply_fields(command: str, reply: str) -> dict[str, str]:
@@ -596,162 +573,70 @@ def resolve(results: list[HeaterResult]) -> tuple[dict[int, int], dict[int, str]
     return association, problems
 
 
-def compose_channel_map(association: dict[int, int], current_map: list[int],
-                        sample_count: int) -> list[int]:
-    """sensor.sequent_rtd_channels with S<h> read from the terminal heater h
-    warmed. Every other sample keeps its current terminal unless a paired
-    heater took it; those samples get the terminals left over, in the order
-    the current map lists them (heat cannot rank them)."""
-    new_map: list[Optional[int]] = [association.get(s) for s in range(sample_count)]
+def compose_layout(association: dict[int, int], layout: Layout) -> Layout:
+    """The layout with each paired heater's specimen read from the terminal
+    that heater warmed. Every other specimen keeps its terminal unless a
+    paired heater took it; those get the terminals left over, in the order
+    the layout lists them (heat cannot rank them). Groups, order and heater
+    lines stay as they are."""
+    specimens = layout.specimens
+    channels: list[Optional[int]] = [None] * len(specimens)
+    for heater, channel in association.items():
+        channels[layout.heater_samples[heater]] = channel
     taken = set(association.values())
-    for sample in range(sample_count):
-        if (new_map[sample] is None and sample < len(current_map)
-                and current_map[sample] not in taken):
-            new_map[sample] = current_map[sample]
-            taken.add(current_map[sample])
-    spare = [c for c in dict.fromkeys([*current_map, *CARD_TERMINALS]) if c not in taken]
-    return [channel if channel is not None else spare.pop(0) for channel in new_map]
+    for sample, specimen in enumerate(specimens):
+        if channels[sample] is None and specimen.channel not in taken:
+            channels[sample] = specimen.channel
+            taken.add(specimen.channel)
+    spare = [c for c in dict.fromkeys([*layout.channels, *CARD_TERMINALS]) if c not in taken]
+    channels = [c if c is not None else spare.pop(0) for c in channels]
+    motors, start = [], 0
+    for group in layout.motors:
+        motors.append(tuple(replace(specimen, channel=channels[start + i])
+                            for i, specimen in enumerate(group)))
+        start += len(group)
+    return Layout(tuple(motors))
 
 
-def load_mapping(values: dict[str, str]) -> Mapping:
-    """The wiring in an INI's values. KeyError or ValueError when unreadable."""
-    numbers = hardware_setup._number_list
-    heater_lines = numbers(values["heater.output_lines"])
-    sample_count = int(values.get("hardware.sample_count", "8"))
-    return Mapping(
-        heater_lines=heater_lines,
-        channels=numbers(values.get("sensor.sequent_rtd_channels",
-                                    ",".join(str(c) for c in range(1, sample_count + 1)))),
-        motors=[numbers(values.get(f"motor{m}.samples",
-                                   ",".join(str(s) for s in GS_MOTOR_SAMPLES[m])))
-                for m in range(MOTOR_COUNT)],
-        clicks=numbers(values.get("sensor.max31865_sample_indices",
-                                  ",".join(str(s) for s in GS_CLICK_SAMPLES))),
-        temperature_channels=numbers(values.get(
-            "heater.temperature_channels", ",".join(str(i) for i in range(len(heater_lines))))),
-    )
-
-
-def mapping_rows(mapping: Mapping, terminals: Optional[dict[int, Terminal]] = None,
-                 notes: Optional[dict[int, str]] = None) -> list[str]:
-    """A table, one line per sample: motor, heater, PT100 terminal, MAX31865
-    click, and when given the live reading and a note."""
-    rows = ["  Sample  Motor  Heater        PT100  Click"
-            + ("  Now" if terminals is not None else "")]
-    for sample, channel in enumerate(mapping.channels):
-        motor = mapping.motor_of(sample)
-        motor_text = "-" if motor is None else f"M{motor}"
-        heater = (f"H{sample} BCM {mapping.heater_lines[sample]}"
-                  if sample < mapping.heater_count else "unheated")
-        click = str(mapping.clicks.index(sample) + 1) if sample in mapping.clicks else ""
-        row = f"  S{sample:<6} {motor_text:<6} {heater:<13} ch{channel:<4} {click:<5}"
-        if terminals is not None:
-            row += f"  {describe_terminal(terminals.get(channel))}"
-        if notes and sample in notes:
-            row += f"  {notes[sample]}"
-        rows.append(row.rstrip())
+def layout_rows(layout: Layout, terminals: Optional[dict[int, Terminal]] = None,
+                notes: Optional[dict[int, str]] = None) -> list[str]:
+    """A table per motor group, one line per specimen: sample, heater, PT100
+    terminal, MAX31865 click, and when given the live reading and a note."""
+    rows = []
+    for motor, samples in enumerate(layout.motor_samples):
+        heated = sum(1 for s in samples if layout.heater_of(s) is not None)
+        rows.append(f"  Motor {motor}: {len(samples)} specimens, {heated} heated")
+        rows.append("    Sample  Heater        PT100  Click"
+                    + ("  Now" if terminals is not None else ""))
+        for sample in samples:
+            specimen = layout.specimens[sample]
+            heater = layout.heater_of(sample)
+            heater_text = "unheated" if heater is None else f"H{heater} BCM {specimen.line}"
+            click = (str(layout.clicks.index(sample) + 1) if sample in layout.clicks else "")
+            row = f"    S{sample:<6} {heater_text:<13} ch{specimen.channel:<4} {click:<5}"
+            if terminals is not None:
+                row += f"  {describe_terminal(terminals.get(specimen.channel))}"
+            if notes and sample in notes:
+                row += f"  {notes[sample]}"
+            rows.append(row.rstrip())
     return rows
 
 
-def assign_command(mapping: Mapping) -> str:
-    """The assign command that writes `mapping` (heated samples first in each group)."""
-    groups = []
-    for motor, samples in enumerate(mapping.motors):
-        entries = [f"ch{mapping.channels[s]}"
-                   + (f":{mapping.heater_lines[s]}" if s < mapping.heater_count else "")
-                   for s in sorted(samples) if s < len(mapping.channels)]
-        groups.append(f"--motor{motor} {','.join(entries)}")
-    return f"{SCRIPT} assign {' '.join(groups)}"
+def assign_command(layout: Layout) -> str:
+    """The assign command that writes `layout`."""
+    groups = " ".join(f"--motor{motor} {hardware_setup.format_specimens(group)}"
+                      for motor, group in enumerate(layout.motors))
+    return f"{SCRIPT} assign {groups}"
 
 
-def mapping_warnings(mapping: Mapping) -> list[str]:
-    warnings = []
-    identity = list(range(mapping.heater_count))
-    if mapping.temperature_channels != identity:
-        warnings.append(
-            f"heater.temperature_channels={','.join(map(str, mapping.temperature_channels))}: "
-            "heater i must read sample i (the ground station assumes it, and "
-            "coatheal-deploy resets it to 0..5)")
-    covered = sorted(s for samples in mapping.motors for s in samples)
-    if covered != list(range(len(mapping.channels))):
-        warnings.append("motor0.samples and motor1.samples must list every sample once")
-    elif [sorted(s) for s in mapping.motors] != [list(g) for g in GS_MOTOR_SAMPLES]:
-        warnings.append("the motor groups are not the ground station's (M0 = S0-S3, "
-                        "M1 = S4-S7): its motion and bend panels name the wrong samples")
-    if tuple(mapping.clicks) != GS_CLICK_SAMPLES:
-        warnings.append("sensor.max31865_sample_indices is not the ground station's (S0, S4)")
-    return warnings
-
-
-def parse_group(text: str) -> list[Specimen]:
-    """`ch8:19,ch2:13,ch1` -> specimens, in the order given."""
-    specimens = []
-    for item in text.split(","):
-        if not item.strip():
-            continue
-        terminal, sep, heater = (part.strip().lower() for part in item.partition(":"))
-        heater = heater.removeprefix("bcm")
-        if not (terminal.startswith("ch") and terminal[2:].isdigit()) or (
-                sep and not heater.isdigit()):
-            raise ValueError(f"{item.strip()!r}: give a PT100 terminal and its heater's "
-                             "BCM line, like ch8:19, or the terminal alone for an "
-                             "unheated specimen")
-        specimens.append(Specimen(int(terminal[2:]), int(heater) if sep else None))
-    return specimens
-
-
-def plan_assignment(groups: list[list[Specimen]], mapping: Mapping) -> Mapping:
-    """The mapping that puts each motor's specimens on that motor's samples:
-    heated ones on the samples that have a heater (S<i>, i < heater count)
-    in the order given, unheated ones on the rest. ValueError says what does
-    not fit."""
-    specimens = [s for group in groups for s in group]
-    sample_count = len(mapping.channels)
-    problems = []
-    channels = [s.channel for s in specimens]
-    lines = [s.line for s in specimens if s.line is not None]
-    if len(specimens) != sample_count:
-        problems.append(f"{len(specimens)} specimens given, the config has {sample_count} samples")
-    repeated = sorted({c for c in channels if channels.count(c) > 1})
-    if repeated:
-        problems.append(", ".join(f"ch{c}" for c in repeated) + " given twice")
-    outside = sorted({c for c in channels if c not in CARD_TERMINALS})
-    if outside:
-        problems.append(", ".join(f"ch{c}" for c in outside)
-                        + " is not a card terminal (ch1-ch8)")
-    repeated_lines = sorted({line for line in lines if lines.count(line) > 1})
-    if repeated_lines:
-        problems.append(", ".join(f"BCM {line}" for line in repeated_lines)
-                        + " heats two specimens")
-    if sorted(s for samples in mapping.motors for s in samples) != list(range(sample_count)):
-        problems.append("motor0.samples and motor1.samples in the config must list every "
-                        "sample once")
+def build_assignment(groups: list[str], sample_count: int, heater_count: int) -> Layout:
+    """The layout the assign command gives. ValueError says what the onboard
+    would refuse."""
+    layout = Layout(tuple(tuple(hardware_setup.parse_specimens(text)) for text in groups))
+    problems = hardware_setup.layout_errors(layout, sample_count, heater_count)
     if problems:
         raise ValueError("; ".join(problems))
-
-    heater_lines = list(mapping.heater_lines)
-    terminal_map = list(mapping.channels)
-    for motor, group in enumerate(groups):
-        slots = sorted(mapping.motors[motor])
-        heated_slots = [s for s in slots if s < mapping.heater_count]
-        unheated_slots = [s for s in slots if s >= mapping.heater_count]
-        heated = [s for s in group if s.line is not None]
-        unheated = [s for s in group if s.line is None]
-        if len(heated) != len(heated_slots) or len(unheated) != len(unheated_slots):
-            names = ", ".join(f"S{s}" for s in slots)
-            problems.append(f"motor {motor} pulls {len(heated_slots)} heated and "
-                            f"{len(unheated_slots)} unheated specimens ({names}); "
-                            f"{len(heated)} heated and {len(unheated)} unheated given")
-            continue
-        for slot, specimen in zip(heated_slots, heated):
-            heater_lines[slot] = specimen.line
-            terminal_map[slot] = specimen.channel
-        for slot, specimen in zip(unheated_slots, unheated):
-            terminal_map[slot] = specimen.channel
-    if problems:
-        raise ValueError("; ".join(problems))
-    return replace(mapping, heater_lines=heater_lines, channels=terminal_map,
-                   temperature_channels=list(range(mapping.heater_count)))
+    return layout
 
 
 def check_ready(onboard: Onboard, heater_count: int, sample_count: int, abort_c: float,
@@ -829,22 +714,18 @@ def check_ready(onboard: Onboard, heater_count: int, sample_count: int, abort_c:
     return status, terminals, blockers
 
 
-def config_changes(values: dict[str, str], mapping: Mapping) -> dict[str, str]:
-    """The INI keys whose value differs from `mapping`."""
-    wanted = {
-        "heater.output_lines": mapping.heater_lines,
-        "sensor.sequent_rtd_channels": mapping.channels,
-        # Heater i reads sample i; the wiring lives in the two maps above.
-        "heater.temperature_channels": list(range(mapping.heater_count)),
-    }
+def config_changes(values: dict[str, str], layout: Layout) -> dict[str, str]:
+    """The specimen keys whose value differs from `layout` (both when the INI
+    still has the index-based layout keys, which write_config then drops)."""
+    try:
+        current = hardware_setup.layout_from_values(values)
+        legacy = any(key in values for key in hardware_setup.LAYOUT_KEYS)
+    except ValueError:
+        current, legacy = None, True
     changes = {}
-    for key, numbers in wanted.items():
-        try:
-            current = hardware_setup._number_list(values.get(key, ""))
-        except ValueError:
-            current = None
-        if current != numbers:
-            changes[key] = ",".join(str(n) for n in numbers)
+    for motor, key in enumerate(hardware_setup.SPECIMEN_KEYS):
+        if legacy or current is None or current.motors[motor] != layout.motors[motor]:
+            changes[key] = hardware_setup.format_specimens(layout.motors[motor])
     return changes
 
 
@@ -858,11 +739,15 @@ def _write_ini(path: Path, text: str) -> None:
 def write_config(path: Path, changes: dict[str, str], yes: bool,
                  ask: Callable[[str], str] = input,
                  out: Callable[[str], None] = print) -> bool:
-    """Apply `changes` to the INI, backup first. False when nothing was
-    written because the validator refused it or the operator said no."""
+    """Apply `changes` to the INI, backup first, dropping the index-based
+    layout keys the specimen lists replace. False when nothing was written
+    because the validator refused it or the operator said no."""
     text = path.read_text(encoding="utf-8")
     values = hardware_setup._ini_values(text)
-    candidate = hardware_setup.replace_ini(text, changes)
+    dropped = [key for key in hardware_setup.LAYOUT_KEYS if key in values]
+    kept = [line for line in text.splitlines()
+            if line.split("=", 1)[0].strip() not in dropped]
+    candidate = hardware_setup.replace_ini("\n".join(kept) + "\n", changes)
     errors = hardware_setup.validate_candidate(candidate)
     for error in errors:
         out(f"  configuration error: {error}")
@@ -871,6 +756,8 @@ def write_config(path: Path, changes: dict[str, str], yes: bool,
         return False
     for key, value in changes.items():
         out(f"  {key}: {values.get(key, '(unset)')} -> {value}")
+    for key in dropped:
+        out(f"  {key}: {values[key]} -> (removed, derived from the specimens now)")
     if not yes and ask(f"Write this to {path}? [y/N]: ").strip().lower() not in ("y", "yes"):
         out("No files changed.")
         return False
@@ -882,7 +769,7 @@ def write_config(path: Path, changes: dict[str, str], yes: bool,
     return True
 
 
-def restart_and_verify(onboard: Onboard, mapping: Mapping,
+def restart_and_verify(onboard: Onboard, layout: Layout,
                        clock: Callable[[], float] = time.monotonic,
                        sleep: Callable[[float], None] = time.sleep,
                        out: Callable[[str], None] = print) -> bool:
@@ -907,12 +794,12 @@ def restart_and_verify(onboard: Onboard, mapping: Mapping,
         out(f"The service did not report RTD terminals within 60 s; see "
             f"journalctl -u {SERVICE}")
         return False
-    running = [t.channel for t in sorted(terminals, key=lambda t: t.sample)][:len(mapping.channels)]
-    if running != mapping.channels:
+    running = [t.channel for t in sorted(terminals, key=lambda t: t.sample)][:layout.sample_count]
+    if running != layout.channels:
         out(f"MISMATCH: the restarted service reads terminals {running}, "
-            f"expected {mapping.channels}")
+            f"expected {layout.channels}")
         return False
-    unclaimed = [f"H{i} (BCM {line})" for i, line in enumerate(mapping.heater_lines)
+    unclaimed = [f"H{i} (BCM {line})" for i, line in enumerate(layout.heater_lines)
                  if components.get(f"heater{i}") != "OK"]
     if unclaimed:
         out(f"The restarted service did not claim {', '.join(unclaimed)}: that line is "
@@ -962,7 +849,9 @@ class Setup:
     config_path: Path
     service_path: Optional[Path]
     values: dict[str, str]
-    mapping: Mapping
+    layout: Layout
+    sample_count: int              # hardware.sample_count
+    heater_count: int              # hardware.heater_count
     onboard: Onboard
     clock: Callable[[], float]
     sleep: Callable[[float], None]
@@ -996,7 +885,7 @@ class Setup:
             return None
         try:
             status, terminals, blockers = check_ready(
-                self.onboard, self.mapping.heater_count, len(self.mapping.channels),
+                self.onboard, self.layout.heater_count, self.layout.sample_count,
                 settings.abort_c, require_all_probes)
         except AssociationError as error:
             status, terminals, blockers = {}, [], [str(error)]
@@ -1021,14 +910,16 @@ def load_setup(args: argparse.Namespace, send: Callable[[str, str, int], str],
     config_path: Path = args.config or service_path or hardware_setup.DEFAULT_CONFIG
     try:
         values = hardware_setup._ini_values(config_path.read_text(encoding="utf-8"))
-        mapping = load_mapping(values)
+        layout = hardware_setup.layout_from_values(values)
+        sample_count = int(values.get("hardware.sample_count", "8"))
+        heater_count = int(values.get("hardware.heater_count", "6"))
         duty_cap = min(float(values.get("heater.debug_max_duty", "0.25")),
                        float(values.get("heater.max_duty", "1.0")))
         pulse_cap = float(values.get("heater.debug_max_seconds", "10"))
-    except (OSError, KeyError, ValueError) as error:
+    except (OSError, ValueError) as error:
         print(f"Cannot use {config_path}: {error}", file=sys.stderr)
         return None
-    return Setup(config_path, service_path, values, mapping,
+    return Setup(config_path, service_path, values, layout, sample_count, heater_count,
                  Onboard(args.host, args.port, send), clock, sleep, ask, duty_cap, pulse_cap)
 
 
@@ -1067,23 +958,37 @@ def heating_session(setup: Setup, status: dict[str, str], work: Callable[[], obj
     return result, failure
 
 
-def write_and_load(setup: Setup, mapping: Mapping, args: argparse.Namespace) -> int:
-    """Write `mapping` into the config and restart the service onto it.
+def boot_block_note(values: dict[str, str]) -> Optional[str]:
+    """Why config.txt no longer holds every heater line low from boot, or None."""
+    try:
+        return hardware_setup.boot_block_problem(values)
+    except ValueError as error:
+        return f"cannot derive the boot-time GPIO states: {error}"
+
+
+def write_and_load(setup: Setup, layout: Layout, args: argparse.Namespace) -> int:
+    """Write `layout` into the config and restart the service onto it.
     0: written (or already there), 1: not written, 2: the restarted service
     does not run it."""
-    changes = config_changes(setup.values, mapping)
+    changes = config_changes(setup.values, layout)
     if not changes:
         print(f"{setup.config_path} already carries this assignment.")
     elif not write_config(setup.config_path, changes, args.yes, setup.ask):
         return 1
-    dropped = sorted(set(setup.mapping.heater_lines) - set(mapping.heater_lines))
-    added = sorted(set(mapping.heater_lines) - set(setup.mapping.heater_lines))
-    if changes and (dropped or added):
-        print(f"Heater lines changed ({', '.join(f'BCM {n}' for n in dropped)} out, "
-              f"{', '.join(f'BCM {n}' for n in added)} in): run coatheal-deploy afterwards "
-              "so config.txt holds the new lines off from boot (it will say REBOOT "
-              "REQUIRED). Nothing holds a line that left the list: make sure no heater "
-              "is wired to it.")
+    if changes:
+        written = hardware_setup._ini_values(setup.config_path.read_text(encoding="utf-8"))
+        note = boot_block_note(written)
+        dropped = sorted(set(setup.layout.heater_lines) - set(layout.heater_lines))
+        added = sorted(set(layout.heater_lines) - set(setup.layout.heater_lines))
+        if note is not None:
+            print(f"! {note}. Nothing holds a line that left the heater list: make "
+                  "sure no heater is wired to it.")
+        elif dropped or added:
+            print(f"Heater lines changed ({', '.join(f'BCM {n}' for n in dropped)} out, "
+                  f"{', '.join(f'BCM {n}' for n in added)} in): run coatheal-deploy "
+                  "afterwards so config.txt holds the new lines off from boot (it will "
+                  "say REBOOT REQUIRED). Nothing holds a line that left the list: make "
+                  "sure no heater is wired to it.")
     if not setup.runs_this_config:
         print(f"\nThe service loads {setup.service_path}, not {setup.config_path}: copy the "
               f"change there (or repoint COATHEAL_CONFIG), then restart {SERVICE}.")
@@ -1091,7 +996,7 @@ def write_and_load(setup: Setup, mapping: Mapping, args: argparse.Namespace) -> 
     terminals = setup.onboard.terminals()
     running = ([t.channel for t in sorted(terminals, key=lambda t: t.sample)]
                if terminals else None)
-    if not changes and running == mapping.channels:
+    if not changes and running == layout.channels:
         print("The running service already uses it.")
         return 0
     if args.no_restart:
@@ -1101,10 +1006,10 @@ def write_and_load(setup: Setup, mapping: Mapping, args: argparse.Namespace) -> 
             .strip().lower() not in ("y", "yes"):
         print(f"Not restarted. Later: sudo systemctl restart {SERVICE}")
         return 0
-    if not restart_and_verify(setup.onboard, mapping, setup.clock, setup.sleep):
+    if not restart_and_verify(setup.onboard, layout, setup.clock, setup.sleep):
         return 2
-    print("Then prove one loop from the ground station: a small SET_TEMP_TARGET on H<i> "
-          "must move S<i>, and only S<i>.")
+    print("Then prove one loop from the ground station: a small SET_TEMP_TARGET on each "
+          "heater must move its own specimen's temperature, and only that one.")
     return 0
 
 
@@ -1115,9 +1020,15 @@ def log_path(args: argparse.Namespace, name: str) -> Path:
 
 def cmd_show(args: argparse.Namespace, setup: Setup) -> int:
     setup.print_config()
-    mapping = setup.mapping
+    layout = setup.layout
     terminals: Optional[dict[int, Terminal]] = None
-    notes = mapping_warnings(mapping)
+    notes = []
+    if any(key in setup.values for key in hardware_setup.LAYOUT_KEYS):
+        notes.append("this config still uses the index-based layout keys: coatheal-deploy "
+                     "converts them to motor0.specimens / motor1.specimens")
+    note = boot_block_note(setup.values)
+    if note is not None:
+        notes.append(note)
     try:
         status = setup.onboard.ack("STATUS")
         components = setup.onboard.ack("COMPONENTS")
@@ -1131,26 +1042,28 @@ def cmd_show(args: argparse.Namespace, setup: Setup) -> int:
         for terminal in listed:
             terminals.setdefault(terminal.channel, terminal)
         running = [t.channel for t in sorted(listed, key=lambda t: t.sample)]
-        if listed and running != mapping.channels:
+        if listed and running != layout.channels:
             notes.append(f"the service reads terminals {','.join(map(str, running))}, not "
                          "the config's: restart it to load the config")
-        unclaimed = [f"H{i}" for i in range(mapping.heater_count)
+        unclaimed = [f"H{i}" for i in range(layout.heater_count)
                      if components.get(f"heater{i}") != "OK"]
         if unclaimed:
             notes.append(f"{', '.join(unclaimed)} not claimed by the service (heaterN in "
                          "COMPONENTS): its line is taken or missing")
     print()
-    for row in mapping_rows(mapping, terminals):
+    for row in layout_rows(layout, terminals):
         print(row)
-    for note in notes:
-        print(f"  ! {note}")
+    for problem in hardware_setup.layout_errors(layout, setup.sample_count, setup.heater_count):
+        notes.append(problem)
+    for text in notes:
+        print(f"  ! {text}")
     print("\nTo change it, edit and run:")
-    print(f"  {assign_command(mapping)}")
+    print(f"  {assign_command(layout)}")
     return 0
 
 
 def cmd_watch(args: argparse.Namespace, setup: Setup) -> int:
-    mapping = setup.mapping
+    layout = setup.layout
     print("Every RTD card terminal once a second, C above its first reading "
           "(OPEN/SHORT: no probe). Heats and arms nothing. Ctrl+C stops.")
     start = setup.clock()
@@ -1159,18 +1072,19 @@ def cmd_watch(args: argparse.Namespace, setup: Setup) -> int:
         while args.seconds is None or setup.clock() - start < args.seconds:
             setup.sleep(1.0)
             try:
-                terminals, duties = poll(setup.onboard, mapping.heater_count)
+                terminals, duties = poll(setup.onboard, layout.heater_count)
             except (OSError, AssociationError) as error:
                 print(f"  (no reading: {error})")
                 continue
             temps = {c: pt100_c(t.ohms) for c, t in terminals.items() if t.conducting}
             if first is None:
                 first = dict(temps)
-                sample_of = {c: s for s, c in enumerate(mapping.channels)}
+                label = {}
+                for sample, channel in enumerate(layout.channels):
+                    label[channel] = f"M{layout.motor_of(sample)}S{sample}"
                 print("        " + "".join(f"ch{c}".rjust(7) for c in CARD_TERMINALS)
                       + "  heaters on")
-                print("  sample" + "".join((f"S{sample_of[c]}" if c in sample_of else "-")
-                                           .rjust(7) for c in CARD_TERMINALS))
+                print("  sample" + "".join(label.get(c, "-").rjust(7) for c in CARD_TERMINALS))
                 print("   start" + "".join((f"{first[c]:.1f}" if c in first else "-")
                                            .rjust(7) for c in CARD_TERMINALS))
             cells = []
@@ -1189,10 +1103,10 @@ def cmd_watch(args: argparse.Namespace, setup: Setup) -> int:
 
 
 def cmd_heat(args: argparse.Namespace, setup: Setup) -> int:
-    mapping = setup.mapping
+    layout = setup.layout
     name = args.heater.strip().upper().removeprefix("H")
-    if not name.isdigit() or not 0 <= int(name) < mapping.heater_count:
-        print(f"No heater {args.heater!r}: H0..H{mapping.heater_count - 1}.", file=sys.stderr)
+    if not name.isdigit() or not 0 <= int(name) < layout.heater_count:
+        print(f"No heater {args.heater!r}: H0..H{layout.heater_count - 1}.", file=sys.stderr)
         return 2
     heater = int(name)
     setup.print_config()
@@ -1201,9 +1115,9 @@ def cmd_heat(args: argparse.Namespace, setup: Setup) -> int:
     if ready is None:
         return 2
     status, terminals = ready
-    line = mapping.heater_lines[heater]
+    line = layout.heater_lines[heater]
     path = log_path(args, f"heater-test-H{heater}")
-    survey = Survey(setup.onboard, settings, mapping.heater_lines,
+    survey = Survey(setup.onboard, settings, layout.heater_lines,
                     {t.channel for t in terminals if t.conducting},
                     clock=setup.clock, sleep=setup.sleep, log_path=path, verbose=True)
     print(f"\nH{heater} (BCM {line}) alone, at most {settings.max_heat_s:.0f} s; nothing is "
@@ -1227,19 +1141,21 @@ def cmd_heat(args: argparse.Namespace, setup: Setup) -> int:
         _, problems = resolve([result])
         print(f"\nH{heater} (BCM {line}) did not pair: {problems[heater]}.")
         return 1
-    configured = mapping.channels[heater]
+    sample = layout.heater_samples[heater]
+    configured = layout.channels[sample]
+    motor = layout.motor_of(sample)
     if result.channel == configured:
         print(f"\nH{heater} (BCM {line}) warms ch{result.channel}, which the config reads "
-              f"as S{heater}: they agree.")
+              f"as S{sample} on motor {motor}: they agree.")
     else:
         print(f"\nH{heater} (BCM {line}) warms ch{result.channel}, but the config reads "
-              f"S{heater} from ch{configured}. `auto` measures and writes every pair; "
-              "`assign` sets them by hand.")
+              f"S{sample} (motor {motor}) from ch{configured}. `auto` measures and writes "
+              "every pair; `assign` sets them by hand.")
     return 0
 
 
 def cmd_auto(args: argparse.Namespace, setup: Setup) -> int:
-    mapping = setup.mapping
+    layout = setup.layout
     setup.print_config()
     settings = setup.settings(args, args.max_heat_s)
     ready = setup.preflight(settings, require_all_probes=True)
@@ -1247,16 +1163,16 @@ def cmd_auto(args: argparse.Namespace, setup: Setup) -> int:
         return 2
     status, terminals = ready
     if args.check:
-        print(f"\nReady: {mapping.heater_count} heaters, one at a time at duty "
+        print(f"\nReady: {layout.heater_count} heaters, one at a time at duty "
               f"{settings.duty:g}, each until a PT100 warms by {settings.rise_c:g} C "
               f"(at most {settings.max_heat_s:.0f} s).")
         return 0
 
     path = log_path(args, "heater-association")
-    survey = Survey(setup.onboard, settings, mapping.heater_lines,
+    survey = Survey(setup.onboard, settings, layout.heater_lines,
                     {t.channel for t in terminals if t.conducting},
                     clock=setup.clock, sleep=setup.sleep, log_path=path, verbose=args.verbose)
-    print(f"\nHeating {mapping.heater_count} heaters one at a time. Ctrl+C stops safely. "
+    print(f"\nHeating {layout.heater_count} heaters one at a time. Ctrl+C stops safely. "
           f"Readings: {path}")
     try:
         results, failure = heating_session(setup, status, survey.run)
@@ -1278,19 +1194,16 @@ def cmd_auto(args: argparse.Namespace, setup: Setup) -> int:
         print("\nNo heater paired with a terminal, so nothing was written. Is the heater "
               f"supply on? Readings: {path}")
         return 1
-    new = replace(mapping,
-                  channels=compose_channel_map(association, mapping.channels,
-                                               len(mapping.channels)),
-                  temperature_channels=list(range(mapping.heater_count)))
-    notes = {sample: "measured" if sample in association
-             else f"NOT measured: do not heat H{sample} until a rerun pairs it"
-             for sample in range(mapping.heater_count)}
-    print("\nAssignment (S<i> = the specimen H<i> warms):")
-    for row in mapping_rows(new, notes=notes):
+    new = compose_layout(association, layout)
+    notes = {layout.heater_samples[h]: "measured" if h in association
+             else f"NOT measured: do not heat H{h} until a rerun pairs it"
+             for h in range(layout.heater_count)}
+    print("\nAssignment (each heater's specimen reads the PT100 it warmed):")
+    for row in layout_rows(new, notes=notes):
         print(row)
-    print("\nHeat cannot tell which motor pulls a specimen, which unheated terminal is\n"
-          "S6 and which S7, or which specimen is on a MAX31865 click. Where the table\n"
-          "is wrong about those, correct it and run:\n"
+    print("\nHeat cannot tell which motor pulls a specimen, or which specimen is on a\n"
+          "MAX31865 click (the first of each motor). Where the table is wrong about\n"
+          "those, correct it and run:\n"
           f"  {assign_command(new)}")
     done = 0 if not problems else 1
     if args.dry_run:
@@ -1306,28 +1219,32 @@ def cmd_auto(args: argparse.Namespace, setup: Setup) -> int:
 
 def cmd_assign(args: argparse.Namespace, setup: Setup) -> int:
     setup.print_config()
-    old = setup.mapping
+    old = setup.layout
     try:
-        new = plan_assignment([parse_group(args.motor0), parse_group(args.motor1)], old)
+        new = build_assignment([args.motor0, args.motor1], setup.sample_count,
+                               setup.heater_count)
     except ValueError as error:
         print(f"\nCannot assign: {error}.", file=sys.stderr)
         return 2
     listed = setup.onboard.terminals()
     terminals = None if listed is None else {t.channel: t for t in listed}
     notes = {}
-    for sample in range(len(new.channels)):
+    for sample, specimen in enumerate(new.specimens):
         was = []
-        if sample < new.heater_count and new.heater_lines[sample] != old.heater_lines[sample]:
-            was.append(f"heater was BCM {old.heater_lines[sample]}")
-        if new.channels[sample] != old.channels[sample]:
-            was.append(f"PT100 was ch{old.channels[sample]}")
+        before = old.specimens[sample] if sample < old.sample_count else None
+        if before is None or before != specimen:
+            if before is not None and before.line != specimen.line:
+                was.append("was unheated" if before.line is None
+                           else f"heater was BCM {before.line}")
+            if before is not None and before.channel != specimen.channel:
+                was.append(f"PT100 was ch{before.channel}")
+        if old.motor_of(sample) != new.motor_of(sample):
+            was.append(f"was on motor {old.motor_of(sample)}")
         if was:
             notes[sample] = f"({', '.join(was)})"
     print("\nAssignment:")
-    for row in mapping_rows(new, terminals, notes):
+    for row in layout_rows(new, terminals, notes):
         print(row)
-    for warning in mapping_warnings(new):
-        print(f"  ! {warning}")
     if terminals is not None:
         silent = [f"ch{c}" for c in new.channels
                   if c not in terminals or not terminals[c].conducting]
@@ -1372,8 +1289,8 @@ def parser() -> argparse.ArgumentParser:
                     "debug, measure or assign them. Without a command: auto.")
     commands = root.add_subparsers(dest="command", metavar="command")
     commands.add_parser("show", parents=[common],
-                        help="the assignment in the config, live readings, and the "
-                             "assign command that reproduces it")
+                        help="each motor group's specimens, live readings, and the "
+                             "assign command that reproduces them")
     watch = commands.add_parser("watch", parents=[common],
                                 help="every PT100 once a second (heats nothing)")
     watch.add_argument("--seconds", type=float, default=None, help="stop after this long")
@@ -1396,13 +1313,12 @@ def parser() -> argparse.ArgumentParser:
                       help="print every terminal on every reading while heating")
     assign = commands.add_parser(
         "assign", parents=[common, writing],
-        help="write heater/PT100 pairs and motor groups given by hand",
-        description="Each motor's specimens, each a PT100 card terminal and, when "
-                    "heated, its heater's BCM line: --motor0 ch8:19,ch2:13,ch3:6,ch4:5 "
-                    "--motor1 ch5:24,ch7:23,ch1,ch6. Heated specimens take the motor's "
-                    "heated samples in the order given (list the MAX31865 click specimen "
-                    "first), unheated ones the rest. `show` prints the current config "
-                    "in this form.")
+        help="write each motor group's heaters and PT100s given by hand",
+        description="Each motor's specimens in order, each a PT100 card terminal and, "
+                    "when heated, its heater's BCM line: --motor0 ch8:19,ch2:13,ch3:6,ch4:5 "
+                    "--motor1 ch5:24,ch7:23,ch1,ch6. They become S0.. in that order and "
+                    "the heated ones H0..; each motor's first specimen is the one its "
+                    "MAX31865 click reads. `show` prints the current config in this form.")
     assign.add_argument("--motor0", required=True, metavar="SPECIMENS",
                         help="motor 0's specimens, e.g. ch8:19,ch2:13,ch3:6,ch4:5")
     assign.add_argument("--motor1", required=True, metavar="SPECIMENS",

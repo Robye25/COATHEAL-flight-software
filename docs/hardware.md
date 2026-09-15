@@ -30,7 +30,7 @@ link loss.
 | UV | GUVA-S12SD analog UV sensor | Analog into ADS1115 | `sensor.uv_*` |
 | ADC | Adafruit ADS1115 16-bit 4-channel PGA | I2C, STEMMA QT/Qwiic | `sensor.ads1115_i2c_addr` |
 | Pressure / ambient T | Adafruit DPS310 precision pressure/altitude sensor | I2C, STEMMA QT/Qwiic | `sensor.dps310_i2c_addr` |
-| Heater switching | Electrokit EKM014 UCC27524 4-channel MOSFET driver board | GPIO PWM inputs | `heater.output_lines` |
+| Heater switching | Electrokit EKM014 UCC27524 4-channel MOSFET driver board | GPIO PWM inputs | `motor*.specimens` (heater lines) |
 | Heaters | Polyimide film heaters | MOSFET-switched heater rail | `hardware.heater_count=6` |
 | Logic rail | Pololu D24V50F5 5 V / 5 A regulator | 5 V DC | `power.logic_regulator_v=5.0` |
 | Stepper rail | Pololu D42V110F12 12 V / 9 A regulator | 12 V DC | `power.stepper_regulator_v=12.0` |
@@ -40,8 +40,8 @@ Schematic v3 adds a dedicated sample-resistance instrument: two MAX31865
 clicks measuring the coating specimens' own resistance directly, distinct
 from the Sequent RTD card's PT100 *element* resistance. By default
 (`sensor.resistance_source=max31865_click`) the click resistance is what
-serializes on the telemetry `RESISTANCE=` field, in the two
-`sensor.max31865_sample_indices` slots only. `sequent_rtd` (PT100 element
+serializes on the telemetry `RESISTANCE=` field, in the two click slots only —
+the first specimen of `motor0.specimens` and of `motor1.specimens`. `sequent_rtd` (PT100 element
 resistance, all eight slots), `disabled` (`-` placeholders), and `simulated`
 remain available.
 
@@ -53,12 +53,12 @@ elsewhere as the error, not this one.
 
 | Function | BCM line | Config key |
 |---|---:|---|
-| Heater H1 | 19 | `heater.output_lines[0]` |
-| Heater H2 | 13 | `heater.output_lines[1]` |
-| Heater H3 | 6 | `heater.output_lines[2]` |
-| Heater H4 | 5 | `heater.output_lines[3]` |
-| Heater H5 | 24 | `heater.output_lines[4]` |
-| Heater H6 | 23 | `heater.output_lines[5]` |
+| Heater H1 | 19 | `motor0.specimens` entry 1 (`ch1:19`) |
+| Heater H2 | 13 | `motor0.specimens` entry 2 (`ch2:13`) |
+| Heater H3 | 6 | `motor0.specimens` entry 3 (`ch3:6`) |
+| Heater H4 | 5 | `motor0.specimens` entry 4 (`ch4:5`) |
+| Heater H5 | 24 | `motor1.specimens` entry 1 (`ch5:24`) |
+| Heater H6 | 23 | `motor1.specimens` entry 2 (`ch6:23`) |
 | Motor 0 / STEP1 CS (soft) | 22 | `motor0.cs_line` |
 | Motor 0 / STEP1 EN | 20 | `motor0.enable_line` |
 | Motor 1 / STEP2 CS (soft) | 27 | `motor1.cs_line` |
@@ -145,7 +145,8 @@ Two software layers close that window; `deploy_onboard.sh` installs both.
 
 1. **Firmware boot to service start: a managed `gpio=` block in
    `config.txt`.** `scripts/hardware_setup.py boot-gpio` derives it from the
-   same INI the service runs on (`heater.output_lines`/`heater.active_high`,
+   same INI the service runs on (the heater lines of `motor0.specimens` /
+   `motor1.specimens` with `heater.active_high`,
    `motorN.cs_line`, `motorN.enable_line`/`enable_active_low`), so the two
    can never disagree, and `deploy_onboard.sh` writes it between managed
    marker comments in `/boot/firmware/config.txt` (idempotent; a changed
@@ -187,7 +188,6 @@ Relevant config:
 ```ini
 hardware.sample_count=8
 sensor.sequent_rtd_stack=0
-sensor.sequent_rtd_channels=1,2,3,4,5,6,7,8
 sensor.sequent_rtd_poll_ms=1000
 sensor.sequent_rtd_expect_sensor_type=pt100
 sensor.sequent_rtd_resistance_min_ohm=60.0
@@ -203,7 +203,9 @@ heaters whose mapped sample channel is valid and fresh. A channel is valid
 only when its temperature and resistance are both finite, resistance falls
 inside the configured plausibility window, and the card's reported
 temperature agrees with the resistance-derived temperature within
-`sequent_rtd_crosscheck_tol_c`.
+`sequent_rtd_crosscheck_tol_c`. Which card terminal each specimen's PT100 is
+on is the `ch<n>` of its entry in `motor0.specimens` / `motor1.specimens`
+([Configuration: Motor groups](configuration.md#motor-groups-motorspecimens)).
 
 ### Sample Resistance: MAX31865 Dual-Click
 
@@ -216,16 +218,18 @@ SAMPLE2 on `/dev/spidev0.0`. Device paths are fixed by the CE crossover, not
 configurable. See
 [Sequent RTD Bench Bring-Up §9-10](sequent-rtd-bring-up.md#9-max31865-sample-resistance-click-bring-up-blocking-gates)
 for the bench gates (reference resistor value, coating resistance range
-characterisation, and the sample-index mapping placeholder) and
+characterisation, and which specimen each click is wired to) and
 [TMC5160 Commissioning §4](tmc5160-commissioning.md#4-spi-topology--four-devices-one-bus)
 for the full SPI0 topology.
 
 ```ini
 sensor.max31865_reference_ohm=470.0
 sensor.max31865_poll_ms=1000
-sensor.max31865_sample_indices=0,4
 sensor.resistance_source=max31865_click
 ```
+
+Click 1 reads the first specimen of `motor0.specimens`, click 2 the first of
+`motor1.specimens`.
 
 An out-of-range (saturated) specimen reading is a first-class, valid
 measurement outcome — the adapter reports the channel invalid rather than a
@@ -299,7 +303,11 @@ motor1.enable_line=21
 motor1.sense_resistor_ohm=0.075
 ```
 
-Motor 0 controls samples 0-3. Motor 1 controls samples 4-7. Current is set
+Each motor pulls the specimens of its `motorN.specimens` list — samples 0-3
+and 4-7 in the schematic wiring; `GET_LAYOUT` reports the running groups.
+`motor0.invert_direction=true`: motor 0 turns opposite to motor 1 for the same
+command, so its steps are flipped to make "+" the same physical direction on
+both (owner 2026-09-15). Current is set
 from `run_current_a_rms` and `sense_resistor_ohm` (GLOBALSCALER/IRUN, no
 TMC2240-style fixed peak-current range) — see
 [TMC5160 Commissioning §6](tmc5160-commissioning.md#6-current-model-globalscaler--irun-two-regimes).
@@ -312,7 +320,8 @@ channels.
 
 ```ini
 hardware.heater_count=6
-heater.output_lines=19,13,6,5,24,23
+motor0.specimens=ch1:19,ch2:13,ch3:6,ch4:5
+motor1.specimens=ch5:24,ch6:23,ch7,ch8
 heater.pwm_frequency_hz=1.0
 heater.active_high=true
 power.max_active_heaters=3

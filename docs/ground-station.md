@@ -87,8 +87,8 @@ amber on simulated sensors, red on any failure, grey when unreported),
 purple and the panic buttons are disabled (only `RADIO RESUME` is live).
 
 ### Alarm strip
-Appears while alarms are active. Sources: `OVERTEMP`, `SAMPLE_TEMP` (which
-heated channels are invalid), `FALLBACK` (link-loss fallback onboard),
+Appears while alarms are active. Sources: `OVERTEMP`, `SAMPLE_TEMP` (the
+samples read by a heater that are invalid), `FALLBACK` (link-loss fallback onboard),
 `SEQ_PAUSED`, `ENERGY`, `MOTORn FAILED`, `HEATERS_INHIBITED` (amber, names
 the moving motor), `SENSOR` (any bad component or bus flag), `RX_QUEUE`
 (onboard backlog draining), `LINK STALE` (suppressed during silence).
@@ -108,27 +108,47 @@ confirmed) · Shutdown (`SHUTDOWN_SAFE` confirmed).
 
 ### Thermal tab
 Energy used / budget, active heaters (of 3), motion inhibit, PID gains ·
-six rows H0–H5: measured temperature of the mapped sample (S0–S5), target
-spin box + `Set` / `Clr`, duty bar, state word (`OFF`, `PID`, `DUTY`,
-`INHIB`, `NO-T` = the sample is invalid so the heater cannot run) · `Set
-all` / `Clear all` / `Refresh` (`GET_THERMAL`, which also supplies the
-target limits) · presets: `Apply` (re-sends `SET_PID ALL …` then a
-`SET_TEMP_TARGET` / `CLEAR_TEMP_TARGET` per heater), `Save as…`, `Capture`
-(reads the onboard's current targets into a preset).
+one section per motor group, holding that motor's specimens in sample
+order: a heater row for each heated specimen (the heater, the measured
+temperature of the sample it reads, target box + `Set` / `Clr`, duty bar,
+state word `OFF`, `PID`, `DUTY`, `INHIB`, `NO-T` = the sample is invalid so
+the heater cannot run) and an `unheated` row with the PT100 reading for
+every other specimen · `Set all` / `Clear all` / `Refresh` (`GET_THERMAL`,
+which also supplies the target limits) · presets: `Apply` (re-sends
+`SET_PID ALL …` then a `SET_TEMP_TARGET` / `CLEAR_TEMP_TARGET` per
+heater), `Save as…`, `Capture` (reads the onboard's current targets into a
+preset) · PID autotune.
+
+The groups are the onboard's (`GET_LAYOUT`, asked on the first live frame
+of every onboard session; derived onboard from `motor0.specimens` /
+`motor1.specimens`). Until it answers, and with firmware that predates the
+command, the tab shows the schematic groups (heater `i` on sample `i`, M0 =
+S0–S3, M1 = S4–S7) under an amber note saying they may not match the
+wiring. A query that gets no reply is asked again after 10 s. The same
+groups drive the Motion cards, the Values column, the Temperature and
+Heater plots, and gating and alarm texts.
+
+Targets are limited to 0–75 °C (`heater.target_max_c`; the onboard latches
+a heater off when its sample goes above `heater.max_sample_temp_c` =
+80 °C). A target above
+40 °C asks for confirmation first — see [Interaction rules](#interaction-rules).
 
 Presets live in `profiles/thermal_presets.json` (v2). Every save is atomic
 and keeps the previous file as `.bak`; a legacy `thermal_profiles.json` is
 migrated on first load and never deleted.
 
 ### Motion tab
-Two motor cards (M0 = S0–S3, M1 = S4–S7) with enabled / zeroed / moving /
+Two motor cards, each naming its specimens and heaters (for example
+`S0 S1 S2 S3 · H0 H1 H2 H3`), with enabled / zeroed / moving /
 holding / healthy dots, position and target, speed, last command, sequence
 state, and the resistance readout: `R now`, `bend start` and `Δ %` for the
 card's monitored specimen — the bend confirmation. The selector (M0 | M1)
 drives the shared controls: `ENABLE`, `DISABLE`, `SET ZERO`, `HOME`, `STOP`
-· jog ±0.1/±1/±5 mm (allowed before zeroing) · speed 1–50
-full-step Hz (the 0.5 mm/s ceiling at the 2 mm lead) · **BEND**
-(`STEPPER_MOVETO <id> <target> <hold>`) and
+· jog ±0.1/±1/±5 mm (allowed before zeroing) · drive settings in SI units:
+speed 0.01–0.5 mm/s, run current in A RMS, acceleration 0.01–50 mm/s²
+(the wire stays in full steps: ×100 at the 2 mm lead, so 0.5 mm/s is
+`STEPPER_SET_SPEED <id> 50.000` and 2 mm/s² is `STEPPER_SET_ACCEL <id> 200.0`)
+· **BEND** (`STEPPER_MOVETO_MM <id> <mm> <hold>`) and
 **STANDARD PULL** (`PULL_EXECUTE <id>`, the config-defined pull). BEND and
 STANDARD PULL are disabled — with the reason shown — until the motor is
 enabled and zeroed, the mode is RUN, and neither radio silence nor
@@ -136,11 +156,14 @@ link-loss fallback is active. Pressing them records the specimen
 resistance at bend start; the idle→moving edge does the same automatically.
 
 ### Advanced tab
-Bend sequences (`BENDSEQ_LOAD/RUN/PAUSE/RESUME/STOP/STATUS/CLEAR`; step
-speed ≤ 50 Hz) · PID tuning · open-loop duty (`SET_HEATER_DUTY`,
-`SET_ALL_DUTY`, `CLEAR_OVERRIDES`) · microstep · preset management ·
-fallback plan (`FALLBACK_PLAN/ARM/DISARM/STATUS`, executed onboard only
-during link-loss fallback — see the redesign spec §10) · network (beacon
+Bend sequences (`BENDSEQ_LOAD/RUN/PAUSE/RESUME/STOP/STATUS/CLEAR`; each
+step is target mm, hold s and an optional speed ≤ 0.5 mm/s, encoded as
+microsteps at the motor's live divisor and full-steps/s) · PID tuning ·
+open-loop duty (`SET_HEATER_DUTY`, `SET_ALL_DUTY`, `CLEAR_OVERRIDES`) ·
+microstep · preset management · fallback plan
+(`FALLBACK_PLAN/ARM/DISARM/STATUS` with target mm, hold s and speed mm/s,
+executed onboard only during link-loss fallback — see the redesign spec
+§10) · network (beacon
 priority, manual host override). Bench-only commands (`ARM_DEBUG`,
 `HEATER_TEST`, `SET_BENCH_MODE`) are console-only.
 
@@ -170,7 +193,7 @@ decodes the TMC5160's own registers:
   off; SD_MODE strap; DRIVER FAULT.
 - A plot of MSCNT and XACTUAL against seconds since the probe started.
 
-At the 50 Hz ceiling a BEND of 800 µsteps at µ4 is one revolution in 4 s,
+At the 0.5 mm/s ceiling (50 full-steps/s) a BEND of 800 µsteps at µ4 is one revolution in 4 s,
 about 1.5 mm -- invisible on a remote camera, unmistakable in MSCNT. The
 probe stops itself when radio silence starts or the link is lost.
 
@@ -180,18 +203,21 @@ shows UTC). Window 5 m / 30 m / 2 h / all; `FOLLOW` re-engages live
 scrolling after a manual pan; `PAUSE` freezes drawing (data keeps
 accumulating); `EXPORT` writes a PNG of the current page or a CSV of the
 visible window. Every series is kept for the whole session. Pages:
-Temperatures (S0–S7, dashed target overlays, fallback floor and
+Temperatures (one x-linked plot per motor group: its samples, dashed target
+overlays for the heaters that read them, fallback floor and
 over-temperature lines), Ambient (three x-linked plots: ambient T, pressure
-with the pre-float line, UV), Heaters (duty %), Resistance (only channels
-that have reported; pull markers), Motors (position/target per motor; pull
-markers).
+with the pre-float line, UV), Heaters (duty %, one plot per motor group),
+Resistance (only channels that have reported; pull markers), Motors
+(position/target per motor; pull markers).
 
 ### Right column
 Health (every OK/FAIL flag, tri-state flag and COMPONENT_STATE entry as a
 dot) · Checkout (live go/no-go rows: link, RTC, DPS310/ADS1115, PT100
 channels valid n/8, MAX31865 clicks reporting, PWM, M0/M1 healthy · enabled
 · zeroed, storage, energy budget, mode RUN, unacknowledged alarms, last
-CHECK; `RUN CHECK ALL`) · Values (every field, monospace).
+CHECK; `RUN CHECK ALL`) · Values (every field, monospace; specimen
+temperatures, heater duties and click resistances grouped by motor, each
+sample labelled with the heater that reads it; motor speed in mm/s).
 
 ### Console, events, pulls
 The console lists every command from every panel with ✔/✖, latency and the
@@ -226,8 +252,17 @@ as ignored.
 ## Interaction rules
 
 - **Confirmation dialogs**: `ARM`, `SET_PHASE`, `ENTER_SAFE`, `SHUTDOWN_SAFE`,
-  `RADIO_SILENCE`, `RESET_CTRL`, `BENDSEQ_RUN`, `FALLBACK_ARM`. Everything
-  else — including the panic pair — sends immediately.
+  `RADIO_SILENCE`, `RESET_CTRL`, `BENDSEQ_RUN`, `FALLBACK_ARM`, and any heater
+  target above 40 °C (owner rule 2026-09-15): a heater row's `Set`, `Set
+  all`, a preset whose targets go above 40 °C, an autotune setpoint above
+  40 °C, and `SET_TEMP_TARGET` / `SET_ALL_TEMP_TARGETS` / `PID_TUNE_START`
+  typed into the console. 40 °C itself does not ask; a declined dialog sends
+  nothing. Everything else — including the panic pair — sends immediately.
+- **Number boxes**: the mouse wheel changes a number box, dropdown or slider
+  only while `Ctrl` or `Shift` is held (one step per notch); a plain wheel
+  scrolls the page under the pointer. Decimals use `.` whatever the
+  operating system's locale, and a typed `,` enters `.`. The unit is a label
+  beside the box, so typing replaces only the number.
 - **Gating**: a control that would be refused by the onboard is disabled
   and its tooltip (and the note under its group) says why. Unknown facts
   never block; the onboard remains the authority.
@@ -266,7 +301,7 @@ logs/
     pulls.csv                              EVT,PULL
     commands.csv                           ts_utc, command, ok, latency_ms, body, raw
     events.log                             the event log
-    session.json                           ground-station metadata and counters
+    session.json                           ground-station metadata and counters; `layout` = the motor groups GET_LAYOUT reported
 ```
 
 The directory is named after the onboard session id (its boot time first,
@@ -287,7 +322,7 @@ values are empty cells.
 ## CLI
 
 ```bash
-python main.py telemetry-server [--bind 0.0.0.0] [--port 4000] [--log logs] [--plot] [--alert-temp-c 80] [--timeout-s 10]
+python main.py telemetry-server [--bind 0.0.0.0] [--port 4000] [--log logs] [--plot] [--alert-temp-c 75] [--timeout-s 10]
 python main.py command --cmd "<COMMAND>" [--host <ip>] [--port 5000] [--timeout <s>] [--yes]
 ```
 
