@@ -86,6 +86,8 @@ std::string CommandTypeToString(CommandType type) {
       return "CLEAR_TEMP_TARGETS";
     case CommandType::kGetThermal:
       return "GET_THERMAL";
+    case CommandType::kGetLayout:
+      return "GET_LAYOUT";
     case CommandType::kClearOverrides:
       return "CLEAR_OVERRIDES";
     case CommandType::kSetBenchMode:
@@ -226,6 +228,7 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
       {"CLEAR_TEMP_TARGET", CommandType::kClearTempTarget},
       {"CLEAR_TEMP_TARGETS", CommandType::kClearTempTargets},
       {"GET_THERMAL", CommandType::kGetThermal},
+      {"GET_LAYOUT", CommandType::kGetLayout},
       {"CLEAR_OVERRIDES", CommandType::kClearOverrides},
       {"SET_BENCH_MODE", CommandType::kSetBenchMode},
       {"SET_TICK_HZ", CommandType::kSetTickHz},
@@ -372,6 +375,7 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
     case CommandType::kClearOverrides:
     case CommandType::kClearTempTargets:
     case CommandType::kGetThermal:
+    case CommandType::kGetLayout:
     case CommandType::kRadioSilence:
     case CommandType::kRadioResume:
     case CommandType::kFallbackArm:

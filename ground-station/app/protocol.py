@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -712,8 +713,15 @@ def validate_duty(duty: float) -> Tuple[bool, str]:
     return True, f"{d:.3f}"
 
 
+# Owner rule 2026-09-15: the overtemperature latch is 80 C
+# (heater.max_sample_temp_c) and targets stay 5 C under it
+# (heater.target_max_c), because a film heater overshoots its target.
+OVERTEMP_LATCH_C = 80.0
+TARGET_MAX_C = 75.0
+
+
 def validate_temperature_target(
-    target_c: float, minimum_c: float = 0.0, maximum_c: float = 80.0
+    target_c: float, minimum_c: float = 0.0, maximum_c: float = TARGET_MAX_C
 ) -> Tuple[bool, str]:
     try:
         value = float(target_c)
@@ -753,8 +761,23 @@ def validate_tick_hz(hz: float) -> Tuple[bool, str]:
 MAX_SPEED_MM_S = 0.5
 LEAD_MM_PER_REV = 2.0
 FULL_STEPS_PER_REV = 200
-MAX_SPEED_HZ = MAX_SPEED_MM_S / LEAD_MM_PER_REV * FULL_STEPS_PER_REV  # 50.0
+FULL_STEPS_PER_MM = FULL_STEPS_PER_REV / LEAD_MM_PER_REV              # 100
+MAX_SPEED_HZ = MAX_SPEED_MM_S * FULL_STEPS_PER_MM                     # 50.0
+MAX_ACCEL_STEPS_S2 = 5000.0         # stepper.max_accel_steps_per_s2
+MAX_ACCEL_MM_S2 = MAX_ACCEL_STEPS_S2 / FULL_STEPS_PER_MM              # 50.0
 MAX_DIRECT_USTEPS = 1000
+
+
+# The operator works in SI (owner 2026-09-15): speed in mm/s and
+# acceleration in mm/s² of ball-screw travel. The wire keeps full-steps
+# (STEPPER_SET_SPEED <hz>, STEPPER_SET_ACCEL <steps/s²>, the BENDSEQ_LOAD and
+# FALLBACK_PLAN speeds); these convert at the lead above.
+def hz_from_mm_s(mm_s: float) -> float:
+    return float(mm_s) * FULL_STEPS_PER_MM
+
+
+def mm_s_from_hz(hz: float) -> float:
+    return float(hz) / FULL_STEPS_PER_MM
 
 
 def validate_speed_hz(hz: float, max_hz: float = MAX_SPEED_HZ) -> Tuple[bool, str]:
@@ -773,6 +796,30 @@ def validate_speed_hz(hz: float, max_hz: float = MAX_SPEED_HZ) -> Tuple[bool, st
     if v <= 0.0 or v > max_hz:
         return False, f"hz must be in (0, {max_hz}]"
     return True, f"{v:.3f}"
+
+
+def validate_speed_mm_s(mm_s: float, max_mm_s: float = MAX_SPEED_MM_S) -> Tuple[bool, str]:
+    """Validate a speed in mm/s; the normalised value is the full-step Hz
+    the wire carries."""
+    try:
+        v = float(mm_s)
+    except (TypeError, ValueError):
+        return False, "speed must be numeric"
+    if not math.isfinite(v) or v <= 0.0 or v > max_mm_s + 1e-9:
+        return False, f"speed must be in (0, {max_mm_s:g}] mm/s"
+    return True, f"{hz_from_mm_s(v):.3f}"
+
+
+def validate_accel_mm_s2(accel: float, max_mm_s2: float = MAX_ACCEL_MM_S2) -> Tuple[bool, str]:
+    """Validate an acceleration in mm/s²; the normalised value is the
+    full-steps/s² the wire carries."""
+    try:
+        v = float(accel)
+    except (TypeError, ValueError):
+        return False, "accel must be numeric"
+    if not math.isfinite(v) or v <= 0.0 or v > max_mm_s2 + 1e-9:
+        return False, f"accel must be in (0, {max_mm_s2:g}] mm/s^2"
+    return True, f"{v * FULL_STEPS_PER_MM:.1f}"
 
 
 def validate_microstep(divisor: int) -> Tuple[bool, str]:

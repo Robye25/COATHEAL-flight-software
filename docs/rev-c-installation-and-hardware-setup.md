@@ -331,7 +331,7 @@ This map matches the final pinout diagram. GPIO values are BCM numbers.
 | Function | Default | Config key |
 |---|---|---|
 | Status LEDs | Disabled; none in final diagram | `hal.*_led_enabled` |
-| Heater H1..H6 inputs | BCM 19,13,6,5,24,23 | `heater.output_lines` |
+| Heater H1..H6 inputs | BCM 19,13,6,5,24,23 | heater lines in `motor0.specimens` / `motor1.specimens` |
 | Heater PWM frequency | 1 Hz | `heater.pwm_frequency_hz` |
 | Heater input polarity | active-high | `heater.active_high` |
 | Max simultaneous heaters | 3 | `power.max_active_heaters` |
@@ -396,7 +396,6 @@ hardware.sample_count=8
 hardware.heater_count=6
 
 sensor.sequent_rtd_stack=0
-sensor.sequent_rtd_channels=1,2,3,4,5,6,7,8
 sensor.sequent_rtd_poll_ms=1000
 sensor.sequent_rtd_expect_sensor_type=pt100
 sensor.sequent_rtd_resistance_min_ohm=60.0
@@ -409,16 +408,15 @@ sensor.ads1115_i2c_addr=0x48
 sensor.uv_ads1115_channel=0
 sensor.max31865_reference_ohm=470.0
 sensor.max31865_poll_ms=1000
-sensor.max31865_sample_indices=0,4
 sensor.resistance_source=max31865_click
 
 hal.status_led_enabled=false
 hal.mode_led_enabled=false
-heater.output_lines=19,13,6,5,24,23
 heater.pwm_frequency_hz=1.0
 heater.active_high=true
+heater.max_sample_temp_c=80.0
 heater.target_min_c=0.0
-heater.target_max_c=80.0
+heater.target_max_c=75.0
 power.max_active_heaters=3
 power.max_thermal_w=15.0
 
@@ -427,18 +425,21 @@ motor0.gpio_chip=/dev/gpiochip0
 motor0.spi_device=/dev/spidev0.0
 motor0.cs_line=22
 motor0.enable_line=20
+motor0.invert_direction=true
 motor0.run_current_a_rms=0.8
 motor0.sense_resistor_ohm=0.075
-motor0.samples=0,1,2,3
+# Specimens in order: PT100 card terminal, and the heater's BCM line if heated.
+motor0.specimens=ch1:19,ch2:13,ch3:6,ch4:5
 
 motor1.driver=tmc5160
 motor1.gpio_chip=/dev/gpiochip0
 motor1.spi_device=/dev/spidev0.0
 motor1.cs_line=27
 motor1.enable_line=21
+motor1.invert_direction=false
 motor1.run_current_a_rms=0.8
 motor1.sense_resistor_ohm=0.075
-motor1.samples=4,5,6,7
+motor1.specimens=ch5:24,ch6:23,ch7,ch8
 ```
 
 ## Component Bring-Up Commands

@@ -6,13 +6,15 @@ group plus the console (redesign spec §6.3).
 """
 from __future__ import annotations
 
-from typing import Callable, Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter
+from PyQt6.QtCore import QEvent, QLocale, QObject, QPointF, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QKeyEvent, QPainter, QWheelEvent
 from PyQt6.QtWidgets import (
-    QButtonGroup, QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton,
-    QSizePolicy, QVBoxLayout, QWidget,
+    QAbstractScrollArea, QAbstractSlider, QAbstractSpinBox, QApplication, QButtonGroup, QComboBox,
+    QDoubleSpinBox,
+    QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QScrollBar, QSizePolicy,
+    QVBoxLayout, QWidget,
 )
 
 from ..protocol import CommandResponse
@@ -303,3 +305,115 @@ def hrow(*widgets: QWidget, spacing: int = 6, stretch_last: bool = False) -> QWi
     if stretch_last:
         lay.addStretch()
     return w
+
+
+def with_unit(box: QWidget, unit: str, *, stretch: bool = False) -> QWidget:
+    """A number box with its unit as a label outside it (owner 2026-09-15):
+    typing into the box replaces only the number."""
+    label = QLabel(unit)
+    label.setStyleSheet(f"color: {MUTED};")
+    return hrow(box, label, spacing=3, stretch_last=stretch)
+
+
+def unit_label(unit: str) -> QLabel:
+    label = QLabel(unit)
+    label.setStyleSheet(f"color: {MUTED};")
+    return label
+
+
+def apply_number_locale() -> None:
+    """Numbers read and typed with "." as the decimal separator and no
+    thousands separator, whatever the operating system's locale says (a
+    comma locale showed 0,25 in every box). Takes effect for widgets
+    created afterwards."""
+    locale = QLocale(QLocale.Language.English, QLocale.Country.UnitedStates)
+    locale.setNumberOptions(QLocale.NumberOption.OmitGroupSeparator
+                            | QLocale.NumberOption.RejectGroupSeparator)
+    QLocale.setDefault(locale)
+
+
+class InputPolicy(QObject):
+    """App-wide rules for value widgets (owner 2026-09-15). The mouse wheel
+    changes a number box, dropdown or slider only while Ctrl or Shift is
+    held, one step per notch; a plain wheel goes on to the page, which
+    scrolls instead of silently editing whatever is under the pointer. A
+    comma typed into a decimal box enters the "." separator."""
+
+    STEP_MODIFIERS = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier
+
+    def __init__(self, parent: Optional[QObject] = None):
+        super().__init__(parent)
+        self._remainder: Dict[int, int] = {}
+
+    @staticmethod
+    def value_widget(obj: QObject) -> Optional[QWidget]:
+        """The number box / dropdown / slider `obj` is (or is the editor of)."""
+        if isinstance(obj, QLineEdit) and isinstance(obj.parent(), (QAbstractSpinBox, QComboBox)):
+            obj = obj.parent()
+        if isinstance(obj, (QAbstractSpinBox, QComboBox)):
+            return obj
+        if isinstance(obj, QAbstractSlider) and not isinstance(obj, QScrollBar):
+            return obj
+        return None
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:  # noqa: N802
+        if event.type() == QEvent.Type.Wheel:
+            target = self.value_widget(obj)
+            if target is None:
+                return False
+            if not event.modifiers() & self.STEP_MODIFIERS:
+                # Not for the box: the page under it scrolls instead.
+                self.scroll_page(target, event)
+                return True
+            delta = event.angleDelta().y() or event.angleDelta().x()
+            total = self._remainder.get(id(target), 0) + delta
+            steps = int(total / 120)
+            self._remainder[id(target)] = total - steps * 120
+            if steps and target.isEnabled():
+                self.step(target, steps)
+            event.accept()
+            return True
+        if event.type() == QEvent.Type.KeyPress and event.text() == ",":
+            box = obj.parent() if isinstance(obj, QLineEdit) else obj
+            if isinstance(box, QDoubleSpinBox):
+                QApplication.sendEvent(obj, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Period,
+                                                      event.modifiers(), "."))
+                return True
+        return False
+
+    @staticmethod
+    def scroll_page(target: QWidget, event: QWheelEvent) -> None:
+        """Hand the wheel to the nearest scroll area around `target`; with
+        none, let it carry on to the parent widgets."""
+        area = target.parentWidget()
+        while area is not None and not isinstance(area, QAbstractScrollArea):
+            area = area.parentWidget()
+        if area is None:
+            event.ignore()
+            return
+        viewport = area.viewport()
+        global_pos = event.globalPosition()
+        forwarded = QWheelEvent(QPointF(viewport.mapFromGlobal(global_pos.toPoint())), global_pos,
+                                event.pixelDelta(), event.angleDelta(), event.buttons(),
+                                event.modifiers(), event.phase(), event.inverted())
+        QApplication.sendEvent(viewport, forwarded)
+        event.accept()
+
+    @staticmethod
+    def step(target: QWidget, steps: int) -> None:
+        if isinstance(target, QAbstractSpinBox):
+            target.stepBy(steps)
+        elif isinstance(target, QComboBox):
+            if target.count():
+                target.setCurrentIndex(max(0, min(target.count() - 1, target.currentIndex() - steps)))
+        elif isinstance(target, QAbstractSlider):
+            target.setValue(target.value() + steps * target.singleStep())
+
+
+def install_input_policy(app: QApplication) -> InputPolicy:
+    """Install the InputPolicy on `app` once; later calls return it."""
+    policy = app.findChild(InputPolicy)
+    if policy is None:
+        policy = InputPolicy(app)
+        app.installEventFilter(policy)
+    return policy

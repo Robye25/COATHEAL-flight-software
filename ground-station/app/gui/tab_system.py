@@ -17,7 +17,7 @@ from .state import OnboardState
 from .theme import mode_color, phase_color
 from .widgets import (
     AMBER, GREEN, MONO_CSS, MUTED, RED, Indicator, ResponseLine, confirm,
-    group_box, hrow, make_button,
+    group_box, hrow, make_button, with_unit,
 )
 
 # STOPPED is deliberately absent: the onboard refuses it (it would end the
@@ -113,10 +113,10 @@ class SystemTab(QScrollArea):
         frame, lay = group_box("Downlink rate")
         self.tick_hz = QDoubleSpinBox()
         self.tick_hz.setRange(0.1, 5.0); self.tick_hz.setDecimals(1); self.tick_hz.setSingleStep(0.5)
-        self.tick_hz.setValue(1.0); self.tick_hz.setSuffix(" Hz")
+        self.tick_hz.setValue(1.0)
         self.btn_tick = make_button("SET", "primary", sends="SET_TICK_HZ <hz>", slot=self._set_tick, min_height=24)
         lbl = QLabel("0.1–5.0 Hz (BEXUS §5.4)"); lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
-        lay.addWidget(hrow(self.tick_hz, self.btn_tick, lbl, stretch_last=True))
+        lay.addWidget(hrow(with_unit(self.tick_hz, "Hz"), self.btn_tick, lbl, stretch_last=True))
         self.resp_rate = ResponseLine()
         lay.addWidget(self.resp_rate)
         outer.addWidget(frame)

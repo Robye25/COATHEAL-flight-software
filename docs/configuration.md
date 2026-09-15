@@ -67,8 +67,8 @@ fallback at `PRE_FLOAT`/`FLOAT`.
 
 | Key | Default | Description |
 |---|---:|---|
-| `hardware.sample_count` | `8` | Software sample channels, one per Sequent RTD HAT card channel. |
-| `hardware.heater_count` | `6` | Polyimide heater channels, samples 0-5. |
+| `hardware.sample_count` | `8` | Software sample channels, one per Sequent RTD HAT card channel; must equal the number of specimens `motor0.specimens` and `motor1.specimens` list together. |
+| `hardware.heater_count` | `6` | Polyimide heater channels; must equal the number of heated specimens in those lists. |
 | `hardware.electronics_heater_index` | `SIZE_MAX` | Optional box heater; omitted for final BOM. |
 
 ## Sensors
@@ -80,7 +80,6 @@ fallback at `PRE_FLOAT`/`FLOAT`.
 | `sensor.dps310_poll_ms`, `ads1115_poll_ms` | `1000` | Independent worker polling intervals. |
 | `sensor.stale_after_ms` | `3000` | Age after which a last-good failed reading is `STALE`. |
 | `sensor.sequent_rtd_stack` | `0` | Sequent RTD HAT DIP-switch stack level, `0..7` -> I2C `0x40..0x47`. |
-| `sensor.sequent_rtd_channels` | `1,2,3,4,5,6,7,8` | Card channel (1-indexed) supplying each logical sample; must have exactly `hardware.sample_count` entries, each `1..8`, no duplicates. This is the bench wiring map: `scripts/associate_heaters.py auto` measures it (one heater at a time, watching which terminal warms) so that sample `i` is the specimen heater `i` warms, `scripts/associate_heaters.py assign` sets it by hand together with `heater.output_lines`, and `migrate-config` — every `coatheal-deploy` — keeps it from the local config. |
 | `sensor.sequent_rtd_poll_ms` | `1000` | RTD worker polling interval. |
 | `sensor.sequent_rtd_expect_sensor_type` | `pt100` | Expected card-configured sensor type. **`pt100` is the only accepted value**; `Probe()` refuses on mismatch with the card. `pt1000` is recognised and rejected at config load: the card and `Probe()` handle it, but the card-vs-CVD cross-check hardcodes the PT100 Callendar-Van Dusen curve and the resistance window below is a PT100 window, so a `pt1000` config would load and then mark every channel invalid forever — every heater clamped, no diagnostic. |
 | `sensor.sequent_rtd_resistance_min_ohm` | `60.0` | Lower plausibility bound for per-channel resistance; must be below `_max_ohm`. |
@@ -92,17 +91,23 @@ fallback at `PRE_FLOAT`/`FLOAT`.
 | `sensor.ads1115_i2c_addr` | `0x48` | ADS1115 I2C address. |
 | `sensor.uv_ads1115_channel` | `0` | ADS1115 channel for GUVA-S12SD output. |
 | `sensor.uv_full_scale_v` | `4.096` | ADC full-scale used for normalization. |
-| `sensor.resistance_source` | `max31865_click` | Source for the compatibility `RESISTANCE=` field. `max31865_click` (v3-shipped default): coating-specimen resistance measured directly by the two MAX31865 clicks, in the two `sensor.max31865_sample_indices` slots only (other slots emit `-`). `sequent_rtd`: the RTD card's per-channel PT100 element resistance, all eight slots. `disabled`: `-` in every slot. `simulated`: the decaying bench model. |
+| `sensor.resistance_source` | `max31865_click` | Source for the compatibility `RESISTANCE=` field. `max31865_click` (v3-shipped default): coating-specimen resistance measured directly by the two MAX31865 clicks, in the two click slots only — the first specimen of each motor ([Motor groups](#motor-groups-motorspecimens)); other slots emit `-`. `sequent_rtd`: the RTD card's per-channel PT100 element resistance, all eight slots. `disabled`: `-` in every slot. `simulated`: the decaying bench model. |
 | `sensor.max31865_reference_ohm` | `470.0` | MAX31865 reference resistor value (Ω), shared by both clicks. MikroE RTD Click nominal; **bench-confirm against the populated part** — the retired pre-migration code assumed `400`. See [Sequent RTD Bench Bring-Up §9](sequent-rtd-bring-up.md#9-max31865-sample-resistance-click-bring-up-blocking-gates), gate 4. |
 | `sensor.max31865_poll_ms` | `1000` | MAX31865 click worker polling interval. |
-| `sensor.max31865_sample_indices` | `0,4` | Which two of `hardware.sample_count` indices the two clicks feed: entry 0 -> click 1/SAMPLE1 (CE1, `/dev/spidev0.1`), entry 1 -> click 2/SAMPLE2 (CE0, `/dev/spidev0.0`). Must be two distinct entries in `[0, hardware.sample_count)`. Owner decision (2026-08-29): resistance is measured on exactly two samples, one per motor group, via the two MAX31865 RTD clicks — `0,4` is the first sample index of each group; see [Sequent RTD Bench Bring-Up §10](sequent-rtd-bring-up.md#10-sample-index-mapping-max31865_sample_indices). |
+
+Click 1 / SAMPLE1 (CE1, `/dev/spidev0.1`) reads the first specimen of
+`motor0.specimens` and click 2 / SAMPLE2 (CE0, `/dev/spidev0.0`) the first of
+`motor1.specimens` — owner decision (2026-08-29): resistance is measured on
+exactly two specimens, one per motor group. The retired
+`sensor.max31865_sample_indices` key is derived from the specimen lists; see
+[Sequent RTD Bench Bring-Up §10](sequent-rtd-bring-up.md#10-sample-index-mapping-max31865_sample_indices).
 
 The default `60.0 .. 390.0` Ω `sequent_rtd_resistance_*` window is a PT100
 *sensor-range* sanity check, not a mission-envelope check: through the PT100
 CVD curve it spans roughly −102 °C to +845 °C, far wider than anything this
 payload should ever see. It catches an open, shorted, or miswired probe and
 nothing subtler — the actual thermal guard is the `heater.max_sample_temp_c`
-over-temp latch at 85 °C. The bench survey in section 8 of
+over-temp latch at 80 °C. The bench survey in section 8 of
 [Sequent RTD Bench Bring-Up](sequent-rtd-bring-up.md) is expected to replace
 these defaults with a narrower mission-envelope window. This window applies
 only to the `sequent_rtd` resistance path — the MAX31865 click instrument
@@ -114,11 +119,9 @@ guessed range (section 9, gate 5 of the same bring-up doc).
 
 | Key | Default | Description |
 |---|---:|---|
-| `heater.max_sample_temp_c` | `85.0` | Per-sample overtemperature latch. |
+| `heater.max_sample_temp_c` | `80.0` | Per-channel overtemperature latch: a heater whose sample reads above it is held off until `RESET_CTRL`. Owner rule 2026-09-15 (was 85); `migrate-config` pins it. |
 | `heater.target_min_c` | `0.0` | Lowest accepted manual PID target. |
-| `heater.target_max_c` | `80.0` | Highest accepted manual PID target; must stay below the overtemperature latch. |
-| `heater.output_lines` | `19,13,6,5,24,23` | BCM GPIO lines for HEAT_EN1..6 (schematic v3 map). Bench wiring may differ: `scripts/associate_heaters.py assign` sets the lines the harness really uses, in the order of the samples they heat (a heater that warms nothing in `auto` or `heat` is usually not on its listed line); `migrate-config` keeps the value from the local config (it is validated, not pinned). The boot-time `gpio=` block is derived from it — redeploy (and reboot) after a change. |
-| `heater.temperature_channels` | `0,1,2,3,4,5` | DAQ sample supplying feedback for H0..H5. Keep `0,1,2,3,4,5`: the ground station pairs heater `i` with sample `i`, and `migrate-config` pins this value. Remap PT100 wiring through `sensor.sequent_rtd_channels`. |
+| `heater.target_max_c` | `75.0` | Highest accepted manual PID target; must stay below the overtemperature latch — 5 °C under it, because a film heater overshoots its target. Owner rule 2026-09-15 (was 80); `migrate-config` pins it. The console asks for confirmation before any target above 40 °C. |
 | `heater.pwm_frequency_hz` | `1.0` | Requested heater PWM frequency. v3: film heaters have high thermal inertia and no hardware PWM channel is wired, so 1 Hz software PWM is the owner-confirmed rate (was 10.0 pre-v3). The software PWM period is divided into 100 slices and the duty is re-read every slice, so a `SetDuty(0)` from the motion heater-inhibit reaches the GPIO within one slice — 1000/100 = **10 ms** at 1 Hz — not one whole period. |
 | `heater.active_high` | `true` | MOSFET input polarity. |
 | `heater.debug_max_duty` | `0.25` | Bench-only maximum `HEATER_TEST` duty. |
@@ -189,6 +192,7 @@ load as unknown motor keys, not merely deprecated.**
 | `motor*.spi_device` | `/dev/spidev0.0` | `/dev/spidev0.0` | Shared SPI0 bus device; software drives each configured CS GPIO with `SPI_NO_CS` (see below). |
 | `motor*.cs_line` | `22` | `27` | Chip select GPIO (software CS). |
 | `motor*.enable_line` | `20` | `21` | EN GPIO. |
+| `motor*.invert_direction` | `true` (built-in `false`) | `false` | Flip the sign of every step so a positive command moves the mechanism the same physical way on both motors. Motor 0 turns opposite to motor 1 for the same command (owner 2026-09-15: its "+" was "−"), so `migrate-config` pins `motor0.invert_direction=true`. Fix direction here, never by rewiring the coils. |
 | `motor*.run_current_a_rms` | `0.8` | `0.8` | Conservative commissioning current; increase only after thermal validation. Validated against both a flat `(0, 3.1]` A_rms ceiling and the sense resistor's physical current limit (below). `STEPPER_SET_CURRENT` changes it at runtime (same limits) until the service restarts. |
 | `motor*.hold_current_frac` | `0.30` | `0.30` | Hold current fraction, relative to the chosen IRUN. |
 | `motor*.stealth_chop` | `false` | `false` | Chopper mode (GCONF `en_pwm_mode`, bit 2). `false` — the flight setting since 2026-09-11 — writes `GCONF=0x00000000`: spreadCycle, full torque headroom for the ball-screw bend; `true` writes `GCONF=0x00000004`: StealthChop, the quiet low-speed chopper, bench opt-in only. The driver's GCONF readback verify confirms the mode during `Reinitialize()`, and `MOTOR_DEBUG` reports the live `stealth` flag. |
@@ -196,7 +200,53 @@ load as unknown motor keys, not merely deprecated.**
 | `motor*.sense_resistor_ohm` | `0.075` | `0.075` | TMC5160 current-sense resistor value (Ω); feeds the GLOBALSCALER/IHOLD_IRUN current calculation. `0.075` is an assumed typical value for this board family — **read the actual value off the board at the bench** (see [TMC5160 Commissioning §6](tmc5160-commissioning.md#6-current-model-globalscaler--irun-two-regimes)). Validated `> 0.0 && < 1.0`. |
 | `motor*.retry_ms` | `2000` | `2000` | Idle driver re-probe interval after a fault. |
 | `motor*.accel_steps_per_s2` | `0` | `0` | Per-motor trapezoid slope, full-steps/s². `0` inherits `pull.accel_steps_per_s2`; a positive value (≤ `stepper.max_accel_steps_per_s2`) overrides it for this motor. `STEPPER_SET_ACCEL` adjusts it at runtime until restart. |
-| `motor*.samples` | `0,1,2,3` | `4,5,6,7` | Sample indices pulled by the motor. Keep the defaults: the ground station shows these groups. A specimen on the other motor is moved through `heater.output_lines` and `sensor.sequent_rtd_channels` instead (`scripts/associate_heaters.py assign`). |
+| `motor*.specimens` | `ch1:19,ch2:13,ch3:6,ch4:5` | `ch5:24,ch6:23,ch7,ch8` | The specimens the motor pulls, each with its PT100 terminal and heater line — see [Motor groups](#motor-groups-motorspecimens). |
+
+### Motor groups (`motor*.specimens`)
+
+Which specimens each motor pulls, which Sequent RTD card terminal each
+specimen's PT100 is on and which GPIO line drives its heater are one fact of
+the bench wiring, written once per motor:
+
+```ini
+motor0.specimens=ch8:19,ch2:13,ch3:6,ch4:5
+motor1.specimens=ch5:24,ch7:23,ch1,ch6
+```
+
+Each entry is `ch<terminal>:<BCM line>` for a heated specimen or
+`ch<terminal>` for an unheated one (`bcm19` is accepted for `19`). The
+onboard numbers everything from these two lists:
+
+- **Samples**: motor 0's specimens are S0, S1, … in the order listed; motor
+  1's follow (S4… above).
+- **Heaters**: the heated specimens are H0, H1, … in the same order (above:
+  H0–H3 on motor 0, H4 = S4 and H5 = S5 on motor 1); heater `h` reads the
+  PT100 of its own specimen.
+- **Clicks**: MAX31865 click 1 reads the first specimen of motor 0, click 2
+  the first of motor 1 — put the specimen whose resistance you monitor
+  first.
+
+The load is refused unless both lists are set, together they list exactly
+`hardware.sample_count` specimens of which exactly `hardware.heater_count`
+are heated, every terminal is `ch1..ch8` and appears once, and no BCM line
+heats two specimens (heater lines also join the duplicate-GPIO check against
+motors and LEDs). The boot-time `gpio=` block that holds heater lines low
+from power-on is derived from the lists — redeploy and reboot after changing
+a line.
+
+`GET_LAYOUT` reports the derived groups, and the ground station arranges its
+Thermal tab, motor cards, Values column, plots and `session.json` by them.
+`scripts/associate_heaters.py` shows, measures (`auto`, `heat`) and writes
+(`assign`) the lists; `migrate-config` (every `coatheal-deploy`) keeps them
+from the local config.
+
+The index-based keys the lists replaced — `heater.output_lines`,
+`heater.temperature_channels`, `sensor.sequent_rtd_channels`,
+`sensor.max31865_sample_indices`, `motor0.samples`, `motor1.samples` — are
+derived from them: an INI that sets both is refused (`<key> is derived from
+motor0.specimens / motor1.specimens: remove it`). An INI with none of the
+specimen keys still loads the old keys, and `migrate-config` converts it to
+specimen lists (each motor's click sample first).
 
 The TMC5160 backend uses SPI mode 3, opens SPI with the kernel chip-select
 disabled (`SPI_NO_CS`), and drives `motor0.cs_line`/`motor1.cs_line` through

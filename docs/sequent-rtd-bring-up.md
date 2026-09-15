@@ -304,7 +304,7 @@ curve that spans roughly **−102 °C to +845 °C** — far wider than anything 
 payload should ever see, and wider than the sensor range the mission actually
 cares about. It is a broken-probe check (open, shorted, miswired), not a
 thermal guard; the thermal guard is the `heater.max_sample_temp_c` over-temp
-latch at 85 °C. Nothing is wrong with shipping the wide window, but a window
+latch at 80 °C. Nothing is wrong with shipping the wide window, but a window
 derived from real hardware across the real flight band would catch a drifting
 or partially-shorted probe that the wide one waves through.
 
@@ -394,9 +394,8 @@ including reporting "out of range," rather than assume a window in advance.
 1. With both clicks wired 4-wire Kelvin to their specimens (SAMPLE1 -> click
    1, SAMPLE2 -> click 2 — do not cross them), read resistance via
    `printf 'CHECK MAX31865\n' | nc 127.0.0.1 5000` or the telemetry
-   `RESISTANCE=` field (see [Configuration Reference](configuration.md) for
-   `sensor.max31865_sample_indices`, which selects which two of the eight
-   wire slots the clicks fill).
+   `RESISTANCE=` field (the clicks fill the slots of the first specimen of
+   `motor0.specimens` and of `motor1.specimens` — section 10).
 2. Record the resistance across the specimen(s) actually wired at the bench,
    across whatever range of specimen states (as-deposited, after thermal
    cycling, after mechanical pull) is practical to exercise during
@@ -429,30 +428,28 @@ including reporting "out of range," rather than assume a window in advance.
 
 ## 10. Sample-Index Mapping (`max31865_sample_indices`)
 
-`sensor.max31865_sample_indices` defaults to `0,4` — entry 0 feeds click 1 /
-SAMPLE1, entry 1 feeds click 2 / SAMPLE2. **Owner decision (confirmed
+Click 1 / SAMPLE1 reads the first specimen of `motor0.specimens` and click 2 /
+SAMPLE2 the first of `motor1.specimens`. **Owner decision (confirmed
 2026-08-29): specimen resistance is measured on exactly two samples, one per
-motor group, via the two MAX31865 RTD clicks** — `0,4` is the first sample
-index of each motor's group (`motor0.samples` starts at 0, `motor1.samples`
-starts at 4).
+motor group, via the two MAX31865 RTD clicks.** The retired
+`sensor.max31865_sample_indices` key is derived from the specimen lists (in
+the schematic wiring the clicks read `S0` and `S4`); `GET_LAYOUT` reports it
+as `clicks=`.
 
 Determining the real mapping is a bench/integration task, not a software
-task — record which physical specimen positions SAMPLE1 and SAMPLE2 actually
-correspond to once the clicks are wired into the finished mechanism, then set
-this key to match. The two entries must be distinct and each less than
-`hardware.sample_count` (validated at config load); nothing else constrains
-them.
+task — record which physical specimen each click is wired to once the clicks
+are in the finished mechanism, then list that specimen first in its motor's
+`motorN.specimens` (`scripts/associate_heaters.py assign` rewrites both
+lists; `show` prints the current ones with a Click column).
 
 **Record here:**
 
-- Physical specimen position SAMPLE1 (click 1, CE1) actually measures, as a
-  software sample index: `____` *(fill in at bench/integration —
-  decided default is `0`)*
-- Physical specimen position SAMPLE2 (click 2, CE0) actually measures, as a
-  software sample index: `____` *(fill in at bench/integration —
-  decided default is `4`)*
-- Config line to set once confirmed:
-  `sensor.max31865_sample_indices=____,____ ` *(fill in at bench)*
+- Physical specimen click 1 (SAMPLE1, CE1) measures — its PT100 terminal and
+  motor: `____` *(fill in at bench/integration)*
+- Physical specimen click 2 (SAMPLE2, CE0) measures — its PT100 terminal and
+  motor: `____` *(fill in at bench/integration)*
+- First entries of the lists once confirmed:
+  `motor0.specimens=____,…` / `motor1.specimens=____,…` *(fill in at bench)*
 
 ## Useful Operator Commands
 
@@ -557,7 +554,6 @@ readback.
 
 ```ini
 sensor.sequent_rtd_stack=0                   # 0..7 -> I2C 0x40..0x47
-sensor.sequent_rtd_channels=1,2,3,4,5,6,7,8  # card channel per logical sample
 sensor.sequent_rtd_poll_ms=1000
 sensor.sequent_rtd_expect_sensor_type=pt100
 sensor.sequent_rtd_resistance_min_ohm=60.0
@@ -570,7 +566,9 @@ sensor.sequent_rtd_crosscheck_tol_c=2.0
 # configurable.
 sensor.max31865_reference_ohm=470.0
 sensor.max31865_poll_ms=1000
-sensor.max31865_sample_indices=0,4           # one specimen per motor group, see section 10
+# Click 1 reads the first specimen of motor0.specimens, click 2 the first of
+# motor1.specimens (section 10). Each PT100's card terminal is the ch<n> of
+# its specimen there too.
 
 # max31865_click is the v3-shipped default -- coating/specimen resistance
 # from the two clicks. sequent_rtd (PT100 element resistance from the RTD
@@ -583,7 +581,7 @@ for why `pt1000` is rejected at load rather than accepted and silently broken.
 
 The `60.0 .. 390.0` Ω window above maps through the PT100 CVD curve to roughly
 −102 °C to +845 °C, far wider than the mission envelope; the real thermal
-guard is the `heater.max_sample_temp_c` over-temp latch at 85 °C. Section 8's
+guard is the `heater.max_sample_temp_c` over-temp latch at 80 °C. Section 8's
 bench survey is expected to narrow it. This window applies only to the RTD
 HAT's own `sequent_rtd` resistance path — the MAX31865 click instrument
 deliberately has no equivalent plausibility window (section 9, gate 5): its
@@ -615,6 +613,6 @@ sections 3-5) is filled in with a bench observation, not an assumption.
       clicks.
 - [ ] Section 9, gate 5 (coating resistance range characterisation) PASSED
       and observations recorded, including any saturation behaviour.
-- [ ] Section 10 (`max31865_sample_indices` physical mapping) confirmed
-      against the real specimen wiring and `sensor.max31865_sample_indices`
-      updated from the `0,4` placeholder if the mapping differs.
+- [ ] Section 10 (which specimen each click reads) confirmed against the
+      real specimen wiring, and that specimen listed first in its motor's
+      `motorN.specimens`.

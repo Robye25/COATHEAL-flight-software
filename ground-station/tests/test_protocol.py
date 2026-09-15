@@ -411,9 +411,11 @@ class ValidatorTests(unittest.TestCase):
 
     def test_temperature_target(self) -> None:
         self.assertTrue(validate_temperature_target(0.0)[0])
-        self.assertTrue(validate_temperature_target(80.0)[0])
+        # Owner rule 2026-09-15: targets up to 75 C (the latch is 80 C).
+        self.assertTrue(validate_temperature_target(75.0)[0])
         self.assertFalse(validate_temperature_target(-0.1)[0])
-        self.assertFalse(validate_temperature_target(80.1)[0])
+        self.assertFalse(validate_temperature_target(75.1)[0])
+        self.assertFalse(validate_temperature_target(80.0)[0])
 
     def test_pid_gains(self) -> None:
         self.assertTrue(validate_pid_gains(0.2, 0.02, 0.03)[0])

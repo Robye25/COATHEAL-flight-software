@@ -2239,6 +2239,30 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       return Ack(cmd_name, result.str());
     }
 
+    case CommandType::kGetLayout: {
+      // motorN = its sample indices in order; heater_samples[h] = the sample
+      // heater h reads; clicks = the samples the two MAX31865 clicks read;
+      // rtd_channels[s] / heater_lines[h] = the wiring behind them.
+      const auto join = [](const std::vector<std::size_t>& values) {
+        std::ostringstream oss;
+        for (std::size_t i = 0; i < values.size(); ++i) {
+          oss << (i == 0 ? "" : ",") << values[i];
+        }
+        return oss.str();
+      };
+      std::ostringstream result;
+      result << "samples=" << config_.hardware.sample_count
+             << ";heaters=" << config_.hardware.heater_count;
+      for (std::size_t m = 0; m < config_.motors.size(); ++m) {
+        result << ";motor" << m << '=' << join(config_.motors[m].samples);
+      }
+      result << ";heater_samples=" << join(config_.heaters.temperature_channels)
+             << ";clicks=" << join(config_.sensors.max31865_sample_indices)
+             << ";rtd_channels=" << join(config_.sensors.sequent_rtd_channels)
+             << ";heater_lines=" << join(config_.heaters.output_lines);
+      return Ack(cmd_name, result.str());
+    }
+
     case CommandType::kClearOverrides:
       set_state_override([&]() {
         control_overrides_.heaters_off = false;
