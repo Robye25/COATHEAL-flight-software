@@ -284,27 +284,50 @@ requested.
 
 ## 10. Changing Heater-to-PT100 Mapping
 
-Heater `Hi` always takes its feedback from sample `Si`:
+The software, and the ground station with it, fixes the logical frame:
+heater `Hi` takes its feedback from sample `Si`, motor 0 pulls `S0`–`S3`,
+motor 1 pulls `S4`–`S7` (`S6` and `S7` unheated), and the MAX31865 clicks
+read `S0` and `S4`:
 
 ```ini
 heater.temperature_channels=0,1,2,3,4,5
+motor0.samples=0,1,2,3
+motor1.samples=4,5,6,7
+sensor.max31865_sample_indices=0,4
 ```
 
-Leave that at `0,1,2,3,4,5` — the ground station pairs heater `i` with sample
-`i`, and `migrate-config` (every `coatheal-deploy`) pins it. When the PT100s
-are not wired to the card terminals the schematic shows, remap the terminals
-instead (`sensor.sequent_rtd_channels`, section 14), so that `Si` is the
-specimen `Hi` warms.
+Leave those as they are — the ground station hard-codes the same pairing and
+groups, and `migrate-config` (every `coatheal-deploy`) pins
+`heater.temperature_channels`. A harness that does not follow the schematic
+is placed into that frame through the two wiring maps instead: the BCM line
+of the heater under `Si` goes into `heater.output_lines[i]`, and the card
+terminal of its PT100 into `sensor.sequent_rtd_channels[i]` (section 14).
+`coatheal-deploy` keeps both.
 
-Measure that map rather than tracing the harness. On the Pi, service running
-with `runtime.bench_mode=true`, all eight PT100s reading and the motors idle:
+`scripts/associate_heaters.py` shows, debugs, measures and writes them. On
+the Pi, with the service running:
 
 ```bash
-python3 scripts/associate_heaters.py --check   # preflight only, no heat
-python3 scripts/associate_heaters.py           # measure, write, restart
+python3 scripts/associate_heaters.py show        # the table, live readings, an assign command
+python3 scripts/associate_heaters.py watch       # every PT100 once a second, heats nothing
+python3 scripts/associate_heaters.py heat H2     # one heater on, every PT100 each second
+python3 scripts/associate_heaters.py auto --check  # preflight for auto, no heat
+python3 scripts/associate_heaters.py auto        # measure every pair, write, restart
+python3 scripts/associate_heaters.py assign \
+    --motor0 ch8:19,ch2:13,ch3:6,ch4:5 --motor1 ch5:24,ch7:23,ch1,ch6
 ```
 
-It takes the heaters one at a time: switches the heater on with bench
+Heating (`heat`, `auto`) needs `runtime.bench_mode=true` and the motors idle.
+`heat H2` is the debugging tool: it switches that one heater on (at most 60 s,
+`--seconds`), prints every terminal's rise each second and for 15 s after the
+heater goes off (`--after-s`: a PT100 keeps rising after its heater stops),
+names the terminal that warmed and says whether the config agrees. It writes
+nothing, and a terminal without a probe elsewhere does not stop it. `watch`
+prints the same table without heating or arming anything, for heat commanded
+from the ground station.
+
+`auto` (also the default without a command) takes the heaters one at a time:
+switches the heater on with bench
 `HEATER_TEST` pulses (each lapses within 5 s on its own, so a dead script
 cannot leave a heater on), switches it off as soon as one RTD card terminal
 has warmed by 2 °C while no other has warmed by a third of that, and waits
@@ -313,7 +336,8 @@ into `sensor.sequent_rtd_channels` with a config backup beside the file, and
 the service is restarted and checked against the new map; `coatheal-deploy`
 keeps the map from then on. It stops for a terminal reaching 50 °C, a probe
 dropping out, or another client driving heaters. Every reading is logged to
-`logs/heater-association-<time>.csv`.
+`logs/heater-association-<time>.csv` (`heat` logs to
+`logs/heater-test-H<i>-<time>.csv`; `--verbose` prints auto's table too).
 
 A heater that cannot be paired is reported and left out, and every heater
 that did pair is still written: one that warms nothing within 60 s (bench
@@ -323,11 +347,26 @@ two heaters that warm the same terminal, and one that needs far longer than
 the rest (a probe off its own specimen reads the neighbour's heat). The
 left-out heater's sample keeps its terminal unless a paired heater took it,
 so its feedback is no better than before: do not heat it, fix what the script
-reported, and rerun. The script exits 0 only when every heater paired.
+reported, and rerun. `auto` exits 0 only when every heater paired.
 
-Heat cannot tell which unheated terminal is `S6` and which `S7`, nor which
-motor group or MAX31865 click a specimen belongs to — check
-`motor*.samples` and `sensor.max31865_sample_indices` against the harness.
+Heat cannot tell which motor pulls a specimen, which unheated terminal is `S6`
+and which `S7`, or which specimen is on a MAX31865 click. `assign` writes all
+of it by hand, one motor at a time: each specimen as its PT100 card terminal
+and, when heated, its heater's BCM line (`ch8:19`; `ch1` alone is unheated).
+Heated specimens take the motor's heated samples in the order given — so
+list the specimen on the click first — and unheated ones the rest, which
+reorders `heater.output_lines` and `sensor.sequent_rtd_channels` while the
+groups themselves stay `0,1,2,3` / `4,5,6,7`. It refuses what the frame cannot
+hold (an unheated specimen on motor 0, a terminal or heater line given twice,
+a line the validator refuses) and, like `auto`, backs the config up, restarts
+the service and checks it runs the new assignment and claimed every heater
+line. `show` and `auto` print the `assign` command for the current and the
+measured table, so the usual path is: `auto`, correct the groups in the
+printed command, run it, then `auto --dry-run` to confirm the pairs still
+hold. A heater moved to a new BCM line needs `coatheal-deploy` afterwards so
+`config.txt` holds that line off from boot (REBOOT REQUIRED); nothing holds
+the line it left.
+
 Afterwards prove one loop from the ground station: a small temperature target
 on `Hi` must move `Si`, and only `Si`. A heater whose mapped sample is invalid
 or stale remains physically off.
