@@ -439,8 +439,9 @@ as `clicks=`.
 Determining the real mapping is a bench/integration task, not a software
 task — record which physical specimen each click is wired to once the clicks
 are in the finished mechanism, then list that specimen first in its motor's
-`motorN.specimens` (`scripts/associate_heaters.py assign` rewrites both
-lists; `show` prints the current ones with a Click column).
+`motorN.specimens`: `scripts/associate_heaters.py touch` puts it first when
+you answer `0c` / `1c` for it, `assign` rewrites both lists by hand, and
+`show` prints the current ones with a Click column.
 
 **Record here:**
 
