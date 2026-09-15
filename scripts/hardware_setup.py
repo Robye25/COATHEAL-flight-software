@@ -27,8 +27,9 @@ FINAL_PIN_VALUES = {
     # each sample's PT100 landed on are bench wiring (2026-09-14: neither
     # follows the schematic), so heater.output_lines and
     # sensor.sequent_rtd_channels are deliberately NOT pinned here: migration
-    # keeps what scripts/associate_heaters.py measured, and validate_candidate
-    # still checks the lines it finds in the INI.
+    # keeps the lines set for the harness and the terminal map
+    # scripts/associate_heaters.py measured, and validate_candidate still
+    # checks the lines it finds in the INI.
     "heater.temperature_channels": "0,1,2,3,4,5",
     "hal.status_led_enabled": "false",
     "hal.mode_led_enabled": "false",
