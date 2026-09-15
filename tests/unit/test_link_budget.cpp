@@ -550,9 +550,14 @@ class LoopbackGround {
     hello = ReadLine(fd);
     if (mode_ != Mode::kOldGround) {
       const std::string reply = "HELLO,z1\n";
-      send(fd, reply.data(), reply.size(), 0);
+      send(fd, reply.data(), reply.size(), MSG_NOSIGNAL);
     }
     frame_line = ReadLine(fd);
+    if (frame_line.empty()) {
+      // The onboard reset the connection instead of sending a frame.
+      close(fd);
+      return;
+    }
     if (mode_ == Mode::kSlowAck) {
       std::this_thread::sleep_for(400ms);  // past the 180 ms ACK deadline
     } else {
@@ -565,7 +570,7 @@ class LoopbackGround {
       std::string seq = decoded.substr(b + 1, decoded.find(',', b + 1) - b - 1);
       if (mode_ == Mode::kWrongAck) seq = std::to_string(std::stoull(seq) - 1);
       const std::string ack = "ACK," + decoded.substr(a + 1, b - a - 1) + "," + seq + "\n";
-      send(fd, ack.data(), ack.size(), 0);
+      send(fd, ack.data(), ack.size(), MSG_NOSIGNAL);
     }
     std::this_thread::sleep_for(50ms);
     close(fd);
@@ -620,6 +625,33 @@ void TestTelemetryClientOverLoopback() {
 #endif
     assert(budget.InWindow() > 0);
   }
+}
+
+// A ground station that does not take the codec cannot carry a full DATA
+// line at all: the link is dropped rather than held open carrying nothing.
+// (Holding it would also hide a ground station that has gone away, whose
+// close is only seen on a write.)
+void TestPlainGroundStationLosesTheLink() {
+  LoopbackGround ground(LoopbackGround::Mode::kOldGround);  // never answers the HELLO
+  coatheal::LinkBudget budget(coatheal::kOnboardShareBytes);
+  coatheal::TelemetryClient client("127.0.0.1", ground.port(), 5000, 1000,
+                                   /*discovery_enabled=*/false, 4100, "", "");
+  client.SetLinkBudget(&budget);
+  const std::string line = "DATA,coatheal-1789498045-582267,12,2026-09-15T18:48:05Z,1," +
+                           std::string(1100, 'x');
+  coatheal::TelemetryAck ack;
+  const auto status = client.SendFrame(line, coatheal::LinkPriority::kLive,
+                                       std::chrono::steady_clock::now() + 500ms, &ack);
+  assert(status == coatheal::SendStatus::kFailed);
+  assert(!client.is_connected());
+  assert(client.ack_timeouts() == 0);  // nothing was sent, so nothing timed out
+  assert(ground.frame_line.empty());
+  // The retry waits, so the link does not churn against a ground station
+  // that cannot take the codec.
+  assert(client.SendFrame(line, coatheal::LinkPriority::kLive,
+                          std::chrono::steady_clock::now() + 100ms,
+                          &ack) == coatheal::SendStatus::kNotConnected);
+  assert(budget.InWindow() <= coatheal::kOnboardShareBytes);
 }
 
 // A reply longer than one chunk goes out in paced chunks: complete, but only
@@ -688,6 +720,7 @@ int main() {
   TestDrainKeepsEveryWindowUnderTheShare(/*merged=*/false);
 #ifndef _WIN32
   TestTelemetryClientOverLoopback();
+  TestPlainGroundStationLosesTheLink();
   TestCommandReplyIsPacedInChunks();
 #endif
   std::cout << "[link_budget] all tests passed\n";
