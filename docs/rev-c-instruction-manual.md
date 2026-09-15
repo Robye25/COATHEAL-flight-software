@@ -323,11 +323,16 @@ python3 scripts/associate_heaters.py watch       # every PT100 once a second, he
 python3 scripts/associate_heaters.py heat H2     # one heater on, every PT100 each second
 python3 scripts/associate_heaters.py auto --check  # preflight for auto, no heat
 python3 scripts/associate_heaters.py auto        # measure every pair, write, restart
+python3 scripts/associate_heaters.py touch       # find each specimen's motor by hand, write
 python3 scripts/associate_heaters.py assign \
     --motor0 ch8:19,ch2:13,ch3:6,ch4:5 --motor1 ch5:24,ch7:23,ch1,ch6
 ```
 
-Heating (`heat`, `auto`) needs `runtime.bench_mode=true` and the motors idle.
+Heating (`heat`, `auto`, `touch`) needs `runtime.bench_mode=true` and the
+motors idle, and `auto` and `touch` refuse while the service runs another
+assignment than the config (written but not restarted since): they switch
+heaters by number, and the service would heat a different specimen than the
+one the answer is written for. `heat` only reports it.
 `heat H2` is the debugging tool: it switches that one heater on (at most 60 s,
 `--seconds`), prints every terminal's rise each second and for 15 s after the
 heater goes off (`--after-s`: a PT100 keeps rising after its heater stops),
@@ -360,16 +365,47 @@ so its feedback is no better than before: do not heat it, fix what the script
 reported, and rerun. `auto` exits 0 only when every heater paired.
 
 Heat cannot tell which motor pulls a specimen, the order of the unheated
-specimens, or which specimen is on a MAX31865 click. `assign` writes the two
-lists by hand, exactly as given — list the specimen on each motor's click
-first. It refuses what the onboard would refuse (a terminal outside
+specimens, or which specimen is on a MAX31865 click. `touch` finds that out
+by hand, after `auto` has measured the pairs:
+
+- Each heater comes on in turn (duty 0.25, up to 60 s at a time,
+  `--seconds`) and stays on while you feel along the mechanisms for the
+  specimen warming now. Type the motor it is on and Enter: `0` or `1`, or
+  `0c` / `1c` when that specimen is the one wired to the motor's MAX31865
+  click. `s` = can't find it (it stays where the config has it), `r` = heat
+  it again, `q` = stop without writing. The heater goes off at your answer.
+  A specimen found before stays warm for a while, so feel for the one that
+  is warming. Every 10 s the script prints how much the heater's PT100 from
+  the config has warmed: only a hint, nothing about the pairs is written.
+  Unanswered, the heater goes off after `--seconds` (type the motor
+  anyway, or `r`), and a question left for 10 minutes stops the session.
+- Then the unheated specimens: hold one unheated specimen's PT100 between
+  your fingers. The script names the terminal that warms (`--warm-c`, 1 °C,
+  clearly more than the other unheated ones) and asks that specimen's motor;
+  the last unheated specimen is known by elimination. If none warms within
+  2 minutes (`--hand-s`) it says which terminal did — a PT100 the config
+  gives to a heated specimen means the pairs are not measured yet.
+
+`touch` then moves each specimen, with its heater line and PT100 terminal,
+into the list of the motor you gave, in the lists' present order with each
+motor's click specimen first, and prints the resulting table and the heater
+numbers that change (thermal presets and per-heater PID gains follow the
+numbers, not the heaters). It warns when a motor's click specimen changed
+without being marked, and when a heater's PT100 from the config stayed cold
+while another terminal warmed (run `auto`). Nothing is written until the end;
+then it is written like `assign` below. It logs every reading to
+`logs/heater-touch-<time>.csv`.
+
+`assign` writes the two lists by hand, exactly as given — list the specimen
+on each motor's click first. It refuses what the onboard would refuse (a terminal outside
 `ch1`–`ch8` or given twice, a heater line given twice, other totals than
 `hardware.sample_count` specimens and `hardware.heater_count` heaters, a line
 the validator refuses) and, like `auto`, backs the config up, restarts the
 service and checks it runs the new terminals and claimed every heater line. `show` and `auto` print the `assign` command for the current and the
-measured assignment, so the usual path is: `auto`, correct the groups in the
-printed command, run it, then `auto --dry-run` to confirm the pairs still
-hold. A heater moved to a new BCM line needs `coatheal-deploy` afterwards so
+measured assignment. The usual path is `auto` (hands off: the pairs), then
+`touch` (the motor groups and clicks), then `auto --dry-run` to confirm the
+pairs still hold through the new numbering; `assign` corrects anything by
+hand. A heater moved to a new BCM line needs `coatheal-deploy` afterwards so
 `config.txt` holds that line off from boot (REBOOT REQUIRED); nothing holds
 the line it left.
 
