@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Put the bench wiring of heaters, PT100s and motor groups into the onboard
-config: measure the heater/PT100 pairs by heat, debug one heater or the live
-readings, or set the whole assignment by hand.
+config: measure the heater/PT100 pairs by heat, find each specimen's motor by
+touch, debug one heater or the live readings, or set the whole assignment by
+hand.
 
 The config lists each motor group's specimens, each a PT100's Sequent RTD
 card terminal and, when heated, its heater's BCM line:
@@ -21,6 +22,7 @@ Run it on the Pi with coatheal-onboard running:
     python3 scripts/associate_heaters.py watch     # every PT100 once a second
     python3 scripts/associate_heaters.py heat H2   # one heater on, every PT100 printed
     python3 scripts/associate_heaters.py auto      # measure every pair, write (default)
+    python3 scripts/associate_heaters.py touch     # find each specimen's motor by hand, write
     python3 scripts/associate_heaters.py assign \\
         --motor0 ch8:19,ch2:13,ch3:6,ch4:5 --motor1 ch5:24,ch7:23,ch1,ch6
 
@@ -29,7 +31,16 @@ current config. Groups need not be even (three heated and one unheated
 specimen per motor is fine), but the totals must match hardware.sample_count
 and hardware.heater_count.
 
-Heating (heat, auto) needs runtime.bench_mode=true and the motors idle. Each
+touch switches each heater on in turn and keeps it on while the operator
+feels for the specimen that warms and types the motor it is on (`1`, or `1c`
+when that specimen is the one wired to motor 1's MAX31865 click). Then each
+unheated specimen: the operator holds its PT100 between their fingers, the
+script names the terminal that warms, and the operator types its motor; the
+last one is known by elimination. It moves specimens between the lists and
+puts each click specimen first, and writes no heater/PT100 pair: run auto
+(hands off) first, so the PT100 terminals it moves are the right ones.
+
+Heating (heat, auto, touch) needs runtime.bench_mode=true and the motors idle. Each
 HEATER_TEST pulse lapses within seconds on its own, so a dead script cannot
 leave a heater on. auto, per heater: waits until no PT100 is still warming,
 heats until one terminal has warmed by 2 C while the others have not, and
@@ -46,6 +57,8 @@ import argparse
 import csv
 import math
 import os
+import re
+import select
 import shutil
 import signal
 import statistics
@@ -63,7 +76,7 @@ import hardware_setup  # noqa: E402  (shared INI and command helpers)
 ENV_FILE = Path("/etc/coatheal/env")
 SERVICE = "coatheal-onboard.service"
 SCRIPT = "python3 scripts/associate_heaters.py"
-COMMANDS = ("show", "watch", "heat", "auto", "assign")
+COMMANDS = ("show", "watch", "heat", "auto", "touch", "assign")
 CARD_TERMINALS = tuple(range(1, 9))
 Layout = hardware_setup.Layout
 Specimen = hardware_setup.Specimen
@@ -639,6 +652,76 @@ def build_assignment(groups: list[str], sample_count: int, heater_count: int) ->
     return layout
 
 
+class Keyboard:
+    """Lines typed on stdin, read without blocking, so a heater goes on being
+    pulsed and the PT100s watched while the operator is at the bench. Reads
+    the descriptor itself: a buffered reader can hold a typed line that
+    select() no longer reports."""
+
+    def __init__(self, fd: Optional[int] = None) -> None:
+        self.fd = sys.stdin.fileno() if fd is None else fd
+        self._partial = b""
+        self._lines: deque[str] = deque()
+        self._closed = False
+
+    def __call__(self) -> Optional[str]:
+        """The next typed line, None when none is complete; EOFError once the
+        input has closed and every line was taken."""
+        while not self._closed and select.select([self.fd], [], [], 0.0)[0]:
+            chunk = os.read(self.fd, 1024)
+            if not chunk:
+                self._closed = True
+                if self._partial.strip():
+                    self._lines.append(self._partial.decode("utf-8", "replace").strip())
+                break
+            *complete, self._partial = (self._partial + chunk).split(b"\n")
+            self._lines.extend(line.decode("utf-8", "replace").strip() for line in complete)
+        if self._lines:
+            return self._lines.popleft()
+        if self._closed:
+            raise EOFError("the input closed")
+        return None
+
+
+TOUCH_ANSWERS = ("0 or 1 = the motor it is on (0c / 1c: its specimen is the one on "
+                 "that motor's click), s = can't find it (it stays as it is), "
+                 "r = heat it again, q = stop (nothing written)")
+
+
+def parse_answer(text: str, motor_count: int) -> tuple[str, Optional[int], bool]:
+    """An operator's answer: ("motor", motor, on its click) for `1`, `1c` or
+    `m1c`; ("skip" | "again" | "quit", None, False) for s, r, q; else
+    ("unknown", None, False)."""
+    word = "".join(text.split()).lower()
+    if word in ("s", "skip"):
+        return "skip", None, False
+    if word in ("r", "again"):
+        return "again", None, False
+    if word in ("q", "quit", "stop"):
+        return "quit", None, False
+    match = re.fullmatch(r"m?(\d+)(c?)", word)
+    if match and int(match.group(1)) < motor_count:
+        return "motor", int(match.group(1)), bool(match.group(2))
+    return "unknown", None, False
+
+
+def place_specimens(layout: Layout, motors: dict[int, int], clicks: dict[int, int]) -> Layout:
+    """`layout` with specimen S<s> moved to motor motors[s] (the rest stay).
+    Each motor lists its specimens in their present order, and clicks[motor]
+    -- the specimen wired to that motor's MAX31865 click -- first; a motor
+    with none given keeps its present first specimen first while it stays."""
+    placed = {s: motors.get(s, layout.motor_of(s)) for s in range(layout.sample_count)}
+    groups = []
+    for motor, present in enumerate(layout.motor_samples):
+        samples = [s for s in range(layout.sample_count) if placed[s] == motor]
+        first = clicks.get(motor, present[0] if present else None)
+        if first in samples:
+            samples.remove(first)
+            samples.insert(0, first)
+        groups.append(tuple(layout.specimens[s] for s in samples))
+    return Layout(tuple(groups))
+
+
 def check_ready(onboard: Onboard, heater_count: int, sample_count: int, abort_c: float,
                 require_all_probes: bool = True, out: Callable[[str], None] = print
                 ) -> tuple[dict[str, str], list[Terminal], list[str]]:
@@ -712,6 +795,40 @@ def check_ready(onboard: Onboard, heater_count: int, sample_count: int, abort_c:
             blockers.append("already at or above the abort limit: "
                             + ", ".join(f"ch{t.channel} {pt100_c(t.ohms):.1f} C" for t in hot))
     return status, terminals, blockers
+
+
+def running_assignment_problem(onboard: Onboard, layout: Layout
+                               ) -> tuple[Optional[str], Optional[str]]:
+    """(why the running service does not run the config's heaters, PT100s and
+    motor groups, a note when that cannot be fully checked). Heaters are
+    switched by index and what is found is written against the config: a
+    service still on another assignment heats one specimen while the result
+    lands on another."""
+    wanted = {f"motor{motor}": ",".join(map(str, samples))
+              for motor, samples in enumerate(layout.motor_samples)}
+    wanted["heater_samples"] = ",".join(map(str, layout.heater_samples))
+    wanted["rtd_channels"] = ",".join(map(str, layout.channels))
+    wanted["heater_lines"] = ",".join(map(str, layout.heater_lines))
+    restart = f"restart it (sudo systemctl restart {SERVICE}) and rerun"
+    try:
+        running = onboard.ack("GET_LAYOUT")
+    except AssociationError:
+        running = None  # firmware from before GET_LAYOUT
+    if running is not None:
+        differ = [key for key, value in wanted.items() if running.get(key) != value]
+        if not differ:
+            return None, None
+        return ("the service runs another assignment than the config ("
+                + "; ".join(f"{key} {running.get(key) or '?'}, config {wanted[key]}"
+                            for key in differ)
+                + f"): {restart}"), None
+    terminals = onboard.terminals() or []
+    channels = [t.channel for t in sorted(terminals, key=lambda t: t.sample)]
+    if channels and channels != layout.channels:
+        return (f"the service reads terminals {','.join(map(str, channels))}, not the "
+                f"config's {','.join(map(str, layout.channels))}: {restart}"), None
+    return None, ("the onboard does not report its heater lines (no GET_LAYOUT): if the "
+                  "config changed since the service started, restart the service first")
 
 
 def config_changes(values: dict[str, str], layout: Layout) -> dict[str, str]:
@@ -858,6 +975,7 @@ class Setup:
     ask: Callable[[str], str]
     duty_cap: float
     pulse_cap: float
+    keyboard: Optional[Callable[[], Optional[str]]] = None   # touch's answers; None: stdin
 
     @property
     def runs_this_config(self) -> bool:
@@ -877,9 +995,13 @@ class Setup:
                         max_heat_s=max_heat_s, abort_c=args.abort_c,
                         pulse_s=min(Settings.pulse_s, self.pulse_cap))
 
-    def preflight(self, settings: Settings, require_all_probes: bool
+    def preflight(self, settings: Settings, require_all_probes: bool,
+                  same_assignment: bool = True
                   ) -> Optional[tuple[dict[str, str], list[Terminal]]]:
-        """(STATUS, terminals) when heating may start, else None (reasons printed)."""
+        """(STATUS, terminals) when heating may start, else None (reasons
+        printed). same_assignment: a service running another assignment than
+        the config blocks (the result is written against the config); else it
+        is only reported."""
         if settings.duty <= 0.0 or settings.rise_c <= 0.0 or settings.max_heat_s <= 0.0:
             print("Need a duty, a rise and a heating time above 0.", file=sys.stderr)
             return None
@@ -889,6 +1011,18 @@ class Setup:
                 settings.abort_c, require_all_probes)
         except AssociationError as error:
             status, terminals, blockers = {}, [], [str(error)]
+        if status:
+            try:
+                problem, note = running_assignment_problem(self.onboard, self.layout)
+            except OSError as error:
+                problem, note = f"cannot read the running assignment ({error})", None
+            if note is not None:
+                print(f"  ({note})")
+            if problem is not None:
+                if same_assignment:
+                    blockers.append(problem)
+                else:
+                    print(f"  ! {problem}")
         if blockers:
             print("\nNOT READY:")
             for blocker in blockers:
@@ -905,7 +1039,8 @@ class Setup:
 
 def load_setup(args: argparse.Namespace, send: Callable[[str, str, int], str],
                clock: Callable[[], float], sleep: Callable[[float], None],
-               ask: Callable[[str], str]) -> Optional[Setup]:
+               ask: Callable[[str], str],
+               keyboard: Optional[Callable[[], Optional[str]]] = None) -> Optional[Setup]:
     service_path = service_config()
     config_path: Path = args.config or service_path or hardware_setup.DEFAULT_CONFIG
     try:
@@ -920,7 +1055,8 @@ def load_setup(args: argparse.Namespace, send: Callable[[str, str, int], str],
         print(f"Cannot use {config_path}: {error}", file=sys.stderr)
         return None
     return Setup(config_path, service_path, values, layout, sample_count, heater_count,
-                 Onboard(args.host, args.port, send), clock, sleep, ask, duty_cap, pulse_cap)
+                 Onboard(args.host, args.port, send), clock, sleep, ask, duty_cap, pulse_cap,
+                 keyboard)
 
 
 def heating_session(setup: Setup, status: dict[str, str], work: Callable[[], object]
@@ -1018,6 +1154,312 @@ def log_path(args: argparse.Namespace, name: str) -> Path:
                         / f"{name}-{time.strftime('%Y%m%d-%H%M%S')}.csv")
 
 
+class Touch:
+    """The touch session. Each heater stays on (at most max_heat_s at a time)
+    until the operator, feeling for the specimen that warms, types the motor
+    it is on; then each unheated specimen is found by the PT100 the operator
+    warms between their fingers. Only answers are collected here: the caller
+    places the specimens and writes."""
+
+    IDLE_S = 600.0   # a question left unanswered this long stops the session
+    HINT_S = 10.0
+
+    def __init__(self, setup: Setup, settings: Settings, survey: Survey,
+                 keyboard: Callable[[], Optional[str]], *, warm_c: float, hand_s: float,
+                 out: Callable[[str], None] = print) -> None:
+        self.layout = setup.layout
+        self.onboard = setup.onboard
+        self.clock = setup.clock
+        self.sleep = setup.sleep
+        self.s = settings
+        self.survey = survey
+        self.keyboard = keyboard
+        self.warm_c = warm_c
+        self.hand_s = hand_s
+        self.out = out
+        self.motors: dict[int, int] = {}   # S<s> -> the motor the operator gave
+        self.clicks: dict[int, int] = {}   # motor -> S<s> the operator marked as on its click
+        self.found: dict[int, str] = {}    # S<s> -> how it was placed, or why not
+        self.suspect: list[str] = []       # heaters whose PT100 in the config did not warm
+        self.quit = False
+
+    # -- answers ----------------------------------------------------------------
+    def typed(self) -> Optional[tuple[str, Optional[int], bool]]:
+        """A parsed answer, or None (nothing typed, or not an answer: help shown)."""
+        try:
+            text = self.keyboard()
+        except EOFError:
+            self.quit = True
+            raise AssociationError("the input closed") from None
+        if text is None:
+            return None
+        answer = parse_answer(text, len(self.layout.motors))
+        if answer[0] == "unknown":
+            self.out(f"  ? {text!r}: {TOUCH_ANSWERS}")
+            return None
+        return answer
+
+    def stop(self) -> AssociationError:
+        self.quit = True
+        return AssociationError("you stopped it")
+
+    def idle(self, since: float) -> None:
+        if self.clock() - since >= self.IDLE_S:
+            raise AssociationError(f"no answer for {self.IDLE_S / 60.0:.0f} min")
+        self.sleep(0.2)
+
+    def settle(self, sample: int, motor: int, click: bool, how: str) -> None:
+        self.motors[sample] = motor
+        self.found[sample] = how
+        if click:
+            before = self.clicks.get(motor)
+            if before is not None and before != sample:
+                self.out(f"  (this replaces the specimen marked before as on motor {motor}'s click)")
+            self.clicks[motor] = sample
+        self.out(f"  -> motor {motor}" + (", on its click." if click else "."))
+
+    def ask_motor(self, sample: int, how: str, question: str) -> None:
+        """Wait, heaters off, for the motor of S<sample>; s leaves it where it is."""
+        self.out(question)
+        since = self.clock()
+        while True:
+            answer = self.typed()
+            if answer is None:
+                self.idle(since)
+                continue
+            kind, motor, click = answer
+            if kind == "motor":
+                self.settle(sample, motor, click, how)
+                return
+            if kind == "skip":
+                self.found[sample] = "skipped: stays as it is"
+                self.out("  It stays as it is.")
+                return
+            if kind == "quit":
+                raise self.stop()
+            self.out("  Type its motor: 0 or 1 (0c / 1c: on that motor's click), "
+                     "s = it stays as it is, q = stop.")
+
+    # -- heaters ----------------------------------------------------------------
+    def heaters(self) -> None:
+        self.onboard.ack("HEATERS_OFF")
+        self.out("Heaters off (any operator targets cleared).")
+        for heater in range(self.layout.heater_count):
+            self.heater(heater)
+        self.out("\nEvery heater asked; all heaters off.")
+
+    def heater(self, heater: int) -> None:
+        layout, s = self.layout, self.s
+        sample = layout.heater_samples[heater]
+        line = layout.heater_lines[heater]
+        channel = layout.channels[sample]
+        # repr, not :g -- a rounded-up duty would exceed heater.debug_max_duty.
+        command = f"HEATER_TEST {heater} {s.duty!r} {s.pulse_s!r}"
+        refresh_s = max(s.poll_s, s.pulse_s / 2.5)
+        self.out(f"\nH{heater} (BCM {line}) is ON at duty {s.duty:g}: in the config S{sample} "
+                 f"on motor {layout.motor_of(sample)}, PT100 ch{channel}.")
+        self.out("  Feel for the heater warming now and type its motor (0, 1, 0c, 1c), or s, r, q.")
+        self.survey._pulse(command)
+        on, off_since = True, 0.0
+        start = last_pulse = last_hint = self.clock()
+        base: Optional[dict[int, float]] = None
+        rises: dict[int, float] = {}
+        pulse_failures = undriven = others_on = 0
+        while True:
+            answer = self.typed()
+            if answer is not None:
+                kind, motor, click = answer
+                if kind == "again":
+                    if not on:
+                        self.survey._pulse(command)
+                        on, undriven, others_on = True, 0, 0
+                    start = last_pulse = last_hint = self.clock()
+                    self.out(f"  H{heater} on for up to {s.max_heat_s:.0f} s more.")
+                    continue
+                if on:
+                    self.switch_off(heater, channel, rises, self.clock() - start)
+                    on = False
+                if kind == "quit":
+                    raise self.stop()
+                if kind == "skip":
+                    self.found[sample] = "not found: stays as it is"
+                    self.out(f"  H{heater} stays as it is.")
+                else:
+                    self.settle(sample, motor, click, "found by touch")
+                return
+            if not on:
+                self.idle(off_since)
+                continue
+            reading = self.survey.read("touch", heater)
+            now = self.clock()
+            if now - last_pulse >= refresh_s:
+                try:
+                    self.survey._pulse(command)
+                except OSError as error:
+                    pulse_failures += 1
+                    if pulse_failures >= 3:
+                        raise AssociationError(
+                            f"{command} not reaching the onboard: {error}") from error
+                else:
+                    last_pulse, pulse_failures = now, 0
+            if reading is not None:
+                if base is None:
+                    base = dict(reading.temps)
+                rises = {c: t - base[c] for c, t in reading.temps.items() if c in base}
+                if now - start >= s.duty_grace_s:
+                    undriven = 0 if reading.duties[heater] > 0.0 else undriven + 1
+                    others = [i for i, d in enumerate(reading.duties) if d > 0.0 and i != heater]
+                    others_on = others_on + 1 if others else 0
+                    if others_on >= 2:
+                        raise AssociationError(
+                            f"H{others[0]} came on while H{heater} was on: something else "
+                            "is commanding heaters")
+                if undriven >= 3:
+                    self.onboard.ack("HEATERS_OFF")
+                    on, off_since = False, now
+                    self.out(f"  H{heater}: the onboard applies duty 0 to it, so nothing warms "
+                             "(heater energy budget latch?). r = try again, s = skip it, q = stop.")
+                    continue
+                if now - last_hint >= self.HINT_S:
+                    self.out(f"  H{heater} on {now - start:.0f} s: {self.hint(channel, rises)}")
+                    last_hint = now
+            if now - start >= s.max_heat_s:
+                self.switch_off(heater, channel, rises, now - start)
+                on, off_since = False, now
+                self.out(f"  H{heater} off after {now - start:.0f} s. Type its motor if you found "
+                         "it; r = heat it again, s = can't find it, q = stop.")
+
+    @staticmethod
+    def hint(channel: int, rises: dict[int, float]) -> str:
+        own = rises.get(channel)
+        text = f"its PT100 ch{channel} " + ("reads nothing" if own is None else f"{own:+.1f} C")
+        others = [(c, r) for c, r in rises.items() if c != channel]
+        warmest = max(others, key=lambda item: item[1], default=None)
+        if warmest is not None and (own is None or warmest[1] > own):
+            text += f", warmest ch{warmest[0]} {warmest[1]:+.1f} C"
+        return text
+
+    def switch_off(self, heater: int, channel: int, rises: dict[int, float],
+                   seconds: float) -> None:
+        """HEATERS_OFF, noting a heater whose PT100 in the config stayed cold
+        while another terminal warmed: the pairs are then not measured yet."""
+        self.onboard.ack("HEATERS_OFF")
+        own = rises.get(channel)
+        warmest = max(((c, r) for c, r in rises.items() if c != channel),
+                      key=lambda item: item[1], default=None)
+        if (seconds >= self.HINT_S and warmest is not None and warmest[1] >= self.s.rise_c
+                and (own is None or own < self.s.rise_c / 2.0)):
+            state = "reads nothing" if own is None else f"stayed at {own:+.1f} C"
+            self.suspect.append(f"H{heater} (BCM {self.layout.heater_lines[heater]}): its PT100 "
+                                f"ch{channel} {state} while ch{warmest[0]} rose "
+                                f"{warmest[1]:+.1f} C")
+
+    # -- unheated specimens -----------------------------------------------------
+    def unheated(self) -> None:
+        layout = self.layout
+        pending = [s for s in range(layout.sample_count) if layout.heater_of(s) is None]
+        if not pending:
+            return
+        self.out("\nUnheated specimens, by their PT100 in the config: "
+                 + ", ".join(f"ch{layout.channels[s]}" for s in pending) + ".")
+        question = ("Which motor is {what} on? 0 or 1 (0c / 1c: on that motor's click), "
+                    "s = it stays as it is, q = stop.")
+        while pending:
+            if len(pending) == 1:
+                sample = pending.pop()
+                self.ask_motor(sample, "the last unheated one",
+                               f"\nThe last unheated specimen is the one on "
+                               f"ch{layout.channels[sample]} (in the config S{sample} on motor "
+                               f"{layout.motor_of(sample)}). " + question.format(what="it"))
+                return
+            found = self.by_hand(pending)
+            if found is None:
+                for sample in pending:
+                    self.found[sample] = "not warmed: stays as it is"
+                return
+            sample, rise = found
+            pending.remove(sample)
+            channel = layout.channels[sample]
+            self.ask_motor(sample, f"PT100 ch{channel} warmed by hand",
+                           f"  ch{channel} warmed {rise:+.1f} C: in the config S{sample} on motor "
+                           f"{layout.motor_of(sample)}. You can let go. "
+                           + question.format(what="this specimen"))
+
+    def by_hand(self, pending: list[int]) -> Optional[tuple[int, float]]:
+        """(S<s>, rise) of the pending unheated specimen whose PT100 the
+        operator warms, or None when they leave the rest as they are."""
+        layout, s = self.layout, self.s
+        watched = {layout.channels[x]: x for x in pending
+                   if layout.channels[x] in self.survey.channels}
+        if not watched:
+            self.out("  None of them reads a PT100, so none can be found by warming: "
+                     "they stay as they are.")
+            return None
+        self.out("\nHold the PT100 of one unheated specimen between your fingers; watching "
+                 + ", ".join(f"ch{c}" for c in sorted(watched))
+                 + ". s = the unheated specimens stay as they are, q = stop.")
+        start = last_hint = paused_since = self.clock()
+        base: Optional[dict[int, float]] = None
+        confirmed = 0
+        paused = False
+        while True:
+            answer = self.typed()
+            if answer is not None:
+                kind = answer[0]
+                if kind == "quit":
+                    raise self.stop()
+                if kind == "skip":
+                    self.out("  The unheated specimens stay as they are.")
+                    return None
+                if kind == "again":
+                    base, confirmed, paused = None, 0, False
+                    start = last_hint = self.clock()
+                    self.out("  Watching again.")
+                else:
+                    self.out("  Hold a PT100 first: the terminal that warms is named here.")
+                continue
+            if paused:
+                self.idle(paused_since)
+                continue
+            reading = self.survey.read("hand")
+            if reading is None:
+                continue
+            now = self.clock()
+            if base is None:
+                base = dict(reading.temps)
+                continue
+            rises = {c: t - base[c] for c, t in reading.temps.items() if c in base}
+            ranked = sorted(((c, rises[c]) for c in watched if c in rises),
+                            key=lambda item: item[1], reverse=True)
+            if ranked:
+                best = ranked[0]
+                second = ranked[1][1] if len(ranked) > 1 else 0.0
+                clear = (best[1] >= self.warm_c
+                         and second <= max(s.noise_c, best[1] / s.dominance))
+                confirmed = confirmed + 1 if clear else 0
+                if confirmed >= 2:
+                    return watched[best[0]], best[1]
+                if now - last_hint >= self.HINT_S:
+                    self.out("  " + ", ".join(f"ch{c} {r:+.1f} C" for c, r in ranked))
+                    last_hint = now
+            if now - start >= self.hand_s:
+                warmest = max(((c, r) for c, r in rises.items() if c not in watched),
+                              key=lambda item: item[1], default=None)
+                other = ""
+                if (warmest is not None and warmest[1] >= self.warm_c
+                        and warmest[0] in layout.channels):
+                    owner_sample = layout.channels.index(warmest[0])
+                    owner = layout.heater_of(owner_sample)
+                    whose = (f"H{owner}'s specimen" if owner is not None
+                             else f"S{owner_sample}, placed already")
+                    other = (f" ch{warmest[0]} warmed {warmest[1]:+.1f} C, but the config gives "
+                             f"it to {whose}: if that PT100 is the one in your hand, the "
+                             "pairs are not measured yet (run auto first).")
+                self.out(f"  No unheated PT100 warmed in {self.hand_s:.0f} s.{other} r = watch "
+                         "again, s = they stay as they are, q = stop.")
+                paused, paused_since = True, now
+
+
 def cmd_show(args: argparse.Namespace, setup: Setup) -> int:
     setup.print_config()
     layout = setup.layout
@@ -1111,7 +1553,7 @@ def cmd_heat(args: argparse.Namespace, setup: Setup) -> int:
     heater = int(name)
     setup.print_config()
     settings = setup.settings(args, args.seconds)
-    ready = setup.preflight(settings, require_all_probes=False)
+    ready = setup.preflight(settings, require_all_probes=False, same_assignment=False)
     if ready is None:
         return 2
     status, terminals = ready
@@ -1217,6 +1659,87 @@ def cmd_auto(args: argparse.Namespace, setup: Setup) -> int:
     return max(write_and_load(setup, new, args), done)
 
 
+def cmd_touch(args: argparse.Namespace, setup: Setup) -> int:
+    layout = setup.layout
+    setup.print_config()
+    if args.warm_c <= 0.0 or args.hand_s <= 0.0:
+        print("Need --warm-c and --hand-s above 0.", file=sys.stderr)
+        return 2
+    try:
+        keyboard = setup.keyboard or Keyboard()
+    except (OSError, ValueError) as error:
+        print(f"touch reads your answers from a terminal ({error}).", file=sys.stderr)
+        return 2
+    settings = setup.settings(args, args.seconds)
+    ready = setup.preflight(settings, require_all_probes=False)
+    if ready is None:
+        return 2
+    status, terminals = ready
+    path = log_path(args, "heater-touch")
+    survey = Survey(setup.onboard, settings, layout.heater_lines,
+                    {t.channel for t in terminals if t.conducting},
+                    clock=setup.clock, sleep=setup.sleep, log_path=path)
+    touch = Touch(setup, settings, survey, keyboard, warm_c=args.warm_c, hand_s=args.hand_s)
+    print(f"\nEach heater comes on in turn (duty {settings.duty:g}, up to "
+          f"{settings.max_heat_s:.0f} s at a time) until you type the motor its specimen is "
+          "on; then the unheated specimens, by warming their PT100 in your fingers. A heater "
+          "you found stays warm for a while: feel for the one warming now. Nothing is "
+          f"written before the end. Ctrl+C stops safely. Readings: {path}")
+    print(f"Answers, each followed by Enter: {TOUCH_ANSWERS}.")
+    try:
+        _, failure = heating_session(setup, status, touch.heaters)
+        if failure is None:
+            try:
+                touch.unheated()
+            except AssociationError as error:
+                failure = str(error)
+            except OSError as error:
+                failure = f"lost the onboard ({error})"
+            except KeyboardInterrupt:
+                failure = "interrupted"
+    finally:
+        survey.close()
+    if failure is not None:
+        print(f"\nSTOPPED: {failure}. Nothing was written.")
+        return 1 if touch.quit else 2
+
+    new = place_specimens(layout, touch.motors, touch.clicks)
+    moved_to = {specimen: sample for sample, specimen in enumerate(new.specimens)}
+    notes = {}
+    for sample, specimen in enumerate(layout.specimens):
+        was, placed = layout.motor_of(sample), new.motor_of(moved_to[specimen])
+        note = touch.found.get(sample, "not asked")
+        notes[moved_to[specimen]] = f"({note}{'' if placed == was else f', was on motor {was}'})"
+    print("\nAssignment from what you found:")
+    for row in layout_rows(new, notes=notes):
+        print(row)
+    renumbered = [f"BCM {line} H{layout.heater_lines.index(line)} -> H{heater}"
+                  for heater, line in enumerate(new.heater_lines)
+                  if layout.heater_lines.index(line) != heater]
+    if renumbered:
+        print(f"  Heater numbers change: {', '.join(renumbered)}. Thermal presets and PID "
+              "gains set per heater number before this apply to the new numbers.")
+    for motor, (before, after) in enumerate(zip(layout.motor_samples, new.motor_samples)):
+        if (motor not in touch.clicks and before and after
+                and layout.specimens[before[0]] != new.specimens[after[0]]):
+            print(f"  ! Nothing was marked as on motor {motor}'s click, and S{after[0]} "
+                  f"(ch{new.specimens[after[0]].channel}) is now its first specimen, the one "
+                  f"click {motor + 1} is taken to read: rerun, or fix it with assign.")
+    if touch.suspect:
+        print("  ! The heater/PT100 pairs look unmeasured: " + "; ".join(touch.suspect)
+              + ". Run auto (hands off) to measure them.")
+    problems = hardware_setup.layout_errors(new, setup.sample_count, setup.heater_count)
+    if problems:
+        print(f"\nCannot write this: {'; '.join(problems)}.")
+        return 1
+    print(f"\nThe same by hand:\n  {assign_command(new)}")
+    if args.dry_run:
+        print("\n--dry-run: nothing written.")
+        return 0
+    print()
+    return write_and_load(setup, new, args)
+
+
 def cmd_assign(args: argparse.Namespace, setup: Setup) -> int:
     setup.print_config()
     old = setup.layout
@@ -1311,6 +1834,26 @@ def parser() -> argparse.ArgumentParser:
                            "(default %(default)s)")
     auto.add_argument("--verbose", action="store_true",
                       help="print every terminal on every reading while heating")
+    touch = commands.add_parser(
+        "touch", parents=[common, heating, writing],
+        help="each heater on in turn: feel for it and type the motor it is on; then "
+             "the unheated specimens, by warming their PT100 by hand",
+        description="Each heater comes on in turn and stays on until you type the motor its "
+                    "specimen is on: 0 or 1, or 0c / 1c when that specimen is the one wired to "
+                    "the motor's MAX31865 click; s = can't find it, r = heat it again, q = stop. "
+                    "Then hold each unheated specimen's PT100 between your fingers: the "
+                    "terminal that warms is named, and you type its motor. Specimens move "
+                    "between motor0.specimens and motor1.specimens with their heater line and "
+                    "PT100 terminal; no pair is measured or written (run auto first).")
+    touch.add_argument("--seconds", type=float, default=defaults.max_heat_s,
+                       help="longest a heater stays on at a time; r heats it again "
+                            "(default %(default)s)")
+    touch.add_argument("--warm-c", type=float, default=1.0,
+                       help="rise that names the unheated PT100 held in your fingers "
+                            "(default %(default)s)")
+    touch.add_argument("--hand-s", type=float, default=120.0,
+                       help="how long to watch for a held PT100 before asking again "
+                            "(default %(default)s)")
     assign = commands.add_parser(
         "assign", parents=[common, writing],
         help="write each motor group's heaters and PT100s given by hand",
@@ -1330,20 +1873,23 @@ def main(argv: Optional[list[str]] = None, *,
          send: Callable[[str, str, int], str] = hardware_setup.send_command,
          clock: Callable[[], float] = time.monotonic,
          sleep: Callable[[float], None] = time.sleep,
-         ask: Callable[[str], str] = input) -> int:
+         ask: Callable[[str], str] = input,
+         keyboard: Optional[Callable[[], Optional[str]]] = None) -> int:
     """auto: 0 every heater paired and written, 1 not every heater paired (the
     pairs found are still written) or nothing written, 2 could not run, was
     stopped, or the restarted service disagrees. heat: 0 paired, 1 not.
+    touch: 0 written (or --dry-run), 1 you stopped it or nothing written, 2
+    could not run, was stopped, or the restarted service disagrees.
     assign: 0 written, 1 not written, 2 refused or the service disagrees."""
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0] not in (*COMMANDS, "-h", "--help"):
         argv.insert(0, "auto")
     args = parser().parse_args(argv)
-    setup = load_setup(args, send, clock, sleep, ask)
+    setup = load_setup(args, send, clock, sleep, ask, keyboard)
     if setup is None:
         return 2
     handlers = {"show": cmd_show, "watch": cmd_watch, "heat": cmd_heat,
-                "auto": cmd_auto, "assign": cmd_assign}
+                "auto": cmd_auto, "touch": cmd_touch, "assign": cmd_assign}
     return handlers[args.command](args, setup)
 
 

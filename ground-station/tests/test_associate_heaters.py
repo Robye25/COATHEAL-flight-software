@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import os
 import random
 import re
 import shlex
@@ -43,6 +44,8 @@ class FakeClock:
 # index h warms specimen h until an assignment reorders them.
 LINES = [19, 13, 6, 5, 24, 23]
 HARNESS = [3, 1, 6, 2, 8, 5, 4, 7]
+EXAMPLE_LAYOUT = hardware_setup.layout_from_values(
+    hardware_setup._ini_values(hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")))
 
 
 class FakeOnboard:
@@ -62,15 +65,20 @@ class FakeOnboard:
     HEATER_W = 5.0
     ROOM_DRIFT_C_PER_S = 0.1 / 60.0
     STEP_S = 0.25
+    SKIN_C = 32.0       # a PT100 held between the fingers heads for this
+    HAND_LAG_S = 20.0
 
     def __init__(self, clock: FakeClock, harness: list[int], *, bench_mode: bool = True) -> None:
         self.clock = clock
         self.harness = list(harness)          # specimen -> RTD card terminal
         self.line_heats = {line: [(s, 1.0)] for s, line in enumerate(LINES)}  # BCM -> [(specimen, share)]
-        # The heater lines and terminal map the service derived from its
-        # config, re-read from config_path on every (fake) restart.
-        self.output_lines = list(LINES)
-        self.running_map = list(range(1, 9))
+        # The assignment the service derived from its config, re-read from
+        # config_path on every (fake) restart: heater lines, terminal map and
+        # motor groups (GET_LAYOUT).
+        self.running = EXAMPLE_LAYOUT
+        self.reports_layout = True            # False: firmware from before GET_LAYOUT
+        self.hands: set[int] = set()          # specimens whose PT100 someone holds
+        self.foreign: int | None = None       # a heater another client keeps driving
         self.config_path: Path | None = None
         self.restarts = 0
         self.bench_mode = bench_mode
@@ -92,6 +100,14 @@ class FakeOnboard:
         self._last = clock.now
         self._rng = random.Random(1234)
 
+    @property
+    def output_lines(self) -> list[int]:
+        return self.running.heater_lines
+
+    @property
+    def running_map(self) -> list[int]:
+        return self.running.channels
+
     def active(self) -> tuple[int | None, float]:
         if (self.test is not None and self.mode == "RUN" and self.debug_armed
                 and self._last < self.test[2] and self.test[0] not in self.undriven):
@@ -112,6 +128,9 @@ class FakeOnboard:
             flows.append(flow)
         for s in range(8):
             self.specimen[s] += flows[s] * self.STEP_S / self.CAPACITY_J_PER_K
+            if s in self.hands:
+                self.probe[s] += (self.SKIN_C - self.probe[s]) * self.STEP_S / self.HAND_LAG_S
+                continue
             follows = self.room if s in self.detached else self.specimen[s]
             self.probe[s] += (follows - self.probe[s]) * self.STEP_S / self.PROBE_LAG_S
         self.hottest_probe = max(self.hottest_probe, *self.probe)
@@ -124,9 +143,7 @@ class FakeOnboard:
         self.mode, self.debug_armed, self.test = "STANDBY", False, None
         if self.config_path is not None:
             values = hardware_setup._ini_values(self.config_path.read_text(encoding="utf-8"))
-            layout = hardware_setup.layout_from_values(values)
-            self.output_lines = layout.heater_lines
-            self.running_map = layout.channels
+            self.running = hardware_setup.layout_from_values(values)
 
     def subprocess_run(self, args, **kwargs):
         if "systemctl" in args:
@@ -171,10 +188,21 @@ class FakeOnboard:
                     + ";".join(f"heater{i}={'FAILED' if line in self.busy_lines else 'OK'}"
                                for i, line in enumerate(self.output_lines))
                     + ";motor0=OK;motor1=OK;comms=OK")
+        if verb == "GET_LAYOUT" and self.reports_layout:
+            layout = self.running
+
+            def join(values) -> str:
+                return ",".join(map(str, values))
+            return ("ACK,GET_LAYOUT,samples=8;heaters=6;"
+                    + "".join(f"motor{m}={join(samples)};"
+                              for m, samples in enumerate(layout.motor_samples))
+                    + f"heater_samples={join(layout.heater_samples)};clicks={join(layout.clicks)};"
+                      f"rtd_channels={join(layout.channels)};heater_lines={join(layout.heater_lines)}")
         if verb == "GET_THERMAL":
             heater, duty = self.active()
             return "ACK,GET_THERMAL,target_min_c=0;target_max_c=80" + "".join(
-                f";h{i}_target=-;h{i}_temp=-;h{i}_duty={duty if i == heater else 0:g}"
+                f";h{i}_target=-;h{i}_temp=-;"
+                f"h{i}_duty={duty if i == heater else 0.25 if i == self.foreign else 0:g}"
                 for i in range(6))
         if verb == "ARM_DEBUG":
             if not self.bench_mode:
@@ -214,6 +242,131 @@ class FakeOnboard:
 # Motor 0 pulls specimens 4, 1, 2, 3 and motor 1 pulls 0, 5, 6, 7.
 ASSIGNMENT = ["--motor0", "ch8:24,ch1:13,ch6:6,ch2:5", "--motor1", "ch3:19,ch5:23,ch4,ch7"]
 
+# The config as auto leaves it on this bench: every heater with the PT100 it
+# warms, the unheated specimens on the two leftover terminals.
+MEASURED = {"motor0.specimens": "ch3:19,ch1:13,ch6:6,ch2:5",
+            "motor1.specimens": "ch8:24,ch5:23,ch4,ch7"}
+
+# Where the specimens really are, for touch: the motor each specimen is on,
+# and the specimen wired to each motor's MAX31865 click (on motor 1 an
+# unheated one).
+BENCH_MOTORS = [1, 0, 0, 1, 0, 1, 0, 1]
+BENCH_CLICKS = {0: 4, 1: 7}
+
+
+class FakeOperator:
+    """Someone at the bench answering touch: reads what the script prints,
+    feels for the specimen that is warming now, holds an unheated specimen's
+    PT100 when asked, and types what they found."""
+
+    TYPE_S = 2.0   # from knowing the answer to pressing Enter
+
+    def __init__(self, rig: FakeOnboard, clock: FakeClock, *, motors=BENCH_MOTORS,
+                 clicks=BENCH_CLICKS, feel_c: float = 3.0, give_up_s: float = 45.0,
+                 hold_order=(6, 7), late_for_the_first: bool = False,
+                 both_hands: bool = False) -> None:
+        self.rig = rig
+        self.clock = clock
+        self.motors = list(motors)
+        self.clicks = dict(clicks)
+        self.feel_c = feel_c              # a specimen this much above the room feels warm
+        self.give_up_s = give_up_s
+        self.hold_order = list(hold_order)
+        self.late = late_for_the_first    # misses the first heater until it has gone off
+        self.both_hands = both_hands      # holds every unheated PT100 at once
+        self.output: io.StringIO | None = None
+        self.seen = 0
+        self.task: tuple | None = None    # ("feel", since) | ("type", text, at)
+        self.base: list[float] = []       # specimen temperatures when they started feeling
+        self.heater: int | None = None    # the heater asked about last
+        self.held: int | None = None
+        self.known: set[int] = set()      # specimens found already
+        self.typed: list[tuple[int | None, str, int | None]] = []  # (heater asked, text, heater on)
+
+    def attach(self, output: io.StringIO) -> None:
+        self.output = output
+        self.seen = len(output.getvalue())
+
+    def answer(self, specimen: int) -> str:
+        motor = self.motors[specimen]
+        return f"{motor}{'c' if self.clicks.get(motor) == specimen else ''}"
+
+    def type_later(self, text: str) -> None:
+        self.task = ("type", text, self.clock.now + self.TYPE_S)
+
+    def start_feeling(self) -> None:
+        """Feel for the specimen warming from now on: one found before, or
+        still warm from an earlier heater, does not count."""
+        self.base = list(self.rig.specimen)
+        self.task = ("feel", self.clock.now)
+
+    def read_screen(self) -> None:
+        text = self.output.getvalue()
+        for line in (piece.strip() for piece in text[self.seen:].splitlines()):
+            asked = re.match(r"H(\d) \(BCM \d+\) is ON", line)
+            if asked:
+                self.heater = int(asked.group(1))
+                if self.late:
+                    self.task = None
+                else:
+                    self.start_feeling()
+            elif self.late and re.match(r"H\d off after", line):
+                self.late = False
+                self.type_later("r")
+            elif re.match(r"H\d on for up to", line):
+                self.start_feeling()
+            elif line.startswith("Hold the PT100 of one unheated specimen"):
+                self.held = next(s for s in self.hold_order if s not in self.known)
+                self.rig.hands = set(self.hold_order) if self.both_hands else {self.held}
+                self.task = None
+            elif "You can let go" in line:
+                self.rig.hands = set()
+                self.known.add(self.held)
+                self.type_later(self.answer(self.held))
+            elif line.startswith("No unheated PT100 warmed"):
+                self.rig.hands = set()
+                self.type_later("s")
+            elif line.startswith("The last unheated specimen"):
+                last = next(s for s in self.hold_order if s not in self.known)
+                self.known.add(last)
+                self.type_later(self.answer(last))
+        self.seen = len(text)
+
+    def __call__(self) -> str | None:
+        self.read_screen()
+        now = self.clock.now
+        if self.task and self.task[0] == "feel":
+            warm = [s for s in range(8) if s not in self.known
+                    and self.rig.specimen[s] - self.base[s] >= self.feel_c]
+            if len(warm) == 1:
+                self.known.add(warm[0])
+                self.type_later(self.answer(warm[0]))
+            elif now - self.task[1] >= self.give_up_s:
+                self.type_later("s")
+        if self.task and self.task[0] == "type" and now >= self.task[2]:
+            text = self.task[1]
+            self.task = None
+            self.typed.append((self.heater, text, self.rig.active()[0]))
+            return text
+        return None
+
+
+class Typist:
+    """Canned answers: each typed once its seconds have passed since the
+    first question."""
+
+    def __init__(self, clock: FakeClock, answers: list[tuple[float, str]]) -> None:
+        self.clock = clock
+        self.answers = list(answers)
+        self.start: float | None = None
+
+    def __call__(self) -> str | None:
+        if self.start is None:
+            self.start = self.clock.now
+        if self.answers and self.clock.now - self.start >= self.answers[0][0]:
+            return self.answers.pop(0)[1]
+        return None
+
 
 class EndToEnd(unittest.TestCase):
     def setUp(self) -> None:
@@ -229,24 +382,33 @@ class EndToEnd(unittest.TestCase):
         self.original = self.config.read_text(encoding="utf-8")
         self.rig.config_path = self.config
 
-    def run_script(self, *argv: str, restart: bool = False) -> tuple[int, str]:
+    def run_script(self, *argv: str, restart: bool = False, keyboard=None) -> tuple[int, str]:
         """Without a command word this is `auto`, as on the bench."""
         command = argv[0] if argv and argv[0] in associate_heaters.COMMANDS else ""
         options = ["--config", str(self.config)]
-        if command in ("", "auto", "heat"):
+        if command in ("", "auto", "heat", "touch"):
             options += ["--log", str(self.dir / "readings.csv")]
-        if command in ("", "auto", "assign"):
+        if command in ("", "auto", "assign", "touch"):
             options += ["--yes"] + ([] if restart else ["--no-restart"])
         full = ([command, *options, *argv[1:]] if command else [*options, *argv])
         output = io.StringIO()
+        if hasattr(keyboard, "attach"):
+            keyboard.attach(output)
         with mock.patch.object(hardware_setup, "BOOT_CONFIG_PATHS", (self.dir / "config.txt",)), \
                 mock.patch.object(associate_heaters, "service_config", return_value=None), \
                 mock.patch.object(hardware_setup, "_check_with_binary", return_value=0), \
                 mock.patch.object(associate_heaters.subprocess, "run", self.rig.subprocess_run), \
                 contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
-            rc = associate_heaters.main(full, send=self.rig.send,
-                                        clock=self.clock.time, sleep=self.clock.sleep)
+            rc = associate_heaters.main(full, send=self.rig.send, clock=self.clock.time,
+                                        sleep=self.clock.sleep, keyboard=keyboard)
         return rc, output.getvalue()
+
+    def use_measured_pairs(self) -> None:
+        """The config as auto leaves it, loaded by the service."""
+        self.config.write_text(hardware_setup.replace_ini(self.original, MEASURED), encoding="utf-8")
+        self.original = self.config.read_text(encoding="utf-8")
+        self.rig.restart()
+        self.rig.restarts = 0
 
     def values(self) -> dict[str, str]:
         return hardware_setup._ini_values(self.config.read_text(encoding="utf-8"))
@@ -484,7 +646,32 @@ class AutoTests(EndToEnd):
         rc, output = self.run_script("--check")
         self.assertEqual(rc, 0, output)
         self.assertIn("Ready: 6 heaters", output)
-        self.assertEqual(self.rig.sent, ["STATUS", "COMPONENTS", "GET_THERMAL"])
+        self.assertEqual(self.rig.sent, ["STATUS", "COMPONENTS", "GET_THERMAL", "GET_LAYOUT"])
+
+    def test_refuses_while_the_service_runs_another_assignment(self) -> None:
+        # Written but not restarted: HEATER_TEST 0 would heat the old H0 while
+        # the pair lands on the new one.
+        self.config.write_text(hardware_setup.replace_ini(self.original, MEASURED), encoding="utf-8")
+        rc, output = self.run_script()
+        self.assertEqual(rc, 2, output)
+        self.assertIn("the service runs another assignment than the config (rtd_channels "
+                      "1,2,3,4,5,6,7,8, config 3,1,6,2,8,5,4,7): restart it (sudo systemctl "
+                      "restart coatheal-onboard.service) and rerun", output)
+        self.assertFalse([c for c in self.rig.sent if c.split()[0] in {"ARM", "ARM_DEBUG", "HEATER_TEST"}])
+
+    # MUTATION: make running_assignment_problem return (None, None) and
+    # confirm test_refuses_while_the_service_runs_another_assignment fails.
+
+    def test_firmware_without_get_layout_is_checked_by_its_terminal_map(self) -> None:
+        self.rig.reports_layout = False
+        rc, output = self.run_script("--check")
+        self.assertEqual(rc, 0, output)
+        self.assertIn("(the onboard does not report its heater lines (no GET_LAYOUT)", output)
+        self.config.write_text(hardware_setup.replace_ini(self.original, MEASURED), encoding="utf-8")
+        rc, output = self.run_script("--check")
+        self.assertEqual(rc, 2, output)
+        self.assertIn("the service reads terminals 1,2,3,4,5,6,7,8, not the config's "
+                      "3,1,6,2,8,5,4,7", output)
 
 
 class AssignTests(EndToEnd):
@@ -664,6 +851,165 @@ class AssignTests(EndToEnd):
         self.assert_untouched()
 
 
+class TouchTests(EndToEnd):
+    def test_places_each_specimen_found_by_hand_and_auto_agrees(self) -> None:
+        rc, output = self.run_script(restart=True)  # auto first, hands off: the pairs
+        self.assertEqual(rc, 0, output)
+        operator = FakeOperator(self.rig, self.clock)
+        rc, output = self.run_script("touch", restart=True, keyboard=operator)
+        self.assertEqual(rc, 0, output)
+        values = self.values()
+        self.assertEqual(values["motor0.specimens"], "ch8:24,ch1:13,ch6:6,ch4")
+        self.assertEqual(values["motor1.specimens"], "ch7,ch3:19,ch2:5,ch5:23")
+        self.assertEqual([text for _, text, _ in operator.typed],
+                         ["1", "0", "0", "1", "0c", "1", "0", "1c"])
+        # Every heater was still on when its answer was typed.
+        self.assertEqual([(asked, on) for asked, _, on in operator.typed[:6]],
+                         [(h, h) for h in range(6)])
+        self.assertIn("Heater numbers change: BCM 24 H4 -> H0, BCM 19 H0 -> H3, BCM 5 H3 -> H4",
+                      output)
+        self.assertRegex(output, r"S0\s+H0 BCM 24\s+ch8\s+1\s+\(found by touch, was on motor 1\)")
+        self.assertRegex(output, r"S3\s+unheated\s+ch4\s+\(PT100 ch4 warmed by hand, was on motor 1\)")
+        self.assertRegex(output, r"S4\s+unheated\s+ch7\s+2\s+\(the last unheated one\)")
+        self.assertNotIn("!", output)
+        self.assertIn("Service restarted and runs the new assignment", output)
+        self.assert_left_safe()
+        for heater, (start, end) in self.heater_windows().items():
+            self.assertLess(end - start, 15.0, f"H{heater} stayed on after its answer")
+        self.assertLess(self.rig.hottest_probe, 35.0)
+        # Heat through the new numbering finds each pair where touch put it.
+        rc, output = self.run_script("auto", "--dry-run")
+        self.assertEqual(rc, 0, output)
+        self.assertIn("H0 (BCM 24) -> ch8", output)
+        self.assertNotIn("NOT", output)
+
+    # MUTATION: in place_specimens, drop the `samples.insert(0, first)` and
+    # confirm test_places_each_specimen_found_by_hand_and_auto_agrees fails
+    # on motor1.specimens.
+
+    def test_before_auto_it_says_the_pairs_are_not_measured(self) -> None:
+        # The example config's identity map: H0's PT100 is really on ch3, and
+        # the unheated specimens' on ch4 and ch7, not ch7 and ch8.
+        operator = FakeOperator(self.rig, self.clock, feel_c=8.0)
+        rc, output = self.run_script("touch", "--dry-run", "--hand-s", "30", keyboard=operator)
+        self.assertEqual(rc, 0, output)
+        self.assertRegex(output, r"H0 on 10 s: its PT100 ch1 [-+]0\.\d C, warmest ch3 \+\d+\.\d C")
+        self.assertRegex(output, r"! The heater/PT100 pairs look unmeasured: H0 \(BCM 19\): its "
+                                 r"PT100 ch1 stayed at [-+]0\.\d C while ch3 rose \+\d+\.\d C")
+        self.assertIn("Run auto (hands off) to measure them.", output)
+        self.assertRegex(output, r"No unheated PT100 warmed in 30 s\. ch4 warmed \+\d+\.\d C, but "
+                                 r"the config gives it to H3's specimen")
+        self.assertIn("(not warmed: stays as it is)", output)
+        self.assertIn("! Nothing was marked as on motor 1's click, and S3 (ch1) is now its first "
+                      "specimen", output)
+        self.assertIn("--dry-run: nothing written", output)
+        self.assert_untouched()
+        self.assert_left_safe()
+
+    def test_a_heater_nobody_finds_stays_where_it_is(self) -> None:
+        self.use_measured_pairs()
+        self.rig.line_heats.pop(6)  # H2 warms nothing (bench 2026-09-14)
+        operator = FakeOperator(self.rig, self.clock, give_up_s=20.0,
+                                motors=[1, 0, 1, 1, 0, 1, 0, 1])
+        rc, output = self.run_script("touch", keyboard=operator)
+        self.assertEqual(rc, 0, output)
+        self.assertEqual(operator.typed[2][1], "s")
+        self.assertRegex(output, r"H2 BCM 6\s+ch6\s+\(not found: stays as it is\)")
+        self.assertEqual(self.values()["motor0.specimens"], "ch8:24,ch1:13,ch6:6,ch4")
+        start, end = self.heater_windows()[2]
+        self.assertLess(end - start, 25.0)
+        self.assert_left_safe()
+
+    def test_a_heater_goes_off_at_the_limit_and_r_heats_it_again(self) -> None:
+        self.use_measured_pairs()
+        operator = FakeOperator(self.rig, self.clock, late_for_the_first=True)
+        rc, output = self.run_script("touch", "--seconds", "15", "--dry-run", keyboard=operator)
+        self.assertEqual(rc, 0, output)
+        self.assertRegex(output, r"H0 off after 1[5-7] s\. Type its motor if you found it")
+        self.assertIn("H0 on for up to 15 s more.", output)
+        pulses = [t for t, c in self.rig.timeline if c.startswith("HEATER_TEST 0 ")]
+        first_off = next(t for t, c in self.rig.timeline if c == "HEATERS_OFF" and t > pulses[0])
+        self.assertLess(first_off - pulses[0], 18.0)
+        self.assertTrue(any(t > first_off for t in pulses), "r did not heat H0 again")
+        self.assertEqual(operator.typed[0], (0, "r", None))  # typed while H0 was off
+        self.assertEqual(operator.typed[1], (0, "1", 0))     # found once it warmed again
+        self.assert_untouched()
+        self.assert_left_safe()
+
+    def test_q_stops_with_the_heaters_off_and_writes_nothing(self) -> None:
+        self.use_measured_pairs()
+        rc, output = self.run_script("touch", keyboard=Typist(self.clock, [(3.0, "hello"),
+                                                                            (6.0, "q")]))
+        self.assertEqual(rc, 1, output)
+        self.assertIn("? 'hello': 0 or 1 = the motor it is on", output)
+        self.assertIn("STOPPED: you stopped it. Nothing was written.", output)
+        self.assertEqual(self.rig.sent[-3:], ["HEATERS_OFF", "DISARM_DEBUG", "DISARM"])
+        self.assert_untouched()
+        self.assert_left_safe()
+
+    def test_closed_input_stops_safely(self) -> None:
+        self.use_measured_pairs()
+
+        def closed() -> str | None:
+            raise EOFError
+
+        rc, output = self.run_script("touch", keyboard=closed)
+        self.assertEqual(rc, 1, output)
+        self.assertIn("STOPPED: the input closed. Nothing was written.", output)
+        self.assert_untouched()
+        self.assert_left_safe()
+
+    def test_refuses_while_the_service_runs_another_assignment(self) -> None:
+        self.config.write_text(hardware_setup.replace_ini(self.original, MEASURED), encoding="utf-8")
+        rc, output = self.run_script("touch", keyboard=Typist(self.clock, []))
+        self.assertEqual(rc, 2, output)
+        self.assertIn("the service runs another assignment than the config", output)
+        self.assertNotIn("HEATER_TEST", " ".join(self.rig.sent))
+
+    def test_two_unheated_pt100s_warming_together_name_neither(self) -> None:
+        self.use_measured_pairs()
+        operator = FakeOperator(self.rig, self.clock, both_hands=True)
+        rc, output = self.run_script("touch", "--dry-run", "--hand-s", "30", keyboard=operator)
+        self.assertEqual(rc, 0, output)
+        self.assertIn("No unheated PT100 warmed in 30 s", output)
+        self.assertNotIn("You can let go", output)
+        self.assertRegex(output, r"S\d\s+unheated\s+ch4\s+.*\(not warmed: stays as it is\)")
+
+    # MUTATION: drop the `second <= max(...)` condition from Touch.by_hand's
+    # `clear` and confirm test_two_unheated_pt100s_warming_together_name_neither fails.
+
+    def test_a_heater_the_onboard_does_not_drive_is_named(self) -> None:
+        self.use_measured_pairs()
+        self.rig.undriven.add(1)
+        operator = FakeOperator(self.rig, self.clock, give_up_s=20.0)
+        rc, output = self.run_script("touch", "--dry-run", keyboard=operator)
+        self.assertEqual(rc, 0, output)
+        self.assertIn("H1: the onboard applies duty 0 to it, so nothing warms", output)
+        start, end = self.heater_windows()[1]
+        self.assertLess(end - start, 10.0)  # off as soon as that was clear, not at the answer
+        self.assert_left_safe()
+
+    def test_another_heater_coming_on_stops_the_session(self) -> None:
+        self.use_measured_pairs()
+        self.rig.foreign = 5
+        rc, output = self.run_script("touch", keyboard=Typist(self.clock, []))
+        self.assertEqual(rc, 2, output)
+        self.assertIn("STOPPED: H5 came on while H0 was on: something else is commanding heaters",
+                      output)
+        self.assert_untouched()
+
+    def test_an_unanswered_question_stops_the_session(self) -> None:
+        self.use_measured_pairs()
+        rc, output = self.run_script("touch", "--seconds", "20", keyboard=Typist(self.clock, []))
+        self.assertEqual(rc, 2, output)
+        self.assertIn("H0 off after 2", output)
+        self.assertIn("STOPPED: no answer for 10 min. Nothing was written.", output)
+        start, end = self.heater_windows()[0]
+        self.assertLess(end - start, 23.0)
+        self.assert_untouched()
+        self.assert_left_safe()
+
+
 class DebugTests(EndToEnd):
     def test_heat_prints_every_terminal_and_names_the_pt100(self) -> None:
         rc, output = self.run_script("heat", "H0")
@@ -692,6 +1038,13 @@ class DebugTests(EndToEnd):
         self.assertEqual(rc, 0, output)
         self.assertIn("ch7 read no PT100 and are not watched", output)
         self.assertIn("H0 (BCM 19) warms ch3", output)
+        self.assert_left_safe()
+
+    def test_heat_names_another_running_assignment_and_still_runs(self) -> None:
+        self.config.write_text(hardware_setup.replace_ini(self.original, MEASURED), encoding="utf-8")
+        rc, output = self.run_script("heat", "H0", "--after-s", "0")
+        self.assertEqual(rc, 0, output)
+        self.assertIn("! the service runs another assignment than the config", output)
         self.assert_left_safe()
 
     def test_heat_refuses_an_unknown_heater(self) -> None:
@@ -793,6 +1146,47 @@ class UnitTests(unittest.TestCase):
             "STATUS", "ACK,STATUS,mode=RUN;seq0={motor=0;mode=x};bench_mode=1")
         self.assertEqual(fields["mode"], "RUN")
         self.assertEqual(fields["bench_mode"], "1")
+
+    def test_parse_answer(self) -> None:
+        parse = associate_heaters.parse_answer
+        self.assertEqual(parse("1", 2), ("motor", 1, False))
+        self.assertEqual(parse(" 0C ", 2), ("motor", 0, True))
+        self.assertEqual(parse("m1 c", 2), ("motor", 1, True))
+        for text, kind in (("s", "skip"), ("SKIP", "skip"), ("r", "again"), ("q", "quit"),
+                           ("2", "unknown"), ("", "unknown"), ("1x", "unknown"), ("c", "unknown")):
+            self.assertEqual(parse(text, 2)[0], kind, repr(text))
+
+    def test_place_specimens_moves_them_and_puts_each_click_first(self) -> None:
+        place = associate_heaters.place_specimens
+        layout = example_layout()  # ch1:19,ch2:13,ch3:6,ch4:5 | ch5:24,ch6:23,ch7,ch8
+        fmt = hardware_setup.format_specimens
+        self.assertEqual(place(layout, {}, {}), layout)
+        swapped = place(layout, {0: 1, 4: 0}, {})
+        self.assertEqual([fmt(g) for g in swapped.motors],
+                         ["ch2:13,ch3:6,ch4:5,ch5:24", "ch1:19,ch6:23,ch7,ch8"])
+        clicked = place(layout, {0: 1, 4: 0}, {0: 4, 1: 7})
+        self.assertEqual([fmt(g) for g in clicked.motors],
+                         ["ch5:24,ch2:13,ch3:6,ch4:5", "ch8,ch1:19,ch6:23,ch7"])
+        # Without a click given, a motor's first specimen stays first while it stays.
+        kept = place(layout, {1: 1}, {})
+        self.assertEqual([fmt(g) for g in kept.motors],
+                         ["ch1:19,ch3:6,ch4:5", "ch5:24,ch2:13,ch6:23,ch7,ch8"])
+
+    def test_keyboard_hands_over_typed_lines_without_blocking(self) -> None:
+        read_fd, write_fd = os.pipe()
+        self.addCleanup(os.close, read_fd)
+        keyboard = associate_heaters.Keyboard(read_fd)
+        self.assertIsNone(keyboard())
+        os.write(write_fd, b"1c\nq\npart")
+        self.assertEqual(keyboard(), "1c")
+        self.assertEqual(keyboard(), "q")
+        self.assertIsNone(keyboard())
+        os.write(write_fd, b"ial\nlast")
+        os.close(write_fd)
+        self.assertEqual(keyboard(), "partial")
+        self.assertEqual(keyboard(), "last")
+        with self.assertRaises(EOFError):
+            keyboard()
 
 
 if __name__ == "__main__":

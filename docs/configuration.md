@@ -236,8 +236,9 @@ a line.
 
 `GET_LAYOUT` reports the derived groups, and the ground station arranges its
 Thermal tab, motor cards, Values column, plots and `session.json` by them.
-`scripts/associate_heaters.py` shows, measures (`auto`, `heat`) and writes
-(`assign`) the lists; `migrate-config` (every `coatheal-deploy`) keeps them
+`scripts/associate_heaters.py` shows the lists, measures the heater/PT100
+pairs (`auto`, `heat`), finds each specimen's motor and click by hand
+(`touch`) and writes them (`auto`, `touch`, `assign`); `migrate-config` (every `coatheal-deploy`) keeps them
 from the local config.
 
 The index-based keys the lists replaced — `heater.output_lines`,
