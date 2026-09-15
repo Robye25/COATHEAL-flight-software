@@ -4,6 +4,8 @@ import contextlib
 import importlib.util
 import io
 import random
+import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -11,6 +13,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from app.gui import state as gs_state  # noqa: E402
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "associate_heaters.py"
 SPEC = importlib.util.spec_from_file_location("associate_heaters", SCRIPT)
@@ -36,13 +41,23 @@ class FakeClock:
         self.now += max(seconds, 0.0)
 
 
+# The bench as built: specimen s (0..5) is heated by the heater on LINES[s]
+# and read by the PT100 on card terminal HARNESS[s]; specimens 6 and 7 are
+# unheated. The example config lists the lines in this order, so heater
+# index h warms specimen h until an assignment reorders them.
+LINES = [19, 13, 6, 5, 24, 23]
+HARNESS = [3, 1, 6, 2, 8, 5, 4, 7]
+
+
 class FakeOnboard:
     """coatheal-onboard as seen through port 5000: eight specimens in a row
     (lumped heat capacity, loss to the room, some conduction to each
     neighbour), each PT100 lagging its specimen, behind a shuffled harness.
-    Sized like the bench of 2026-09-14 at duty 0.25: a PT100 +1 C about 3 s
-    after its heater comes on, still rising ~2 C after it goes off, a
-    neighbour picking up a few tenths."""
+    Heat follows the BCM line the service drives, so a reordered
+    heater.output_lines moves which specimen a heater index warms. Sized
+    like the bench of 2026-09-14 at duty 0.25: a PT100 +1 C about 3 s after
+    its heater comes on, still rising ~2 C after it goes off, a neighbour
+    picking up a few tenths."""
 
     CAPACITY_J_PER_K = 1.4
     LOSS_W_PER_K = 0.05
@@ -55,12 +70,17 @@ class FakeOnboard:
     def __init__(self, clock: FakeClock, harness: list[int], *, bench_mode: bool = True) -> None:
         self.clock = clock
         self.harness = list(harness)          # specimen -> RTD card terminal
-        self.running_map = list(range(1, 9))  # the service's sequent_rtd_channels
-        self.config_path: Path | None = None  # re-read on every (fake) restart
+        self.line_heats = {line: [(s, 1.0)] for s, line in enumerate(LINES)}  # BCM -> [(specimen, share)]
+        # The service's heater.output_lines and sensor.sequent_rtd_channels,
+        # re-read from config_path on every (fake) restart.
+        self.output_lines = list(LINES)
+        self.running_map = list(range(1, 9))
+        self.config_path: Path | None = None
         self.restarts = 0
         self.bench_mode = bench_mode
-        self.heats = {h: [(h, 1.0)] for h in range(6)}  # heater -> [(specimen, share)]
-        self.undriven: set[int] = set()  # accepted, but the scheduler applies duty 0
+        self.undriven: set[int] = set()  # heater indexes accepted but scheduled at duty 0
+        self.busy_lines: set[int] = set()  # BCM lines the service cannot claim
+        self.down = False                  # the service is not running
         self.links = {s: [n for n in (s - 1, s + 1) if 0 <= n < 8] for s in range(8)}
         self.detached: set[int] = set()  # specimens whose probe hangs off them, reading the room
         self.faults: dict[int, tuple[float, str, float]] = {}  # terminal -> (from, fault, ohms)
@@ -86,7 +106,7 @@ class FakeOnboard:
         heater, duty = self.active()
         power = [0.0] * 8
         if heater is not None:
-            for specimen, share in self.heats[heater]:
+            for specimen, share in self.line_heats.get(self.output_lines[heater], []):
                 power[specimen] += self.HEATER_W * duty * share
         flows = []
         for s in range(8):
@@ -108,6 +128,7 @@ class FakeOnboard:
         self.mode, self.debug_armed, self.test = "STANDBY", False, None
         if self.config_path is not None:
             values = hardware_setup._ini_values(self.config_path.read_text(encoding="utf-8"))
+            self.output_lines = hardware_setup._number_list(values["heater.output_lines"])
             self.running_map = hardware_setup._number_list(values["sensor.sequent_rtd_channels"])
 
     def subprocess_run(self, args, **kwargs):
@@ -126,6 +147,8 @@ class FakeOnboard:
     def send(self, command: str, host: str, port: int) -> str:
         while self.clock.now - self._last >= self.STEP_S:
             self._step()
+        if self.down:
+            raise ConnectionRefusedError(111, "Connection refused")
         self.sent.append(command)
         self.timeline.append((self.clock.now, command))
         verb, *args = command.split()
@@ -148,7 +171,8 @@ class FakeOnboard:
                     f"sequent_rtd_valid=8/8;sequent_rtd_ch={channels};"
                     "max31865_1=OK;max31865_1_error=NONE;sample_valid_channels=8;"
                     "heated_channels_ok=1;simulated=0;pwm=OK;"
-                    + ";".join(f"heater{i}=OK" for i in range(6))
+                    + ";".join(f"heater{i}={'FAILED' if line in self.busy_lines else 'OK'}"
+                               for i, line in enumerate(self.output_lines))
                     + ";motor0=OK;motor1=OK;comms=OK")
         if verb == "GET_THERMAL":
             heater, duty = self.active()
@@ -189,11 +213,12 @@ class FakeOnboard:
         return "NACK,UNKNOWN,unknown command"
 
 
-# Heater h warms specimen h; specimens 6 and 7 are unheated.
-HARNESS = [3, 1, 6, 2, 8, 5, 4, 7]
+# assign's view of the same bench: each motor's specimens, heated first.
+# Motor 0 pulls specimens 4, 1, 2, 3 and motor 1 pulls 0, 5, 6, 7.
+ASSIGNMENT = ["--motor0", "ch8:24,ch1:13,ch6:6,ch2:5", "--motor1", "ch3:19,ch5:23,ch4,ch7"]
 
 
-class AssociateHeatersEndToEndTests(unittest.TestCase):
+class EndToEnd(unittest.TestCase):
     def setUp(self) -> None:
         self.clock = FakeClock()
         self.rig = FakeOnboard(self.clock, HARNESS)
@@ -207,23 +232,29 @@ class AssociateHeatersEndToEndTests(unittest.TestCase):
         self.original = self.config.read_text(encoding="utf-8")
         self.rig.config_path = self.config
 
-    def run_script(self, *extra: str, restart: bool = False) -> tuple[int, str]:
-        argv = ["--config", str(self.config), "--yes",
-                "--log", str(self.dir / "readings.csv"), *extra]
-        if not restart:
-            argv.append("--no-restart")
+    def run_script(self, *argv: str, restart: bool = False) -> tuple[int, str]:
+        """Without a command word this is `auto`, as on the bench."""
+        command = argv[0] if argv and argv[0] in associate_heaters.COMMANDS else ""
+        options = ["--config", str(self.config)]
+        if command in ("", "auto", "heat"):
+            options += ["--log", str(self.dir / "readings.csv")]
+        if command in ("", "auto", "assign"):
+            options += ["--yes"] + ([] if restart else ["--no-restart"])
+        full = ([command, *options, *argv[1:]] if command else [*options, *argv])
         output = io.StringIO()
         with mock.patch.object(associate_heaters, "service_config", return_value=None), \
                 mock.patch.object(hardware_setup, "_check_with_binary", return_value=0), \
                 mock.patch.object(associate_heaters.subprocess, "run", self.rig.subprocess_run), \
-                contextlib.redirect_stdout(output):
-            rc = associate_heaters.main(argv, send=self.rig.send,
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            rc = associate_heaters.main(full, send=self.rig.send,
                                         clock=self.clock.time, sleep=self.clock.sleep)
         return rc, output.getvalue()
 
+    def values(self) -> dict[str, str]:
+        return hardware_setup._ini_values(self.config.read_text(encoding="utf-8"))
+
     def written_map(self) -> list[int]:
-        values = hardware_setup._ini_values(self.config.read_text(encoding="utf-8"))
-        return hardware_setup._number_list(values["sensor.sequent_rtd_channels"])
+        return hardware_setup._number_list(self.values()["sensor.sequent_rtd_channels"])
 
     def heater_windows(self) -> dict[int, tuple[float, float]]:
         """Heater -> (first pulse, the HEATERS_OFF that ended it)."""
@@ -246,14 +277,19 @@ class AssociateHeatersEndToEndTests(unittest.TestCase):
         self.assertEqual(self.rig.mode, "STANDBY")
         self.assertFalse(self.rig.debug_armed)
 
+    def assert_untouched(self) -> None:
+        self.assertEqual(self.config.read_text(encoding="utf-8"), self.original)
+
+
+class AutoTests(EndToEnd):
     def test_pairs_a_shuffled_harness_and_writes_the_map(self) -> None:
         rc, output = self.run_script()
         self.assertEqual(rc, 0, output)
         written = self.written_map()
         self.assertEqual(written[:6], [3, 1, 6, 2, 8, 5])  # S<h> <- the terminal H<h> warms
         self.assertEqual(sorted(written[6:]), [4, 7])       # the two unheated, in some order
-        values = hardware_setup._ini_values(self.config.read_text(encoding="utf-8"))
-        self.assertEqual(values["heater.temperature_channels"], "0,1,2,3,4,5")
+        self.assertEqual(self.values()["heater.temperature_channels"], "0,1,2,3,4,5")
+        self.assertEqual(self.values()["heater.output_lines"], "19,13,6,5,24,23")
         self.assertTrue(list(self.dir.glob("onboard.local.ini.bak.*")))
         self.assert_left_safe()
         windows = self.heater_windows()  # also: one heater at a time, each switched off
@@ -261,55 +297,58 @@ class AssociateHeatersEndToEndTests(unittest.TestCase):
         self.assertLess(self.rig.hottest_probe, 30.0)
         self.assertIn("H0 (BCM 19) -> ch3", output)
         self.assertNotIn("NOT", output)
+        self.assertIn(f"assign --motor0 ch3:19,ch1:13,ch6:6,ch2:5 --motor1 ch8:24,ch5:23,"
+                      f"ch{written[6]},ch{written[7]}", output)
         self.assertTrue((self.dir / "readings.csv").read_text(encoding="utf-8").startswith("t_s,"))
 
-    def test_restarts_the_service_and_checks_it_reads_the_new_map(self) -> None:
+    def test_restarts_the_service_and_checks_it_runs_the_new_map(self) -> None:
         rc, output = self.run_script(restart=True)
         self.assertEqual(rc, 0, output)
         self.assertEqual(self.rig.restarts, 1)
         self.assertEqual(self.rig.running_map, self.written_map())
-        self.assertIn("Service restarted and reads the new map", output)
+        self.assertIn("Service restarted and runs the new assignment", output)
         # A rerun finds the same pairs in the running map and changes nothing.
         before = self.config.read_text(encoding="utf-8")
         rc, output = self.run_script(restart=True)
         self.assertEqual(rc, 0, output)
-        self.assertIn("already carries this map", output)
-        self.assertIn("already reads this map", output)
+        self.assertIn("already carries this assignment", output)
+        self.assertIn("The running service already uses it", output)
         self.assertEqual(self.rig.restarts, 1)
         self.assertEqual(self.config.read_text(encoding="utf-8"), before)
 
     def test_dry_run_reports_the_map_without_writing(self) -> None:
-        rc, output = self.run_script("--dry-run")
+        rc, output = self.run_script("auto", "--dry-run", "--verbose")
         self.assertEqual(rc, 0, output)
-        self.assertIn("S0 <- ch3  (H0, measured)", output)
-        self.assertEqual(self.config.read_text(encoding="utf-8"), self.original)
+        self.assertRegex(output, r"S0\s+M0\s+H0 BCM 19\s+ch3\s+1\s+measured")
+        self.assertIn("(C above the reading at switch-on)", output)  # --verbose table
+        self.assert_untouched()
         self.assert_left_safe()
 
     def test_a_heater_that_warms_nothing_is_left_out_and_the_rest_are_written(self) -> None:
         # Bench 2026-09-14: H2 warmed nothing on BCM 6, the other five paired.
-        self.rig.heats[2] = []
+        self.rig.line_heats.pop(6)
         rc, output = self.run_script()
         self.assertEqual(rc, 1, output)
         self.assertIn("H2 (BCM 6) -> NOT PAIRED: no terminal warmed in 60 s", output)
         written = self.written_map()
         self.assertEqual([written[h] for h in (0, 1, 3, 4, 5)], [3, 1, 2, 8, 5])
         self.assertEqual(sorted(written), list(range(1, 9)))
-        self.assertIn(f"S2 <- ch{written[2]}  (H2, NOT measured", output)
+        self.assertRegex(output, rf"S2\s+M0\s+H2 BCM 6\s+ch{written[2]}\s+NOT measured")
         self.assertIn("H2 left out", output)
         start, end = self.heater_windows()[2]
         self.assertLessEqual(end - start, 63.0)  # the silent heater did not stay on
         self.assert_left_safe()
 
     def test_no_heater_warming_anything_writes_nothing(self) -> None:
-        self.rig.heats = {h: [] for h in range(6)}
+        self.rig.line_heats = {}
         rc, output = self.run_script()
         self.assertEqual(rc, 1, output)
         self.assertIn("nothing was written", output)
-        self.assertEqual(self.config.read_text(encoding="utf-8"), self.original)
+        self.assert_untouched()
         self.assert_left_safe()
 
     def test_a_heater_warming_two_specimens_is_left_out(self) -> None:
-        self.rig.heats[3] = [(3, 0.5), (4, 0.5)]
+        self.rig.line_heats[5] = [(3, 0.5), (4, 0.5)]
         rc, output = self.run_script()
         self.assertEqual(rc, 1, output)
         self.assertRegex(output, r"H3 \(BCM 5\) -> NOT PAIRED: ch(2|8) \+\d\.\d C and "
@@ -321,7 +360,7 @@ class AssociateHeatersEndToEndTests(unittest.TestCase):
         self.assert_left_safe()
 
     def test_two_heaters_on_one_specimen_are_both_left_out(self) -> None:
-        self.rig.heats[1] = [(0, 1.0)]
+        self.rig.line_heats[13] = [(0, 1.0)]
         rc, output = self.run_script()
         self.assertEqual(rc, 1, output)
         self.assertIn("H0 and H1 both warmed ch3", output)
@@ -345,7 +384,6 @@ class AssociateHeatersEndToEndTests(unittest.TestCase):
         self.assertEqual(rc, 1, output)
         self.assertIn("H5 (BCM 23) -> NOT PAIRED", output)
         self.assertNotIn("H5 (BCM 23) -> ch4", output)
-        self.assertNotIn("(H5, measured)", output)
         self.assertEqual(self.written_map()[:5], [3, 1, 6, 2, 8])
         self.assert_left_safe()
 
@@ -359,7 +397,6 @@ class AssociateHeatersEndToEndTests(unittest.TestCase):
         self.assertEqual(rc, 1, output)
         self.assertRegex(output, r"H5 \(BCM 23\) -> NOT PAIRED: took \d+ s to warm ch4, "
                                  r"the others \d+ s")
-        self.assertNotIn("(H5, measured)", output)
         self.assert_left_safe()
 
     def test_each_heater_waits_until_the_last_pt100_stops_rising(self) -> None:
@@ -394,7 +431,7 @@ class AssociateHeatersEndToEndTests(unittest.TestCase):
         self.assertEqual(rc, 2, output)
         self.assertIn("abort limit", output)
         self.assertIn("loose PT100 terminal", output)
-        self.assertEqual(self.config.read_text(encoding="utf-8"), self.original)
+        self.assert_untouched()
         self.assertEqual(self.rig.sent[-3:], ["HEATERS_OFF", "DISARM_DEBUG", "DISARM"])
         self.assert_left_safe()
 
@@ -403,7 +440,7 @@ class AssociateHeatersEndToEndTests(unittest.TestCase):
         rc, output = self.run_script()
         self.assertEqual(rc, 2, output)
         self.assertIn("the PT100 on ch6 stopped reading", output)
-        self.assertEqual(self.config.read_text(encoding="utf-8"), self.original)
+        self.assert_untouched()
         self.assert_left_safe()
 
     def test_ctrl_c_mid_heat_leaves_heaters_off_and_disarmed(self) -> None:
@@ -421,7 +458,7 @@ class AssociateHeatersEndToEndTests(unittest.TestCase):
         rc, output = self.run_script()
         self.assertEqual(rc, 2, output)
         self.assertIn("STOPPED: interrupted", output)
-        self.assertEqual(self.config.read_text(encoding="utf-8"), self.original)
+        self.assert_untouched()
         self.assert_left_safe()
 
     def test_refuses_without_bench_mode_and_heats_nothing(self) -> None:
@@ -448,12 +485,190 @@ class AssociateHeatersEndToEndTests(unittest.TestCase):
         self.assertEqual(self.rig.sent, ["STATUS", "COMPONENTS", "GET_THERMAL"])
 
 
+class AssignTests(EndToEnd):
+    def test_show_prints_the_table_and_the_assign_command_that_reproduces_it(self) -> None:
+        rc, output = self.run_script("show")
+        self.assertEqual(rc, 0, output)
+        self.assertRegex(output, r"S0\s+M0\s+H0 BCM 19\s+ch1\s+1\s+OK 10\d\.\d ohm 2\d\.\d C")
+        self.assertRegex(output, r"S4\s+M1\s+H4 BCM 24\s+ch5\s+2")
+        self.assertRegex(output, r"S7\s+M1\s+unheated\s+ch8")
+        command = next(line.strip() for line in output.splitlines() if " assign " in line)
+        self.assertEqual(command, "python3 scripts/associate_heaters.py assign "
+                                  "--motor0 ch1:19,ch2:13,ch3:6,ch4:5 --motor1 ch5:24,ch6:23,ch7,ch8")
+        self.assertFalse([c for c in self.rig.sent if c not in ("STATUS", "COMPONENTS")])
+        rc, output = self.run_script(*shlex.split(command)[2:])
+        self.assertEqual(rc, 0, output)
+        self.assertIn("already carries this assignment", output)
+        self.assert_untouched()
+
+    def test_moves_specimens_between_motor_groups_and_auto_agrees(self) -> None:
+        rc, output = self.run_script("assign", *ASSIGNMENT, restart=True)
+        self.assertEqual(rc, 0, output)
+        values = self.values()
+        self.assertEqual(values["heater.output_lines"], "24,13,6,5,19,23")
+        self.assertEqual(values["sensor.sequent_rtd_channels"], "8,1,6,2,3,5,4,7")
+        self.assertEqual(values["motor0.samples"], "0,1,2,3")  # the groups stay; specimens move
+        self.assertRegex(output, r"S4\s+M1\s+H4 BCM 19\s+ch3\s+2\s+.*\(heater was BCM 24, "
+                                 r"PT100 was ch5\)")
+        self.assertNotIn("Heater lines changed", output)  # the same six lines, reordered
+        self.assertEqual(self.rig.restarts, 1)
+        self.assertEqual(self.rig.output_lines, [24, 13, 6, 5, 19, 23])
+        self.assertIn("Service restarted and runs the new assignment", output)
+        # Heat through the new numbering finds the same pairs: H0 is now
+        # BCM 24, which warms ch8.
+        rc, output = self.run_script(restart=True)
+        self.assertEqual(rc, 0, output)
+        self.assertIn("H0 (BCM 24) -> ch8", output)
+        self.assertIn("already carries this assignment", output)
+        self.assertEqual(self.rig.restarts, 1)
+        self.assert_left_safe()
+
+    def test_show_without_the_service_prints_the_config(self) -> None:
+        self.rig.down = True
+        rc, output = self.run_script("show")
+        self.assertEqual(rc, 0, output)
+        self.assertIn("the onboard does not answer", output)
+        self.assertRegex(output, r"S5\s+M1\s+H5 BCM 23\s+ch6\n")
+        self.assertIn("assign --motor0 ch1:19,", output)
+
+    def test_show_names_a_config_the_service_has_not_loaded(self) -> None:
+        self.config.write_text(hardware_setup.replace_ini(
+            self.original, {"sensor.sequent_rtd_channels": "3,1,6,2,8,5,4,7"}), encoding="utf-8")
+        rc, output = self.run_script("show")
+        self.assertEqual(rc, 0, output)
+        self.assertIn("! the service reads terminals 1,2,3,4,5,6,7,8, not the config's", output)
+
+    def test_dry_run_writes_nothing(self) -> None:
+        rc, output = self.run_script("assign", *ASSIGNMENT, "--dry-run")
+        self.assertEqual(rc, 0, output)
+        self.assertIn("--dry-run: nothing written", output)
+        self.assert_untouched()
+
+    def test_a_line_the_service_cannot_claim_fails_the_restart_check(self) -> None:
+        self.rig.busy_lines.add(16)
+        rc, output = self.run_script("assign", "--motor0", "ch8:24,ch1:13,ch6:16,ch2:5",
+                                     *ASSIGNMENT[2:], restart=True)
+        self.assertEqual(rc, 2, output)
+        self.assertIn("did not claim H2 (BCM 16)", output)
+
+    def test_a_heater_moved_to_another_line(self) -> None:
+        # H2's heater is really on BCM 16: assign it there, restart, and
+        # heat that heater to check.
+        self.rig.line_heats[16] = self.rig.line_heats.pop(6)
+        motor0 = "ch8:24,ch1:13,ch6:16,ch2:5"
+        rc, output = self.run_script("assign", "--motor0", motor0, *ASSIGNMENT[2:], restart=True)
+        self.assertEqual(rc, 0, output)
+        self.assertEqual(self.values()["heater.output_lines"], "24,13,16,5,19,23")
+        self.assertIn("Heater lines changed (BCM 6 out, BCM 16 in): run coatheal-deploy", output)
+        rc, output = self.run_script("heat", "H2")
+        self.assertEqual(rc, 0, output)
+        self.assertIn("H2 (BCM 16) warms ch6, which the config reads as S2: they agree", output)
+        self.assert_left_safe()
+
+    def test_refuses_what_the_software_cannot_run(self) -> None:
+        cases = {
+            "motor 0 pulls 4 heated and 0 unheated specimens (S0, S1, S2, S3); 3 heated and 1 unheated given":
+                ["--motor0", "ch8:24,ch1:13,ch6:6,ch4", "--motor1", "ch3:19,ch5:23,ch2:5,ch7"],
+            "ch8 given twice":
+                ["--motor0", "ch8:24,ch8:13,ch6:6,ch2:5", "--motor1", "ch3:19,ch5:23,ch4,ch7"],
+            "BCM 24 heats two specimens":
+                ["--motor0", "ch8:24,ch1:24,ch6:6,ch2:5", "--motor1", "ch3:19,ch5:23,ch4,ch7"],
+            "ch9 is not a card terminal":
+                ["--motor0", "ch9:24,ch1:13,ch6:6,ch2:5", "--motor1", "ch3:19,ch5:23,ch4,ch7"],
+            "7 specimens given, the config has 8 samples":
+                ["--motor0", "ch8:24,ch1:13,ch6:6,ch2:5", "--motor1", "ch3:19,ch5:23,ch4"],
+            "'8:24': give a PT100 terminal":
+                ["--motor0", "8:24,ch1:13,ch6:6,ch2:5", "--motor1", "ch3:19,ch5:23,ch4,ch7"],
+            "'ch8:H0': give a PT100 terminal":
+                ["--motor0", "ch8:H0,ch1:13,ch6:6,ch2:5", "--motor1", "ch3:19,ch5:23,ch4,ch7"],
+        }
+        for message, argv in cases.items():
+            with self.subTest(message):
+                rc, output = self.run_script("assign", *argv)
+                self.assertEqual(rc, 2, output)
+                self.assertIn(message, output)
+                self.assert_untouched()
+        self.assertEqual(self.rig.sent, [])
+
+    def test_a_line_the_hat_owns_is_refused_by_the_validator(self) -> None:
+        rc, output = self.run_script("assign", "--motor0", "ch8:24,ch1:13,ch6:17,ch2:5",
+                                     *ASSIGNMENT[2:])
+        self.assertEqual(rc, 1, output)
+        self.assertIn("line 17 used by reserved: sequent_hat rs485_dir", output)
+        self.assertIn("nothing written", output)
+        self.assert_untouched()
+
+
+class DebugTests(EndToEnd):
+    def test_heat_prints_every_terminal_and_names_the_pt100(self) -> None:
+        rc, output = self.run_script("heat", "H0")
+        self.assertEqual(rc, 0, output)
+        self.assertIn("H0 (BCM 19) warms ch3, but the config reads S0 from ch1", output)
+        rows = [line for line in output.splitlines() if re.match(r"\s+\d+s(\s+[-+]\d+\.\d){8}", line)]
+        self.assertGreater(len(rows), 5)
+        self.assertTrue(any(line.endswith("H0 0.25") for line in rows))
+        self.assertTrue(any(line.endswith("(off)") for line in rows))  # after it went off
+        self.assertEqual({c.split()[1] for c in self.rig.sent if c.startswith("HEATER_TEST")}, {"0"})
+        self.assert_untouched()
+        self.assert_left_safe()
+
+    def test_heat_a_silent_heater_says_so(self) -> None:
+        self.rig.line_heats.pop(6)
+        rc, output = self.run_script("heat", "H2", "--seconds", "20", "--after-s", "0")
+        self.assertEqual(rc, 1, output)
+        self.assertIn("H2 (BCM 6) did not pair: no terminal warmed in 20 s", output)
+        start, end = self.heater_windows()[2]
+        self.assertLessEqual(end - start, 22.0)
+        self.assert_left_safe()
+
+    def test_heat_runs_with_a_probe_missing_elsewhere(self) -> None:
+        self.rig.faults[7] = (0.0, "OPEN", 366.0)
+        rc, output = self.run_script("heat", "0", "--after-s", "0")
+        self.assertEqual(rc, 0, output)
+        self.assertIn("ch7 read no PT100 and are not watched", output)
+        self.assertIn("H0 (BCM 19) warms ch3", output)
+        self.assert_left_safe()
+
+    def test_heat_refuses_an_unknown_heater(self) -> None:
+        rc, output = self.run_script("heat", "H6")
+        self.assertEqual(rc, 2, output)
+        self.assertIn("No heater 'H6': H0..H5", output)
+        self.assertEqual(self.rig.sent, [])
+
+    def test_watch_prints_every_terminal_and_commands_nothing(self) -> None:
+        # Someone heats H0 from the ground station meanwhile.
+        self.rig.mode, self.rig.debug_armed = "RUN", True
+        self.rig.test = (0, 0.25, self.clock.now + 30.0)
+        rc, output = self.run_script("watch", "--seconds", "8")
+        self.assertEqual(rc, 0, output)
+        self.assertRegex(output, r"sample(\s+S\d){8}")
+        rows = [line for line in output.splitlines() if re.match(r"\s+\d+s(\s+[-+]\d+\.\d){8}", line)]
+        self.assertEqual(len(rows), 8)
+        self.assertTrue(rows[-1].endswith("H0 0.25"))
+        ch3 = float(rows[-1].split()[3])
+        self.assertGreater(ch3, 1.0)
+        self.assertEqual(set(self.rig.sent), {"COMPONENTS", "GET_THERMAL"})
+
+
 def result(heater: int, channel: int, seconds: float, verdict: str = "paired"):
-    return associate_heaters.HeaterResult(heater, str(heater), verdict, channel, 2.5,
+    return associate_heaters.HeaterResult(heater, heater, verdict, channel, 2.5,
                                           (channel % 8 + 1, 0.1), seconds)
 
 
-class AssociateHeatersUnitTests(unittest.TestCase):
+def example_mapping():
+    return associate_heaters.load_mapping(
+        hardware_setup._ini_values(hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")))
+
+
+class UnitTests(unittest.TestCase):
+    def test_the_frame_matches_the_ground_station(self) -> None:
+        self.assertEqual(associate_heaters.GS_MOTOR_SAMPLES, gs_state.MOTOR_SAMPLES)
+        self.assertEqual(associate_heaters.GS_CLICK_SAMPLES, gs_state.RESISTANCE_SAMPLES)
+        self.assertEqual(gs_state.HEATER_SAMPLE, tuple(range(6)))
+        mapping = example_mapping()
+        self.assertEqual(associate_heaters.mapping_warnings(mapping), [])
+        self.assertEqual(mapping.motors, [list(g) for g in gs_state.MOTOR_SAMPLES])
+
     def test_parse_terminals_reads_the_components_channel_list(self) -> None:
         terminals = associate_heaters.parse_terminals(
             "S0:ch3:OK:109.8|S1:ch2:OPEN:-366.0|S2:ch1:MISMATCH:nan|junk")
@@ -488,6 +703,46 @@ class AssociateHeatersUnitTests(unittest.TestCase):
         self.assertIn("took 40 s to warm ch3", problems[2])
         self.assertIn("H3 and H4 both warmed ch4", problems[3])
         self.assertIn("no terminal warmed", problems[5])
+
+    def test_parse_group_reads_terminals_and_heater_lines(self) -> None:
+        Specimen = associate_heaters.Specimen
+        self.assertEqual(associate_heaters.parse_group(" CH8:19, ch2:bcm13,ch1 ,"),
+                         [Specimen(8, 19), Specimen(2, 13), Specimen(1, None)])
+
+    def test_plan_places_heated_specimens_first_in_the_order_given(self) -> None:
+        parse = associate_heaters.parse_group
+        mapping = example_mapping()
+        # Unheated listed first in motor 1 still land on S6/S7; the first
+        # heated specimen of each motor lands on its click sample (S0, S4).
+        new = associate_heaters.plan_assignment(
+            [parse("ch8:24,ch1:13,ch6:6,ch2:5"), parse("ch4,ch3:19,ch7,ch5:23")], mapping)
+        self.assertEqual(new.heater_lines, [24, 13, 6, 5, 19, 23])
+        self.assertEqual(new.channels, [8, 1, 6, 2, 3, 5, 4, 7])
+        self.assertEqual(new.temperature_channels, [0, 1, 2, 3, 4, 5])
+        self.assertEqual(mapping.heater_lines, [19, 13, 6, 5, 24, 23])  # not modified in place
+
+    def test_assign_command_round_trips(self) -> None:
+        mapping = example_mapping()
+        mapping.heater_lines = [24, 13, 16, 5, 19, 23]
+        mapping.channels = [8, 1, 6, 2, 3, 5, 4, 7]
+        command = associate_heaters.assign_command(mapping)
+        argv = shlex.split(command)
+        motor0, motor1 = argv[argv.index("--motor0") + 1], argv[argv.index("--motor1") + 1]
+        again = associate_heaters.plan_assignment(
+            [associate_heaters.parse_group(motor0), associate_heaters.parse_group(motor1)],
+            example_mapping())
+        self.assertEqual((again.heater_lines, again.channels),
+                         (mapping.heater_lines, mapping.channels))
+
+    def test_warnings_name_what_the_ground_station_would_get_wrong(self) -> None:
+        mapping = example_mapping()
+        mapping.motors = [[0, 1, 2, 4], [3, 5, 6, 7]]
+        mapping.clicks = [1, 4]
+        mapping.temperature_channels = [1, 0, 2, 3, 4, 5]
+        warnings = " | ".join(associate_heaters.mapping_warnings(mapping))
+        self.assertIn("heater i must read sample i", warnings)
+        self.assertIn("motor groups are not the ground station's", warnings)
+        self.assertIn("max31865_sample_indices is not the ground station's", warnings)
 
     def test_reply_fields_raises_on_a_nack_and_keeps_the_first_spelling(self) -> None:
         with self.assertRaises(associate_heaters.AssociationError):
