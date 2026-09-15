@@ -266,8 +266,10 @@ harness does not follow the schematic — with
 probes reading; see [Instruction Manual §10](rev-c-instruction-manual.md#10-changing-heater-to-pt100-mapping)).
 It writes the PT100 terminal each heater warms into its specimen in
 `motor0.specimens` / `motor1.specimens`; `show`, `watch` and `heat H<i>`
-debug it, and `assign --motor0 … --motor1 …` sets the pairs and the motor
-groups by hand. The heater lines are held low from power-on by the managed
+debug it. Heat cannot tell motor groups: `touch` switches each heater on
+until you type the motor you feel it warming on (and finds the unheated
+specimens by the PT100 you warm in your fingers), and `assign --motor0 …
+--motor1 …` sets the pairs and the motor groups by hand. The heater lines are held low from power-on by the managed
 `gpio=` block in `/boot/firmware/config.txt`, derived from the same lists:
 after changing a heater line run `coatheal-deploy` and reboot (`show`, a
 write by `auto` or `assign`, and `hardware_setup.py doctor` warn while the
