@@ -193,12 +193,12 @@ reserved lines.
 
 | Function | Physical pin | BCM | Configuration key |
 |---|---:|---:|---|
-| Heater H1 / HEAT_EN1 | 35 | 19 | `heater.output_lines[0]` |
-| Heater H2 / HEAT_EN2 | 33 | 13 | `heater.output_lines[1]` |
-| Heater H3 / HEAT_EN3 | 31 | 6 | `heater.output_lines[2]` |
-| Heater H4 / HEAT_EN4 | 29 | 5 | `heater.output_lines[3]` |
-| Heater H5 / HEAT_EN5 | 18 | 24 | `heater.output_lines[4]` |
-| Heater H6 / HEAT_EN6 | 16 | 23 | `heater.output_lines[5]` |
+| Heater H1 / HEAT_EN1 | 35 | 19 | `motor0.specimens` entry 1 (`ch1:19`) |
+| Heater H2 / HEAT_EN2 | 33 | 13 | `motor0.specimens` entry 2 (`ch2:13`) |
+| Heater H3 / HEAT_EN3 | 31 | 6 | `motor0.specimens` entry 3 (`ch3:6`) |
+| Heater H4 / HEAT_EN4 | 29 | 5 | `motor0.specimens` entry 4 (`ch4:5`) |
+| Heater H5 / HEAT_EN5 | 18 | 24 | `motor1.specimens` entry 1 (`ch5:24`) |
+| Heater H6 / HEAT_EN6 | 16 | 23 | `motor1.specimens` entry 2 (`ch6:23`) |
 | Motor 0 CS (soft) | 15 | 22 | `motor0.cs_line` |
 | Motor 0 EN | 38 | 20 | `motor0.enable_line` |
 | Motor 1 CS (soft) | 13 | 27 | `motor1.cs_line` |
@@ -236,33 +236,39 @@ Simulation is permitted only when explicitly running
 
 ## 9. Changing Heater GPIO Pins
 
-The order of `heater.output_lines` defines heater identity:
+A heater's GPIO line is written beside its specimen in the motor group lists
+(section 10):
 
 ```ini
-heater.output_lines=19,13,6,5,24,23
+motor0.specimens=ch1:19,ch2:13,ch3:6,ch4:5
+motor1.specimens=ch5:24,ch6:23,ch7,ch8
 ```
 
-This means:
+`ch1:19` is the specimen whose PT100 is on card terminal 1 and whose heater
+is on BCM 19. The heated specimens are the heaters in the order listed,
+motor 0 first:
 
 ```text
-list position 0 -> H0 (H1 on the silkscreen)
-list position 1 -> H1 (H2)
+first heated specimen  -> H0 (H1 on the silkscreen), BCM 19 above
+second heated specimen -> H1 (H2), BCM 13
 ...
-list position 5 -> H5 (H6)
+sixth heated specimen  -> H5 (H6), BCM 23
 ```
 
 Example: to move H0 from BCM 19 to BCM 4:
 
 ```ini
-heater.output_lines=4,13,6,5,24,23
+motor0.specimens=ch1:4,ch2:13,ch3:6,ch4:5
 ```
 
 Move the physical H0 wire to physical pin 7, which is BCM 4. Do not place BCM
 4 elsewhere in the heater or motor configuration, and do not place it on any
 of the six v3 reserved lines (BCM 7, 8, 14, 15, 17, 26 — see
-[hardware.md](hardware.md#final-pin-map)).
+[hardware.md](hardware.md#final-pin-map)). Then run `coatheal-deploy` and
+reboot: the boot-time `gpio=` block in `/boot/firmware/config.txt` that holds
+every heater line low from power-on is derived from these lists.
 
-The number of entries must equal:
+The number of heated specimens must equal:
 
 ```ini
 hardware.heater_count=6
@@ -282,27 +288,31 @@ Do not change `heater.active_high` unless the electrical input stage has been
 verified. An incorrect polarity can energize a heater when zero duty is
 requested.
 
-## 10. Changing Heater-to-PT100 Mapping
+## 10. Changing Heater-to-PT100 Mapping and Motor Groups
 
-The software, and the ground station with it, fixes the logical frame:
-heater `Hi` takes its feedback from sample `Si`, motor 0 pulls `S0`–`S3`,
-motor 1 pulls `S4`–`S7` (`S6` and `S7` unheated), and the MAX31865 clicks
-read `S0` and `S4`:
+Each motor lists the specimens it pulls, in order, each as the Sequent RTD
+card terminal of its PT100 and, when heated, the BCM line of its heater
+(`ch8:19`; `ch1` alone is an unheated specimen):
 
 ```ini
-heater.temperature_channels=0,1,2,3,4,5
-motor0.samples=0,1,2,3
-motor1.samples=4,5,6,7
-sensor.max31865_sample_indices=0,4
+motor0.specimens=ch8:19,ch2:13,ch3:6,ch4:5
+motor1.specimens=ch5:24,ch7:23,ch1,ch6
 ```
 
-Leave those as they are — the ground station hard-codes the same pairing and
-groups, and `migrate-config` (every `coatheal-deploy`) pins
-`heater.temperature_channels`. A harness that does not follow the schematic
-is placed into that frame through the two wiring maps instead: the BCM line
-of the heater under `Si` goes into `heater.output_lines[i]`, and the card
-terminal of its PT100 into `sensor.sequent_rtd_channels[i]` (section 14).
-`coatheal-deploy` keeps both.
+The onboard numbers everything from these two lists. Motor 0's specimens are
+`S0`, `S1`, … in the order listed and motor 1's follow; the heated specimens
+are `H0`, `H1`, … in the same order, each heater reading its own specimen's
+PT100; MAX31865 click 1 reads motor 0's first specimen and click 2 motor 1's
+first. Groups need not be even — three heated and one unheated specimen on
+each motor is fine — but together the lists must hold `hardware.sample_count`
+specimens, `hardware.heater_count` of them heated. The ground station asks
+the onboard for the result (`GET_LAYOUT`) and arranges its Thermal tab, motor
+cards, values and plots by it, so nothing else has to agree.
+`coatheal-deploy` keeps both lists, and converts a config written before them
+(`heater.output_lines`, `heater.temperature_channels`,
+`sensor.sequent_rtd_channels`, `sensor.max31865_sample_indices`,
+`motor0.samples`, `motor1.samples` — now derived, and refused next to the
+lists) into them.
 
 `scripts/associate_heaters.py` shows, debugs, measures and writes them. On
 the Pi, with the service running:
@@ -331,10 +341,10 @@ switches the heater on with bench
 `HEATER_TEST` pulses (each lapses within 5 s on its own, so a dead script
 cannot leave a heater on), switches it off as soon as one RTD card terminal
 has warmed by 2 °C while no other has warmed by a third of that, and waits
-until no PT100 is still rising before the next heater. The pairs are written
-into `sensor.sequent_rtd_channels` with a config backup beside the file, and
-the service is restarted and checked against the new map; `coatheal-deploy`
-keeps the map from then on. It stops for a terminal reaching 50 °C, a probe
+until no PT100 is still rising before the next heater. Each paired heater's
+terminal is written into its specimen in the lists, with a config backup
+beside the file, and the service is restarted and checked against the new
+terminals; `coatheal-deploy` keeps the lists from then on. It stops for a terminal reaching 50 °C, a probe
 dropping out, or another client driving heaters. Every reading is logged to
 `logs/heater-association-<time>.csv` (`heat` logs to
 `logs/heater-test-H<i>-<time>.csv`; `--verbose` prints auto's table too).
@@ -349,27 +359,24 @@ left-out heater's sample keeps its terminal unless a paired heater took it,
 so its feedback is no better than before: do not heat it, fix what the script
 reported, and rerun. `auto` exits 0 only when every heater paired.
 
-Heat cannot tell which motor pulls a specimen, which unheated terminal is `S6`
-and which `S7`, or which specimen is on a MAX31865 click. `assign` writes all
-of it by hand, one motor at a time: each specimen as its PT100 card terminal
-and, when heated, its heater's BCM line (`ch8:19`; `ch1` alone is unheated).
-Heated specimens take the motor's heated samples in the order given — so
-list the specimen on the click first — and unheated ones the rest, which
-reorders `heater.output_lines` and `sensor.sequent_rtd_channels` while the
-groups themselves stay `0,1,2,3` / `4,5,6,7`. It refuses what the frame cannot
-hold (an unheated specimen on motor 0, a terminal or heater line given twice,
-a line the validator refuses) and, like `auto`, backs the config up, restarts
-the service and checks it runs the new assignment and claimed every heater
-line. `show` and `auto` print the `assign` command for the current and the
-measured table, so the usual path is: `auto`, correct the groups in the
+Heat cannot tell which motor pulls a specimen, the order of the unheated
+specimens, or which specimen is on a MAX31865 click. `assign` writes the two
+lists by hand, exactly as given — list the specimen on each motor's click
+first. It refuses what the onboard would refuse (a terminal outside
+`ch1`–`ch8` or given twice, a heater line given twice, other totals than
+`hardware.sample_count` specimens and `hardware.heater_count` heaters, a line
+the validator refuses) and, like `auto`, backs the config up, restarts the
+service and checks it runs the new terminals and claimed every heater line. `show` and `auto` print the `assign` command for the current and the
+measured assignment, so the usual path is: `auto`, correct the groups in the
 printed command, run it, then `auto --dry-run` to confirm the pairs still
 hold. A heater moved to a new BCM line needs `coatheal-deploy` afterwards so
 `config.txt` holds that line off from boot (REBOOT REQUIRED); nothing holds
 the line it left.
 
 Afterwards prove one loop from the ground station: a small temperature target
-on `Hi` must move `Si`, and only `Si`. A heater whose mapped sample is invalid
-or stale remains physically off.
+on each heater must move its own specimen's temperature, and only that one
+(the Thermal tab shows every heater row under its motor with the sample it
+reads). A heater whose sample is invalid or stale remains physically off.
 
 ## 11. Changing Motor GPIO Pins
 
@@ -406,19 +413,16 @@ Rules:
    never uses them.
 7. Keep `motor*.enable_active_low=true` when the carrier exposes active-low
    enable input.
-8. Set `motor*.invert_direction=true` only when software direction must be
-   reversed — this is confirmed by
+8. Set `motor*.invert_direction=true` when software direction must be
+   reversed — confirmed by
    [TMC5160 Commissioning gate 2](tmc5160-commissioning.md#gate-2--one-revolution-test-stepxtarget-scale-and-direction-blocking).
-   Do not reverse a motor by changing wires while powered.
+   Motor 0 turns opposite to motor 1 for the same command (owner 2026-09-15),
+   so `motor0.invert_direction=true` is the flight setting and
+   `coatheal-deploy` pins it. Do not reverse a motor by changing wires while
+   powered.
 
-Motor-to-sample grouping:
-
-```ini
-motor0.samples=0,1,2,3
-motor1.samples=4,5,6,7
-```
-
-This grouping is telemetry/event metadata. It does not change SPI wiring.
+Which specimens each motor pulls is `motor0.specimens` / `motor1.specimens`
+(section 10). The grouping does not change SPI wiring.
 
 ## 12. GPIO Conflict Validation
 
@@ -433,13 +437,13 @@ Validate every edit:
 Example conflict:
 
 ```text
-BCM GPIO 19 assigned to both heater.output_lines[0] and motor0.cs_line
+/dev/gpiochip0 line 19 assigned to both heater H0 (motor0.specimens) and motor0.cs_line
 ```
 
 Or a reserved-line collision, naming the owner:
 
 ```text
-GPIO 17 already claimed by reserved: sequent_hat rs485_dir
+/dev/gpiochip0 line 17 assigned to both reserved: sequent_hat rs485_dir and heater H2 (motor0.specimens)
 ```
 
 Do not start the service until the validator prints `Config OK`.
@@ -494,44 +498,32 @@ journalctl -fu coatheal-onboard.service
 
 ## 14. Sequent RTD HAT and PT100 Configuration
 
-Physical card channel labels are one-based, while software samples are
-zero-based:
-
-| Physical card channel | Software sample |
-|---:|---|
-| 1 | `S0` |
-| 2 | `S1` |
-| 3 | `S2` |
-| 4 | `S3` |
-| 5 | `S4` |
-| 6 | `S5` |
-| 7 | `S6` |
-| 8 | `S7` |
-
-`sensor.sequent_rtd_channels` maps card channel to software sample, in
-software-sample order. The default is an identity mapping:
+Physical card terminals are one-based (`ch1`–`ch8`), software samples
+zero-based. Which terminal each specimen's PT100 is on is the `ch<n>` of its
+entry in `motor0.specimens` / `motor1.specimens` (section 10); in the
+schematic wiring terminal `n` is sample `S(n-1)`:
 
 ```ini
-sensor.sequent_rtd_channels=1,2,3,4,5,6,7,8
+motor0.specimens=ch1:19,ch2:13,ch3:6,ch4:5
+motor1.specimens=ch5:24,ch6:23,ch7,ch8
 ```
 
-To remap, for example, a dead card channel 3 (so it no longer feeds software
-sample `S2`) by swapping it with channel 8 (previously feeding `S7`):
+To move, for example, `S2`'s PT100 off a dead card terminal 3 onto spare
+terminal 8 (where `S7`'s was), swap the two:
 
 ```ini
-sensor.sequent_rtd_channels=1,2,8,4,5,6,7,3
+motor0.specimens=ch1:19,ch2:13,ch8:6,ch4:5
+motor1.specimens=ch5:24,ch6:23,ch7,ch3
 ```
 
-Every entry must be `1..8`, there must be exactly `hardware.sample_count`
-entries, and entries must not repeat. When the harness does not follow the
-schematic, let `scripts/associate_heaters.py` (section 10) write this map;
-`coatheal-deploy` keeps it.
+Every terminal must be `ch1`–`ch8` and appear once across both lists. When
+the harness does not follow the schematic, let `scripts/associate_heaters.py`
+(section 10) measure and write the terminals; `coatheal-deploy` keeps them.
 
 Configure:
 
 ```ini
 sensor.sequent_rtd_stack=0
-sensor.sequent_rtd_channels=1,2,3,4,5,6,7,8
 sensor.sequent_rtd_poll_ms=1000
 sensor.sequent_rtd_expect_sensor_type=pt100
 sensor.sequent_rtd_resistance_min_ohm=60.0
@@ -552,7 +544,9 @@ python3 scripts/hardware_setup.py rtd-check
 every configured channel passed validation (finite, in-range resistance,
 temperature/resistance cross-check). It does not prove every PT100 probe is
 physically the one intended for that channel — verify the physical wiring
-against `sensor.sequent_rtd_channels` directly.
+against the terminals in `motor0.specimens` / `motor1.specimens` directly
+(`python3 scripts/associate_heaters.py heat H<i>` names the terminal a heater
+warms).
 
 ## 14b. MAX31865 Sample-Resistance Click Configuration
 
@@ -563,16 +557,15 @@ SPI0's native hardware chip-selects (not GPIO). Configure:
 ```ini
 sensor.max31865_reference_ohm=470.0
 sensor.max31865_poll_ms=1000
-sensor.max31865_sample_indices=0,4
 sensor.resistance_source=max31865_click
 ```
 
-`max31865_sample_indices` selects which two of the eight sample slots the
-clicks fill (entry 0 -> click 1/SAMPLE1, entry 1 -> click 2/SAMPLE2); the
-shipped `0,4` default is an owner-flagged placeholder, not a confirmed
-mapping. `max31865_reference_ohm` defaults to the MikroE nominal 470 Ω but
-must be confirmed against the populated part at the bench. Neither value nor
-the coating-resistance range itself should be trusted until
+Click 1/SAMPLE1 reads the first specimen of `motor0.specimens` and click
+2/SAMPLE2 the first of `motor1.specimens` (section 10): put the specimen that
+is wired to each click first in its motor's list. `max31865_reference_ohm`
+defaults to the MikroE nominal 470 Ω but must be confirmed against the
+populated part at the bench. Neither the click-to-specimen wiring nor that
+value nor the coating-resistance range itself should be trusted until
 [Sequent RTD Bench Bring-Up §9-10](sequent-rtd-bring-up.md#9-max31865-sample-resistance-click-bring-up-blocking-gates)
 is complete.
 

@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
 
 from ..protocol import (
     CommandResponse, validate_duty, validate_microstep, validate_move_mm, validate_pid_gains,
-    MAX_SPEED_HZ, validate_speed_hz,
+    MAX_SPEED_MM_S, validate_speed_mm_s,
 )
 from ..thermal_presets import PresetStore
 from . import gating
@@ -22,6 +22,7 @@ from .state import HEATER_COUNT, MOTOR_COUNT, OnboardState
 from .theme import HEATER_COLORS
 from .widgets import (
     AMBER, GREEN, MONO_CSS, MUTED, RED, ResponseLine, Segmented, confirm, group_box, hrow, make_button,
+    with_unit,
 )
 
 
@@ -56,14 +57,14 @@ class AdvancedTab(QScrollArea):
         self.btn_seq_del = make_button("−", "neutral", min_height=22, slot=self._remove_step)
         lay.addWidget(hrow(self.seq_motor, self.seq_name, self.btn_seq_add, self.btn_seq_del))
         self.seq_table = QTableWidget(0, 3)
-        self.seq_table.setHorizontalHeaderLabels(["target mm", "hold s", "speed Hz"])
+        self.seq_table.setHorizontalHeaderLabels(["target mm", "hold s", "speed mm/s"])
         self.seq_table.verticalHeader().setVisible(False)
         self.seq_table.setMinimumHeight(110)
         self.seq_table.horizontalHeader().setStretchLastSection(True)
         lay.addWidget(self.seq_table)
         self._add_step()
         grid = QGridLayout(); grid.setSpacing(3)
-        self.btn_seq_load = make_button("LOAD", "primary", sends="BENDSEQ_LOAD <motor_id> <name> <target µst from mm>:<hold>[:<hz>] ...", min_height=24, slot=self._seq_load)
+        self.btn_seq_load = make_button("LOAD", "primary", sends="BENDSEQ_LOAD <motor_id> <name> <target µst from mm>:<hold>[:<full-steps/s from mm/s>] ...", min_height=24, slot=self._seq_load)
         self.btn_seq_run = make_button("RUN", "success", sends="BENDSEQ_RUN <motor_id> <name>", min_height=24, slot=self._seq_run)
         self.btn_seq_pause = make_button("PAUSE", "danger", sends="BENDSEQ_PAUSE <motor_id>", min_height=24, slot=lambda: self._seq_cmd("BENDSEQ_PAUSE"))
         self.btn_seq_resume = make_button("RESUME", "success", sends="BENDSEQ_RESUME <motor_id>", min_height=24, slot=lambda: self._seq_cmd("BENDSEQ_RESUME"))
@@ -165,16 +166,17 @@ class AdvancedTab(QScrollArea):
         for motor_id in range(MOTOR_COUNT):
             name = QLabel(f"M{motor_id}"); name.setStyleSheet(f"{MONO_CSS} font-weight: bold;")
             target = QDoubleSpinBox(); target.setRange(-500.0, 500.0); target.setDecimals(2)
-            target.setValue(2.0); target.setSuffix(" mm")
-            hold = QDoubleSpinBox(); hold.setRange(0.0, 3600.0); hold.setDecimals(1); hold.setValue(5.0); hold.setSuffix(" s")
-            speed = QSpinBox(); speed.setRange(1, int(MAX_SPEED_HZ)); speed.setValue(int(MAX_SPEED_HZ)); speed.setSuffix(" Hz")
-            for spin, width in ((target, 84), (hold, 60), (speed, 64)):
+            target.setValue(2.0)
+            hold = QDoubleSpinBox(); hold.setRange(0.0, 3600.0); hold.setDecimals(1); hold.setValue(5.0)
+            speed = QDoubleSpinBox(); speed.setRange(0.01, MAX_SPEED_MM_S); speed.setDecimals(2)
+            speed.setSingleStep(0.01); speed.setValue(MAX_SPEED_MM_S)
+            for spin, width in ((target, 62), (hold, 48), (speed, 44)):
                 spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
                 spin.setFixedWidth(width)
-            btn = make_button("LOAD", "primary", sends=f"FALLBACK_PLAN {motor_id} <target µst from mm> <hold> <hz>", min_height=22,
+            btn = make_button("LOAD", "primary", sends=f"FALLBACK_PLAN {motor_id} <target µst from mm> <hold> <full-steps/s from mm/s>", min_height=22,
                               compact=True, slot=lambda m=motor_id: self._plan_load(m))
             self.plan_rows.append((target, hold, speed, btn))
-            lay.addWidget(hrow(name, target, hold, speed, btn))
+            lay.addWidget(hrow(name, with_unit(target, "mm"), with_unit(hold, "s"), with_unit(speed, "mm/s"), btn))
         self.btn_plan_arm = make_button("ARM PLAN", "success", sends="FALLBACK_ARM", min_height=24, slot=self._plan_arm)
         self.btn_plan_disarm = make_button("DISARM", "danger", sends="FALLBACK_DISARM", min_height=24, slot=lambda: self._send("FALLBACK_DISARM"))
         self.btn_plan_status = make_button("STATUS", "neutral", sends="FALLBACK_STATUS", min_height=24, slot=lambda: self._send("FALLBACK_STATUS"))
@@ -242,9 +244,10 @@ class AdvancedTab(QScrollArea):
         encoded: List[str] = []
         for row in range(self.seq_table.rowCount()):
             try:
-                target_mm = float(self.seq_table.item(row, 0).text().strip())
-                hold = float(self.seq_table.item(row, 1).text().strip())
-                speed_text = self.seq_table.item(row, 2).text().strip()
+                # "." is the separator; a typed "," is read the same way.
+                target_mm = float(self.seq_table.item(row, 0).text().strip().replace(",", "."))
+                hold = float(self.seq_table.item(row, 1).text().strip().replace(",", "."))
+                speed_text = self.seq_table.item(row, 2).text().strip().replace(",", ".")
             except (AttributeError, ValueError) as exc:
                 self.resp_seq.show_note(f"✖ step {row + 1}: {exc}", RED)
                 return None
@@ -263,10 +266,13 @@ class AdvancedTab(QScrollArea):
             target = _mm_to_usteps(target_mm, us)
             step = f"{target}:{hold:g}"
             if speed_text:
-                ok, msg = validate_speed_hz(float(speed_text))
+                try:
+                    ok, hz = validate_speed_mm_s(float(speed_text))
+                except ValueError as exc:
+                    ok, hz = False, str(exc)
                 if not ok:
-                    self.resp_seq.show_note(f"✖ step {row + 1}: {msg}", RED); return None
-                step += f":{float(speed_text):g}"
+                    self.resp_seq.show_note(f"✖ step {row + 1}: {hz}", RED); return None
+                step += f":{float(hz):g}"
             encoded.append(step)
         if not encoded:
             self.resp_seq.show_note("✖ add at least one step", RED)
@@ -330,7 +336,11 @@ class AdvancedTab(QScrollArea):
                 f"✖ M{motor_id} microstep unknown — wait for telemetry before loading the plan", RED)
             return
         usteps = _mm_to_usteps(target.value(), us)
-        self._send(f"FALLBACK_PLAN {motor_id} {usteps} {hold.value():g} {speed.value()}")
+        ok, hz = validate_speed_mm_s(speed.value())
+        if not ok:
+            self.resp_plan.show_note(f"✖ M{motor_id}: {hz}", RED)
+            return
+        self._send(f"FALLBACK_PLAN {motor_id} {usteps} {hold.value():g} {float(hz):g}")
 
     def _plan_arm(self) -> None:
         if confirm(self, "Arm the fallback plan?", "Send FALLBACK_ARM? The onboard will execute the loaded plan on its own if the link is lost at PRE_FLOAT/FLOAT."):

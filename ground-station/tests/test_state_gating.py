@@ -44,7 +44,7 @@ class StateTests(unittest.TestCase):
         self.assertFalse(m1.enabled)
         self.assertIs(m1.zeroed, False)
         self.assertTrue(m1.moving)
-        self.assertEqual(m1.samples, (4, 5, 6, 7))
+        self.assertEqual(st.layout.motor_samples[1], (4, 5, 6, 7))
 
     def test_empty_state_defaults(self) -> None:
         st = OnboardState()

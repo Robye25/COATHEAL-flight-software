@@ -48,12 +48,15 @@ python main.py command --cmd HEATERS_OFF --yes
 
 Rules:
 
-- Targets must be within `heater.target_min_c..heater.target_max_c`.
+- Targets must be within `heater.target_min_c..heater.target_max_c` (flight
+  `0..75` °C). The ground station asks for confirmation before any target
+  above 40 °C.
 - Setting a duty clears that channel's target.
 - Setting a target clears that channel's duty override.
 - `HEATERS_OFF` clears every duty and target.
 - Invalid PT100 data forces the matching heater off, including open-loop mode.
-- Overtemperature is latched until `RESET_CTRL`.
+- A heater whose sample reads above `heater.max_sample_temp_c` (80 °C) is
+  latched off until `RESET_CTRL`.
 - The Pi does not persist targets or tuned PID gains across restart. Save and
   reapply them through a ground-station thermal profile.
 
@@ -92,7 +95,7 @@ means the power stage is off; `ola`/`olb` are open-load flags (only valid
 at standstill), `s2ga`/`s2gb` short-to-ground. The console's **Debug tab**
 polls this twice a second and turns the deltas into full-steps/s, rev/s and
 mm/s (using the ball-screw lead you enter), with a verdict line. Expected:
-one revolution = 200 full steps ≈ 1–2 mm of pull; at the 50 Hz ceiling a
+one revolution = 200 full steps ≈ 1–2 mm of pull; at the 0.5 mm/s ceiling (50 full-steps/s) a
 BEND of 800 µsteps (µ4) takes 4 s and moves about 1.5 mm -- easy to miss on
 a camera, obvious in `mscnt`.
 
@@ -186,7 +189,8 @@ python main.py command --cmd STATUS
 If the link is lost right when the samples should be bent (ascent, just
 before float), the onboard can bend them on its own — but only with a plan
 the operator loaded and armed beforehand. Load one bend per motor (absolute
-microsteps, hold seconds, optional full-step Hz), then arm:
+microsteps, hold seconds, optional full-steps/s — the console's Advanced tab
+takes mm and mm/s and converts), then arm:
 
 ```powershell
 python main.py command --cmd "FALLBACK_PLAN 0 800 5 50"

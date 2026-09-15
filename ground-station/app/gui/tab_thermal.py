@@ -1,25 +1,26 @@
-"""Thermal tab: budget header, six heater rows, all-channel targets,
-presets, PID autotune (redesign spec §5.3). Manual PID gains and
-open-loop duty live in the Advanced tab."""
+"""Thermal tab: budget header, the heaters and specimens of each motor group,
+all-channel targets, presets, PID autotune (redesign spec §5.3). Manual PID
+gains and open-loop duty live in the Advanced tab."""
 from __future__ import annotations
 
 from typing import Dict, List, Optional
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
-    QAbstractSpinBox, QComboBox, QDoubleSpinBox, QGridLayout, QHBoxLayout, QInputDialog, QLabel,
+    QAbstractSpinBox, QComboBox, QDoubleSpinBox, QHBoxLayout, QInputDialog, QLabel,
     QProgressBar, QScrollArea, QSpinBox, QVBoxLayout, QWidget,
 )
 
-from ..protocol import CommandResponse, validate_temperature_target
+from ..protocol import OVERTEMP_LATCH_C, TARGET_MAX_C, CommandResponse, validate_temperature_target
 from ..reply_format import parse_kv_body
 from ..thermal_presets import PresetStore, ThermalPreset
 from . import gating
 from .dispatch import CommandDispatcher
-from .state import HEATER_COUNT, HEATER_SAMPLE, OnboardState
+from .state import DEFAULT_LAYOUT, HEATER_COUNT, Layout, OnboardState
 from .theme import HEATER_COLORS
 from .widgets import (
-    AMBER, GREEN, MONO_CSS, MUTED, RED, Indicator, ResponseLine, group_box, hrow, make_button, soft_breaks,
+    AMBER, GREEN, MONO_CSS, MUTED, RED, Indicator, ResponseLine, confirm, group_box, hrow,
+    make_button, soft_breaks, unit_label, with_unit,
 )
 
 DEFAULT_TARGET_C = 20.0
@@ -44,6 +45,17 @@ _STATE_COLORS = {"NO TEMP": RED, "INHIBITED": AMBER, "PID": GREEN, "DUTY": "#349
 _STATE_SHORT = {"NO TEMP": "NO-T", "INHIBITED": "INHIB"}
 
 
+def _measured_text(label: QLabel, sample: int, temp: Optional[float]) -> None:
+    if temp is None:
+        label.setText(f"S{sample} —")
+        label.setStyleSheet(f"{MONO_CSS} color: {RED};")
+        label.setToolTip(f"S{sample}: no valid temperature")
+    else:
+        label.setText(f"S{sample} {temp:5.1f}")
+        label.setStyleSheet(MONO_CSS)
+        label.setToolTip(f"S{sample} = {temp:.2f} °C")
+
+
 class HeaterRow(QWidget):
     def __init__(self, index: int, tab: "ThermalTab", parent=None):
         super().__init__(parent)
@@ -59,8 +71,8 @@ class HeaterRow(QWidget):
         self.measured.setStyleSheet(MONO_CSS)
         self.measured.setFixedWidth(64)
         self.target = QDoubleSpinBox()
-        self.target.setRange(0.0, 80.0); self.target.setDecimals(1); self.target.setValue(DEFAULT_TARGET_C)
-        self.target.setSuffix(" °C"); self.target.setFixedWidth(62)
+        self.target.setRange(0.0, TARGET_MAX_C); self.target.setDecimals(1); self.target.setValue(DEFAULT_TARGET_C)
+        self.target.setFixedWidth(46)
         self.target.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.btn_set = make_button("Set", "primary", sends=f"SET_TEMP_TARGET {index} <target_c>", min_height=22,
                                    compact=True, width=32, slot=lambda: tab.set_target(index, self.target.value()))
@@ -72,7 +84,8 @@ class HeaterRow(QWidget):
         self.duty = QLabel("  0 %"); self.duty.setStyleSheet(MONO_CSS); self.duty.setFixedWidth(36)
         self.state = QLabel("—"); self.state.setStyleSheet(f"{MONO_CSS} font-weight: bold; color: {MUTED};")
         self.state.setFixedWidth(40)
-        for w in (name, self.measured, self.target, self.btn_set, self.btn_clear):
+        unit = unit_label("°C"); unit.setFixedWidth(16)
+        for w in (name, self.measured, self.target, unit, self.btn_set, self.btn_clear):
             lay.addWidget(w)
         lay.addWidget(self.bar, 1)
         lay.addWidget(self.duty)
@@ -83,17 +96,9 @@ class HeaterRow(QWidget):
             "QProgressBar { border: 1px solid #333; border-radius: 2px; background: #0e0e0e; }"
             f"QProgressBar::chunk {{ background-color: {color}; }}")
 
-    def update_row(self, temp: Optional[float], duty: float, target: Optional[float],
+    def update_row(self, sample: int, temp: Optional[float], duty: float, target: Optional[float],
                    inhibited: bool, reason: Optional[str]) -> None:
-        sample = HEATER_SAMPLE[self.index]
-        if temp is None:
-            self.measured.setText(f"S{sample} —")
-            self.measured.setStyleSheet(f"{MONO_CSS} color: {RED};")
-            self.measured.setToolTip(f"S{sample}: no valid temperature")
-        else:
-            self.measured.setText(f"S{sample} {temp:5.1f}")
-            self.measured.setStyleSheet(MONO_CSS)
-            self.measured.setToolTip(f"S{sample} = {temp:.2f} °C")
+        _measured_text(self.measured, sample, temp)
         pct = max(0.0, min(1.0, duty)) * 100.0
         self.bar.setValue(int(pct * 10))
         self._style_bar(GREEN if pct < 60 else AMBER if pct < 85 else RED)
@@ -106,6 +111,24 @@ class HeaterRow(QWidget):
         self.btn_clear.set_reason(gating.generic_reason(self._tab.state))
 
 
+class SampleRow(QWidget):
+    """An unheated specimen of a motor group: its PT100 reading only."""
+
+    def __init__(self, sample: int, parent=None):
+        super().__init__(parent)
+        self.sample = sample
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+        name = QLabel("—"); name.setStyleSheet(f"{MONO_CSS} color: {MUTED};"); name.setFixedWidth(22)
+        self.measured = QLabel("—"); self.measured.setStyleSheet(MONO_CSS); self.measured.setFixedWidth(64)
+        note = QLabel("unheated"); note.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
+        lay.addWidget(name); lay.addWidget(self.measured); lay.addWidget(note, 1)
+
+    def update_row(self, temp: Optional[float]) -> None:
+        _measured_text(self.measured, self.sample, temp)
+
+
 class ThermalTab(QScrollArea):
     targets_changed = pyqtSignal(list)
 
@@ -116,8 +139,9 @@ class ThermalTab(QScrollArea):
         self.setFrameShape(QScrollArea.Shape.NoFrame)
         self._disp = dispatcher
         self.state = OnboardState()
+        self._layout: Layout = DEFAULT_LAYOUT
         self._targets: List[Optional[float]] = [None] * HEATER_COUNT   # last known onboard targets
-        self._limits = (0.0, 80.0)
+        self._limits = (0.0, TARGET_MAX_C)
         self._gains = (0.20, 0.02, 0.03)
         self.presets = preset_store if preset_store is not None else PresetStore().load()
 
@@ -141,36 +165,39 @@ class ThermalTab(QScrollArea):
             lay.addWidget(ind)
         outer.addWidget(frame)
 
-        frame, lay = group_box("Heaters")
-        header = QHBoxLayout(); header.setSpacing(4)
-        for text, width in (("", 22), ("meas. °C", 64), ("target", 62 + 32 + 32 + 8), ("duty", 0), ("state", 40)):
-            lbl = QLabel(text); lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
-            if width:
-                lbl.setFixedWidth(width)
-                header.addWidget(lbl)
-            else:
-                header.addWidget(lbl, 1)
-        lay.addLayout(header)
-        self.rows: List[HeaterRow] = []
-        for i in range(HEATER_COUNT):
-            row = HeaterRow(i, self)
-            self.rows.append(row)
-            lay.addWidget(row)
+        # One group per motor, each with its heaters and unheated specimens
+        # (set_layout rearranges them when the onboard reports its groups).
+        frame, lay = group_box("Heaters and specimens by motor group")
+        self.rows: List[HeaterRow] = [HeaterRow(i, self) for i in range(HEATER_COUNT)]
+        self.sample_rows: Dict[int, SampleRow] = {}
+        self.group_titles: List[QLabel] = []
+        self._groups = QWidget()
+        self._groups_lay = QVBoxLayout(self._groups)
+        self._groups_lay.setContentsMargins(0, 0, 0, 0); self._groups_lay.setSpacing(6)
+        lay.addWidget(self._groups)
+        self.layout_note = QLabel("")
+        self.layout_note.setWordWrap(True); self.layout_note.setMinimumWidth(1)
+        lay.addWidget(self.layout_note)
+        confirm_note = QLabel(f"A target above {gating.CONFIRM_ABOVE_C:g} °C asks first; the onboard "
+                              f"allows up to {TARGET_MAX_C:g} °C and latches a heater off above "
+                              f"{OVERTEMP_LATCH_C:g} °C.")
+        confirm_note.setWordWrap(True); confirm_note.setMinimumWidth(1)
+        confirm_note.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
+        lay.addWidget(confirm_note)
         self.resp_heaters = ResponseLine()
         lay.addWidget(self.resp_heaters)
         outer.addWidget(frame)
 
         frame, lay = group_box("All channels")
         self.all_target = QDoubleSpinBox()
-        self.all_target.setRange(0.0, 80.0); self.all_target.setDecimals(1); self.all_target.setValue(DEFAULT_TARGET_C)
-        self.all_target.setSuffix(" °C")
+        self.all_target.setRange(0.0, TARGET_MAX_C); self.all_target.setDecimals(1); self.all_target.setValue(DEFAULT_TARGET_C)
         self.btn_set_all = make_button("Set all", "success", sends="SET_ALL_TEMP_TARGETS <target_c>", min_height=24,
                                        slot=self.set_all_targets)
         self.btn_clear_all = make_button("Clear all", "neutral", sends="CLEAR_TEMP_TARGETS", min_height=24,
                                          slot=lambda: self._send("CLEAR_TEMP_TARGETS"))
         self.btn_refresh = make_button("Refresh", "neutral", sends="GET_THERMAL", min_height=24,
                                        slot=lambda: self._send("GET_THERMAL"))
-        lay.addWidget(hrow(self.all_target, self.btn_set_all, self.btn_clear_all, self.btn_refresh))
+        lay.addWidget(hrow(with_unit(self.all_target, "°C"), self.btn_set_all, self.btn_clear_all, self.btn_refresh))
         self.resp_all = ResponseLine()
         lay.addWidget(self.resp_all)
         outer.addWidget(frame)
@@ -197,14 +224,15 @@ class ThermalTab(QScrollArea):
         self.tune_heater = QComboBox()
         for i in range(HEATER_COUNT):
             self.tune_heater.addItem(f"H{i}", i)
-        self.tune_setpoint = QDoubleSpinBox(); self.tune_setpoint.setRange(0.0, 80.0)
-        self.tune_setpoint.setDecimals(1); self.tune_setpoint.setValue(40.0); self.tune_setpoint.setSuffix(" °C")
+        self.tune_setpoint = QDoubleSpinBox(); self.tune_setpoint.setRange(0.0, TARGET_MAX_C)
+        self.tune_setpoint.setDecimals(1); self.tune_setpoint.setValue(40.0)
         self.tune_duty = QDoubleSpinBox(); self.tune_duty.setRange(0.05, 1.0)
         self.tune_duty.setDecimals(2); self.tune_duty.setSingleStep(0.05); self.tune_duty.setValue(0.5)
         self.tune_cycles = QSpinBox(); self.tune_cycles.setRange(1, 10); self.tune_cycles.setValue(4)
         hl = QLabel("relay duty"); hl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         cl = QLabel("cycles"); cl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
-        lay.addWidget(hrow(self.tune_heater, self.tune_setpoint, hl, self.tune_duty, cl, self.tune_cycles))
+        lay.addWidget(hrow(self.tune_heater, with_unit(self.tune_setpoint, "°C"), hl, self.tune_duty, cl,
+                           self.tune_cycles))
         self.btn_tune_start = make_button("START TUNE", "success",
                                           sends="PID_TUNE_START <heater> <setpoint_c> <relay_duty> <cycles>",
                                           min_height=26, slot=self._tune_start)
@@ -235,18 +263,86 @@ class ThermalTab(QScrollArea):
 
         self._capture_pending: Optional[str] = None
         self.refresh_presets()
+        self.set_layout(self._layout)
+
+    # -- motor groups ------------------------------------------------------------
+    def set_layout(self, layout: Layout) -> None:
+        """Arrange the heater rows and unheated specimens under their motors."""
+        self._layout = layout
+        for row in self.rows:
+            row.setParent(None)
+        while self._groups_lay.count():
+            old = self._groups_lay.takeAt(0).widget()
+            if old is not None:
+                old.setParent(None)   # out of the tree now, not at the next event loop pass
+                old.deleteLater()
+        self.sample_rows = {}
+        self.group_titles = []
+        for motor, samples in enumerate(layout.motor_samples):
+            heaters = layout.heaters_of_motor(motor)
+            box = QWidget(); box.setObjectName(f"motorGroup{motor}")
+            box_lay = QVBoxLayout(box); box_lay.setContentsMargins(0, 0, 0, 0); box_lay.setSpacing(3)
+            title = QLabel(f"MOTOR {motor} — {len(samples)} specimens, {len(heaters)} heated "
+                           f"(S{', S'.join(map(str, samples))})")
+            title.setStyleSheet("color: #bbb; font-size: 8pt; font-weight: bold; "
+                                "border-bottom: 1px solid #333; padding-bottom: 1px;")
+            title.setWordWrap(True); title.setMinimumWidth(1)
+            self.group_titles.append(title)
+            box_lay.addWidget(title)
+            header = QHBoxLayout(); header.setSpacing(4)
+            for text, width in (("", 22), ("meas. °C", 64), ("target", 46 + 16 + 32 + 32 + 12),
+                                ("duty", 0), ("state", 40)):
+                lbl = QLabel(text); lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
+                if width:
+                    lbl.setFixedWidth(width)
+                    header.addWidget(lbl)
+                else:
+                    header.addWidget(lbl, 1)
+            box_lay.addLayout(header)
+            for sample in samples:
+                heater = layout.heater_of_sample(sample)
+                if heater is not None and heater < len(self.rows):
+                    box_lay.addWidget(self.rows[heater])
+                    self.rows[heater].show()
+                else:
+                    row = SampleRow(sample)
+                    self.sample_rows[sample] = row
+                    box_lay.addWidget(row)
+            self._groups_lay.addWidget(box)
+        if layout.reported:
+            self.layout_note.setText("Groups as the onboard reports them (motor0.specimens / motor1.specimens).")
+            self.layout_note.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
+        else:
+            self.layout_note.setText("Schematic groups: the onboard has not reported its layout "
+                                     "(GET_LAYOUT), so these may not match the wiring.")
+            self.layout_note.setStyleSheet(f"color: {AMBER}; font-size: 8pt;")
+        for i in range(self.tune_heater.count()):
+            heater = int(self.tune_heater.itemData(i))
+            self.tune_heater.setItemData(
+                i, f"motor {layout.motor_of_heater(heater)}, sample S{layout.sample_of_heater(heater)}",
+                Qt.ItemDataRole.ToolTipRole)
         self.update_state(self.state)
 
     # -- senders -----------------------------------------------------------------
     def _send(self, cmd: str) -> None:
         self._disp.send(cmd, tag=self)
 
+    def _confirmed(self, cmd: str, line: ResponseLine) -> bool:
+        """Owner rule 2026-09-15: heating above 40 °C asks first."""
+        question = gating.heating_question(cmd)
+        if question is None or confirm(self, "Heat above 40 °C?", question):
+            return True
+        line.show_note(f"not sent: {cmd}", AMBER)
+        return False
+
     def set_target(self, index: int, value: float) -> None:
         ok, norm = validate_temperature_target(value, self._limits[0], self._limits[1])
         if not ok:
             self.resp_heaters.show_note(f"✖ H{index}: {norm}", RED)
             return
-        self._send(f"SET_TEMP_TARGET {index} {norm}")
+        cmd = f"SET_TEMP_TARGET {index} {norm}"
+        if self._confirmed(cmd, self.resp_heaters):
+            self._send(cmd)
 
     def clear_target(self, index: int) -> None:
         self._send(f"CLEAR_TEMP_TARGET {index}")
@@ -256,17 +352,23 @@ class ThermalTab(QScrollArea):
         if not ok:
             self.resp_all.show_note(f"✖ {norm}", RED)
             return
+        cmd = f"SET_ALL_TEMP_TARGETS {norm}"
+        if not self._confirmed(cmd, self.resp_all):
+            return
         for row in self.rows:
             row.target.setValue(self.all_target.value())
-        self._send(f"SET_ALL_TEMP_TARGETS {norm}")
+        self._send(cmd)
 
     # -- PID autotune ------------------------------------------------------------
     def _tune_start(self) -> None:
         heater = int(self.tune_heater.currentData() or 0)
+        cmd = (f"PID_TUNE_START {heater} {self.tune_setpoint.value():g} "
+               f"{self.tune_duty.value():g} {self.tune_cycles.value()}")
+        if not self._confirmed(cmd, self.resp_tune):
+            return
         self._tune_result = None
         self.btn_tune_apply.set_reason("no tune result yet")
-        self._send(f"PID_TUNE_START {heater} {self.tune_setpoint.value():g} "
-                   f"{self.tune_duty.value():g} {self.tune_cycles.value()}")
+        self._send(cmd)
         self._tune_timer.start()
         self._tune_poll()
 
@@ -350,6 +452,13 @@ class ThermalTab(QScrollArea):
         if preset is None:
             self.resp_preset.show_note("✖ select a preset", RED)
             return
+        hot = [f"H{index} {target:g} °C" for index, target in enumerate(preset.targets_c[:HEATER_COUNT])
+               if target is not None and target > gating.CONFIRM_ABOVE_C]
+        if hot and not confirm(self, "Heat above 40 °C?",
+                               f"Preset '{name}' heats {', '.join(hot)} — above "
+                               f"{gating.CONFIRM_ABOVE_C:g} °C. Apply it?"):
+            self.resp_preset.show_note(f"not applied: '{name}'", AMBER)
+            return
         for index, target in enumerate(preset.targets_c[:HEATER_COUNT]):
             if target is not None:
                 self.rows[index].target.setValue(target)
@@ -377,11 +486,19 @@ class ThermalTab(QScrollArea):
 
     def update_state(self, state: OnboardState) -> None:
         self.state = state
+        layout = self._layout
         inhibited = state.heaters_inhibited
         for row in self.rows:
-            temp = state.sample_temps[HEATER_SAMPLE[row.index]] if state.have_packet else None
+            sample = layout.sample_of_heater(row.index)
+            if sample is None:
+                continue
+            temp = state.sample_temps[sample] if state.have_packet and sample < len(state.sample_temps) else None
             duty = state.heater_duty[row.index] if state.have_packet else 0.0
-            row.update_row(temp, duty, self._targets[row.index], inhibited, gating.heater_reason(state, row.index))
+            row.update_row(sample, temp, duty, self._targets[row.index], inhibited,
+                           gating.heater_reason(state, row.index))
+        for sample, sample_row in self.sample_rows.items():
+            temp = state.sample_temps[sample] if state.have_packet and sample < len(state.sample_temps) else None
+            sample_row.update_row(temp)
         self.btn_set_all.set_reason(gating.all_heaters_reason(state))
         tune_ch = int(self.tune_heater.currentData() or 0)
         if state.tune_channel:
@@ -486,6 +603,7 @@ class ThermalTab(QScrollArea):
             for row in self.rows:
                 row.target.setRange(lo, hi)
             self.all_target.setRange(lo, hi)
+            self.tune_setpoint.setRange(lo, hi)
         except ValueError:
             pass
         for index in range(HEATER_COUNT):

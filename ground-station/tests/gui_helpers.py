@@ -36,9 +36,16 @@ def make_window(tmp_root: Path, *, cmd_host: str = "127.0.0.1"):
     )
 
 
-def capture_sends(dispatcher) -> list:
+def capture_sends(dispatcher, *, layout_query: bool = False) -> list:
+    """Commands the window sends. The GET_LAYOUT the window asks on every
+    new onboard session is left out unless `layout_query`."""
     sent: list = []
-    dispatcher.send = lambda cmd, tag=None, timeout=None: sent.append(cmd)
+
+    def send(cmd, tag=None, timeout=None, quiet=False):
+        if layout_query or cmd != "GET_LAYOUT":
+            sent.append(cmd)
+
+    dispatcher.send = send
     return sent
 
 

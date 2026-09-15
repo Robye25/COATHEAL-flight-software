@@ -88,9 +88,10 @@ model and SPI0 topology are gated on bench verification too; see
 
 | Parameter | Default |
 |---|---|
-| Heated samples | 0..5 |
-| Unheated pulled samples | 6..7 |
-| Manual target range | `heater.target_min_c..heater.target_max_c` (`0..80 C`) |
+| Heated samples | The heated specimens of `motor0.specimens` / `motor1.specimens` (0..5 in the schematic wiring; `GET_LAYOUT` reports them) |
+| Unheated pulled samples | The rest (6..7 in the schematic wiring) |
+| Manual target range | `heater.target_min_c..heater.target_max_c` (`0..75 C`) |
+| Overtemperature latch | `heater.max_sample_temp_c=80.0`: a heater whose sample reads above it stays off until `RESET_CTRL` |
 | Fallback floor | `phase.sample_floor_c=5.0` |
 | Hysteresis | 0.5 C |
 | Duty range | `0.0..1.0` |

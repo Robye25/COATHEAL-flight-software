@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Optional
 
 import pyqtgraph as pg
-from PyQt6.QtCore import QSettings, Qt, QTimer
+from PyQt6.QtCore import QLocale, QSettings, Qt, QTimer
 from PyQt6.QtGui import QAction, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QAbstractSpinBox, QApplication, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
@@ -26,7 +26,7 @@ from PyQt6.QtWidgets import (
 from ..protocol import CommandResponse, PullEvent, TelemetryPacket
 from ..telemetry_log import LogManager
 from ..thermal_presets import PresetStore
-from . import firewall
+from . import firewall, gating
 from .alarms import AlarmModel
 from .dispatch import CommandDispatcher, TelemetryReceiver
 from .discovery import (
@@ -41,15 +41,19 @@ from .panels_health import HealthPanel
 from .plots import PlotArea
 from .replay import ReplayClassifier, ReplayVerdict, parse_onboard_timestamp
 from .scale import UiScale
-from .state import OnboardState, state_from_packet
+from .state import DEFAULT_LAYOUT, Layout, OnboardState, parse_layout, state_from_packet
 from .tab_advanced import AdvancedTab
 from .tab_debug import DebugTab
 from .tab_motion import MotionTab
 from .tab_system import SystemTab
 from .tab_thermal import ThermalTab
+from .widgets import apply_number_locale, confirm, install_input_policy
 
 STATE_TICK_MS = 500
 DISK_TICK_MS = 10_000
+# A GET_LAYOUT that never reached the onboard (refused, timed out) is asked
+# again on the first live frame after this long.
+LAYOUT_RETRY_S = 10.0
 
 
 class MainWindow(QMainWindow):
@@ -61,6 +65,14 @@ class MainWindow(QMainWindow):
         self.resize(1600, 900)
         self._settings = QSettings("COATHEAL", "GroundStation")
         app = QApplication.instance()
+        # Before any widget exists: "." decimals, and the wheel edits a value
+        # only with Ctrl or Shift held (owner 2026-09-15).
+        apply_number_locale()
+        # This window was created under the previous default, and children
+        # take their parent's locale when added to it.
+        self.setLocale(QLocale())
+        if app is not None:
+            install_input_policy(app)
         self._scale = UiScale(app, self._settings) if app is not None else None
 
         # `log_path` is the log ROOT (`logs/`); a legacy file path such as
@@ -98,6 +110,11 @@ class MainWindow(QMainWindow):
         # 2026-08-29).
         self._mode_override: Optional[str] = None
         self._beep = bool(self._settings.value("alarms/beep", False, type=bool))
+        # Motor groups as the onboard reports them (GET_LAYOUT, asked once per
+        # onboard session); the schematic groups until then.
+        self._layout: Layout = DEFAULT_LAYOUT
+        self._layout_session = ""
+        self._layout_retry_mono = 0.0
 
         self._dispatcher = CommandDispatcher(cmd_host, cmd_port, log_manager=self._logs)
         self._dispatcher.response_received.connect(self._on_response)
@@ -144,7 +161,7 @@ class MainWindow(QMainWindow):
         self._right_tabs.setMinimumWidth(300)
 
         self._console = ConsolePanel()
-        self._console.send_requested.connect(lambda cmd: self._dispatcher.send(cmd, tag=self._console))
+        self._console.send_requested.connect(self._send_console)
         self._events = EventsPanel()
         self._events.set_sink(self._logs.log_event)
         self._pulls = PullsPanel()
@@ -299,6 +316,10 @@ class MainWindow(QMainWindow):
                 self._backlog_frames = self._verdict.backlog_frames
             self._mode_override = None
             self._last_pkt = pkt
+            if (pkt.session_id != self._layout_session and not self._dispatcher.silence
+                    and now_mono >= self._layout_retry_mono):
+                self._layout_session = pkt.session_id
+                self._dispatcher.send("GET_LAYOUT", tag=self)
             self._top.set_health(pkt)
             self._health.on_packet(pkt)
             self._apply_state()
@@ -317,6 +338,8 @@ class MainWindow(QMainWindow):
         self._events.append(f"[{'ACK' if resp.ok else 'NACK'}] {cmd}  ({ms:.0f} ms)  {body}",
                             "INFO" if resp.ok else "WARN")
         verb = cmd.strip().split()[0].upper() if cmd.strip() else ""
+        if verb == "GET_LAYOUT":
+            self._absorb_layout(resp)
         if resp.ok and verb in ("ARM", "DISARM", "EXIT_SAFE", "ENTER_SAFE", "STATUS"):
             # The acknowledgement is the onboard's word on its mode right now;
             # the panels must not wait for the next live frame to show it.
@@ -327,6 +350,48 @@ class MainWindow(QMainWindow):
         self._console.on_response(cmd, resp, ms, tag)
         for panel in (self._system, self._thermal, self._motion, self._advanced, self._checkout):
             panel.on_response(cmd, resp, ms, tag)
+
+    def _absorb_layout(self, resp: CommandResponse) -> None:
+        if not resp.ok and not resp.raw:
+            # Never reached the onboard (refused, timed out, radio silence):
+            # ask again once the link is back.
+            self._layout_session = ""
+            self._layout_retry_mono = time.monotonic() + LAYOUT_RETRY_S
+            self._events.append(f"[layout] GET_LAYOUT got no reply ({resp.error}); asking again "
+                                f"in {LAYOUT_RETRY_S:.0f} s", "WARN")
+            return
+        if not resp.ok:
+            self._events.append("[layout] the onboard does not report its motor groups "
+                                f"({resp.error or resp.raw}); showing the schematic groups", "WARN")
+            return
+        layout = parse_layout(resp.body)
+        if layout is None:
+            self._events.append(f"[layout] unreadable GET_LAYOUT reply: {resp.body}", "WARN")
+            return
+        self._logs.record_layout(self._layout_session, layout.as_dict())
+        if layout == self._layout:
+            return
+        self.set_layout(layout)
+        groups = "; ".join(f"M{m} S{','.join(map(str, samples))}"
+                           for m, samples in enumerate(layout.motor_samples))
+        self._events.append(f"[layout] motor groups from the onboard: {groups}; heaters read "
+                            + " ".join(f"H{h}=S{s}" for h, s in enumerate(layout.heater_samples)))
+
+    def set_layout(self, layout: Layout) -> None:
+        """Rearrange every per-motor view for `layout`."""
+        self._layout = layout
+        self._thermal.set_layout(layout)
+        self._motion.set_layout(layout)
+        self._values.set_layout(layout)
+        self._plots.set_layout(layout)
+        self._apply_state()
+
+    def _send_console(self, cmd: str) -> None:
+        question = gating.heating_question(cmd)
+        if question is not None and not confirm(self, "Heat above 40 °C?", question):
+            self._events.append(f"[console] not sent (not confirmed): {cmd.strip()}")
+            return
+        self._dispatcher.send(cmd, tag=self._console)
 
     def _on_silence_changed(self, active: bool) -> None:
         for worker in (self._beacon, self._probe):
@@ -344,9 +409,11 @@ class MainWindow(QMainWindow):
         silence = self._dispatcher.silence
         age = self._link_age()
         if self._last_pkt is not None:
-            state = state_from_packet(self._last_pkt, silence=silence, link_age_s=age)
+            state = state_from_packet(self._last_pkt, silence=silence, link_age_s=age,
+                                      layout=self._layout)
         else:
-            state = dataclasses.replace(OnboardState(), silence=silence, link_age_s=age)
+            state = dataclasses.replace(OnboardState(), silence=silence, link_age_s=age,
+                                        layout=self._layout)
         tagged = self._verdict.tagged
         if tagged:
             # Live-first drain: replay frames interleave with live ones, so
@@ -590,6 +657,8 @@ def run_gui(argv: Optional[list[str]] = None) -> int:
     app = QApplication.instance() or QApplication([])
     from .theme import apply_dark_palette
     apply_dark_palette(app)
+    apply_number_locale()
+    install_input_policy(app)
 
     win = MainWindow(bind=args.bind, tel_port=args.tel_port, cmd_port=args.cmd_port,
                      cmd_host=args.host, log_path=args.log,

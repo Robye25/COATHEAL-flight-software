@@ -34,8 +34,9 @@ class BendTracker:
 
     @staticmethod
     def monitored_samples(state: OnboardState, motor_id: int) -> List[int]:
-        motor = state.motor(motor_id)
-        return [s for s in motor.samples
+        groups = state.layout.motor_samples
+        samples = groups[motor_id] if 0 <= motor_id < len(groups) else ()
+        return [s for s in samples
                 if s < len(state.sample_resistance) and state.sample_resistance[s] is not None]
 
     def mark_start(self, motor_id: int, state: OnboardState, ts_utc: str,

@@ -71,6 +71,114 @@ bool ParseSizeList(const std::string& value, std::vector<std::size_t>* out) {
   return true;
 }
 
+bool ParseDigits(const std::string& text, std::size_t* out) {
+  if (text.empty() || text.size() > 4 ||
+      !std::all_of(text.begin(), text.end(),
+                   [](unsigned char c) { return std::isdigit(c) != 0; })) {
+    return false;
+  }
+  *out = static_cast<std::size_t>(std::stoul(text));
+  return true;
+}
+
+// motorN.specimens: `ch8:19,ch2:13,ch1` -- each entry a card terminal and,
+// for a heated specimen, its heater's BCM line.
+bool ParseSpecimenList(const std::string& value, std::vector<SpecimenConfig>* out) {
+  out->clear();
+  std::istringstream iss(value);
+  std::string item;
+  while (std::getline(iss, item, ',')) {
+    std::string entry = Trim(item);
+    std::transform(entry.begin(), entry.end(), entry.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    const std::size_t colon = entry.find(':');
+    const std::string terminal = Trim(entry.substr(0, colon));
+    SpecimenConfig specimen;
+    if (terminal.rfind("ch", 0) != 0 ||
+        !ParseDigits(terminal.substr(2), &specimen.rtd_channel)) {
+      return false;
+    }
+    if (colon != std::string::npos) {
+      std::string line = Trim(entry.substr(colon + 1));
+      if (line.rfind("bcm", 0) == 0) line = line.substr(3);
+      std::size_t parsed = 0;
+      if (!ParseDigits(line, &parsed)) return false;
+      specimen.heater_line = parsed;
+    }
+    out->push_back(specimen);
+  }
+  return !out->empty();
+}
+
+// Fills the index-based maps the rest of the onboard runs on from the two
+// motors' specimen lists. The caller has checked both lists are present.
+bool DeriveLayoutFromSpecimens(OnboardConfig* config, std::string* error) {
+  auto fail = [&](const std::string& message) {
+    if (error != nullptr) *error = message;
+    return false;
+  };
+  std::size_t specimen_count = 0;
+  std::size_t heated_count = 0;
+  std::set<std::size_t> terminals;
+  std::set<std::size_t> lines;
+  for (std::size_t m = 0; m < config->motors.size(); ++m) {
+    const std::string key = "motor" + std::to_string(m) + ".specimens";
+    if (config->motors[m].specimens.empty()) {
+      return fail(key + " lists no specimen");
+    }
+    for (const SpecimenConfig& specimen : config->motors[m].specimens) {
+      ++specimen_count;
+      if (specimen.rtd_channel < 1 || specimen.rtd_channel > 8) {
+        return fail(key + ": ch" + std::to_string(specimen.rtd_channel) +
+                    " is not a card terminal (ch1..ch8)");
+      }
+      if (!terminals.insert(specimen.rtd_channel).second) {
+        return fail("ch" + std::to_string(specimen.rtd_channel) +
+                    " is listed twice in motor0.specimens / motor1.specimens");
+      }
+      if (specimen.heater_line.has_value()) {
+        ++heated_count;
+        if (!lines.insert(*specimen.heater_line).second) {
+          return fail("BCM " + std::to_string(*specimen.heater_line) +
+                      " heats two specimens in motor0.specimens / motor1.specimens");
+        }
+      }
+    }
+  }
+  if (specimen_count != config->hardware.sample_count) {
+    return fail("motor0.specimens and motor1.specimens list " +
+                std::to_string(specimen_count) + " specimens; hardware.sample_count is " +
+                std::to_string(config->hardware.sample_count));
+  }
+  if (heated_count != config->hardware.heater_count) {
+    return fail("motor0.specimens and motor1.specimens list " +
+                std::to_string(heated_count) +
+                " heated specimens; hardware.heater_count is " +
+                std::to_string(config->hardware.heater_count));
+  }
+
+  config->sensors.sequent_rtd_channels.clear();
+  config->sensors.max31865_sample_indices.clear();
+  config->heaters.output_lines.clear();
+  config->heaters.temperature_channels.clear();
+  std::size_t sample = 0;
+  for (MotorConfig& motor : config->motors) {
+    motor.samples.clear();
+    // The first specimen of each motor carries that group's MAX31865 click.
+    config->sensors.max31865_sample_indices.push_back(sample);
+    for (const SpecimenConfig& specimen : motor.specimens) {
+      motor.samples.push_back(sample);
+      config->sensors.sequent_rtd_channels.push_back(specimen.rtd_channel);
+      if (specimen.heater_line.has_value()) {
+        config->heaters.output_lines.push_back(*specimen.heater_line);
+        config->heaters.temperature_channels.push_back(sample);
+      }
+      ++sample;
+    }
+  }
+  return true;
+}
+
 }  // namespace
 
 OnboardConfig::OnboardConfig() {
@@ -188,6 +296,15 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
     return false;
   };
 
+  // The keys motorN.specimens derives. A legacy INI sets these instead; an
+  // INI with specimens must not set them too.
+  const std::set<std::string> layout_keys = {
+      "heater.output_lines", "heater.temperature_channels",
+      "sensor.sequent_rtd_channels", "sensor.max31865_sample_indices",
+      "motor0.samples", "motor1.samples"};
+  std::vector<std::string> legacy_layout_keys;
+  std::array<bool, 2> specimens_set{false, false};
+
   std::string line;
   int line_no = 0;
   while (std::getline(in, line)) {
@@ -207,6 +324,9 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
 
     const std::string key = Trim(trimmed.substr(0, eq));
     const std::string value = Trim(trimmed.substr(eq + 1));
+    if (layout_keys.count(key) != 0) {
+      legacy_layout_keys.push_back(key);
+    }
 
     if (key == "runtime.tick_hz") {
       if (!parse_double(key, value, &config->runtime.tick_hz, line_no)) return false;
@@ -492,6 +612,16 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
           }
           return false;
         }
+      } else if (suffix == "specimens") {
+        if (!ParseSpecimenList(value, &motor.specimens)) {
+          if (error != nullptr) {
+            *error = "invalid " + key + " at line " + std::to_string(line_no) +
+                     ": entries are a PT100 card terminal and, when heated, the "
+                     "heater's BCM line (ch8:19), or the terminal alone (ch1)";
+          }
+          return false;
+        }
+        specimens_set[motor_index] = true;
       } else {
         if (error != nullptr) {
           *error = "unknown motor config key at line " + std::to_string(line_no) +
@@ -505,6 +635,25 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
       if (error != nullptr) {
         *error = "unknown config key at line " + std::to_string(line_no) + ": " + key;
       }
+      return false;
+    }
+  }
+
+  if (specimens_set[0] || specimens_set[1]) {
+    if (!specimens_set[0] || !specimens_set[1]) {
+      if (error != nullptr) {
+        *error = "motor0.specimens and motor1.specimens must be set together";
+      }
+      return false;
+    }
+    if (!legacy_layout_keys.empty()) {
+      if (error != nullptr) {
+        *error = legacy_layout_keys.front() +
+                 " is derived from motor0.specimens / motor1.specimens: remove it";
+      }
+      return false;
+    }
+    if (!DeriveLayoutFromSpecimens(config, error)) {
       return false;
     }
   }
@@ -1014,8 +1163,20 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
   }
 
   for (std::size_t i = 0; i < config->heaters.output_lines.size(); ++i) {
-    if (!claim_gpio(config->runtime.gpio_chip, config->heaters.output_lines[i],
-                    "heater.output_lines[" + std::to_string(i) + "]")) {
+    std::string owner = "heater.output_lines[" + std::to_string(i) + "]";
+    if (specimens_set[0]) {
+      // The line came from a specimen list: name the list the INI has.
+      const std::size_t sample = i < config->heaters.temperature_channels.size()
+                                     ? config->heaters.temperature_channels[i]
+                                     : config->hardware.sample_count;
+      for (std::size_t m = 0; m < config->motors.size(); ++m) {
+        const std::vector<std::size_t>& samples = config->motors[m].samples;
+        if (std::find(samples.begin(), samples.end(), sample) != samples.end()) {
+          owner = "heater H" + std::to_string(i) + " (motor" + std::to_string(m) + ".specimens)";
+        }
+      }
+    }
+    if (!claim_gpio(config->runtime.gpio_chip, config->heaters.output_lines[i], owner)) {
       return false;
     }
   }

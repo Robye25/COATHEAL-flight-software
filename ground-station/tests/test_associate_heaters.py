@@ -13,10 +13,6 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from app.gui import state as gs_state  # noqa: E402
-
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "associate_heaters.py"
 SPEC = importlib.util.spec_from_file_location("associate_heaters", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
@@ -53,8 +49,8 @@ class FakeOnboard:
     """coatheal-onboard as seen through port 5000: eight specimens in a row
     (lumped heat capacity, loss to the room, some conduction to each
     neighbour), each PT100 lagging its specimen, behind a shuffled harness.
-    Heat follows the BCM line the service drives, so a reordered
-    heater.output_lines moves which specimen a heater index warms. Sized
+    Heat follows the BCM line the service drives, so a reordered specimen
+    list moves which specimen a heater index warms. Sized
     like the bench of 2026-09-14 at duty 0.25: a PT100 +1 C about 3 s after
     its heater comes on, still rising ~2 C after it goes off, a neighbour
     picking up a few tenths."""
@@ -71,8 +67,8 @@ class FakeOnboard:
         self.clock = clock
         self.harness = list(harness)          # specimen -> RTD card terminal
         self.line_heats = {line: [(s, 1.0)] for s, line in enumerate(LINES)}  # BCM -> [(specimen, share)]
-        # The service's heater.output_lines and sensor.sequent_rtd_channels,
-        # re-read from config_path on every (fake) restart.
+        # The heater lines and terminal map the service derived from its
+        # config, re-read from config_path on every (fake) restart.
         self.output_lines = list(LINES)
         self.running_map = list(range(1, 9))
         self.config_path: Path | None = None
@@ -128,8 +124,9 @@ class FakeOnboard:
         self.mode, self.debug_armed, self.test = "STANDBY", False, None
         if self.config_path is not None:
             values = hardware_setup._ini_values(self.config_path.read_text(encoding="utf-8"))
-            self.output_lines = hardware_setup._number_list(values["heater.output_lines"])
-            self.running_map = hardware_setup._number_list(values["sensor.sequent_rtd_channels"])
+            layout = hardware_setup.layout_from_values(values)
+            self.output_lines = layout.heater_lines
+            self.running_map = layout.channels
 
     def subprocess_run(self, args, **kwargs):
         if "systemctl" in args:
@@ -242,7 +239,8 @@ class EndToEnd(unittest.TestCase):
             options += ["--yes"] + ([] if restart else ["--no-restart"])
         full = ([command, *options, *argv[1:]] if command else [*options, *argv])
         output = io.StringIO()
-        with mock.patch.object(associate_heaters, "service_config", return_value=None), \
+        with mock.patch.object(hardware_setup, "BOOT_CONFIG_PATHS", (self.dir / "config.txt",)), \
+                mock.patch.object(associate_heaters, "service_config", return_value=None), \
                 mock.patch.object(hardware_setup, "_check_with_binary", return_value=0), \
                 mock.patch.object(associate_heaters.subprocess, "run", self.rig.subprocess_run), \
                 contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
@@ -253,8 +251,11 @@ class EndToEnd(unittest.TestCase):
     def values(self) -> dict[str, str]:
         return hardware_setup._ini_values(self.config.read_text(encoding="utf-8"))
 
+    def layout(self):
+        return hardware_setup.layout_from_values(self.values())
+
     def written_map(self) -> list[int]:
-        return hardware_setup._number_list(self.values()["sensor.sequent_rtd_channels"])
+        return self.layout().channels
 
     def heater_windows(self) -> dict[int, tuple[float, float]]:
         """Heater -> (first pulse, the HEATERS_OFF that ended it)."""
@@ -288,8 +289,8 @@ class AutoTests(EndToEnd):
         written = self.written_map()
         self.assertEqual(written[:6], [3, 1, 6, 2, 8, 5])  # S<h> <- the terminal H<h> warms
         self.assertEqual(sorted(written[6:]), [4, 7])       # the two unheated, in some order
-        self.assertEqual(self.values()["heater.temperature_channels"], "0,1,2,3,4,5")
-        self.assertEqual(self.values()["heater.output_lines"], "19,13,6,5,24,23")
+        self.assertEqual(self.layout().heater_lines, [19, 13, 6, 5, 24, 23])
+        self.assertEqual(self.values()["motor0.specimens"], "ch3:19,ch1:13,ch6:6,ch2:5")
         self.assertTrue(list(self.dir.glob("onboard.local.ini.bak.*")))
         self.assert_left_safe()
         windows = self.heater_windows()  # also: one heater at a time, each switched off
@@ -319,7 +320,8 @@ class AutoTests(EndToEnd):
     def test_dry_run_reports_the_map_without_writing(self) -> None:
         rc, output = self.run_script("auto", "--dry-run", "--verbose")
         self.assertEqual(rc, 0, output)
-        self.assertRegex(output, r"S0\s+M0\s+H0 BCM 19\s+ch3\s+1\s+measured")
+        self.assertRegex(output, r"Motor 0: 4 specimens, 4 heated\n\s+Sample\s+Heater")
+        self.assertRegex(output, r"S0\s+H0 BCM 19\s+ch3\s+1\s+measured")
         self.assertIn("(C above the reading at switch-on)", output)  # --verbose table
         self.assert_untouched()
         self.assert_left_safe()
@@ -333,7 +335,7 @@ class AutoTests(EndToEnd):
         written = self.written_map()
         self.assertEqual([written[h] for h in (0, 1, 3, 4, 5)], [3, 1, 2, 8, 5])
         self.assertEqual(sorted(written), list(range(1, 9)))
-        self.assertRegex(output, rf"S2\s+M0\s+H2 BCM 6\s+ch{written[2]}\s+NOT measured")
+        self.assertRegex(output, rf"S2\s+H2 BCM 6\s+ch{written[2]}\s+NOT measured")
         self.assertIn("H2 left out", output)
         start, end = self.heater_windows()[2]
         self.assertLessEqual(end - start, 63.0)  # the silent heater did not stay on
@@ -489,9 +491,10 @@ class AssignTests(EndToEnd):
     def test_show_prints_the_table_and_the_assign_command_that_reproduces_it(self) -> None:
         rc, output = self.run_script("show")
         self.assertEqual(rc, 0, output)
-        self.assertRegex(output, r"S0\s+M0\s+H0 BCM 19\s+ch1\s+1\s+OK 10\d\.\d ohm 2\d\.\d C")
-        self.assertRegex(output, r"S4\s+M1\s+H4 BCM 24\s+ch5\s+2")
-        self.assertRegex(output, r"S7\s+M1\s+unheated\s+ch8")
+        self.assertRegex(output, r"S0\s+H0 BCM 19\s+ch1\s+1\s+OK 10\d\.\d ohm 2\d\.\d C")
+        self.assertRegex(output, r"Motor 1: 4 specimens, 2 heated\n\s+Sample.*\n\s+S4\s+H4 BCM 24\s+ch5\s+2")
+        self.assertRegex(output, r"S7\s+unheated\s+ch8")
+        self.assertNotIn("!", output)
         command = next(line.strip() for line in output.splitlines() if " assign " in line)
         self.assertEqual(command, "python3 scripts/associate_heaters.py assign "
                                   "--motor0 ch1:19,ch2:13,ch3:6,ch4:5 --motor1 ch5:24,ch6:23,ch7,ch8")
@@ -505,10 +508,11 @@ class AssignTests(EndToEnd):
         rc, output = self.run_script("assign", *ASSIGNMENT, restart=True)
         self.assertEqual(rc, 0, output)
         values = self.values()
-        self.assertEqual(values["heater.output_lines"], "24,13,6,5,19,23")
-        self.assertEqual(values["sensor.sequent_rtd_channels"], "8,1,6,2,3,5,4,7")
-        self.assertEqual(values["motor0.samples"], "0,1,2,3")  # the groups stay; specimens move
-        self.assertRegex(output, r"S4\s+M1\s+H4 BCM 19\s+ch3\s+2\s+.*\(heater was BCM 24, "
+        self.assertEqual(values["motor0.specimens"], "ch8:24,ch1:13,ch6:6,ch2:5")
+        self.assertEqual(values["motor1.specimens"], "ch3:19,ch5:23,ch4,ch7")
+        self.assertEqual(self.layout().heater_lines, [24, 13, 6, 5, 19, 23])
+        self.assertEqual(self.written_map(), [8, 1, 6, 2, 3, 5, 4, 7])
+        self.assertRegex(output, r"S4\s+H4 BCM 19\s+ch3\s+2\s+.*\(heater was BCM 24, "
                                  r"PT100 was ch5\)")
         self.assertNotIn("Heater lines changed", output)  # the same six lines, reordered
         self.assertEqual(self.rig.restarts, 1)
@@ -528,12 +532,13 @@ class AssignTests(EndToEnd):
         rc, output = self.run_script("show")
         self.assertEqual(rc, 0, output)
         self.assertIn("the onboard does not answer", output)
-        self.assertRegex(output, r"S5\s+M1\s+H5 BCM 23\s+ch6\n")
+        self.assertRegex(output, r"S5\s+H5 BCM 23\s+ch6\n")
         self.assertIn("assign --motor0 ch1:19,", output)
 
     def test_show_names_a_config_the_service_has_not_loaded(self) -> None:
         self.config.write_text(hardware_setup.replace_ini(
-            self.original, {"sensor.sequent_rtd_channels": "3,1,6,2,8,5,4,7"}), encoding="utf-8")
+            self.original, {"motor0.specimens": "ch3:19,ch1:13,ch6:6,ch2:5",
+                            "motor1.specimens": "ch8:24,ch5:23,ch4,ch7"}), encoding="utf-8")
         rc, output = self.run_script("show")
         self.assertEqual(rc, 0, output)
         self.assertIn("! the service reads terminals 1,2,3,4,5,6,7,8, not the config's", output)
@@ -558,24 +563,25 @@ class AssignTests(EndToEnd):
         motor0 = "ch8:24,ch1:13,ch6:16,ch2:5"
         rc, output = self.run_script("assign", "--motor0", motor0, *ASSIGNMENT[2:], restart=True)
         self.assertEqual(rc, 0, output)
-        self.assertEqual(self.values()["heater.output_lines"], "24,13,16,5,19,23")
+        self.assertEqual(self.layout().heater_lines, [24, 13, 16, 5, 19, 23])
         self.assertIn("Heater lines changed (BCM 6 out, BCM 16 in): run coatheal-deploy", output)
         rc, output = self.run_script("heat", "H2")
         self.assertEqual(rc, 0, output)
-        self.assertIn("H2 (BCM 16) warms ch6, which the config reads as S2: they agree", output)
+        self.assertIn("H2 (BCM 16) warms ch6, which the config reads as S2 on motor 0: "
+                      "they agree", output)
         self.assert_left_safe()
 
-    def test_refuses_what_the_software_cannot_run(self) -> None:
+    def test_refuses_what_the_onboard_cannot_run(self) -> None:
         cases = {
-            "motor 0 pulls 4 heated and 0 unheated specimens (S0, S1, S2, S3); 3 heated and 1 unheated given":
-                ["--motor0", "ch8:24,ch1:13,ch6:6,ch4", "--motor1", "ch3:19,ch5:23,ch2:5,ch7"],
-            "ch8 given twice":
+            "list 7 heated specimens; hardware.heater_count is 6":
+                ["--motor0", "ch8:24,ch1:13,ch6:6,ch2:5", "--motor1", "ch3:19,ch5:23,ch4:12,ch7"],
+            "ch8 is listed twice in motor0.specimens / motor1.specimens":
                 ["--motor0", "ch8:24,ch8:13,ch6:6,ch2:5", "--motor1", "ch3:19,ch5:23,ch4,ch7"],
-            "BCM 24 heats two specimens":
+            "BCM 24 heats two specimens in motor0.specimens / motor1.specimens":
                 ["--motor0", "ch8:24,ch1:24,ch6:6,ch2:5", "--motor1", "ch3:19,ch5:23,ch4,ch7"],
-            "ch9 is not a card terminal":
+            "motor0.specimens: ch9 is not a card terminal (ch1..ch8)":
                 ["--motor0", "ch9:24,ch1:13,ch6:6,ch2:5", "--motor1", "ch3:19,ch5:23,ch4,ch7"],
-            "7 specimens given, the config has 8 samples":
+            "list 7 specimens; hardware.sample_count is 8":
                 ["--motor0", "ch8:24,ch1:13,ch6:6,ch2:5", "--motor1", "ch3:19,ch5:23,ch4"],
             "'8:24': give a PT100 terminal":
                 ["--motor0", "8:24,ch1:13,ch6:6,ch2:5", "--motor1", "ch3:19,ch5:23,ch4,ch7"],
@@ -590,6 +596,65 @@ class AssignTests(EndToEnd):
                 self.assert_untouched()
         self.assertEqual(self.rig.sent, [])
 
+    def test_uneven_groups_are_written_and_auto_agrees(self) -> None:
+        # Three heated and one unheated specimen per motor: H3 is now motor
+        # 1's first specimen, S4, and reads ch3.
+        rc, output = self.run_script("assign", "--motor0", "ch8:24,ch1:13,ch6:6,ch4",
+                                     "--motor1", "ch3:19,ch5:23,ch2:5,ch7", restart=True)
+        self.assertEqual(rc, 0, output)
+        layout = self.layout()
+        self.assertEqual(layout.heater_samples, [0, 1, 2, 4, 5, 6])
+        self.assertEqual(layout.clicks, [0, 4])
+        self.assertRegex(output, r"Motor 0: 4 specimens, 3 heated")
+        self.assertRegex(output, r"S3\s+unheated\s+ch4\s+.*\(heater was BCM 5\)")
+        self.assertRegex(output, r"S4\s+H3 BCM 19\s+ch3\s+2\s+")
+        self.assertRegex(output, r"S6\s+H5 BCM 5\s+ch2\s+.*\(was unheated, PT100 was ch7\)")
+        rc, output = self.run_script("auto", "--dry-run")
+        self.assertEqual(rc, 0, output)
+        self.assertIn("H3 (BCM 19) -> ch3", output)
+        self.assertNotIn("NOT", output)
+
+    def test_a_config_from_before_the_specimen_keys_is_converted_on_write(self) -> None:
+        template = self.original
+        legacy = "\n".join(line for line in template.splitlines()
+                           if not line.startswith(hardware_setup.SPECIMEN_KEYS)) + "\n"
+        legacy += ("heater.output_lines=19,13,6,5,24,23\n"
+                   "sensor.sequent_rtd_channels=1,2,3,4,5,6,7,8\n"
+                   "motor0.samples=0,1,2,3\nmotor1.samples=4,5,6,7\n")
+        self.config.write_text(legacy, encoding="utf-8")
+        rc, output = self.run_script("show")
+        self.assertEqual(rc, 0, output)
+        self.assertIn("still uses the index-based layout keys", output)
+        rc, output = self.run_script("assign", *ASSIGNMENT)
+        self.assertEqual(rc, 0, output)
+        self.assertIn("sensor.sequent_rtd_channels: 1,2,3,4,5,6,7,8 -> (removed", output)
+        values = self.values()
+        for key in hardware_setup.LAYOUT_KEYS:
+            self.assertNotIn(key, values)
+        self.assertEqual(values["motor1.specimens"], "ch3:19,ch5:23,ch4,ch7")
+        self.assertEqual(hardware_setup.validate_candidate(self.config.read_text(encoding="utf-8")), [])
+
+    def test_warns_when_config_txt_no_longer_holds_the_heater_lines_low(self) -> None:
+        # On the Pi: the boot block written by the last deploy, then a heater
+        # moved to BCM 16 without a deploy.
+        boot = self.dir / "config.txt"
+        values = self.values()
+        boot.write_text(hardware_setup.upsert_boot_gpio_block(
+            "dtparam=spi=on\n",
+            hardware_setup.render_boot_gpio_block(hardware_setup.boot_gpio_lines(values))),
+            encoding="utf-8")
+        rc, output = self.run_script("show")
+        self.assertNotIn("!", output)
+        self.rig.line_heats[16] = self.rig.line_heats.pop(6)
+        rc, output = self.run_script("assign", "--motor0", "ch1:19,ch2:13,ch3:16,ch4:5",
+                                     "--motor1", "ch5:24,ch6:23,ch7,ch8")
+        self.assertEqual(rc, 0, output)
+        self.assertIn(f"! {boot} holds gpio=5,6,13,19,23,24=op,dl,pd from boot, but this "
+                      "config needs gpio=5,13,16,19,23,24=op,dl,pd: run coatheal-deploy, "
+                      "then reboot", output)
+        rc, output = self.run_script("show")
+        self.assertIn("run coatheal-deploy, then reboot", output)
+
     def test_a_line_the_hat_owns_is_refused_by_the_validator(self) -> None:
         rc, output = self.run_script("assign", "--motor0", "ch8:24,ch1:13,ch6:17,ch2:5",
                                      *ASSIGNMENT[2:])
@@ -603,7 +668,7 @@ class DebugTests(EndToEnd):
     def test_heat_prints_every_terminal_and_names_the_pt100(self) -> None:
         rc, output = self.run_script("heat", "H0")
         self.assertEqual(rc, 0, output)
-        self.assertIn("H0 (BCM 19) warms ch3, but the config reads S0 from ch1", output)
+        self.assertIn("H0 (BCM 19) warms ch3, but the config reads S0 (motor 0) from ch1", output)
         rows = [line for line in output.splitlines() if re.match(r"\s+\d+s(\s+[-+]\d+\.\d){8}", line)]
         self.assertGreater(len(rows), 5)
         self.assertTrue(any(line.endswith("H0 0.25") for line in rows))
@@ -641,7 +706,7 @@ class DebugTests(EndToEnd):
         self.rig.test = (0, 0.25, self.clock.now + 30.0)
         rc, output = self.run_script("watch", "--seconds", "8")
         self.assertEqual(rc, 0, output)
-        self.assertRegex(output, r"sample(\s+S\d){8}")
+        self.assertRegex(output, r"sample(\s+M[01]S\d){8}")
         rows = [line for line in output.splitlines() if re.match(r"\s+\d+s(\s+[-+]\d+\.\d){8}", line)]
         self.assertEqual(len(rows), 8)
         self.assertTrue(rows[-1].endswith("H0 0.25"))
@@ -655,20 +720,12 @@ def result(heater: int, channel: int, seconds: float, verdict: str = "paired"):
                                           (channel % 8 + 1, 0.1), seconds)
 
 
-def example_mapping():
-    return associate_heaters.load_mapping(
+def example_layout():
+    return hardware_setup.layout_from_values(
         hardware_setup._ini_values(hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")))
 
 
 class UnitTests(unittest.TestCase):
-    def test_the_frame_matches_the_ground_station(self) -> None:
-        self.assertEqual(associate_heaters.GS_MOTOR_SAMPLES, gs_state.MOTOR_SAMPLES)
-        self.assertEqual(associate_heaters.GS_CLICK_SAMPLES, gs_state.RESISTANCE_SAMPLES)
-        self.assertEqual(gs_state.HEATER_SAMPLE, tuple(range(6)))
-        mapping = example_mapping()
-        self.assertEqual(associate_heaters.mapping_warnings(mapping), [])
-        self.assertEqual(mapping.motors, [list(g) for g in gs_state.MOTOR_SAMPLES])
-
     def test_parse_terminals_reads_the_components_channel_list(self) -> None:
         terminals = associate_heaters.parse_terminals(
             "S0:ch3:OK:109.8|S1:ch2:OPEN:-366.0|S2:ch1:MISMATCH:nan|junk")
@@ -681,18 +738,19 @@ class UnitTests(unittest.TestCase):
         for temp in (-20.0, 25.0, 60.0):
             self.assertAlmostEqual(associate_heaters.pt100_c(pt100_ohms(temp)), temp, places=6)
 
-    def test_compose_channel_map_places_the_pairs_and_keeps_the_rest(self) -> None:
-        compose = associate_heaters.compose_channel_map
-        association = {0: 1, 1: 2, 2: 3, 3: 5, 4: 6, 5: 8}
-        self.assertEqual(compose(association, [1, 2, 3, 4, 5, 6, 7, 8], 8),
-                         [1, 2, 3, 5, 6, 8, 7, 4])
-        self.assertEqual(compose(association, [8, 7, 6, 5, 4, 3, 2, 1], 8),
-                         [1, 2, 3, 5, 6, 8, 7, 4])
+    def test_compose_layout_places_the_pairs_and_keeps_the_rest(self) -> None:
+        compose = associate_heaters.compose_layout
+        layout = example_layout()  # schematic order: S<i> on ch<i+1>
         # Bench 2026-09-14: H2 unpaired keeps ch3, which no paired heater took;
-        # the unheated samples lost ch7/ch8 and get the leftovers in order.
-        self.assertEqual(compose({0: 8, 1: 2, 3: 4, 4: 5, 5: 7}, [1, 2, 3, 4, 5, 6, 7, 8], 8),
-                         [8, 2, 3, 4, 5, 7, 1, 6])
-        self.assertEqual(compose({}, [3, 1, 6, 2, 8, 5, 4, 7], 8), [3, 1, 6, 2, 8, 5, 4, 7])
+        # the unheated specimens lost ch7/ch8 and get the leftovers in order.
+        new = compose({0: 8, 1: 2, 3: 4, 4: 5, 5: 7}, layout)
+        self.assertEqual(new.channels, [8, 2, 3, 4, 5, 7, 1, 6])
+        self.assertEqual(new.heater_lines, layout.heater_lines)
+        self.assertEqual(compose({}, layout), layout)
+        # Uneven groups: H3 is S4, so its terminal lands on S4.
+        uneven = associate_heaters.build_assignment(
+            ["ch1:19,ch2:13,ch3:6,ch4", "ch5:5,ch6:24,ch7:23,ch8"], 8, 6)
+        self.assertEqual(compose({3: 7}, uneven).channels, [1, 2, 3, 4, 7, 6, 5, 8])
 
     def test_resolve_leaves_out_shared_terminals_and_a_slow_heater(self) -> None:
         results = [result(0, 8, 6.0), result(1, 2, 5.0), result(2, 3, 40.0),
@@ -704,45 +762,29 @@ class UnitTests(unittest.TestCase):
         self.assertIn("H3 and H4 both warmed ch4", problems[3])
         self.assertIn("no terminal warmed", problems[5])
 
-    def test_parse_group_reads_terminals_and_heater_lines(self) -> None:
-        Specimen = associate_heaters.Specimen
-        self.assertEqual(associate_heaters.parse_group(" CH8:19, ch2:bcm13,ch1 ,"),
+    def test_parse_specimens_reads_terminals_and_heater_lines(self) -> None:
+        Specimen = hardware_setup.Specimen
+        self.assertEqual(hardware_setup.parse_specimens(" CH8:19, ch2:bcm13,ch1 ,"),
                          [Specimen(8, 19), Specimen(2, 13), Specimen(1, None)])
+        with self.assertRaises(ValueError):
+            hardware_setup.parse_specimens("ch8:19,,ch1")
 
-    def test_plan_places_heated_specimens_first_in_the_order_given(self) -> None:
-        parse = associate_heaters.parse_group
-        mapping = example_mapping()
-        # Unheated listed first in motor 1 still land on S6/S7; the first
-        # heated specimen of each motor lands on its click sample (S0, S4).
-        new = associate_heaters.plan_assignment(
-            [parse("ch8:24,ch1:13,ch6:6,ch2:5"), parse("ch4,ch3:19,ch7,ch5:23")], mapping)
-        self.assertEqual(new.heater_lines, [24, 13, 6, 5, 19, 23])
-        self.assertEqual(new.channels, [8, 1, 6, 2, 3, 5, 4, 7])
-        self.assertEqual(new.temperature_channels, [0, 1, 2, 3, 4, 5])
-        self.assertEqual(mapping.heater_lines, [19, 13, 6, 5, 24, 23])  # not modified in place
+    def test_build_assignment_keeps_the_order_given(self) -> None:
+        layout = associate_heaters.build_assignment(
+            ["ch4,ch8:24,ch1:13,ch6:6", "ch3:19,ch7,ch5:23,ch2:5"], 8, 6)
+        self.assertEqual(layout.channels, [4, 8, 1, 6, 3, 7, 5, 2])
+        self.assertEqual(layout.heater_lines, [24, 13, 6, 19, 23, 5])
+        self.assertEqual(layout.heater_samples, [1, 2, 3, 4, 6, 7])
+        self.assertEqual(layout.clicks, [0, 4])  # an unheated specimen can carry the click
+        with self.assertRaises(ValueError):
+            associate_heaters.build_assignment(["ch4,ch8:24,ch1:13", "ch3:19,ch7,ch5:23,ch2:5"], 8, 6)
 
     def test_assign_command_round_trips(self) -> None:
-        mapping = example_mapping()
-        mapping.heater_lines = [24, 13, 16, 5, 19, 23]
-        mapping.channels = [8, 1, 6, 2, 3, 5, 4, 7]
-        command = associate_heaters.assign_command(mapping)
-        argv = shlex.split(command)
+        layout = associate_heaters.build_assignment(
+            ["ch8:24,ch1:13,ch6:16,ch2:5", "ch3:19,ch5:23,ch4,ch7"], 8, 6)
+        argv = shlex.split(associate_heaters.assign_command(layout))
         motor0, motor1 = argv[argv.index("--motor0") + 1], argv[argv.index("--motor1") + 1]
-        again = associate_heaters.plan_assignment(
-            [associate_heaters.parse_group(motor0), associate_heaters.parse_group(motor1)],
-            example_mapping())
-        self.assertEqual((again.heater_lines, again.channels),
-                         (mapping.heater_lines, mapping.channels))
-
-    def test_warnings_name_what_the_ground_station_would_get_wrong(self) -> None:
-        mapping = example_mapping()
-        mapping.motors = [[0, 1, 2, 4], [3, 5, 6, 7]]
-        mapping.clicks = [1, 4]
-        mapping.temperature_channels = [1, 0, 2, 3, 4, 5]
-        warnings = " | ".join(associate_heaters.mapping_warnings(mapping))
-        self.assertIn("heater i must read sample i", warnings)
-        self.assertIn("motor groups are not the ground station's", warnings)
-        self.assertIn("max31865_sample_indices is not the ground station's", warnings)
+        self.assertEqual(associate_heaters.build_assignment([motor0, motor1], 8, 6), layout)
 
     def test_reply_fields_raises_on_a_nack_and_keeps_the_first_spelling(self) -> None:
         with self.assertRaises(associate_heaters.AssociationError):

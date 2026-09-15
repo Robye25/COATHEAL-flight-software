@@ -59,12 +59,12 @@ lines). The lines this guide configures directly, heaters and motors, are:
 
 | Function | BCM | Configuration |
 |---|---:|---|
-| Heater H1 | 19 | `heater.output_lines[0]` |
-| Heater H2 | 13 | `heater.output_lines[1]` |
-| Heater H3 | 6 | `heater.output_lines[2]` |
-| Heater H4 | 5 | `heater.output_lines[3]` |
-| Heater H5 | 24 | `heater.output_lines[4]` |
-| Heater H6 | 23 | `heater.output_lines[5]` |
+| Heater H1 | 19 | `motor0.specimens` entry 1 (`ch1:19`) |
+| Heater H2 | 13 | `motor0.specimens` entry 2 (`ch2:13`) |
+| Heater H3 | 6 | `motor0.specimens` entry 3 (`ch3:6`) |
+| Heater H4 | 5 | `motor0.specimens` entry 4 (`ch4:5`) |
+| Heater H5 | 24 | `motor1.specimens` entry 1 (`ch5:24`) |
+| Heater H6 | 23 | `motor1.specimens` entry 2 (`ch6:23`) |
 | Motor 0 CS (soft) | 22 | `motor0.cs_line` |
 | Motor 0 EN | 20 | `motor0.enable_line` |
 | Motor 1 CS (soft) | 27 | `motor1.cs_line` |
@@ -154,13 +154,15 @@ Relevant configuration:
 
 ```ini
 sensor.sequent_rtd_stack=0
-sensor.sequent_rtd_channels=1,2,3,4,5,6,7,8
 sensor.sequent_rtd_poll_ms=1000
 sensor.sequent_rtd_expect_sensor_type=pt100
 sensor.sequent_rtd_resistance_min_ohm=60.0
 sensor.sequent_rtd_resistance_max_ohm=390.0
 sensor.sequent_rtd_crosscheck_tol_c=2.0
 ```
+
+Which card terminal each specimen's PT100 is on is part of the motor groups,
+`motor0.specimens` / `motor1.specimens` (section 8).
 
 Check it:
 
@@ -194,9 +196,12 @@ but CE0->SAMPLE2, `spidev0.0`).
 ```ini
 sensor.max31865_reference_ohm=470.0
 sensor.max31865_poll_ms=1000
-sensor.max31865_sample_indices=0,4
 sensor.resistance_source=max31865_click
 ```
+
+Click 1 reads the first specimen of `motor0.specimens`, click 2 the first of
+`motor1.specimens` (section 8): list the specimen whose resistance you
+monitor first in its motor's list.
 
 Check it:
 
@@ -214,10 +219,9 @@ gates 4-5** in
 [Sequent RTD Bench Bring-Up §9](sequent-rtd-bring-up.md#9-max31865-sample-resistance-click-bring-up-blocking-gates) —
 the populated reference resistor (470 vs 400 Ω) must be confirmed against
 the actual board, and the coating resistance range is unknown by design
-until characterised at the bench. `sensor.max31865_sample_indices` (which two
-of the eight sample slots the clicks feed) also defaults to an
-owner-flagged placeholder (`0,4`) pending the real specimen mapping — see
-the same document, section 10.
+until characterised at the bench. Which specimens the clicks read follows
+the specimen lists; confirm it against the real specimen wiring — see the
+same document, section 10.
 
 ## 7. DPS310, ADS1115, and GUVA-S12SD
 
@@ -241,11 +245,14 @@ connect the GUVA analog output directly to a digital Pi GPIO.
 ## 8. Heater Outputs
 
 Two four-channel EKM014 boards provide six used channels. Connect H1..H6 in
-the pin-table order. The final v3 mapping is:
+the pin-table order. Each motor group lists its specimens — the PT100's card
+terminal and, when heated, the heater's BCM line
+([Configuration: Motor groups](configuration.md#motor-groups-motorspecimens)).
+The schematic v3 wiring is:
 
 ```ini
-heater.output_lines=19,13,6,5,24,23
-heater.temperature_channels=0,1,2,3,4,5
+motor0.specimens=ch1:19,ch2:13,ch3:6,ch4:5
+motor1.specimens=ch5:24,ch6:23,ch7,ch8
 heater.active_high=true
 heater.pwm_frequency_hz=1.0
 power.max_active_heaters=3
@@ -257,9 +264,14 @@ and PT100s are connected, pair them by measurement — this matters whenever the
 harness does not follow the schematic — with
 `python3 scripts/associate_heaters.py auto` on the Pi (bench mode, all eight
 probes reading; see [Instruction Manual §10](rev-c-instruction-manual.md#10-changing-heater-to-pt100-mapping)).
-It writes `sensor.sequent_rtd_channels` so `Si` is the specimen `Hi` warms;
-`show`, `watch` and `heat H<i>` debug it, and `assign` sets the pairs and the
-motor groups by hand.
+It writes the PT100 terminal each heater warms into its specimen in
+`motor0.specimens` / `motor1.specimens`; `show`, `watch` and `heat H<i>`
+debug it, and `assign --motor0 … --motor1 …` sets the pairs and the motor
+groups by hand. The heater lines are held low from power-on by the managed
+`gpio=` block in `/boot/firmware/config.txt`, derived from the same lists:
+after changing a heater line run `coatheal-deploy` and reboot (`show`, a
+write by `auto` or `assign`, and `hardware_setup.py doctor` warn while the
+block is stale).
 
 A missing GPIO disables only that heater channel. Any invalid mapped PT100
 forces duty to zero, including manual-duty commands. `power.max_active_heaters=3` is an
