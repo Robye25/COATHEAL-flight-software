@@ -248,14 +248,16 @@ class SiUnitTests(WindowTestCase):
     def test_motion_values_and_sequences_in_mm(self) -> None:
         sent = capture_sends(self.win._dispatcher)
         self.feed()   # hz:100, us:4 on both motors
-        self.assertEqual(self.win._values._fields["m0_cfg"].text(), "1.00 mm/s · µstep 1/4")
+        # 1 mm lead: 200 full steps per mm, so 100 Hz is 0.5 mm/s and 1.5 mm
+        # at µ4 is 1200 µsteps.
+        self.assertEqual(self.win._values._fields["m0_cfg"].text(), "0.50 mm/s · µstep 1/4")
         advanced = self.win._advanced
         advanced.seq_name.setText("bend1")
         advanced.seq_table.item(0, 0).setText("1.5")
         advanced.seq_table.item(0, 1).setText("5")
         advanced.seq_table.item(0, 2).setText("0,125")     # a typed comma reads as "."
         advanced._seq_load()
-        self.assertEqual(sent[-1], "BENDSEQ_LOAD 0 bend1 600:5:12.5")
+        self.assertEqual(sent[-1], "BENDSEQ_LOAD 0 bend1 1200:5:25")
         advanced.seq_table.item(0, 2).setText("0.6")
         advanced._seq_load()
         self.assertEqual(len(sent), 1, "above 0.5 mm/s is refused")
@@ -263,7 +265,49 @@ class SiUnitTests(WindowTestCase):
         target, hold, speed, _btn = advanced.plan_rows[1]
         target.setValue(2.0); hold.setValue(5.0); speed.setValue(0.29)
         advanced._plan_load(1)
-        self.assertEqual(sent[-1], "FALLBACK_PLAN 1 800 5 29")
+        self.assertEqual(sent[-1], "FALLBACK_PLAN 1 1600 5 58")
+
+    def test_pull_distances_follow_the_lead(self) -> None:
+        from PyQt6.QtWidgets import QLabel
+        from app.protocol import PullEvent
+        self.feed()
+        # 400 full steps at µ4 = 1600 µsteps = 2.0 mm (the standard pull, two
+        # revolutions at the 1 mm lead).
+        ev = PullEvent(session_id=SESSION, pull_id=1, motor_id=0, start_ts="2026-09-15T00:00:00Z",
+                       steps_moved=1600, hold_s=5.0, samples=[0, 1], microstep=4)
+        self.win._on_pull_event(ev)
+        self.assertIn("+2.00 mm", self.win._motion.pull_lines[0].text())
+        self.assertEqual(self.win._pulls.table.item(0, 3).text(), "+2.00")
+        labels = " ".join(label.text() for label in self.win._motion.findChildren(QLabel))
+        self.assertIn("pulls to 2.0 mm (two revolutions)", labels)
+        self.assertNotIn("2 mm/rev", labels)
+
+
+class LeadMismatchTests(WindowTestCase):
+    def test_a_different_onboard_lead_warns_and_a_matching_one_clears(self) -> None:
+        self.feed(seq=1)
+        self.reply("GET_LAYOUT", UNEVEN_REPLY + ";lead_mm=2")
+        self.assertIn("ball-screw lead of 2 mm/rev", self.events())
+        self.assertIn("converts mm at 1 mm/rev", self.events())
+        self.assertIn("LEAD MISMATCH", self.win._console.note.text())
+        self.assertTrue(self.win._layout.reported, "the groups are still taken")
+        # Radio silence notes share the line instead of wiping the warning.
+        self.reply("RADIO_SILENCE", "radio silent", tag=self.win._system)
+        self.reply("RADIO_RESUME", "radio resumed", tag=self.win._system)
+        self.assertIn("LEAD MISMATCH", self.win._console.note.text())
+        self.reply("GET_LAYOUT", UNEVEN_REPLY + ";lead_mm=1")
+        self.assertIn("matches the ground station", self.events())
+        self.assertEqual(self.win._console.note.text(), "")
+
+    def test_matching_or_absent_lead_says_nothing(self) -> None:
+        self.feed(seq=1)
+        self.reply("GET_LAYOUT", UNEVEN_REPLY + ";lead_mm=1")
+        self.reply("GET_LAYOUT", UNEVEN_REPLY)
+        self.assertNotIn("ball-screw lead", self.events())
+        self.assertEqual(self.win._console.note.text(), "")
+
+    # MUTATION: return early at the top of MainWindow._check_lead and confirm
+    # test_a_different_onboard_lead_warns_and_a_matching_one_clears fails.
 
 
 class InputRuleTests(WindowTestCase):

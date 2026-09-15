@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
     QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
 )
 
-from ..protocol import PullEvent
+from ..protocol import FULL_STEPS_PER_MM, PullEvent
 from .widgets import AMBER, GREEN, MONO_CSS, MUTED, RED, style_button
 
 MAX_LINES = 5000
@@ -114,9 +114,9 @@ class PullsPanel(QWidget):
         lay.addWidget(self.table, 1)
 
     def on_pull_event(self, ev: PullEvent, microstep: int = 4) -> None:
-        # mm from µsteps at the 2 mm ball-screw lead; the caller passes the
+        # mm from µsteps at the 1 mm ball-screw lead; the caller passes the
         # motor's live divisor (default = the µ4 commissioning setting).
-        mm = ev.steps_moved / (200.0 * max(1, microstep) / 2.0)
+        mm = ev.steps_moved / (FULL_STEPS_PER_MM * max(1, microstep))
         values = [time.strftime("%H:%M:%SZ", time.gmtime()), f"M{ev.motor_id}", str(ev.pull_id),
                   f"{mm:+.2f}", f"{ev.steps_moved:+d}",
                   f"{ev.hold_s:.1f}", "|".join(str(s) for s in ev.samples) or "—", ev.session_id[-12:]]

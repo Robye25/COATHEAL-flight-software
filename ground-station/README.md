@@ -76,6 +76,20 @@ stops beaconing and probing and sends nothing but `RADIO RESUME` (plus
 hello replies and refuses every other command. The onboard queue keeps every
 frame and replays it after `RADIO RESUME`.
 
+**Link budget (24 kbps):** all E-Link traffic stays under 24 kbit/s in every
+second ([docs/link-budget.md](../docs/link-budget.md)); the ground station
+keeps to its 1 150 B share. A command exchange uses about a second of it, so
+commands go out one after another — safety commands (`HEATERS_OFF`,
+`STEPPER_STOP`, `DISARM`, `SHUTDOWN_SAFE`, `RADIO_SILENCE`, `RADIO_RESUME`)
+first, background polls and discovery last — and the latency shown includes
+the wait. A request line longer than 230 B is refused locally; a command
+that finds no room within 10 s (or its own longer timeout) fails with
+`waited … s for link budget`. While telemetry arrives the beacon slows to
+every 15 s and the command probe stops. Telemetry arrives compressed (`Z1,`
+lines) when the onboard offers the dictionary in
+`protocol/telemetry-dictionary-z1.txt`; without that file the ground station
+answers `HELLO,plain` and the onboard sends plain lines.
+
 ### Logs
 
 Every onboard session gets its own directory under `logs/sessions/`
@@ -128,6 +142,9 @@ python main.py command --cmd "<COMMAND>" [OPTIONS]
 | `--yes` | off | Skip safety confirmation for dangerous commands |
 | `--no-discovery-enabled` | — | Disable UDP discovery |
 | `--static-host` | `169.254.10.10` | Static fallback IP |
+
+The command is paced by the same link budget as the GUI; a request line over
+230 B is not sent (exit code 1).
 
 **Examples:**
 

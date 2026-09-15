@@ -3,9 +3,11 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <deque>
+#include <map>
 #include <mutex>
+#include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace coatheal {
@@ -15,6 +17,9 @@ struct QueuedTelemetryFrame {
   std::string session_id;
   std::uint64_t seq = 0;
   std::string frame;
+  // Position in the queue, assigned by Enqueue/Initialize in arrival order
+  // (never persisted). Consecutive indices are consecutive frames.
+  std::uint64_t index = 0;
 };
 
 std::int64_t CurrentUnixEpochSeconds();
@@ -40,6 +45,12 @@ std::int64_t CurrentUnixEpochSeconds();
 //     (session, seq) / (session, pull_id).
 //   - Initialize drops frames older than retention_hours outright and
 //     compacts once, so a stale backlog can never accrete across reboots.
+//
+// Frames leave in any order (docs/link-budget.md "Replay order"): each is
+// acknowledged exactly, and the backlog is replayed by bisection -- the
+// middle frame of the longest run of consecutive unacknowledged frames
+// first -- so a replay cut short by the 24 kbps budget or another outage
+// still leaves an even picture of the gap.
 class TelemetryQueue {
  public:
   static constexpr std::uint64_t kDefaultCompactMinDeadBytes = 512ULL * 1024;
@@ -63,29 +74,34 @@ class TelemetryQueue {
                      kDefaultCompactCheapLiveBytes);
 
   bool Initialize(std::string* error);
-  bool Enqueue(const QueuedTelemetryFrame& frame, std::string* error);
+  // `index` (optional) receives the queue index given to the frame.
+  bool Enqueue(const QueuedTelemetryFrame& frame, std::string* error,
+               std::uint64_t* index = nullptr);
+  // Cumulative: every frame of `session_id` with seq <= `seq`.
   bool Acknowledge(const std::string& session_id, std::uint64_t seq,
                    std::string* error);
+  // Exactly this frame (same session, seq and text).
   bool AcknowledgeExact(const QueuedTelemetryFrame& frame, std::string* error);
 
-  // Oldest-first copy of at most `max_frames` pending frames. The drain path
-  // sends a bounded batch per tick, so it must not pay for a copy of the
-  // whole backlog every tick.
+  // Oldest-first copy of at most `max_frames` pending frames.
   std::vector<QueuedTelemetryFrame> PendingFrames(std::size_t max_frames) const;
   std::vector<QueuedTelemetryFrame> PendingFrames() const;
-  // The batch the drain sends this tick: the NEWEST pending frame first
-  // (the one produced this tick -- what the operator needs to see now),
-  // then the backlog oldest-first. Draining strictly in order left the
-  // console blind to the present for the whole drain (bench 2026-08-29:
-  // ARM acknowledged, panels showed the STANDBY frame from boot for five
-  // minutes while 2,400 queued frames replayed at 10/s). The newest frame
-  // must be acknowledged with AcknowledgeExact: a cumulative Acknowledge
-  // of its seq would drop the entire backlog unsent.
-  std::vector<QueuedTelemetryFrame> DrainBatch(std::size_t max_frames) const;
+  // The pending frame at `index`, if it has not been acknowledged or pruned.
+  bool FrameAt(std::uint64_t index, QueuedTelemetryFrame* frame) const;
+  // Oldest-first pending EVT frames, at most `max_frames`.
+  std::vector<QueuedTelemetryFrame> PendingEvents(std::size_t max_frames) const;
+  // The next backlog frame in bisection order: the middle frame of the
+  // longest run of consecutive pending frames (the oldest such run on a tie).
+  // A 15-frame gap replays as 7, 3, 11, 1, 5, 9, 13, 0, 2, 4, ...
+  bool NextReplay(QueuedTelemetryFrame* frame) const;
   std::size_t size() const;
 
  private:
-  bool AppendLocked(const QueuedTelemetryFrame& frame);
+  bool AppendToFileLocked(const QueuedTelemetryFrame& frame);
+  void InsertLocked(QueuedTelemetryFrame frame);
+  void RemoveLocked(std::uint64_t index);
+  void AddRunLocked(std::uint64_t start, std::uint64_t end);
+  void EraseRunLocked(std::map<std::uint64_t, std::uint64_t>::iterator run);
   bool CompactLocked(std::string* error);
   void MaybeCompactLocked();
   void RetryPersistenceLocked();
@@ -104,8 +120,17 @@ class TelemetryQueue {
   std::uint64_t compact_cheap_live_bytes_ = kDefaultCompactCheapLiveBytes;
 
   mutable std::mutex mu_;
-  std::deque<QueuedTelemetryFrame> frames_;
-  // Bytes the live frames_ occupy in file format, maintained incrementally
+  // index -> frame, in arrival order.
+  std::map<std::uint64_t, QueuedTelemetryFrame> frames_;
+  // (session, seq) -> index, for exact acknowledgement.
+  std::map<std::pair<std::string, std::uint64_t>, std::uint64_t> by_key_;
+  std::set<std::uint64_t> events_;
+  // Maximal runs of consecutive pending indices: start -> end (inclusive),
+  // and the same runs ordered longest first, then oldest.
+  std::map<std::uint64_t, std::uint64_t> runs_;
+  std::set<std::pair<std::uint64_t, std::uint64_t>> runs_by_length_;
+  std::uint64_t next_index_ = 0;
+  // Bytes the live frames occupy in file format, maintained incrementally
   // (the old code re-serialised every frame per Enqueue just to size the
   // queue -- another O(backlog) pass on the control loop).
   std::uint64_t live_bytes_ = 0;

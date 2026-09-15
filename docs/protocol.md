@@ -154,10 +154,13 @@ The ground station ACKs each accepted telemetry or event frame.
 ACK,<session_id>,<seq>
 ```
 
-DATA ACKs are cumulative per session. The onboard durable queue deletes all DATA
-frames up to the ACKed sequence number for the matching session. Queued
-`EVT,*` frames also accept the ground station's `ACK,<session>,0`; that removes
-the exact queued event frame and does not fail later DATA telemetry draining.
+Every ACK is exact: the onboard sends one frame at a time and removes exactly
+that `(session, seq)` from its durable queue when the matching ACK arrives
+within 180 ms plus the round trip (since 2026-09-15; earlier firmware treated DATA ACKs as
+cumulative). An `EVT,*` frame is acknowledged by `ACK,<session>,0`. A late or
+malformed ACK resets the telemetry connection; an ACK for another frame ends
+that tick's drain. Either way the frame stays queued
+([link-budget.md](link-budget.md)).
 
 ## UDP Discovery
 
@@ -176,6 +179,12 @@ ONBOARD_HELLO,<nonce>,<session_id>,<hostname>,<command_port>,<telemetry_port>
 If UDP discovery fails, the GUI and CLI also probe `169.254.10.10:5000` with
 `PING`. Any successful command connection lets the onboard retarget telemetry
 to that command peer IP.
+
+To stay inside the 24 kbps budget, the onboard answers `GS_HELLO` and sends
+`ONBOARD_BEACON` only while it has no telemetry connection, and the ground
+station sends `GS_HELLO` and the `PING` probe only while no telemetry has
+arrived for 5 s (`GS_BEACON` every 2 s then, every 15 s otherwise). See
+[link-budget.md](link-budget.md#discovery-cadence).
 
 ## Command Protocol
 
@@ -202,7 +211,7 @@ NACK,<COMMAND>,<reason>
 | Command | Args | Description |
 |---|---|---|
 | `PING` | none | Liveness check |
-| `STATUS` | none | Lightweight live state: phase/mode, fallback, `plan=<state>` (failsafe plan), queue, tick rate, `silence=<0\|1>` (radio silence in force), current hardware flags, and sequence state |
+| `STATUS` | none | Lightweight live state: phase/mode, fallback, `plan=<state>` (failsafe plan), queue, tick rate, link budget (`link_codec`, `link_bytes=<counting>/<share>`, `link_ack_timeouts`; see [link-budget.md](link-budget.md)), `silence=<0\|1>` (radio silence in force), current hardware flags, and sequence state |
 | `COMPONENTS` | none | Non-invasive cached component state, error, and channel summary |
 | `CHECK` | `[ALL\|DPS310\|ADS1115\|SEQUENT_RTD\|DAQ132M\|RTD_CLICK\|MAX31865\|PWM\|MOTOR0\|MOTOR1\|STORAGE\|COMMS]` | Active probe of all or one selected component. `DAQ132M`/`RTD_CLICK` are accepted as legacy aliases for `SEQUENT_RTD` (the retired temperature path). `MAX31865` selects the two v3 sample-resistance clicks — a command-argument addition only, no `COMPONENT_STATE`/frame-format change. Non-fatal driver warnings are appended as `motorN_warn=` (e.g. an enable line that never reaches `DRV_ENN`) |
 | `ARM` | none | Enable manual flight outputs |
@@ -213,7 +222,7 @@ NACK,<COMMAND>,<reason>
 | `HEATERS_OFF` | none | Emergency heater shutoff |
 | `RESET_CTRL` | none | Reset PID integrators and clear the over-temperature latch; if the heater energy latch (`CTRL` `budget_exhausted`) has tripped, clear it too — the Wh tally restarts at 0 against `power.energy_budget_wh` |
 | `SHUTDOWN_SAFE` | none | Safe for power-off: heaters off with every duty/target override cleared, motors stopped and disabled, logs synced. The onboard process keeps running and telemetry continues (an actual exit would only make systemd start a fresh, disarmed instance) |
-| `SET_TICK_HZ` | `<hz>` | Runtime tick/downlink rate, `0.1..5.0` Hz |
+| `SET_TICK_HZ` | `<hz>` | Runtime tick rate, `0.1..5.0` Hz. The downlink never exceeds the 24 kbps budget whatever the rate: frames the budget cannot carry stay queued and are replayed later ([link-budget.md](link-budget.md)) |
 | `RADIO_SILENCE` | none | Stop every onboard-originated transmission while keeping the queue — see [Radio silence](#radio-silence) |
 | `RADIO_RESUME` | none | Resume transmission and drain the queued frames |
 | `SET_HEATER_DUTY` | `<index> <duty>` | Set one heater duty, index `0..5`, duty ≤ `heater.max_duty`. Normal mode requires valid mapped temperature feedback; bench/debug arm allows open-loop duty on channels without feedback or scheduler clamping. |
@@ -227,19 +236,19 @@ NACK,<COMMAND>,<reason>
 | `PID_TUNE_ABORT` | none | Abort the running tune (heater off) |
 | `PID_TUNE_STATUS` | none | `state=idle\|running\|done\|failed` plus progress (`heater`, `cycles a/b`, `relay`, `elapsed_s`); on `done` the measured `ku`/`tu_s`/`amplitude_c` and suggested `kp/ki/kd` (Tyreus–Luyben) + `zn_kp/zn_ki/zn_kd`; on `failed` the reason. Gains are **suggested only** — apply with `SET_PID` (the console's APPLY GAINS does this) |
 | `GET_THERMAL` | none | Return target, measured temperature, and duty for every heater |
-| `GET_LAYOUT` | none | The motor groups and the wiring behind them, derived from `motor0.specimens` / `motor1.specimens`: `samples=8;heaters=6;motor0=0,1,2,3;motor1=4,5,6,7;heater_samples=0,1,2,4,5,6;clicks=0,4;rtd_channels=8,2,3,4,5,7,1,6;heater_lines=19,13,6,5,24,23`. `motorN` = the sample indices that motor pulls; `heater_samples[h]` = the sample heater `h` reads; `clicks` = the samples MAX31865 click 1 and click 2 read (the first specimen of each motor); `rtd_channels[s]` = the RTD card terminal of sample `s`; `heater_lines[h]` = the BCM line of heater `h`. The console asks it on the first live frame of every onboard session and groups its panels, plots and `session.json` by it; firmware before 2026-09-15 NACKs it and the console keeps the schematic groups |
+| `GET_LAYOUT` | none | The motor groups and the wiring behind them, derived from `motor0.specimens` / `motor1.specimens`: `samples=8;heaters=6;motor0=0,1,2,3;motor1=4,5,6,7;heater_samples=0,1,2,4,5,6;clicks=0,4;rtd_channels=8,2,3,4,5,7,1,6;heater_lines=19,13,6,5,24,23;lead_mm=1`. `motorN` = the sample indices that motor pulls; `heater_samples[h]` = the sample heater `h` reads; `clicks` = the samples MAX31865 click 1 and click 2 read (the first specimen of each motor); `rtd_channels[s]` = the RTD card terminal of sample `s`; `heater_lines[h]` = the BCM line of heater `h`; `lead_mm` = `stepper.lead_mm_per_rev` (added 2026-09-15; the console warns when its own conversion lead differs). The console asks it on the first live frame of every onboard session and groups its panels, plots and `session.json` by it; firmware before 2026-09-15 NACKs it and the console keeps the schematic groups |
 | `CLEAR_OVERRIDES` | none | Clear duty, target, and PID overrides |
 | `SET_POSITION_ZERO` | `<id>` | Set current physical position as software zero without motion |
 | `STEPPER_MOVE` | `<id> <steps>` | Relative motor move (`<steps>` are microsteps at the configured divisor: µ4 → 800 per revolution). `|steps|` ≤ `stepper.max_direct_usteps` (1000 = 1.25 rev at µ4); longer travel goes through `STEPPER_MOVE_MM` |
 | `STEPPER_MOVETO` | `<id> <abs_usteps> [hold_s]` | Absolute move; motor must be zeroed. `|abs_usteps|` ≤ `stepper.max_direct_usteps` (1000); `hold_s` is `0..86400` (a hold keeps the MotionLock, and with it the heater inhibit, for its whole duration) |
-| `STEPPER_MOVE_MM` | `<id> <mm>` | Relative move in millimetres of linear travel; converted onboard through `stepper.lead_mm_per_rev` (2 mm/rev default → `1.0` = half a revolution) at the current microstep divisor. The console's jog buttons use this |
+| `STEPPER_MOVE_MM` | `<id> <mm>` | Relative move in millimetres of linear travel; converted onboard through `stepper.lead_mm_per_rev` (1 mm/rev → `1.0` = one revolution) at the current microstep divisor. The console's jog buttons use this |
 | `STEPPER_MOVETO_MM` | `<id> <mm> [hold_s]` | Absolute move in millimetres (zero = `SET_POSITION_ZERO` reference); motor must be zeroed. The console's BEND uses this |
 | `STEPPER_ROTATE` | `<id> <revs>` | Rotate by full revolutions |
 | `STEPPER_BEND` | `<id> <abs_usteps> [hold_s]` | Compatibility alias for absolute move; motor must be zeroed; same `stepper.max_direct_usteps` cap as `STEPPER_MOVETO` |
 | `STEPPER_HOME` | `<id>` | Return to software zero; motor must be zeroed |
 | `STEPPER_STOP` | `<id>` | Stop motion and release `MotionLock` |
-| `STEPPER_SET_SPEED` | `<id> <hz>` | Set motor speed in full-steps/s. Clamped to the onboard speed ceiling — the lower of `pull.max_step_hz` and `stepper.max_speed_mm_s` converted through `stepper.lead_mm_per_rev` (flight: 0.5 mm/s = 50 full-steps/s at the 2 mm lead); a request above it is ACKed as `speed clamped to …`. The console takes mm/s and sends ×100 (full steps per mm at the 2 mm lead) |
-| `STEPPER_SET_ACCEL` | `<id> <steps_s2>` | Set the trapezoidal ramp slope in full-steps/s², `(0, stepper.max_accel_steps_per_s2]`. Applies to the next ramp update, survives until restart. The console takes mm/s² and sends ×100 |
+| `STEPPER_SET_SPEED` | `<id> <hz>` | Set motor speed in full-steps/s. Clamped to the onboard speed ceiling — the lower of `pull.max_step_hz` and `stepper.max_speed_mm_s` converted through `stepper.lead_mm_per_rev` (flight: 0.5 mm/s = 100 full-steps/s at the 1 mm lead); a request above it is ACKed as `speed clamped to …`. The console takes mm/s and sends ×200 (full steps per mm at the 1 mm lead) |
+| `STEPPER_SET_ACCEL` | `<id> <steps_s2>` | Set the trapezoidal ramp slope in full-steps/s², `(0, stepper.max_accel_steps_per_s2]`. Applies to the next ramp update, survives until restart. The console takes mm/s² and sends ×200 |
 | `STEPPER_SET_CURRENT` | `<id> <a_rms>` | Set the motor run current in A RMS, `(0, 3.1]`. Rewrites `GLOBALSCALER`/`IHOLD_IRUN` on the live chip (hold current keeps its configured fraction) and persists across chip-reset recovery until the service restarts; NACKed when the sense resistor cannot deliver the request or the driver is unhealthy |
 | `STEPPER_SET_MICROSTEP` | `<id> <n>` | Set microstep divisor |
 | `STEPPER_ENABLE` / `STEPPER_DISABLE` | `<id>` | Enable or disable driver output |
@@ -353,15 +362,19 @@ These require `runtime.bench_mode=true` and `ARM_DEBUG <token>`.
 | `SET_BENCH_MODE` | `<1|0>` | Toggle bench mode |
 | `HEATER_TEST` | `<index> <duty> <seconds>` | Bounded commissioning pulse. Requires bench mode, debug arm, RUN mode, no active motor motion lock, and configured duty/time limits. |
 
-## Backlog drain order and the `TX=` stamp
+## Telemetry link: budget, framing and replay order
 
-The onboard keeps every unacknowledged frame in a durable queue and drains
-up to 10 frames per 1 Hz tick once a ground station is reachable. The batch
-is **this tick's frame first**, then the backlog oldest-first: after an
-outage the console sees the present within one tick, and the backlog fills
-in behind it (a 40-minute outage takes about four minutes to replay). The
-live frame is acknowledged individually onboard; a backlog frame's ACK is
-cumulative for that session.
+All COATHEAL traffic stays at or below 24 kbps in every second; the rules, the
+`HELLO,<session>,z1:<crc32>` handshake, the `Z1,<base64>` compressed lines and
+the bisection replay order are specified in [link-budget.md](link-budget.md).
+ACK lines are unchanged, and every DATA and EVT frame is acknowledged exactly.
+
+### The `TX=` stamp
+
+The onboard keeps every unacknowledged frame in a durable queue. Each tick it
+sends this tick's frame first, then pending events, then the backlog by
+bisection (the middle frame of the longest gap first), as far as the link
+budget allows.
 
 Every `DATA` line is stamped on the wire with `,TX=<seconds>` — how old the
 frame was when it was sent (`now − queued time`, clamped at 0). `TX=0`/`1`
@@ -370,5 +383,4 @@ frame or the CSV; the ground station uses it to keep its panels on live
 frames only, without comparing clocks. `EVT` lines are not stamped (fixed
 columns). Because frames arrive out of order, a ground station must
 deduplicate by the set of `(session, seq)` it has received, not by "seq ≤
-last seen".
-
+last seen", and insert replayed points at their onboard time.

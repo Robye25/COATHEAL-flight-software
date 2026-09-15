@@ -71,12 +71,12 @@ class ConsoleTabTests(unittest.TestCase):
         motion.current.setValue(0.4)
         motion.btn_current.click()
         self.assertEqual(sent[-1], "STEPPER_SET_CURRENT 0 0.400")
-        motion.accel.setValue(4.0)          # mm/s², sent as full-steps/s²
+        motion.accel.setValue(4.0)          # mm/s², sent as full-steps/s² (200 per mm at the 1 mm lead)
         motion.btn_accel.click()
-        self.assertEqual(sent[-1], "STEPPER_SET_ACCEL 0 400.0")
+        self.assertEqual(sent[-1], "STEPPER_SET_ACCEL 0 800.0")
         motion.speed.setValue(0.25)         # mm/s, sent as full-steps/s
         motion.btn_speed.click()
-        self.assertEqual(sent[-1], "STEPPER_SET_SPEED 0 25.000")
+        self.assertEqual(sent[-1], "STEPPER_SET_SPEED 0 50.000")
 
     def test_motion_gating_reasons(self) -> None:
         self.feed()

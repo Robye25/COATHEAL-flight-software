@@ -349,6 +349,22 @@ class HardwareSetupTests(unittest.TestCase):
         for key in (*hardware_setup.LAYOUT_KEYS, *hardware_setup.SPECIMEN_KEYS):
             self.assertNotIn(key, pins)  # bench wiring is never pinned
 
+    def test_one_mm_lead_motion_envelope_is_pinned(self) -> None:
+        # Owner 2026-09-15: 1 mm ball-screw lead, millimetre values kept --
+        # a fielded INI still carrying the 2 mm lead must not survive
+        # migrate-config, or every mm command would move twice as far.
+        pins = hardware_setup.FINAL_PIN_VALUES
+        self.assertEqual(pins["stepper.lead_mm_per_rev"], "1.0")
+        self.assertEqual(pins["stepper.max_speed_mm_s"], "0.5")
+        self.assertEqual(pins["stepper.default_step_hz"], "100.0")
+        self.assertEqual(pins["pull.max_step_hz"], "100.0")
+        self.assertEqual(pins["pull.accel_steps_per_s2"], "400.0")
+        self.assertEqual(pins["pull.travel_full_steps"], "400")
+        example = hardware_setup._ini_values(
+            hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8"))
+        for key, value in pins.items():
+            self.assertEqual(example.get(key), value, key)
+
     def test_same_line_on_different_gpio_chips_is_valid(self) -> None:
         # BCM 17 is a v3-reserved line (Sequent HAT rs485_dir) on the default
         # gpio_chip, but motor0 is moved to a *different* chip here, so the

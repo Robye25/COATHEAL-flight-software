@@ -1,0 +1,15 @@
+// Generated at configure time from protocol/telemetry-dictionary-z1.txt.
+// Edit that file, never this one: the ground station reads the same bytes.
+#include <cstddef>
+
+namespace coatheal {
+namespace generated {
+
+extern const unsigned char kTelemetryDictionaryZ1[];
+extern const std::size_t kTelemetryDictionaryZ1Size;
+
+const unsigned char kTelemetryDictionaryZ1[] = {@COATHEAL_DICTIONARY_Z1_BYTES@};
+const std::size_t kTelemetryDictionaryZ1Size = @COATHEAL_DICTIONARY_Z1_SIZE@;
+
+}  // namespace generated
+}  // namespace coatheal

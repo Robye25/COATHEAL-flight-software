@@ -71,7 +71,7 @@ say "Installing system dependencies"
 run sudo apt-get update -y
 run sudo apt-get install -y \
   build-essential cmake git pkg-config \
-  libgpiod-dev libi2c-dev i2c-tools \
+  libgpiod-dev libi2c-dev i2c-tools zlib1g-dev \
   python3 python3-pip python3-venv
 
 say "Ensuring the coatheal service user exists"
@@ -113,7 +113,7 @@ say "Building the onboard software"
 # Release build, and refuse a binary built without libgpiod: that one
 # compiles and "runs" with every heater and motor output stubbed out.
 run cmake -S "$PROJECT_DIR" -B "$PROJECT_DIR/build" \
-  -DCMAKE_BUILD_TYPE=Release -DCOATHEAL_REQUIRE_LIBGPIOD=ON
+  -DCMAKE_BUILD_TYPE=Release -DCOATHEAL_REQUIRE_LIBGPIOD=ON -DCOATHEAL_REQUIRE_ZLIB=ON
 run cmake --build "$PROJECT_DIR/build" -j"$(nproc)"
 if [[ "$DRY_RUN" != "1" ]]; then
   [[ -x "$BINARY" ]] || die "build produced no binary at $BINARY"

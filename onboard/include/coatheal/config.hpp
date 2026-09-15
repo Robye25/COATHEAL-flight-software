@@ -209,17 +209,18 @@ struct StepperConfig {
   // Ball-screw lead: linear travel per motor revolution. The mm command
   // surface (STEPPER_MOVE_MM / STEPPER_MOVETO_MM, mm telemetry keys)
   // converts through this single value; the microstep commands stay raw.
-  double lead_mm_per_rev = 2.0;
+  // Owner 2026-09-15: the screws have a 1 mm lead.
+  double lead_mm_per_rev = 1.0;
   // Linear speed ceiling for every motion path (jog, bend, sequences, the
   // fallback plan, pulls), in mm/s of ball-screw travel. Converted through
   // lead_mm_per_rev and steps_per_rev into full-steps/s (LinearMaxStepHz)
   // and combined with pull.max_step_hz into the one ceiling every channel
   // clamps to (EffectiveMaxStepHz). Owner rule 2026-09-11: 0.5 mm/s, i.e.
-  // 50 full-steps/s at the 2 mm lead.
+  // 100 full-steps/s at the 1 mm lead.
   double max_speed_mm_s = 0.5;
   // Longest raw-microstep command accepted: |steps| of STEPPER_MOVE and
   // |target| of STEPPER_MOVETO / STEPPER_BEND, in microsteps at the live
-  // divisor (1000 = 1.25 rev = 2.5 mm at u4 and the 2 mm lead). The mm
+  // divisor (1000 = 1.25 rev = 1.25 mm at u4 and the 1 mm lead). The mm
   // surface and the mm-encoded sequences / fallback plan are bounded by
   // max_position_steps instead. Owner rule 2026-09-11.
   std::int64_t max_direct_usteps = 1000;
@@ -234,11 +235,14 @@ struct StepperConfig {
   }
 };
 
+// Defaults keep the pull in millimetres at the 1 mm lead (owner 2026-09-15):
+// 100 full-steps/s = 0.5 mm/s, 400 full-steps/s² = 2 mm/s², 400 full steps
+// = a 2 mm pull.
 struct PullConfig {
   double max_step_hz = 100.0;
-  double accel_steps_per_s2 = 200.0;
+  double accel_steps_per_s2 = 400.0;
   int microstep = 4;
-  int travel_full_steps = 200;
+  int travel_full_steps = 400;
   double hold_s = 5.0;
 };
 

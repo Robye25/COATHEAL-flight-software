@@ -15,14 +15,15 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque, Dict, List, Optional, Tuple
 
+from ..protocol import LEAD_MM_PER_REV
 from ..reply_format import parse_kv_body
 
 FULL_STEPS_PER_REV = 200
 MSCNT_PER_FULL_STEP = 256
 XACTUAL_PER_FULL_STEP = 256
 MSCNT_MODULUS = 1024
-# The onboard's confirmed ball-screw lead (stepper.lead_mm_per_rev).
-DEFAULT_MM_PER_REV = 2.0
+# The onboard's confirmed ball-screw lead (stepper.lead_mm_per_rev): 1 mm.
+DEFAULT_MM_PER_REV = LEAD_MM_PER_REV
 WINDOW_S = 3.0
 
 

@@ -304,8 +304,8 @@ Step(fwd) -> target_ += (fwd XOR invert_direction) ? +Δ : -Δ
 
 The ramp generator then smooths that single-microstep nudge into the actual
 coil drive waveform in hardware, at a demanded rate the pacing thread paces
-(≤ the speed ceiling: 50 full-steps/s = `stepper.max_speed_mm_s` 0.5 mm/s at
-the 2 mm lead, or `pull.max_step_hz` if that is lower). `Δ = 256 / microstep_divisor`
+(≤ the speed ceiling: 100 full-steps/s = `stepper.max_speed_mm_s` 0.5 mm/s at
+the 1 mm lead, or `pull.max_step_hz` if that is lower). `Δ = 256 / microstep_divisor`
 because XTARGET always counts in the ramp generator's fixed 256
 internal-microsteps-per-fullstep resolution, regardless of the configured
 `MRES`/microstep divisor.

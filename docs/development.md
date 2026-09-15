@@ -34,10 +34,11 @@
 | CMake | 3.16 |
 | C++ compiler | C++17 support (GCC 10+, Clang 12+) |
 | libgpiod | 1.x or 2.x (for real GPIO output backends) |
+| zlib | 1.2 (z1 telemetry compression; without it no DATA frame fits the 24 kbps budget, see [link-budget.md](link-budget.md)) |
 
 On Raspberry Pi OS:
 ```bash
-sudo apt install cmake g++ libgpiod-dev
+sudo apt install cmake g++ libgpiod-dev zlib1g-dev
 ```
 
 ### Configure and build

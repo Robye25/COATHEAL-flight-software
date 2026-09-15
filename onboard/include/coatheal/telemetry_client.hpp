@@ -15,12 +15,10 @@
 #include <netinet/in.h>
 #endif
 
-namespace coatheal {
+#include "coatheal/link_budget.hpp"
+#include "coatheal/telemetry_drain.hpp"
 
-struct TelemetryAck {
-  std::string session_id;
-  std::uint64_t seq = 0;
-};
+namespace coatheal {
 
 // Most-recently-heard ground-station advertisement, populated by the discovery
 // listener thread. Guarded by the client mutex.
@@ -33,7 +31,7 @@ struct GroundStationAdvert {
   bool valid = false;
 };
 
-class TelemetryClient {
+class TelemetryClient : public FrameSender {
  public:
   TelemetryClient(std::string host,
                   int telemetry_port,
@@ -47,10 +45,15 @@ class TelemetryClient {
                   int rediscover_period_s = 30,
                   int failover_grace_s = 5,
                   int priority = 100);
-  ~TelemetryClient();
+  ~TelemetryClient() override;
 
   TelemetryClient(const TelemetryClient&) = delete;
   TelemetryClient& operator=(const TelemetryClient&) = delete;
+
+  // The onboard share of the E-Link budget (docs/link-budget.md). Every
+  // frame, connection attempt, beacon and hello reply is charged to it. Set
+  // before Start(); without one nothing is limited (unit tests).
+  void SetLinkBudget(LinkBudget* budget);
 
   // Starts the UDP discovery listener and the onboard-beacon sender. Safe to
   // call multiple times; subsequent calls are a no-op.
@@ -58,8 +61,14 @@ class TelemetryClient {
   // Stops both discovery threads and closes sockets. Idempotent.
   void Stop();
 
-  bool SendFrameAwaitAck(const std::string& frame, TelemetryAck* ack);
-  bool is_connected() const;
+  SendStatus SendFrame(const std::string& line, LinkPriority priority,
+                       std::chrono::steady_clock::time_point budget_deadline,
+                       TelemetryAck* ack) override;
+  bool is_connected() const override;
+  // "z1" or "plain" for the open connection, "" while disconnected.
+  std::string link_codec() const;
+  // Frames whose ACK missed the deadline (each reset the connection).
+  std::uint64_t ack_timeouts() const;
 
   void SetTransmitEnabled(bool enabled);
   bool transmit_enabled() const;
@@ -68,7 +77,9 @@ class TelemetryClient {
   // beacon thread consults before every broadcast; `hello_reply_allowed()`
   // is what the listener consults before answering a legacy GS_HELLO. Both
   // are false whenever transmit is disabled, so a silent onboard originates
-  // no datagram at all. The counters let tests observe what the two send
+  // no datagram at all, and both are false while a telemetry connection is
+  // up -- discovery has nothing left to find, and the link budget has no
+  // bytes to spare for it. The counters let tests observe what the two send
   // helpers actually did without opening sockets.
   bool beacon_allowed() const;
   bool hello_reply_allowed() const;
@@ -96,12 +107,35 @@ class TelemetryClient {
   // Snapshot of the latest heard GS advert (for tests/observability).
   GroundStationAdvert latest_gs() const;
 
+  // Bytes held for one telemetry frame of `payload` bytes (newline included):
+  // the segment; the ground station's TCP ACK of it (a frame of its own when
+  // its kernel answers before the ACK line is written) and the reset our
+  // kernel answers that ACK with if it arrives after we gave up; the ACK line
+  // for `line` and our ACK of it (or the reset answering a late one); and our
+  // reset if the ACK line does not come in time or is not the one expected.
+  // No retransmission is budgeted because none can reach the wire (see
+  // wire::kAckDeadline). Public so the budget tests use the same model.
+  static std::uint32_t FrameCostBytes(const std::string& line, std::size_t payload);
+
  private:
   bool ConnectLocked();
+  void NegotiateCodecLocked();
+  // What a connection attempt can put on the wire, the HELLO exchange
+  // included (docs/link-budget.md).
+  std::uint32_t ConnectCostBytesLocked() const;
+  void ReleaseConnectHoldLocked(std::chrono::steady_clock::time_point when);
+  // When a charge covering a connection being reset now may be released:
+  // after wire::kAbortTail plus the connection's round trip.
+  std::chrono::steady_clock::time_point AbortTailLocked() const;
+  void QuickAckLocked();
   void CloseLocked();
+  // Close with a reset (SO_LINGER 0): nothing unacknowledged is
+  // retransmitted after this, which is what keeps retransmissions off the
+  // E-Link when an ACK misses its deadline.
+  void AbortLocked();
 
   bool SendAllLocked(const std::string& payload);
-  bool ReadLineLocked(std::string* line);
+  bool ReadLineLocked(std::string* line, int timeout_ms);
   static bool ParseAckLine(const std::string& line, TelemetryAck* ack);
 
   // Background threads.
@@ -135,8 +169,18 @@ class TelemetryClient {
   int failover_grace_s_ = 5;
   int priority_ = 100;
 
+  LinkBudget* budget_ = nullptr;
+
   mutable std::mutex mu_;
   bool connected_ = false;
+  bool codec_z1_ = false;
+  std::uint64_t ack_timeouts_ = 0;
+  bool ack_timeout_logged_ = false;
+  bool oversize_logged_ = false;
+  // Held from before the SYN until the HELLO exchange is over (or, for a
+  // HELLO left unanswered, until the connection shows it never will be).
+  LinkBudget::Ticket connect_hold_;
+  bool connect_hold_open_ = false;
   bool transmit_enabled_ = true;
   std::atomic<std::uint64_t> beacons_sent_{0};
   std::atomic<std::uint64_t> hello_replies_sent_{0};
@@ -144,9 +188,9 @@ class TelemetryClient {
   std::string recv_buffer_;
   std::string session_id_;
   // Exponential connect backoff, expressed as a deadline instead of a
-  // sleep: SendFrameAwaitAck runs on the control-loop thread, and sleeping
-  // there stretched every tick by up to reconnect_ms_ whenever the ground
-  // station was away.
+  // sleep: SendFrame runs on the control-loop thread, and sleeping there
+  // stretched every tick by up to reconnect_ms_ whenever the ground station
+  // was away.
   std::chrono::steady_clock::time_point next_connect_attempt_{};
   int connect_backoff_ms_ = 500;
 

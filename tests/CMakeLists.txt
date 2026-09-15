@@ -39,6 +39,16 @@ target_link_libraries(coatheal_downlink_bandwidth_test PRIVATE coatheal_onboard_
 
 add_test(NAME coatheal_downlink_bandwidth COMMAND coatheal_downlink_bandwidth_test)
 
+# 24 kbps E-Link budget: ledger, z1 codec, bisection replay and the drain
+# that ties them together (docs/link-budget.md).
+add_executable(coatheal_link_budget_tests
+  unit/test_link_budget.cpp
+)
+
+target_link_libraries(coatheal_link_budget_tests PRIVATE coatheal_onboard_core)
+
+add_test(NAME coatheal_link_budget_tests COMMAND coatheal_link_budget_tests)
+
 add_executable(coatheal_status_led_test
   unit/status_led_test.cpp
 )

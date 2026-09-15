@@ -1,14 +1,20 @@
-// Simulates a realistic 1 Hz telemetry stream for 60 s and asserts the
-// serialized downlink bandwidth stays below the E-Link budget with margin.
-// Target: < 100_000 bps (well under the 2 Mbps nominal E-Link budget).
+// A realistic 1 Hz telemetry frame against the 24 kbps E-Link budget
+// (docs/link-budget.md): what one frame holds while it is out -- the frame,
+// the ground station's TCP ACK and ACK line, our ACK, and the resets an abort
+// could cost -- and what stays counted once it was answered, compressed and
+// plain. test_link_budget.cpp replays whole outages against the same model;
+// this pins the per-frame numbers the budget split was sized on.
 
 #include <cassert>
 #include <cstdint>
 #include <iostream>
 #include <string>
 
+#include "coatheal/link_budget.hpp"
 #include "coatheal/status_flags.hpp"
 #include "coatheal/telemetry.hpp"
+#include "coatheal/telemetry_client.hpp"
+#include "coatheal/telemetry_codec.hpp"
 
 namespace {
 
@@ -39,36 +45,36 @@ coatheal::TelemetryRecord MakeRealisticRecord(std::uint64_t seq) {
 }  // namespace
 
 int main() {
-  const std::string session_id = "coatheal-1718000000-123456";
-  constexpr int kDurationSeconds = 60;
-  constexpr int kFramesPerSecond = 1;
-  constexpr std::uint64_t kBudgetBps = 100000;  // 100 kbps ceiling with margin
+  const std::string session_id = "coatheal-1789498045-582267";
+  const std::string frame = coatheal::TagFrameForTransmit(
+      coatheal::SerializeTelemetryDataFrame(MakeRealisticRecord(123456), session_id), 0, 0);
 
-  std::uint64_t total_bytes = 0;
-  for (int i = 0; i < kDurationSeconds * kFramesPerSecond; ++i) {
-    const coatheal::TelemetryRecord record = MakeRealisticRecord(static_cast<std::uint64_t>(i));
-    const std::string frame =
-        coatheal::SerializeTelemetryDataFrame(record, session_id);
-    // +1 for the newline framing the onboard appends before send().
-    total_bytes += frame.size() + 1;
+  // What stays counted after a timely answer that carried the TCP ACK.
+  const auto settled = [](std::uint32_t cost) {
+    return cost - 2 * coatheal::wire::kReset - coatheal::wire::kPureAck;
+  };
+
+  const std::size_t plain_payload = frame.size() + 1;
+  const std::uint32_t plain_cost = coatheal::TelemetryClient::FrameCostBytes(frame, plain_payload);
+  std::cout << "[downlink_bw] plain frame " << plain_payload << " B: holds " << plain_cost
+            << " B, " << settled(plain_cost) << " B once answered\n";
+  // This record fits the share on its own; a full bench frame (about 1.1 kB)
+  // does not, which is why the codec is required.
+  assert(plain_cost <= coatheal::kOnboardShareBytes);
+
+  if (coatheal::TelemetryCodecAvailable()) {
+    const std::string z1 = coatheal::EncodeTelemetryLineZ1(frame);
+    assert(!z1.empty());
+    const std::size_t z1_payload = z1.size() + 1;
+    const std::uint32_t z1_cost = coatheal::TelemetryClient::FrameCostBytes(frame, z1_payload);
+    std::cout << "[downlink_bw] z1 frame " << z1_payload << " B: holds " << z1_cost << " B, "
+              << settled(z1_cost) << " B once answered; share " << coatheal::kOnboardShareBytes
+              << " B per second\n";
+    // A replayed frame fits next to an answered live frame in one second.
+    assert(settled(z1_cost) + z1_cost <= coatheal::kOnboardShareBytes);
+    // One compressed frame per second, answers included: under 8 kbps.
+    assert(settled(z1_cost) * 8 <= 8000);
   }
-
-  const double bps = (static_cast<double>(total_bytes) * 8.0) /
-                     static_cast<double>(kDurationSeconds);
-
-  std::cout << "[downlink_bw] total_bytes=" << total_bytes
-            << " duration_s=" << kDurationSeconds
-            << " bps=" << bps
-            << " budget_bps=" << kBudgetBps << '\n';
-
-  if (bps >= static_cast<double>(kBudgetBps)) {
-    std::cerr << "[downlink_bw] FAIL: bandwidth " << bps
-              << " bps exceeds budget " << kBudgetBps << " bps\n";
-    return 1;
-  }
-
-  // Sanity: frames must be non-empty.
-  assert(total_bytes > 0);
 
   std::cout << "[downlink_bw] PASS\n";
   return 0;

@@ -280,16 +280,16 @@ contract, SPI topology, current model, and bench gates.
 
 ```ini
 stepper.steps_per_rev=200
-stepper.default_step_hz=50.0
+stepper.default_step_hz=100.0
 stepper.max_position_steps=200000
-stepper.lead_mm_per_rev=2.0
+stepper.lead_mm_per_rev=1.0
 stepper.max_speed_mm_s=0.5
 stepper.max_direct_usteps=1000
 
-pull.max_step_hz=50.0
-pull.accel_steps_per_s2=200.0
+pull.max_step_hz=100.0
+pull.accel_steps_per_s2=400.0
 pull.microstep=4
-pull.travel_full_steps=200
+pull.travel_full_steps=400
 pull.hold_s=5.0
 
 motor0.driver=tmc5160

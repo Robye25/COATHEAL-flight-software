@@ -95,8 +95,8 @@ means the power stage is off; `ola`/`olb` are open-load flags (only valid
 at standstill), `s2ga`/`s2gb` short-to-ground. The console's **Debug tab**
 polls this twice a second and turns the deltas into full-steps/s, rev/s and
 mm/s (using the ball-screw lead you enter), with a verdict line. Expected:
-one revolution = 200 full steps ≈ 1–2 mm of pull; at the 0.5 mm/s ceiling (50 full-steps/s) a
-BEND of 800 µsteps (µ4) takes 4 s and moves about 1.5 mm -- easy to miss on
+one revolution = 200 full steps = 1 mm of pull at the 1 mm lead; at the 0.5 mm/s ceiling
+(100 full-steps/s) a BEND of 800 µsteps (µ4) takes 2 s and moves 1 mm -- easy to miss on
 a camera, obvious in `mscnt`.
 
 ```powershell

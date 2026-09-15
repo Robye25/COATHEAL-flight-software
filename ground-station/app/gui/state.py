@@ -91,6 +91,18 @@ def parse_layout(body: str) -> Optional[Layout]:
     return layout
 
 
+def parse_lead_mm(body: str) -> Optional[float]:
+    """The ball-screw lead (`lead_mm=<mm per revolution>`) a GET_LAYOUT reply
+    carries, or None when the firmware does not report it (or reports
+    something that is not a positive number)."""
+    raw = parse_kv_body(body).get("lead_mm")
+    try:
+        value = float(raw) if raw is not None else math.nan
+    except ValueError:
+        return None
+    return value if math.isfinite(value) and value > 0 else None
+
+
 @dataclass(frozen=True)
 class MotorState:
     motor_id: int

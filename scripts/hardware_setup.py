@@ -72,6 +72,15 @@ FINAL_PIN_VALUES = {
     # HeaterScheduler enforces.
     "power.max_active_heaters": "3",
     "power.max_thermal_w": "15.0",
+    # Owner 2026-09-15: the ball screws have a 1 mm lead, and the motion
+    # envelope keeps its millimetre values: 0.5 mm/s = 100 full-steps/s,
+    # 2 mm/s^2 = 400 full-steps/s^2, a 2 mm standard pull = 400 full steps.
+    "stepper.lead_mm_per_rev": "1.0",
+    "stepper.max_speed_mm_s": "0.5",
+    "stepper.default_step_hz": "100.0",
+    "pull.max_step_hz": "100.0",
+    "pull.accel_steps_per_s2": "400.0",
+    "pull.travel_full_steps": "400",
 }
 # motorN.specimens (2026-09-15) replaced these index-based layout keys: the
 # onboard derives them from the two specimen lists and refuses an INI that
