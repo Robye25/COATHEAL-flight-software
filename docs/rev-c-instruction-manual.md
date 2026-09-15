@@ -304,27 +304,26 @@ python3 scripts/associate_heaters.py --check   # preflight only, no heat
 python3 scripts/associate_heaters.py           # measure, write, restart
 ```
 
-It warms one heater at a time with bench `HEATER_TEST` pulses (each lapses
-within 5 s on its own, so a dead script cannot leave a heater on), pairs the
-heater with the RTD card terminal that warms, and writes
-`sensor.sequent_rtd_channels` only when every heater paired clearly with its
-own terminal: a config backup is kept beside the file, and the service is
-restarted and checked against the new map. It stops for a terminal reaching
-50 °C or a probe dropping out, and refuses to write when two terminals warm
-together, a heater warms nothing, or one heater needs far longer than the
-rest (a probe off its specimen reads its neighbour's heat). Every reading is
-logged to `logs/heater-association-<time>.csv`.
+It takes the heaters one at a time: switches the heater on with bench
+`HEATER_TEST` pulses (each lapses within 5 s on its own, so a dead script
+cannot leave a heater on), switches it off as soon as one RTD card terminal
+has warmed by 2 °C while no other has warmed by a third of that, and waits
+until no PT100 is still rising before the next heater. The pairs are written
+into `sensor.sequent_rtd_channels` with a config backup beside the file, and
+the service is restarted and checked against the new map; `coatheal-deploy`
+keeps the map from then on. It stops for a terminal reaching 50 °C, a probe
+dropping out, or another client driving heaters. Every reading is logged to
+`logs/heater-association-<time>.csv`.
 
-A heater that warms nothing is usually on a GPIO the config does not list
-(bench 2026-09-14: H2 was not on BCM 6). The script then offers to try every
-header line nothing in the config or on the HAT claims — BCM 12, 16, 18, 25,
-then 4 on the v3 map; `--lines 12,16` narrows it — one at a time: the line
-goes into `heater.output_lines`, the service restarts, the heater is pulsed
-through the firmware exactly as above, and the line that warms a terminal is
-kept. BCM 0–8 idle pulled up at boot, so those are tried last and held down
-with `pinctrl` while unclaimed. After a line change, run `coatheal-deploy` so
-the boot-time GPIO block in `config.txt` holds the new line off (it will say
-REBOOT REQUIRED). `--no-find-lines` disables the search.
+A heater that cannot be paired is reported and left out, and every heater
+that did pair is still written: one that warms nothing within 60 s (bench
+2026-09-14: H2 on BCM 6 — the heater is not on that line, not connected, or
+its specimen's PT100 is not on the card), one that warms two terminals alike,
+two heaters that warm the same terminal, and one that needs far longer than
+the rest (a probe off its own specimen reads the neighbour's heat). The
+left-out heater's sample keeps its terminal unless a paired heater took it,
+so its feedback is no better than before: do not heat it, fix what the script
+reported, and rerun. The script exits 0 only when every heater paired.
 
 Heat cannot tell which unheated terminal is `S6` and which `S7`, nor which
 motor group or MAX31865 click a specimen belongs to — check

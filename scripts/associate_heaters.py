@@ -1,27 +1,31 @@
 #!/usr/bin/env python3
-"""Measure which PT100 sits on each heater's specimen and write that wiring
-map into the onboard config.
+"""Pair each heater with the PT100 that reads its heat, and write the pairs
+into the onboard config.
 
-The bench harness does not follow the schematic, so heater H<i> (BCM
-heater.output_lines[i]) is not necessarily read by RTD card terminal i+1.
-This script finds out by heat. With coatheal-onboard running in bench mode
-it warms ONE heater at a time with HEATER_TEST pulses -- each lapses on its
-own within seconds, so a dead script cannot leave a heater on -- watches the
-raw resistance of every RTD card terminal (COMPONENTS' sequent_rtd_ch), and
-pairs the heater with the terminal that warms.
+The bench harness does not follow the schematic: heater H<i> (BCM
+heater.output_lines[i]) does not necessarily warm the PT100 on RTD card
+terminal i+1. With coatheal-onboard running in bench mode, this script takes
+the heaters one at a time:
 
-The result is written as sensor.sequent_rtd_channels, ordered so logical
-sample i is the specimen heater i warms, and heater.temperature_channels
-stays 0..5: the ground station and the thermal alarms pair heater i with
-sample i. migrate-config (every coatheal-deploy) keeps this map.
+  1. it switches the heater on with HEATER_TEST pulses, each of which lapses
+     within seconds on its own, so a dead script cannot leave a heater on;
+  2. it watches every RTD card terminal and switches the heater off as soon
+     as one terminal has clearly warmed while the others have not;
+  3. it waits until no PT100 is still warming (a PT100 lags its specimen),
+     then takes the next heater.
 
-A heater that warms nothing is usually wired to a GPIO the config does not
-list (bench 2026-09-14: H2 was not on BCM 6). The script then offers to try
-every unclaimed header line for it -- each try puts the line into
-heater.output_lines, restarts the service and pulses the heater through the
-firmware exactly as above -- and keeps the line that warmed a terminal.
+The pairs go into sensor.sequent_rtd_channels, so that logical sample S<i>
+reads the PT100 heater H<i> warms, and heater.temperature_channels stays
+0..5: the ground station and the thermal alarms pair H<i> with S<i>.
+migrate-config (every coatheal-deploy) keeps both, so the map is written
+once and stays.
 
-Run it once on the Pi, heaters and PT100s connected, motors idle:
+A heater that warms no terminal, or warms two alike, is reported and left
+out. The heaters that did pair are written anyway; the left-out heater's
+sample keeps its terminal unless a paired heater took it. Rerun once that
+heater is fixed.
+
+Run it on the Pi, heaters and PT100s connected, motors idle:
 
     python3 scripts/associate_heaters.py --check   # preflight only, no heat
     python3 scripts/associate_heaters.py           # measure, write, restart
@@ -69,47 +73,31 @@ class AssociationError(Exception):
 @dataclass
 class Settings:
     duty: float = 0.25
-    # A terminal is paired with the heater once its rise reaches rise_c AND
-    # the next-warmest terminal stays within max(noise_c, rise / dominance):
-    # a neighbour warming by conduction, or the whole room drifting, must not
-    # pass for the heated specimen. Rises are means over evidence_s of reads
-    # (COMPONENTS reports 0.1 ohm ~ 0.26 C steps, plus read-to-read scatter).
+    # A terminal is the heater's once it reads rise_c above its reading at
+    # switch-on while every other terminal stays within
+    # max(noise_c, rise / dominance): a neighbour warming by conduction, or
+    # the room drifting, must not pass for the heated specimen. COMPONENTS
+    # reports 0.1 ohm, about 0.26 C per step.
     rise_c: float = 2.0
     dominance: float = 3.0
     noise_c: float = 0.5
-    evidence_s: float = 10.0
-    abort_c: float = 50.0         # any terminal this hot ends the run
-    # Bench 2026-09-14: every wired heater moved its PT100 by +1 C within
-    # 4 s and +4..6 C within 10 s at duty 0.25. A heater that has moved
-    # nothing after this long is not on that line.
-    max_heat_s: float = 120.0
-    scan_heat_s: float = 60.0     # per candidate line while searching for a heater
-    # HEATER_TEST length. Re-sent every pulse_s / 2.5, so the heater drops
-    # within pulse_s of this script dying.
+    # Bench 2026-09-14: every connected heater moved its PT100 by +1 C within
+    # 4 s at duty 0.25. A heater that has warmed nothing after this long is
+    # not warming a PT100 on the card.
+    max_heat_s: float = 60.0
+    abort_c: float = 50.0         # any terminal this hot stops the run
+    # HEATER_TEST length. Re-sent every pulse_s / 2.5 while heating, so the
+    # heater drops within pulse_s of this script dying.
     pulse_s: float = 5.0
     poll_s: float = 1.0
-    baseline_s: float = 20.0
-    # Between heaters: wait until no terminal has warmed faster than the room
-    # by settle_slope_c_per_min over the last settle_window_s (the lagging
-    # PT100 has peaked), at most max_settle_s. The window is long enough that
-    # one 0.1 ohm step inside it stays under the slope limit.
-    settle_window_s: float = 60.0
-    settle_slope_c_per_min: float = 0.6
-    max_settle_s: float = 300.0
-    max_noise_c: float = 1.0      # baseline scatter that makes a terminal suspect
+    # Before each heater: until no terminal has warmed faster than
+    # steady_c_per_s over the last steady_s, at most max_wait_s. Bench
+    # 2026-09-14: a PT100 kept rising ~2 C after its heater went off. One
+    # 0.1 ohm step inside the window stays under the limit.
+    steady_s: float = 15.0
+    steady_c_per_s: float = 0.03
+    max_wait_s: float = 120.0
     duty_grace_s: float = 3.0     # a command lands on the next control tick
-
-    @property
-    def target_rise_c(self) -> float:
-        # Heat a little past rise_c: the verdict's centred average peaks
-        # lower than the trailing one that decides when to stop.
-        return 1.25 * self.rise_c
-
-    @property
-    def stop_rise_c(self) -> float:
-        # Heating stops here even when no single terminal leads: two
-        # terminals warming together will not separate with more heat.
-        return 2.0 * self.rise_c
 
 
 @dataclass(frozen=True)
@@ -125,29 +113,22 @@ class Terminal:
 
 
 @dataclass
-class Sample:
+class Reading:
     t: float
-    raw: dict[int, float]     # C per usable terminal, as read
-    temps: dict[int, float]   # median of the last three reads: no single spikes
-    duties: list[float]       # applied duty per heater (GET_THERMAL)
+    raw: dict[int, float]     # C per terminal, as read
+    temps: dict[int, float]   # median of the terminal's last three reads: no single spikes
+    duties: list[float]       # duty the onboard applies per heater (GET_THERMAL)
 
 
-@dataclass
-class Baseline:
-    level: dict[int, float]
-    noise: dict[int, float]   # worst deviation from a straight-line fit
-
-
-@dataclass
+@dataclass(frozen=True)
 class HeaterResult:
     heater: int
     line: str
-    channel: Optional[int]    # the paired terminal; None unless verdict is ok
-    verdict: str              # ok / no response / ambiguous / noisy terminal
-    candidate: Optional[int]  # warmest terminal, paired or not
-    peak_c: float
+    verdict: str                          # paired / no response / ambiguous / not driven
+    channel: Optional[int]                # warmest terminal when the heater went off
+    rise_c: float                         # its rise over the reading at switch-on
     runner_up: Optional[tuple[int, float]]
-    heat_s: float
+    seconds: float                        # heating time
 
 
 def reply_fields(command: str, reply: str) -> dict[str, str]:
@@ -188,31 +169,14 @@ def pt100_c(ohms: float) -> float:
     return (-a + math.sqrt(a * a - 4.0 * b * (1.0 - ohms / 100.0))) / (2.0 * b)
 
 
-def _moving_means(points: list[tuple[float, float]], half_s: float) -> list[float]:
-    """Mean of the values within +-half_s of each point (points sorted by t)."""
-    means = []
-    lo = hi = 0
-    total = 0.0
-    for t, _ in points:
-        while hi < len(points) and points[hi][0] <= t + half_s:
-            total += points[hi][1]
-            hi += 1
-        while points[lo][0] < t - half_s:
-            total -= points[lo][1]
-            lo += 1
-        means.append(total / (hi - lo))
-    return means
-
-
-def _line_fit(points: list[tuple[float, float]]) -> tuple[float, float, float]:
-    """Least-squares slope (per second), plus the means it pivots on."""
+def _slope(points: list[tuple[float, float]]) -> float:
+    """Least-squares slope of (t, value) points, per second."""
     mean_t = sum(t for t, _ in points) / len(points)
     mean_v = sum(v for _, v in points) / len(points)
     spread = sum((t - mean_t) ** 2 for t, _ in points)
     if spread <= 0.0:
-        return 0.0, mean_t, mean_v
-    slope = sum((t - mean_t) * (v - mean_v) for t, v in points) / spread
-    return slope, mean_t, mean_v
+        return 0.0
+    return sum((t - mean_t) * (v - mean_v) for t, v in points) / spread
 
 
 class Onboard:
@@ -232,10 +196,10 @@ class Onboard:
 
 
 class Survey:
-    """Heats each heater in turn and pairs it with the terminal that warms."""
+    """Heats the heaters one at a time and finds the terminal each one warms."""
 
     def __init__(self, onboard: Onboard, settings: Settings,
-                 heater_lines: list[str], usable: set[int], *,
+                 heater_lines: list[str], channels: set[int], *,
                  clock: Callable[[], float] = time.monotonic,
                  sleep: Callable[[float], None] = time.sleep,
                  out: Callable[[str], None] = print,
@@ -243,14 +207,14 @@ class Survey:
         self.onboard = onboard
         self.s = settings
         self.heater_lines = heater_lines
-        self.usable = sorted(usable)
+        self.channels = sorted(channels)
         self.clock = clock
         self.sleep = sleep
         self.out = out
         self.t0 = clock()
-        self.samples: list[Sample] = []
-        self._recent = {c: deque(maxlen=3) for c in self.usable}
-        self._dropouts = dict.fromkeys(self.usable, 0)
+        self.readings: list[Reading] = []
+        self._recent = {c: deque(maxlen=3) for c in self.channels}
+        self._dropouts = dict.fromkeys(self.channels, 0)
         self._failed_polls = 0
         self._log_file = None
         self._log = None
@@ -273,30 +237,20 @@ class Survey:
             self._log_file = None
 
     def say(self, message: str) -> None:
-        self.out(f"[{self.clock() - self.t0:6.0f}s] {message}")
+        self.out(f"[{self.clock() - self.t0:5.0f}s] {message}")
 
-    def run(self, heaters: Optional[list[int]] = None,
-            max_heat_s: Optional[float] = None) -> list[HeaterResult]:
+    def run(self) -> list[HeaterResult]:
         self.onboard.ack("HEATERS_OFF")
-        self.say("heaters off (any operator targets cleared); waiting for a steady baseline")
-        self.settle("baseline")
-        base = self.baseline()
+        self.say("heaters off (any operator targets cleared)")
         results = []
-        for heater in (range(len(self.heater_lines)) if heaters is None else heaters):
-            line = self.heater_lines[heater]
-            first = len(self.samples)
-            self.say(f"H{heater} (BCM {line}) on at duty {self.s.duty:g}")
-            stopped, heat_s = self.heat(heater, base, max_heat_s)
-            self.onboard.ack("HEATERS_OFF")
-            self.say(f"H{heater} off after {heat_s:.0f} s ({stopped}); letting it cool")
-            self.settle(f"H{heater}")
-            result = self.evaluate(heater, base, first, heat_s)
-            results.append(result)
-            self.say(describe(result))
-            base = self.baseline()
+        for heater in range(len(self.heater_lines)):
+            self.wait_steady(f"before H{heater}")
+            results.append(self.test(heater))
         return results
 
-    def poll(self, phase: str, heater: Optional[int]) -> Optional[Sample]:
+    def read(self, phase: str, heater: Optional[int] = None) -> Optional[Reading]:
+        """One poll: every terminal's temperature and every heater's applied
+        duty. None when this poll failed; three failures in a row raise."""
         self.sleep(self.s.poll_s)
         try:
             components = self.onboard.ack("COMPONENTS")
@@ -317,7 +271,7 @@ class Survey:
             by_channel.setdefault(terminal.channel, terminal)
         raw: dict[int, float] = {}
         temps: dict[int, float] = {}
-        for channel in self.usable:
+        for channel in self.channels:
             terminal = by_channel.get(channel)
             if terminal is not None and terminal.conducting:
                 raw[channel] = pt100_c(terminal.ohms)
@@ -332,7 +286,7 @@ class Survey:
                 seen = (f"{terminal.fault}, {terminal.ohms:.1f} ohm"
                         if terminal is not None else "missing from COMPONENTS")
                 raise AssociationError(
-                    f"the PT100 on ch{channel} dropped out ({seen}); "
+                    f"the PT100 on ch{channel} stopped reading ({seen}); "
                     "fix that terminal and rerun")
 
         duties = []
@@ -341,11 +295,11 @@ class Survey:
                 duties.append(float(thermal.get(f"h{index}_duty", "nan")))
             except ValueError:
                 duties.append(math.nan)
-        sample = Sample(self.clock(), raw, temps, duties)
-        self.samples.append(sample)
+        reading = Reading(self.clock(), raw, temps, duties)
+        self.readings.append(reading)
         if self._log is not None:
             self._log.writerow(
-                [f"{sample.t - self.t0:.1f}", phase, "" if heater is None else heater]
+                [f"{reading.t - self.t0:.1f}", phase, "" if heater is None else heater]
                 + [f"{by_channel[c].ohms:.1f}" if c in by_channel else ""
                    for c in CARD_TERMINALS]
                 + [f"{d:g}" for d in duties])
@@ -355,104 +309,89 @@ class Survey:
             channel = max(hot, key=hot.get)
             message = (f"ch{channel} reads {hot[channel]:.1f} C, at or above the "
                        f"{self.s.abort_c:g} C abort limit")
-            earlier = next((s for s in reversed(self.samples[:-1])
-                            if channel in s.temps), None)
-            if earlier is not None and sample.t > earlier.t:
-                rate = (hot[channel] - earlier.temps[channel]) / (sample.t - earlier.t)
+            earlier = next((r for r in reversed(self.readings[:-1])
+                            if channel in r.temps), None)
+            if earlier is not None and reading.t > earlier.t:
+                rate = (hot[channel] - earlier.temps[channel]) / (reading.t - earlier.t)
                 if rate > 2.0:
                     message += (f" (+{rate:.0f} C/s: a loose PT100 terminal "
                                 "looks like this, real heat does not)")
             raise AssociationError(message)
-        return sample
+        return reading
 
-    def recent_rises(self, base: Baseline) -> dict[int, float]:
-        """Mean rise per terminal over the last evidence_s / 2 of reads.
-
-        No room-drift correction on purpose: by the last heaters most other
-        terminals are specimens still cooling from earlier runs, which drags
-        any "room" estimate down and inflates every neighbour. Uniform drift
-        cannot fake a pairing anyway -- it fails the dominance test."""
-        end = self.samples[-1].t
-        sums: dict[int, float] = {}
-        counts: dict[int, int] = {}
-        for sample in reversed(self.samples):
-            if sample.t < end - self.s.evidence_s / 2.0:
-                break
-            for channel, value in sample.raw.items():
-                if channel in base.level:
-                    sums[channel] = sums.get(channel, 0.0) + value - base.level[channel]
-                    counts[channel] = counts.get(channel, 0) + 1
-        return {c: sums[c] / counts[c] for c in sums}
-
-    def dominant(self, best: float, second: float) -> bool:
-        return (best >= self.s.rise_c
-                and second <= max(self.s.noise_c, best / self.s.dominance))
-
-    def baseline(self) -> Baseline:
-        end = self.samples[-1].t
-        window = [s for s in self.samples if s.t >= end - self.s.baseline_s]
-        level: dict[int, float] = {}
-        noise: dict[int, float] = {}
-        for channel in self.usable:
-            points = [(s.t, s.temps[channel]) for s in window if channel in s.temps]
-            if len(points) < 3:
-                continue
-            slope, mean_t, mean_v = _line_fit(points)
-            level[channel] = statistics.median(s.raw[channel] for s in window if channel in s.raw)
-            noise[channel] = max(abs(v - mean_v - slope * (t - mean_t)) for t, v in points)
-        return Baseline(level, noise)
-
-    def quiet(self) -> bool:
-        end = self.samples[-1].t
-        window = [s for s in self.samples if s.t >= end - self.s.settle_window_s]
-        slopes = []
-        for channel in self.usable:
-            # Raw reads: read-to-read scatter averages out of a slope, while
-            # the median filter would turn it into steps.
-            points = [(s.t, s.raw[channel]) for s in window if channel in s.raw]
+    def warming(self, since: float) -> dict[int, float]:
+        """Terminals whose reads since `since` rose faster than
+        steady_c_per_s: {terminal: C/s}. Fitted on raw reads -- read-to-read
+        scatter averages out of a slope, the median filter would make steps."""
+        window = [r for r in self.readings if r.t >= since]
+        rates = {}
+        for channel in self.channels:
+            points = [(r.t, r.raw[channel]) for r in window if channel in r.raw]
             if len(points) >= 5:
-                slopes.append(_line_fit(points)[0])
-        limit = self.s.settle_slope_c_per_min / 60.0
-        return bool(slopes) and all(slope <= limit for slope in slopes)
+                rate = _slope(points)
+                if rate > self.s.steady_c_per_s:
+                    rates[channel] = rate
+        return rates
 
-    def settle(self, label: str) -> bool:
-        start = self.clock()
-        min_s = max(self.s.settle_window_s, self.s.baseline_s)
-        last_report = start
+    def wait_steady(self, label: str) -> None:
+        """Poll until no terminal is warming any more (at most max_wait_s)."""
+        self.say(f"{label}: waiting until no PT100 is warming "
+                 f"(at least {self.s.steady_s:.0f} s)")
+        start = last_report = self.clock()
         driven = 0
         while True:
-            sample = self.poll("settle", None)
+            reading = self.read("wait")
             now = self.clock()
-            if sample is not None:
-                on = [i for i, duty in enumerate(sample.duties) if duty > 0.0]
+            if reading is not None:
+                on = [i for i, duty in enumerate(reading.duties) if duty > 0.0]
                 driven = driven + 1 if on and now - start >= self.s.duty_grace_s else 0
                 if driven >= 2:
                     raise AssociationError(
-                        f"H{on[0]} is driven (duty {sample.duties[on[0]]:g}) although "
+                        f"H{on[0]} is driven (duty {reading.duties[on[0]]:g}) although "
                         "this script switched the heaters off: something else is "
                         "commanding heaters")
-                if now - start >= min_s and self.quiet():
-                    return True
-            if now - start >= self.s.max_settle_s:
-                self.say(f"{label}: still warming after {self.s.max_settle_s:.0f} s; "
-                         "carrying on")
-                return False
-            if now - start >= min_s and now - last_report >= 30.0:
-                self.say(f"{label}: a terminal is still warming; waiting")
+            if now - start < self.s.steady_s or not self.readings:
+                continue
+            warming = self.warming(now - self.s.steady_s)
+            if not warming:
+                return
+            listed = ", ".join(f"ch{c} {rate * 60.0:+.1f} C/min"
+                               for c, rate in sorted(warming.items()))
+            if now - start >= self.s.max_wait_s:
+                self.say(f"{label}: still warming after {self.s.max_wait_s:.0f} s "
+                         f"({listed}); carrying on")
+                return
+            if now - last_report >= 10.0:
+                self.say(f"{label}: still warming: {listed}")
                 last_report = now
 
-    def heat(self, heater: int, base: Baseline,
-             max_heat_s: Optional[float] = None) -> tuple[str, float]:
-        limit = self.s.max_heat_s if max_heat_s is None else max_heat_s
+    def baseline(self) -> dict[int, float]:
+        """Each terminal's mean over its last three reads."""
+        base = {}
+        for channel in self.channels:
+            values = [r.raw[channel] for r in self.readings[-6:] if channel in r.raw][-3:]
+            if values:
+                base[channel] = sum(values) / len(values)
+        return base
+
+    def test(self, heater: int) -> HeaterResult:
+        """Heat one heater until one terminal clearly warms, two warm alike,
+        or max_heat_s passes; the heater is off again on return."""
+        line = self.heater_lines[heater]
+        base = self.baseline()
         # repr, not :g -- a rounded-up duty would exceed heater.debug_max_duty.
         command = f"HEATER_TEST {heater} {self.s.duty!r} {self.s.pulse_s!r}"
         refresh_s = max(self.s.poll_s, self.s.pulse_s / 2.5)
+        self.say(f"H{heater} (BCM {line}) on at duty {self.s.duty:g}")
         start = self.clock()
         self._pulse(command)
         last_pulse = last_report = start
         pulse_failures = undriven = others_on = confirmed = 0
-        while True:
-            sample = self.poll("heat", heater)
+        ranked: list[tuple[int, float]] = []
+        verdict = None
+        elapsed = 0.0
+        while verdict is None:
+            reading = self.read("heat", heater)
             now = self.clock()
             elapsed = now - start
             if now - last_pulse >= refresh_s:
@@ -461,97 +400,134 @@ class Survey:
                 except OSError as error:
                     pulse_failures += 1
                     if pulse_failures >= 3:
-                        raise AssociationError(f"{command} not reaching the onboard: {error}") from error
+                        raise AssociationError(
+                            f"{command} not reaching the onboard: {error}") from error
                 else:
                     last_pulse = now
                     pulse_failures = 0
-            if sample is not None and elapsed >= self.s.duty_grace_s:
-                # Verify the onboard really drives this heater and only this
-                # one, or "no response" would be blamed on the wiring.
-                duty = sample.duties[heater]
-                undriven = 0 if duty > 0.0 else undriven + 1
-                if undriven >= 3:
-                    raise AssociationError(
-                        f"H{heater} is commanded but the onboard applies duty {duty:g} "
-                        "(motor moving? energy budget latched? disarmed by another client?)")
-                on = [i for i, d in enumerate(sample.duties) if d > 0.0 and i != heater]
-                others_on = others_on + 1 if on else 0
-                if others_on >= 2:
-                    raise AssociationError(
-                        f"H{on[0]} came on while H{heater} was under test: something "
-                        "else is commanding heaters")
-            if sample is not None:
-                ranked = sorted(self.recent_rises(base).items(),
+            if reading is not None:
+                if elapsed >= self.s.duty_grace_s:
+                    # Check the onboard really drives this heater and only
+                    # this one, or a silent heater would be blamed on wiring.
+                    undriven = 0 if reading.duties[heater] > 0.0 else undriven + 1
+                    on = [i for i, d in enumerate(reading.duties) if d > 0.0 and i != heater]
+                    others_on = others_on + 1 if on else 0
+                    if others_on >= 2:
+                        raise AssociationError(
+                            f"H{on[0]} came on while H{heater} was under test: "
+                            "something else is commanding heaters")
+                ranked = sorted(((c, reading.temps[c] - level) for c, level in base.items()
+                                 if c in reading.temps),
                                 key=lambda item: item[1], reverse=True)
-                if ranked:
-                    channel, best = ranked[0]
-                    second = ranked[1][1] if len(ranked) > 1 else 0.0
-                    if best >= self.s.stop_rise_c:
-                        return f"ch{channel} rose {best:.1f} C", elapsed
-                    leads = (best >= self.s.target_rise_c
-                             and self.dominant(best, second))
-                    confirmed = confirmed + 1 if leads else 0
-                    if confirmed >= 2:
-                        return f"ch{channel} responded", elapsed
-                    if now - last_report >= 15.0:
-                        self.say(f"H{heater}: {elapsed:.0f} s, warmest "
-                                 + ", ".join(f"ch{c} {v:+.1f} C" for c, v in ranked[:3]))
-                        last_report = now
-            if elapsed >= limit:
-                return "time limit", elapsed
+                best = ranked[0][1] if ranked else 0.0
+                second = ranked[1][1] if len(ranked) > 1 else 0.0
+                clear = (best >= self.s.rise_c
+                         and second <= max(self.s.noise_c, best / self.s.dominance))
+                confirmed = confirmed + 1 if clear else 0
+                if confirmed >= 2:
+                    verdict = "paired"
+                elif undriven >= 3:
+                    verdict = "not driven"
+                elif not clear and best >= 2.0 * self.s.rise_c:
+                    # Two terminals warming together do not separate with more heat.
+                    verdict = "ambiguous"
+                elif now - last_report >= 5.0:
+                    self.say(f"H{heater}: {elapsed:.0f} s, "
+                             + ", ".join(f"ch{c} {v:+.1f} C" for c, v in ranked[:3]))
+                    last_report = now
+            if verdict is None and elapsed >= self.s.max_heat_s:
+                verdict = "no response"
+        self.onboard.ack("HEATERS_OFF")
+        channel, rise = ranked[0] if ranked else (None, 0.0)
+        result = HeaterResult(heater, line, verdict, channel, rise,
+                              ranked[1] if len(ranked) > 1 else None, elapsed)
+        self.say(describe(result) + "; heater off")
+        return result
 
     def _pulse(self, command: str) -> None:
         reply = self.onboard.raw(command)
         if not reply.startswith("ACK"):
             raise AssociationError(f"{command} -> {reply or 'no reply'}")
 
-    def evaluate(self, heater: int, base: Baseline, first: int,
-                 heat_s: float) -> HeaterResult:
-        # The warmest moment over heating AND cool-down (a lagging PT100 keeps
-        # rising after the heater is off), on evidence_s means of the reads.
-        # Every other terminal is judged at that same moment, not at its own
-        # best: a stray excursion elsewhere in the window is not evidence, and
-        # a neighbour warmed by conduction peaks later than the specimen.
-        window = self.samples[first:]
-        series: dict[int, tuple[list[tuple[float, float]], list[float]]] = {}
-        for channel, level in base.level.items():
-            points = [(s.t, s.raw[channel] - level) for s in window if channel in s.raw]
-            if points:
-                series[channel] = (points, _moving_means(points, self.s.evidence_s / 2.0))
-        line = self.heater_lines[heater]
-        if not series:
-            return HeaterResult(heater, line, None, "no response", None, 0.0, None, heat_s)
-        channel, peak_t, best = None, 0.0, -math.inf
-        for candidate, (points, means) in series.items():
-            index = max(range(len(means)), key=means.__getitem__)
-            if means[index] > best:
-                channel, peak_t, best = candidate, points[index][0], means[index]
-        at_peak = {}
-        for candidate, (points, means) in series.items():
-            if candidate != channel:
-                index = min(range(len(points)), key=lambda i: abs(points[i][0] - peak_t))
-                at_peak[candidate] = means[index]
-        runner_up = max(at_peak.items(), key=lambda item: item[1]) if at_peak else None
-        if best < self.s.rise_c:
-            verdict = "no response"
-        elif not self.dominant(best, runner_up[1] if runner_up else 0.0):
-            verdict = "ambiguous"
-        elif base.noise.get(channel, 0.0) > self.s.max_noise_c:
-            verdict = "noisy terminal"
-        else:
-            verdict = "ok"
-        return HeaterResult(heater, line, channel if verdict == "ok" else None,
-                            verdict, channel, best, runner_up, heat_s)
-
 
 def describe(result: HeaterResult) -> str:
+    head = f"H{result.heater} (BCM {result.line})"
     runner = (f", next ch{result.runner_up[0]} {result.runner_up[1]:+.1f} C"
               if result.runner_up else "")
-    if result.verdict == "ok":
-        return (f"H{result.heater} (BCM {result.line}) -> ch{result.channel}: "
-                f"peak {result.peak_c:+.1f} C{runner}")
-    best = f"ch{result.candidate} {result.peak_c:+.1f} C" if result.candidate else "nothing"
-    return f"H{result.heater} (BCM {result.line}): {result.verdict} (warmest {best}{runner})"
+    if result.verdict == "paired":
+        return (f"{head} -> ch{result.channel}: {result.rise_c:+.1f} C after "
+                f"{result.seconds:.0f} s{runner}")
+    if result.verdict == "not driven":
+        return f"{head}: not driven (the onboard applied duty 0)"
+    warmest = (f"warmest ch{result.channel} {result.rise_c:+.1f} C"
+               if result.channel is not None else "no reading")
+    return f"{head}: {result.verdict} after {result.seconds:.0f} s ({warmest}{runner})"
+
+
+def resolve(results: list[HeaterResult]) -> tuple[dict[int, int], dict[int, str]]:
+    """({heater: terminal} for the pairs to write, {heater: why not} for the rest)."""
+    problems: dict[int, str] = {}
+    for result in results:
+        if result.verdict == "no response":
+            problems[result.heater] = (
+                f"no terminal warmed in {result.seconds:.0f} s. The heater is not on "
+                f"BCM {result.line}, not connected, or its specimen's PT100 is not on "
+                "the card")
+        elif result.verdict == "ambiguous":
+            other = (f"ch{result.runner_up[0]} {result.runner_up[1]:+.1f} C"
+                     if result.runner_up else "another terminal")
+            problems[result.heater] = (
+                f"ch{result.channel} {result.rise_c:+.1f} C and {other} warmed "
+                "together. A heater touching two specimens, or a PT100 off its "
+                "specimen (the neighbours then lead)")
+        elif result.verdict == "not driven":
+            problems[result.heater] = (
+                "the onboard accepted HEATER_TEST but applied duty 0 (heater energy "
+                "budget latch? its feedback PT100 invalid?)")
+    paired = [r for r in results if r.verdict == "paired"]
+    heaters_by_channel: dict[int, list[int]] = {}
+    for result in paired:
+        heaters_by_channel.setdefault(result.channel, []).append(result.heater)
+    for channel, heaters in heaters_by_channel.items():
+        if len(heaters) > 1:
+            names = " and ".join(f"H{h}" for h in heaters)
+            for heater in heaters:
+                problems[heater] = (f"{names} both warmed ch{channel}: two heater "
+                                    "outputs on one specimen")
+    # A PT100 off its specimen leaves the specimen next door as the warmest
+    # terminal, and conducted heat arrives far slower than direct heat. The
+    # heaters and specimens are alike (bench 2026-09-14: +1 C within 2-4 s
+    # for every heater), so a heater far slower than the rest is not trusted.
+    # The +10 s keeps poll jitter from flagging anything on a fast rig.
+    times = [r.seconds for r in paired if r.heater not in problems]
+    if len(times) >= 3:
+        typical = statistics.median(times)
+        for result in paired:
+            if (result.heater not in problems
+                    and result.seconds > max(3.0 * typical, typical + 10.0)):
+                problems[result.heater] = (
+                    f"took {result.seconds:.0f} s to warm ch{result.channel}, the "
+                    f"others {typical:.0f} s. A PT100 off its own specimen reads the "
+                    "neighbouring specimen's heat like this")
+    association = {r.heater: r.channel for r in paired if r.heater not in problems}
+    return association, problems
+
+
+def compose_channel_map(association: dict[int, int], current_map: list[int],
+                        sample_count: int) -> list[int]:
+    """sensor.sequent_rtd_channels with S<h> read from the terminal heater h
+    warmed. Every other sample keeps its current terminal unless a paired
+    heater took it; those samples get the terminals left over, in the order
+    the current map lists them (heat cannot rank them)."""
+    new_map: list[Optional[int]] = [association.get(s) for s in range(sample_count)]
+    taken = set(association.values())
+    for sample in range(sample_count):
+        if (new_map[sample] is None and sample < len(current_map)
+                and current_map[sample] not in taken):
+            new_map[sample] = current_map[sample]
+            taken.add(current_map[sample])
+    spare = [c for c in dict.fromkeys([*current_map, *CARD_TERMINALS]) if c not in taken]
+    return [channel if channel is not None else spare.pop(0) for channel in new_map]
 
 
 def check_ready(onboard: Onboard, heater_lines: list[str], sample_count: int,
@@ -616,8 +592,7 @@ def check_ready(onboard: Onboard, heater_lines: list[str], sample_count: int,
         silent = [f"ch{t.channel}" for t in terminals if not t.conducting]
         if len(usable) < sample_count:
             # With a heater's own probe missing, the PT100 of the specimen next
-            # to it warms by conduction and would be paired instead -- and if
-            # that neighbour is unheated nothing downstream would catch it.
+            # to it warms by conduction and would be paired instead.
             blockers.append(f"{', '.join(silent) or 'some terminals'} read no PT100: every "
                             f"one of the {sample_count} probes must read before pairing, or "
                             "a neighbouring specimen's probe can pass for a heater's own")
@@ -628,80 +603,6 @@ def check_ready(onboard: Onboard, heater_lines: list[str], sample_count: int,
     return status, terminals, blockers
 
 
-def complete_association(results: list[HeaterResult], dominance: float,
-                         out: Callable[[str], None] = print) -> Optional[dict[int, int]]:
-    """heater -> terminal when every heater paired with its own terminal."""
-    problems = [r for r in results if r.verdict != "ok"]
-    heaters_by_channel: dict[int, list[int]] = {}
-    for result in results:
-        if result.channel is not None:
-            heaters_by_channel.setdefault(result.channel, []).append(result.heater)
-    shared = {c: hs for c, hs in heaters_by_channel.items() if len(hs) > 1}
-    # A probe that came off its specimen leaves the specimen next door as the
-    # warmest terminal. If that neighbour is unheated nothing else catches
-    # it, but conducted heat arrives far slower than direct heat -- and the
-    # specimens and heaters are all alike (bench 2026-09-14: 8, 8, 8, 9, 9 s),
-    # so a laggard is a harness fault. The +10 s keeps poll jitter from
-    # flagging anything when the median itself is a few seconds.
-    typical_s = statistics.median(r.heat_s for r in results) if len(results) >= 3 else 0.0
-    slow = [r for r in results if r.verdict == "ok" and typical_s > 0.0
-            and r.heat_s > max(3.0 * typical_s, typical_s + 10.0)]
-    if not problems and not shared and not slow:
-        return {r.heater: r.channel for r in results if r.channel is not None}
-    out("\nNo trustworthy map, so nothing was written:")
-    for result in slow:
-        out(f"  H{result.heater}: needed {result.heat_s:.0f} s to warm ch{result.channel}, "
-            f"the others a median {typical_s:.0f} s. A probe off its specimen reads the "
-            "neighbouring specimen's heat like this: check that ch"
-            f"{result.channel}'s probe is fixed to H{result.heater}'s specimen, then rerun.")
-    for result in problems:
-        if result.verdict == "no response":
-            out(f"  H{result.heater}: no terminal warmed. Heater not connected, its "
-                "PT100 not on that specimen, or the specimen heats slowly (try a "
-                "longer --max-heat-s).")
-        elif result.verdict == "ambiguous":
-            share = result.runner_up[1] / result.peak_c
-            out(f"  H{result.heater}: ch{result.runner_up[0]} warmed to {share:.0%} of "
-                f"ch{result.candidate}'s rise (at most {1.0 / dominance:.0%} allowed). Two "
-                "PT100s on one specimen, a heater touching two, a probe off its specimen "
-                "(the neighbours then lead), or the room temperature moving: check that "
-                "heater's specimen and its probe, then rerun.")
-        else:
-            out(f"  H{result.heater}: ch{result.candidate} warmed but its baseline "
-                "scattered; check that terminal's screws and rerun.")
-    for channel, heaters in shared.items():
-        out(f"  {' and '.join(f'H{h}' for h in heaters)} all warm ch{channel}: two "
-            "heater outputs drive one specimen.")
-    return None
-
-
-def compose_channel_map(association: dict[int, int], current_map: list[int],
-                        sample_count: int) -> list[int]:
-    """sensor.sequent_rtd_channels with sample i = the specimen heater i warms.
-    Terminals no heater warmed fill the unheated samples in the order the
-    current map lists them (heat cannot rank them)."""
-    heated = [association[h] for h in sorted(association)]
-    rest = [c for c in current_map if c not in heated]
-    rest += [c for c in CARD_TERMINALS if c not in heated and c not in rest]
-    return heated + rest[:sample_count - len(heated)]
-
-
-def _validated(text: str, changes: dict[str, str],
-               out: Callable[[str], None]) -> Optional[str]:
-    """The INI text with `changes` applied, or None (reasons printed) when the
-    validator or the onboard binary rejects it."""
-    candidate = hardware_setup.replace_ini(text, changes)
-    errors = hardware_setup.validate_candidate(candidate)
-    for error in errors:
-        out(f"  configuration error: {error}")
-    if errors:
-        return None
-    if hardware_setup._check_with_binary(candidate) != 0:
-        out("  the onboard binary rejected that config")
-        return None
-    return candidate
-
-
 def _write_ini(path: Path, text: str) -> None:
     owner = path.stat()
     hardware_setup.atomic_write(path, text)
@@ -709,24 +610,30 @@ def _write_ini(path: Path, text: str) -> None:
         os.chown(path, owner.st_uid, owner.st_gid)  # keep it editable by coatheal after sudo
 
 
-def write_config(path: Path, new_map: list[int], heater_lines: list[str], yes: bool,
+def map_changes(values: dict[str, str], new_map: list[int],
+                heater_count: int) -> dict[str, str]:
+    """The INI keys (and values) that differ from the measured map."""
+    wanted = {
+        "sensor.sequent_rtd_channels": ",".join(str(c) for c in new_map),
+        # Heater i reads sample i; the wiring lives in the map above.
+        "heater.temperature_channels": ",".join(str(i) for i in range(heater_count)),
+    }
+    return {k: v for k, v in wanted.items() if values.get(k) != v}
+
+
+def write_config(path: Path, changes: dict[str, str], yes: bool,
                  ask: Callable[[str], str] = input,
                  out: Callable[[str], None] = print) -> bool:
+    """Apply `changes` to the INI, backup first. False when nothing was
+    written because the validator refused it or the operator said no."""
     text = path.read_text(encoding="utf-8")
     values = hardware_setup._ini_values(text)
-    wanted = {
-        "heater.output_lines": ",".join(heater_lines),
-        "sensor.sequent_rtd_channels": ",".join(str(c) for c in new_map),
-        # Heater i reads sample i; the wiring lives in the two maps above.
-        "heater.temperature_channels": ",".join(str(i) for i in range(len(heater_lines))),
-    }
-    changes = {k: v for k, v in wanted.items() if values.get(k) != v}
-    if not changes:
-        out(f"{path} already carries this map; nothing to write.")
-        return True
-    candidate = _validated(text, changes, out)
-    if candidate is None:
-        out("Nothing written.")
+    candidate = hardware_setup.replace_ini(text, changes)
+    errors = hardware_setup.validate_candidate(candidate)
+    for error in errors:
+        out(f"  configuration error: {error}")
+    if errors or hardware_setup._check_with_binary(candidate) != 0:
+        out("The map was refused (above), nothing written.")
         return False
     for key, value in changes.items():
         out(f"  {key}: {values.get(key, '(unset)')} -> {value}")
@@ -741,136 +648,16 @@ def write_config(path: Path, new_map: list[int], heater_lines: list[str], yes: b
     return True
 
 
-def _privileged(command: list[str]) -> list[str]:
-    return command if os.geteuid() == 0 else ["sudo", "-n", *command]
-
-
-def restart_service(out: Callable[[str], None] = print) -> bool:
-    command = _privileged(["systemctl", "restart", SERVICE])
-    out(f"Restarting: {' '.join(command)}")
-    if subprocess.run(command, check=False).returncode != 0:
-        out(f"Restart failed; run it by hand: sudo systemctl restart {SERVICE}")
-        return False
-    return True
-
-
-def wait_ready(onboard: Onboard, heater: int,
-               clock: Callable[[], float], sleep: Callable[[float], None],
-               timeout_s: float = 60.0) -> Optional[str]:
-    """After a restart: heater `heater` claimed and every RTD terminal reading.
-    Returns what is still wrong after timeout_s, or None once ready."""
-    deadline = clock() + timeout_s
-    problem = "no reply"
-    while clock() < deadline:
-        sleep(2.0)
-        try:
-            components = onboard.ack("COMPONENTS")
-        except (OSError, AssociationError) as error:
-            problem = str(error)
-            continue
-        if components.get(f"heater{heater}") != "OK":
-            problem = f"heater{heater}={components.get(f'heater{heater}', '?')}"
-            continue
-        if components.get("sequent_rtd_error") not in FRESH_RTD_ERRORS:
-            problem = f"sequent_rtd_error={components.get('sequent_rtd_error', '?')}"
-            continue
-        terminals = parse_terminals(components.get("sequent_rtd_ch", ""))
-        if not terminals or not all(t.conducting for t in terminals):
-            problem = "not every RTD terminal is reading"
-            continue
-        return None
-    return problem
-
-
-# Lines the buses own regardless of config: HAT EEPROM, I2C-1, SPI0 data/clock.
-BUS_LINES = frozenset({0, 1, 2, 3, 9, 10, 11})
-
-
-def free_lines(values: dict[str, str], heater_lines: list[str]) -> list[int]:
-    """Header GPIOs nothing in the config or on the HAT claims: where a heater
-    wired off the schematic can be. BCM 9-27 idle pulled DOWN at boot, so a
-    heater there is off whenever its line is unclaimed; BCM 0-8 idle pulled
-    UP and are tried last."""
-    used = {int(line, 0) for line in heater_lines}
-    for key in ("motor0.cs_line", "motor0.enable_line",
-                "motor1.cs_line", "motor1.enable_line"):
-        if values.get(key, "").strip():
-            used.add(int(values[key], 0))
-    for led in ("status", "mode"):
-        if hardware_setup._ini_bool(values, f"hal.{led}_led_enabled", False):
-            used.add(int(values.get(f"hal.{led}_led_line", "-1"), 0))
-    used |= {line for line, _ in hardware_setup.RESERVED_GPIO_LINES} | BUS_LINES
-    return sorted((line for line in range(28) if line not in used),
-                  key=lambda line: (line <= 8, line))
-
-
-def hold_down(line: int, out: Callable[[str], None]) -> None:
-    """Persistent in-pad pull-down on `line`, so a heater on it stays off in
-    the gap between two service claims (a restart) and afterwards, if the
-    line turns out not to be the one and nothing claims it again."""
-    command = _privileged(["pinctrl", "set", str(line), "pd"])
-    try:
-        ok = subprocess.run(command, check=False, capture_output=True).returncode == 0
-    except OSError:
-        ok = False
-    if not ok:
-        out(f"  (pinctrl could not set a pull-down on BCM {line}; while unclaimed it "
-            "keeps its boot-time pull)")
-
-
-def write_lines(config_path: Path, lines: list[str],
-                out: Callable[[str], None]) -> bool:
-    text = config_path.read_text(encoding="utf-8")
-    candidate = _validated(text, {"heater.output_lines": ",".join(lines)}, out)
-    if candidate is None:
-        return False
-    _write_ini(config_path, candidate)
-    return True
-
-
-def find_line(survey: Survey, onboard: Onboard, config_path: Path, heater: int,
-              candidates: list[int], token: str,
-              clock: Callable[[], float], sleep: Callable[[float], None],
-              out: Callable[[str], None] = print) -> Optional[HeaterResult]:
-    """Try each candidate GPIO as heater `heater`'s output line: write it into
-    the config, restart the service, warm the heater through the firmware as
-    usual. The config and the running service keep the line that warmed a
-    terminal (its result is returned); otherwise the original line is put
-    back and None returned."""
-    original = list(survey.heater_lines)
-    for line in candidates:
-        lines = list(original)
-        lines[heater] = str(line)
-        out(f"\nH{heater}: trying BCM {line}")
-        if not write_lines(config_path, lines, out):
-            out(f"  BCM {line} skipped")
-            continue
-        hold_down(line, out)
-        if not restart_service(out):
-            raise AssociationError(f"could not restart {SERVICE} with BCM {line} as H{heater}")
-        problem = wait_ready(onboard, heater, clock, sleep)
-        if problem is not None:
-            out(f"  the service did not come up with BCM {line} as H{heater} ({problem}); skipped")
-            continue
-        onboard.ack(f"ARM_DEBUG {token}")
-        onboard.ack("ARM")
-        survey.heater_lines[heater] = str(line)
-        result = survey.run([heater], max_heat_s=survey.s.scan_heat_s)[0]
-        onboard.ack("HEATERS_OFF")
-        if result.verdict != "no response":
-            return result
-    out(f"\nH{heater}: none of those lines warmed anything; restoring BCM {original[heater]}")
-    survey.heater_lines[:] = original
-    if write_lines(config_path, original, out) and restart_service(out):
-        wait_ready(onboard, heater, clock, sleep)
-    return None
-
-
 def restart_and_verify(onboard: Onboard, new_map: list[int],
                        clock: Callable[[], float] = time.monotonic,
                        sleep: Callable[[float], None] = time.sleep,
                        out: Callable[[str], None] = print) -> bool:
-    if not restart_service(out):
+    command = ["systemctl", "restart", SERVICE]
+    if os.geteuid() != 0:
+        command = ["sudo", "-n", *command]
+    out(f"Restarting: {' '.join(command)}")
+    if subprocess.run(command, check=False).returncode != 0:
+        out(f"Restart failed; run it by hand: sudo systemctl restart {SERVICE}")
         return False
     deadline = clock() + 60.0
     terminals: list[Terminal] = []
@@ -928,8 +715,8 @@ def service_config() -> Optional[Path]:
 
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(
-        description="Pair each heater with the PT100 on its specimen by heating "
-                    "one heater at a time, and write the map into the onboard config.")
+        description="Switch on one heater at a time, find the PT100 that warms, and "
+                    "write the pairs into the onboard config.")
     root.add_argument("--config", type=Path, default=None,
                       help="INI to update (default: the service's COATHEAL_CONFIG, "
                            "else config/onboard.local.ini)")
@@ -943,11 +730,6 @@ def parser() -> argparse.ArgumentParser:
                       help="write the config and restart the service without asking")
     root.add_argument("--no-restart", action="store_true",
                       help="write the config but leave the service on the old map")
-    root.add_argument("--lines", default=None,
-                      help="BCM lines to try for a heater that warms nothing, e.g. 12,16 "
-                           "(default: every header line nothing in the config claims)")
-    root.add_argument("--no-find-lines", action="store_true",
-                      help="never search other GPIO lines for a heater that warms nothing")
     defaults = Settings()
     root.add_argument("--duty", type=float, default=defaults.duty,
                       help="heater duty during a test (capped by heater.debug_max_duty "
@@ -955,7 +737,8 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--rise-c", type=float, default=defaults.rise_c,
                       help="rise that pairs a terminal with the heater (default %(default)s)")
     root.add_argument("--max-heat-s", type=float, default=defaults.max_heat_s,
-                      help="longest one heater stays on (default %(default)s)")
+                      help="longest one heater stays on without a terminal warming "
+                           "(default %(default)s)")
     root.add_argument("--abort-c", type=float, default=defaults.abort_c,
                       help="any terminal reaching this ends the run (default %(default)s)")
     root.add_argument("--log", type=Path, default=None,
@@ -968,6 +751,9 @@ def main(argv: Optional[list[str]] = None, *,
          clock: Callable[[], float] = time.monotonic,
          sleep: Callable[[float], None] = time.sleep,
          ask: Callable[[str], str] = input) -> int:
+    """0: every heater paired and the map is in the config. 1: not every
+    heater paired (the pairs found are still written), or nothing written.
+    2: could not run, stopped, or the restarted service disagrees."""
     args = parser().parse_args(argv)
     service_path = service_config()
     config_path: Path = args.config or service_path or hardware_setup.DEFAULT_CONFIG
@@ -987,8 +773,8 @@ def main(argv: Optional[list[str]] = None, *,
     settings = Settings(duty=min(args.duty, duty_cap), rise_c=args.rise_c,
                         max_heat_s=args.max_heat_s, abort_c=args.abort_c,
                         pulse_s=min(Settings.pulse_s, pulse_cap))
-    if settings.duty <= 0.0 or settings.rise_c <= 0.0:
-        print("Need --duty > 0 and --rise-c > 0.", file=sys.stderr)
+    if settings.duty <= 0.0 or settings.rise_c <= 0.0 or settings.max_heat_s <= 0.0:
+        print("Need --duty, --rise-c and --max-heat-s above 0.", file=sys.stderr)
         return 2
     runs_this_config = (service_path is None
                         or service_path.resolve() == config_path.resolve())
@@ -1009,7 +795,8 @@ def main(argv: Optional[list[str]] = None, *,
         return 2
     if args.check:
         print(f"\nReady: {len(heater_lines)} heaters, one at a time at duty "
-              f"{settings.duty:g}, up to {settings.max_heat_s:.0f} s each.")
+              f"{settings.duty:g}, each until a PT100 warms by {settings.rise_c:g} C "
+              f"(at most {settings.max_heat_s:.0f} s).")
         return 0
 
     try:
@@ -1018,6 +805,7 @@ def main(argv: Optional[list[str]] = None, *,
         tick_hz = 1.0
     if tick_hz > 0.0:
         settings.duty_grace_s = max(settings.duty_grace_s, 3.0 / tick_hz)
+    running_map = [t.channel for t in sorted(terminals, key=lambda t: t.sample)][:sample_count]
     log_path = args.log or (hardware_setup.ROOT / "logs"
                             / f"heater-association-{time.strftime('%Y%m%d-%H%M%S')}.csv")
     survey = Survey(onboard, settings, heater_lines,
@@ -1033,7 +821,6 @@ def main(argv: Optional[list[str]] = None, *,
     armed_debug = armed_run = False
     failure = None
     results: list[HeaterResult] = []
-    original_lines = list(heater_lines)
     try:
         if status.get("debug_armed") != "1":
             onboard.ack(f"ARM_DEBUG {token}")
@@ -1042,30 +829,6 @@ def main(argv: Optional[list[str]] = None, *,
             onboard.ack("ARM")
             armed_run = True
         results = survey.run()
-        missing = [r.heater for r in results if r.verdict == "no response"]
-        if missing and not args.no_find_lines:
-            candidates = ([int(p, 0) for p in args.lines.split(",") if p.strip()]
-                          if args.lines else free_lines(values, heater_lines))
-            print("\n" + ", ".join(f"H{h} (BCM {heater_lines[h]})" for h in missing)
-                  + " warmed no terminal. A heater wired to a GPIO the config does not"
-                  " list looks exactly like this. Unclaimed header lines, in the order"
-                  " they would be tried: " + (", ".join(f"BCM {c}" for c in candidates)
-                                             or "none (pass --lines)"))
-            if candidates and (args.yes or ask(
-                    f"Try them now? Each try rewrites heater.output_lines and restarts "
-                    f"{SERVICE}; a wrong line drives nothing. [y/N]: ").strip().lower()
-                    in ("y", "yes")):
-                backup = hardware_setup._backup_path(config_path)
-                shutil.copy2(config_path, backup)
-                print(f"Backed up {config_path} -> {backup}")
-                armed_debug = armed_run = True  # every restart is re-armed by find_line
-                for heater in missing:
-                    found = find_line(survey, onboard, config_path, heater, candidates,
-                                      token, clock, sleep)
-                    if found is not None:
-                        results[heater] = found
-                        candidates = [c for c in candidates if c != int(found.line, 0)]
-                heater_lines = list(survey.heater_lines)
     except AssociationError as error:
         failure = str(error)
     except OSError as error:
@@ -1084,48 +847,63 @@ def main(argv: Optional[list[str]] = None, *,
         print(f"\nSTOPPED: {failure}\nNothing was written.")
         return 2
 
-    print("\nResults:")
+    association, problems = resolve(results)
+    print("\nPairs:")
     for result in results:
-        print(f"  {describe(result)}")
-    association = complete_association(results, settings.dominance)
-    if association is None:
+        head = f"  H{result.heater} (BCM {result.line})"
+        if result.heater in association:
+            print(f"{head} -> ch{association[result.heater]}")
+        else:
+            print(f"{head} -> NOT PAIRED: {problems[result.heater]}.")
+    if not association:
+        print("\nNo heater paired with a terminal, so nothing was written. Is the heater "
+              f"supply on? Readings: {log_path}")
         return 1
     new_map = compose_channel_map(association, current_map, sample_count)
-    print("\nWiring map (sample i = the specimen heater i warms):")
+    print("\nWiring map (S<i> <- RTD card terminal):")
     for sample, channel in enumerate(new_map):
-        owner = (f"H{sample}, BCM {heater_lines[sample]}" if sample < len(heater_lines)
-                 else "unheated")
-        print(f"  S{sample} <- ch{channel}  ({owner})")
+        if sample in association:
+            note = f"H{sample}, measured"
+        elif sample < len(heater_lines):
+            note = f"H{sample}, NOT measured: do not heat H{sample} until a rerun pairs it"
+        else:
+            note = "unheated"
+        print(f"  S{sample} <- ch{channel}  ({note})")
     print("  Heat cannot tell which unheated terminal is which, or which motor group /\n"
           "  MAX31865 click a specimen belongs to: check motorN.samples and\n"
           "  sensor.max31865_sample_indices against the harness.")
-    lines_changed = heater_lines != original_lines
-    if lines_changed:
-        print(f"  heater.output_lines: {','.join(original_lines)} -> {','.join(heater_lines)}"
-              " (already written and running)")
+    done = 0 if not problems else 1
     if args.dry_run:
-        print("\n--dry-run: the terminal map is not written."
-              + (" heater.output_lines stays as found." if lines_changed else ""))
-        return 0
-    if not write_config(config_path, new_map, heater_lines, args.yes, ask):
+        print("\n--dry-run: nothing written.")
+        return done
+    print()
+    changes = map_changes(values, new_map, len(heater_lines))
+    if not changes:
+        print(f"{config_path} already carries this map.")
+    elif not write_config(config_path, changes, args.yes, ask):
         return 1
-    print("Then prove one loop from the ground station: a small SET_TEMP_TARGET on H<i> "
-          "must move S<i>, and only S<i>.")
-    if lines_changed:
-        print("heater.output_lines changed: run coatheal-deploy afterwards so config.txt "
-              "holds the new line OFF from boot (it will say REBOOT REQUIRED).")
+    if problems:
+        left_out = ", ".join(f"H{h}" for h in sorted(problems))
+        print(f"{left_out} left out: fix what is reported above, then rerun to pair "
+              f"{'it' if len(problems) == 1 else 'them'}.")
     if not runs_this_config:
         print(f"\nThe service loads {service_path}, not {config_path}: copy the map there "
               f"(or repoint COATHEAL_CONFIG), then restart {SERVICE}.")
-        return 0
-    if args.no_restart:
+        return done
+    if not changes and running_map == new_map:
+        print("The running service already reads this map.")
+    elif args.no_restart:
         print(f"\nRestart the service to load the map: sudo systemctl restart {SERVICE}")
-        return 0
-    if not args.yes and ask("Restart the service now to load the map? [y/N]: ").strip().lower() \
-            not in ("y", "yes"):
+        return done
+    elif not args.yes and ask("Restart the service now to load the map? [y/N]: ") \
+            .strip().lower() not in ("y", "yes"):
         print(f"Not restarted. Later: sudo systemctl restart {SERVICE}")
-        return 0
-    return 0 if restart_and_verify(onboard, new_map, clock, sleep) else 2
+        return done
+    elif not restart_and_verify(onboard, new_map, clock, sleep):
+        return 2
+    print("Then prove one loop from the ground station: a small SET_TEMP_TARGET on H<i> "
+          "must move S<i>, and only S<i>.")
+    return done
 
 
 if __name__ == "__main__":
