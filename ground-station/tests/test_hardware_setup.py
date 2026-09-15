@@ -581,11 +581,11 @@ class HardwareSetupTests(unittest.TestCase):
                 values["sensor.sequent_rtd_channels"], "1,2,3,4,5,6,7,8")
 
     def test_migrate_config_keeps_the_measured_wiring(self) -> None:
-        # scripts/associate_heaters.py writes the bench wiring into
-        # heater.output_lines and sensor.sequent_rtd_channels; every
-        # coatheal-deploy migrates the local config, and must not reset either
-        # to the schematic order. heater.temperature_channels stays pinned:
-        # heater i reads sample i.
+        # The bench wiring lives in heater.output_lines (set for the harness)
+        # and sensor.sequent_rtd_channels (measured by
+        # scripts/associate_heaters.py); every coatheal-deploy migrates the
+        # local config, and must not reset either to the schematic order.
+        # heater.temperature_channels stays pinned: heater i reads sample i.
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "onboard.local.ini"
             source.write_text(hardware_setup.replace_ini(
