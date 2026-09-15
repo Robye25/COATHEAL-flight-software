@@ -172,6 +172,10 @@ constexpr std::size_t kHelloReplyMaxBytes = 16;
 // Below the kernel's 1 s initial SYN timeout, so a connect attempt never
 // retransmits its SYN.
 constexpr int kConnectTimeoutMs = 900;
+// How long to leave a ground station alone that cannot carry a frame at all
+// (no codec): long enough not to churn, short enough to find a ground
+// station that can.
+constexpr auto kOversizeRetry = std::chrono::seconds(30);
 
 // The ACK line a conforming ground station answers `line` with, without the
 // newline: DATA lines carry their own seq, EVT lines are acknowledged with 0.
@@ -850,16 +854,22 @@ SendStatus TelemetryClient::SendFrame(const std::string& line, LinkPriority prio
   LinkBudget::Ticket ticket;
   if (budget_ != nullptr) {
     if (cost > budget_->share_bytes()) {
-      // Only a plain DATA line is this large: the ground station did not
-      // take the codec, and uncompressed frames cannot fit the budget.
+      // Only a plain DATA line is this large: the ground station did not take
+      // the codec, and an uncompressed frame cannot fit the budget at all.
+      // Drop the link rather than hold one that carries nothing -- a
+      // connection nothing is ever written to would also hide a ground
+      // station that has gone away (its close is only seen on a write).
       if (!oversize_logged_) {
         std::cerr << "[telemetry] a " << payload.size() << "-byte plain frame needs " << cost
                   << " B of the " << budget_->share_bytes()
-                  << "-B link share; the ground station must answer HELLO,z1"
+                  << "-B link share; dropping the link until a ground station answers HELLO,z1"
                   << " (docs/link-budget.md)\n";
         oversize_logged_ = true;
       }
-      return SendStatus::kNoBudget;
+      budget_->TryCharge(wire::kReset, priority);
+      AbortLocked();
+      next_connect_attempt_ = std::chrono::steady_clock::now() + kOversizeRetry;
+      return SendStatus::kFailed;
     }
     lock.unlock();
     const bool admitted = budget_->WaitHold(cost, priority, budget_deadline, &ticket);
