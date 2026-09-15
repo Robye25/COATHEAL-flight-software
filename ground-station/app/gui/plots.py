@@ -1,7 +1,8 @@
 """Center plots (redesign spec §5.6): time axis in mission elapsed time,
 trailing-window selector, full-session retention through `SeriesStore`,
-five pages (Temperatures, Ambient, Heaters, Resistance, Motors), pull
-markers, target overlays, crosshair readout, PNG/CSV export.
+five pages (Temperatures and Heaters with one plot per motor group,
+Ambient, Resistance, Motors), pull markers, target overlays, crosshair
+readout, PNG/CSV export.
 """
 from __future__ import annotations
 
@@ -20,9 +21,9 @@ from PyQt6.QtWidgets import (
 from ..protocol import PullEvent, TelemetryPacket
 from ..session_dir import session_epoch
 from .series_store import SeriesStore, format_elapsed, window_bounds
+from .state import DEFAULT_LAYOUT, MOTOR_COUNT, Layout
 from .theme import (
-    HEATER_COLORS, HEATER_LABELS, OVERTEMP_CUTOFF_C, PRE_FLOAT_PRESSURE_MBAR,
-    RESISTANCE_COLORS, SAMPLE_FLOOR_C,
+    HEATER_COLORS, OVERTEMP_CUTOFF_C, PRE_FLOAT_PRESSURE_MBAR, RESISTANCE_COLORS, SAMPLE_FLOOR_C,
 )
 from .widgets import MONO_CSS, MUTED, style_button
 
@@ -104,6 +105,17 @@ class TimePlot(QWidget):
             lbl.setStyleSheet(f"{MONO_CSS} color: {color}; font-size: 9pt;")
             self._legend[name] = lbl
             self._legend_lay.insertWidget(self._legend_lay.count() - 2, lbl)
+
+    def clear_series(self) -> None:
+        """Remove every curve and its legend entry (the store keeps the data)."""
+        for curve in self._curves.values():
+            self.plot.removeItem(curve)
+        for lbl in self._legend.values():
+            self._legend_lay.removeWidget(lbl)
+            lbl.deleteLater()
+        self._curves.clear()
+        self._colors.clear()
+        self._legend.clear()
 
     def add_threshold(self, key: str, y_value: float, color: str, label: str) -> None:
         line = pg.InfiniteLine(pos=y_value, angle=0, pen=pg.mkPen(color, width=1, style=Qt.PenStyle.DashLine),
@@ -210,6 +222,23 @@ class AmbientPage(QWidget):
         return [self.temp, self.pressure, self.uv]
 
 
+class GroupPage(QWidget):
+    """One x-linked plot per motor group, stacked (owner 2026-09-15: each
+    motor's heaters and sensors apart)."""
+
+    def __init__(self, title: str, y_label: str, unit: str, *, decimals: int, parent=None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(2)
+        self.title = title
+        self.plots: List[TimePlot] = []
+        for motor in range(MOTOR_COUNT):
+            plot = TimePlot(f"{title} — motor {motor}", y_label, unit, decimals=decimals)
+            if self.plots:
+                plot.plot.setXLink(self.plots[0].plot)
+            self.plots.append(plot)
+            lay.addWidget(plot, 1)
+
+
 class PlotArea(QWidget):
     """The centre region: toolbar + tabbed plots over one SeriesStore."""
 
@@ -250,18 +279,14 @@ class PlotArea(QWidget):
         lay.addWidget(bar)
         lay.addWidget(self.tabs, 1)
 
-        # Pages.
-        self.temps = TimePlot("Specimen temperatures", "T", "°C", decimals=1)
-        for i in range(8):
-            self.temps.add_series(f"S{i}", RESISTANCE_COLORS[i % len(RESISTANCE_COLORS)])
-        for i in range(6):
-            self.temps.add_series(f"T{i}", HEATER_COLORS[i % len(HEATER_COLORS)], width=1.0, dashed=True, legend=False)
-        self.temps.add_threshold("floor", SAMPLE_FLOOR_C, "#2ecc71", f"fallback floor {SAMPLE_FLOOR_C:.0f} °C")
-        self.temps.add_threshold("overtemp", OVERTEMP_CUTOFF_C, "#e74c3c", f"over-T {OVERTEMP_CUTOFF_C:.0f} °C")
+        # Pages. Temperatures and heater duty: one plot per motor group,
+        # filled by set_layout.
+        self.temps = GroupPage("Specimen temperatures", "T", "°C", decimals=1)
+        for plot in self.temps.plots:
+            plot.add_threshold("floor", SAMPLE_FLOOR_C, "#2ecc71", f"fallback floor {SAMPLE_FLOOR_C:.0f} °C")
+            plot.add_threshold("overtemp", OVERTEMP_CUTOFF_C, "#e74c3c", f"over-T {OVERTEMP_CUTOFF_C:.0f} °C")
         self.ambient = AmbientPage()
-        self.heaters = TimePlot("Heater duty", "duty", "%", decimals=0)
-        for i, label in enumerate(HEATER_LABELS):
-            self.heaters.add_series(label, HEATER_COLORS[i % len(HEATER_COLORS)])
+        self.heaters = GroupPage("Heater duty", "duty", "%", decimals=0)
         self.resistance = TimePlot("Specimen resistance (MAX31865)", "R", "Ω")
         self._resistance_series_added: set = set()
         # Millimetres of linear travel (the ball-screw-lead-derived mm/mm_tgt
@@ -279,6 +304,7 @@ class PlotArea(QWidget):
             plot.bind(self.store)
             plot.manual_range_changed = self._manual_range
         self._dirty = False
+        self.set_layout(DEFAULT_LAYOUT)
         self.tabs.currentChanged.connect(lambda _i: self.redraw(force=True))
         self.set_window(1800.0)
 
@@ -286,13 +312,29 @@ class PlotArea(QWidget):
 
     # -- helpers -----------------------------------------------------------------
     def all_plots(self) -> List[TimePlot]:
-        return [self.temps, *self.ambient.plots, self.heaters, self.resistance, self.motors]
+        return [*self.temps.plots, *self.ambient.plots, *self.heaters.plots, self.resistance, self.motors]
 
     def current_plots(self) -> List[TimePlot]:
         page = self.tabs.currentWidget()
-        if isinstance(page, AmbientPage):
+        if isinstance(page, (AmbientPage, GroupPage)):
             return page.plots
         return [page] if isinstance(page, TimePlot) else []
+
+    def set_layout(self, layout: Layout) -> None:
+        """Put each sample, target overlay and heater duty on its motor's plot."""
+        for motor, (temps, heaters) in enumerate(zip(self.temps.plots, self.heaters.plots)):
+            temps.clear_series()
+            heaters.clear_series()
+            samples = layout.motor_samples[motor] if motor < len(layout.motor_samples) else ()
+            for sample in samples:
+                heater = layout.heater_of_sample(sample)
+                temps.add_series(f"S{sample}", RESISTANCE_COLORS[sample % len(RESISTANCE_COLORS)])
+                if heater is not None:
+                    temps.add_series(f"T{heater}", HEATER_COLORS[heater % len(HEATER_COLORS)],
+                                     width=1.0, dashed=True, legend=False)
+            for heater in layout.heaters_of_motor(motor):
+                heaters.add_series(f"H{heater}", HEATER_COLORS[heater % len(HEATER_COLORS)])
+        self.redraw(force=True)
 
     def set_window(self, span: Optional[float]) -> None:
         self._span = span
@@ -389,7 +431,8 @@ class PlotArea(QWidget):
         label = f"pull M{ev.motor_id} #{ev.pull_id}"
         self.resistance.add_marker(t, color, label)
         self.motors.add_marker(t, color, label)
-        self.temps.add_marker(t, color, label)
+        for plot in self.temps.plots:
+            plot.add_marker(t, color, label)
 
     def clear(self) -> None:
         self.store.clear()

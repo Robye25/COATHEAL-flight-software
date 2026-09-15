@@ -161,14 +161,16 @@ what CS (hardware or software) does.
 ## 5. Configuration Reference
 
 ```ini
-# --- Motor 0 / STEP1 (samples 0..3, v3 pinout CS on BCM 22, EN on BCM 20) ---
+# --- Motor 0 / STEP1 (motor0.specimens, v3 pinout CS on BCM 22, EN on BCM 20) ---
 # v3: TMC5160, SPI-only motion — no STEP/DIR.
 motor0.driver=tmc5160
 motor0.gpio_chip=/dev/gpiochip0
 motor0.spi_device=/dev/spidev0.0
 motor0.cs_line=22
 motor0.enable_line=20
-motor0.invert_direction=false
+# Owner 2026-09-15: motor 0 turns opposite to motor 1 for the same command;
+# flipped so "+" is the same physical direction on both. coatheal-deploy pins it.
+motor0.invert_direction=true
 motor0.enable_active_low=true
 motor0.run_current_a_rms=0.8
 motor0.hold_current_frac=0.30
@@ -176,9 +178,9 @@ motor0.stealth_chop=false
 motor0.spi_speed_hz=1000000
 motor0.sense_resistor_ohm=0.075
 motor0.retry_ms=2000
-motor0.samples=0,1,2,3
+motor0.specimens=ch1:19,ch2:13,ch3:6,ch4:5
 
-# --- Motor 1 / STEP2 (samples 4..7, v3 pinout CS on BCM 27, EN on BCM 21) ---
+# --- Motor 1 / STEP2 (motor1.specimens, v3 pinout CS on BCM 27, EN on BCM 21) ---
 motor1.driver=tmc5160
 motor1.gpio_chip=/dev/gpiochip0
 motor1.spi_device=/dev/spidev0.0
@@ -192,7 +194,7 @@ motor1.stealth_chop=false
 motor1.spi_speed_hz=1000000
 motor1.sense_resistor_ohm=0.075
 motor1.retry_ms=2000
-motor1.samples=4,5,6,7
+motor1.specimens=ch5:24,ch6:23,ch7,ch8
 
 pull.microstep=4
 pull.max_step_hz=50.0
@@ -397,7 +399,9 @@ commanded travel:
    (`STEPPER_MOVE <id> <positive>` should rotate the direction this bench
    procedure defines as forward). If it does not, set
    `motor*.invert_direction=true` for that motor — **do not** rewire the
-   motor phases to fix a direction sign.
+   motor phases to fix a direction sign. (Bench 2026-09-15: motor 0 ran
+   opposite to motor 1, so the flight config sets
+   `motor0.invert_direction=true`; recheck both after any rewiring.)
 
 **Record here:**
 
@@ -464,13 +468,14 @@ multi-heater operation. See
 1. With heaters unloaded or on current-limited dummy loads, energise **one
    heater at a time** at low duty (`heater.debug_max_duty` or lower) via
    `SET_HEATER_DUTY <index> <low_duty>` or `HEATER_TEST`.
-2. For each of H1..H6 (`heater.output_lines` index 0..5), confirm:
+2. For each of H1..H6 (the heated specimens of `motor0.specimens` /
+   `motor1.specimens` in order, H0..H5 in software), confirm:
    - the correct physical GPIO line toggles (meter or LED on the expected
      BCM line only);
    - the correct EKM014 channel switches;
    - the correct physical sample position warms (thermally, or via its
-     PT100: `scripts/associate_heaters.py` measures and writes that pairing
-     as `sensor.sequent_rtd_channels`).
+     PT100: `scripts/associate_heaters.py` measures that pairing and writes
+     each heater's PT100 terminal into its specimen in the lists).
 3. Confirm no *other* heater or GPIO activates during any single-heater test.
 4. **Heater-inhibit latency — scope check (BLOCKING).** With one heater
    energised at a duty that is clearly ON (say 0.5), command a PULL on the

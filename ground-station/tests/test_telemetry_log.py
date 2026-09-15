@@ -199,6 +199,30 @@ class LogManagerTests(unittest.TestCase):
     # branch of SessionLogs.write_packet and confirm
     # test_session_meta_written_on_first_frame fails (first_frame_utc None).
 
+    def test_layout_recorded_in_its_session(self) -> None:
+        layout = {"motor_samples": [[0, 1, 2], [3, 4, 5, 6, 7]], "heater_samples": [0, 1, 3, 4, 5, 6],
+                  "clicks": [0, 3], "rtd_channels": [1, 2, 3, 4, 5, 6, 7, 8],
+                  "heater_lines": [19, 13, 6, 5, 24, 23]}
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = LogManager(Path(tmp) / "logs")
+            mgr.on_packet(parse_telemetry_csv(FRAME_A), rx_utc="rx1")
+            mgr.on_packet(parse_telemetry_csv(FRAME_B), rx_utc="rx2")
+            mgr.record_layout("coatheal-1787760547-1", layout)
+            mgr.record_layout("coatheal-0-never-seen", {"motor_samples": []})   # no directory: ignored
+            dir_a = mgr.dir_for("coatheal-1787760547-1")
+            dir_b = mgr.dir_for("coatheal-1787760900-2")
+            meta_a = json.loads((dir_a / "session.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta_a["layout"], layout)
+            self.assertTrue(meta_a["layout_utc"])
+            mgr.on_packet(parse_telemetry_csv(FRAME_A.replace(",10,", ",11,")), rx_utc="rx3")
+            mgr.close()
+            meta_a = json.loads((dir_a / "session.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta_a["layout"], layout, "later frames and close() keep the layout")
+            self.assertNotIn("layout", json.loads((dir_b / "session.json").read_text(encoding="utf-8")),
+                             "the layout belongs to the session that reported it")
+            mgr.record_layout("coatheal-1787760547-1", {"motor_samples": []})   # after close: ignored
+            self.assertEqual(json.loads((dir_a / "session.json").read_text(encoding="utf-8"))["layout"], layout)
+
     def test_close_without_session_keeps_operator_record(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "logs"

@@ -49,7 +49,8 @@ def evaluate(state: OnboardState) -> List[Alarm]:
         if state.flag("OVERTEMP_FAIL"):
             alarms.append(Alarm("OVERTEMP", "OVERTEMP latched — heaters forced off until RESET_CTRL"))
         if state.flag("SAMPLE_TEMP_FAIL"):
-            invalid = [f"S{i}" for i in range(6) if not state.heater_temp_valid(i)]
+            invalid = [f"S{state.layout.sample_of_heater(i)}" for i in range(6)
+                       if not state.heater_temp_valid(i)]
             detail = " ".join(invalid) if invalid else "a heated channel"
             alarms.append(Alarm("SAMPLE_TEMP", f"SAMPLE_TEMP FAIL — {detail} invalid"))
         if state.fallback:

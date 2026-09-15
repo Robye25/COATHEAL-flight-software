@@ -47,17 +47,19 @@ console is a fixed layout that scales to any screen from 1366×768 up
 | **Top strip** | MODE, PHASE, HEALTH, LINK age, RX rate, command target, session/seq, T+ mission time, UTC, RADIO state; panic group `HEATERS OFF` / `STOP MOTORS` (no confirmation) and `ENTER SAFE` (confirmed) |
 | **Alarm strip** | Active alarms as chips (over-temperature, invalid heated channel, link-loss fallback, sequence paused, energy budget, motor failed, heaters inhibited, sensor faults, onboard backlog, stale link) with `ACK` |
 | **System tab** | Link status, `ARM` / `DISARM` / `ENTER SAFE` / `EXIT SAFE`, `SET PHASE`, `RADIO SILENCE` / `RADIO RESUME`, downlink rate, diagnostics (`PING` `STATUS` `COMPONENTS` `GET_THERMAL` `CHECK <component>` `RESET_CTRL`), `SHUTDOWN SAFE` |
-| **Thermal tab** | Energy budget, active heaters, six heater rows (measured sample, target, duty, state), all-channel targets, presets (`profiles/thermal_presets.json`) |
-| **Motion tab** | M0 / M1 cards (enabled, zeroed, moving, holding, healthy, position, resistance before/after the bend), `ENABLE` `DISABLE` `SET ZERO` `HOME` `STOP`, jog, speed 1–50 Hz (the 0.5 mm/s ceiling), **BEND** (`STEPPER_MOVETO` with hold), **STANDARD PULL** (`PULL_EXECUTE`), recent pulls |
+| **Thermal tab** | Energy budget, active heaters, the heaters and specimens of each motor group as the onboard reports them (`GET_LAYOUT`: heater rows with measured sample, target, duty, state; unheated specimens), all-channel targets, presets (`profiles/thermal_presets.json`), PID autotune. Targets 0–75 °C; above 40 °C asks first |
+| **Motion tab** | M0 / M1 cards (enabled, zeroed, moving, holding, healthy, position, resistance before/after the bend), `ENABLE` `DISABLE` `SET ZERO` `HOME` `STOP`, jog, speed 0.01–0.5 mm/s, current, acceleration in mm/s², **BEND** (`STEPPER_MOVETO_MM` with hold), **STANDARD PULL** (`PULL_EXECUTE`), recent pulls |
 | **Advanced tab** | Bend sequences, PID tuning, open-loop duty, microstep, preset management, fallback plan, network |
-| **Plots** | Temperatures, Ambient (T + pressure + UV), Heaters, Resistance, Motors — mission-time axis, 5 m / 30 m / 2 h / all window, follow/pause, PNG/CSV export, full-session retention |
-| **Right column** | Health (every wire flag as a dot), Checkout (live go/no-go + `RUN CHECK ALL`), Values |
+| **Plots** | Temperatures and Heaters (one plot per motor group), Ambient (T + pressure + UV), Resistance, Motors — mission-time axis, 5 m / 30 m / 2 h / all window, follow/pause, PNG/CSV export, full-session retention |
+| **Right column** | Health (every wire flag as a dot), Checkout (live go/no-go + `RUN CHECK ALL`), Values (grouped by motor) |
 | **Bottom** | Console (every command and reply, entry with completion and history), Events, Pulls |
 
 Controls the onboard would refuse are disabled with the reason in their
 tooltip (mode, enable, zero, fallback, temperature validity, radio
 silence). Every reply is shown in a persistent line under its control group
-and in the console; there are no toasts.
+and in the console; there are no toasts. Number boxes change on the mouse
+wheel only while `Ctrl` or `Shift` is held, take `.` as the decimal point
+whatever the system locale, and show their unit beside the box.
 
 **Confirmation dialogs:** `ARM`, `SET PHASE`, `ENTER SAFE`, `SHUTDOWN SAFE`,
 `RADIO SILENCE`, `RESET_CTRL`, `BENDSEQ RUN`, `FALLBACK ARM`. Everything else
@@ -101,7 +103,7 @@ python main.py telemetry-server [OPTIONS]
 | `--port` | `4000` | TCP telemetry port |
 | `--log` | `logs` | Log root; each onboard session gets its own directory under `<root>/sessions/` |
 | `--plot` | off | Enable live matplotlib plot (basic; use GUI for full visualization) |
-| `--alert-temp-c` | `80.0` | Hottest-sample temperature alert threshold (°C) |
+| `--alert-temp-c` | `75.0` | Hottest-sample temperature alert threshold (°C) |
 | `--timeout-s` | `10.0` | Seconds before stale connection is closed |
 | `--no-discovery-enabled` | — | Disable UDP discovery beacon |
 | `--discovery-port` | `4100` | UDP discovery port |
@@ -151,7 +153,7 @@ python main.py command --cmd GET_THERMAL
 # Define and run a bend sequence on motor 1
 python main.py command --cmd "STEPPER_ENABLE 1"
 python main.py command --cmd "SET_POSITION_ZERO 1"
-python main.py command --cmd "BENDSEQ_LOAD 1 flex 800:2:50 1600:3:75 0:1:50"
+python main.py command --cmd "BENDSEQ_LOAD 1 flex 800:2:50 1600:3:40 0:1:50"
 python main.py command --cmd "BENDSEQ_RUN 1 flex"
 ```
 

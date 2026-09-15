@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <array>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -85,9 +86,11 @@ struct TransitionConfig {
 };
 
 struct HeaterSafetyConfig {
-  double max_sample_temp_c = 85.0;
+  // Owner rule 2026-09-15: nothing above 80 C. Targets stay 5 C under the
+  // latch -- a film heater overshoots its target.
+  double max_sample_temp_c = 80.0;
   double target_min_c = 0.0;
-  double target_max_c = 80.0;
+  double target_max_c = 75.0;
 };
 
 struct SensorRangeConfig {
@@ -239,6 +242,13 @@ struct PullConfig {
   double hold_s = 5.0;
 };
 
+// One specimen of a motor group: the Sequent RTD card terminal its PT100 is
+// wired to, and the BCM line of its heater when it has one.
+struct SpecimenConfig {
+  std::size_t rtd_channel = 0;
+  std::optional<std::size_t> heater_line;
+};
+
 struct MotorConfig {
   // v3 schematic: TMC5160 SPI-only motion (position dribble via XTARGET).
   // No STEP/DIR lines exist. CS is a software chip-select GPIO because the
@@ -271,7 +281,13 @@ struct MotorConfig {
   // this motor only. Runtime-adjustable via STEPPER_SET_ACCEL, bounded by
   // stepper.max_accel_steps_per_s2 either way.
   double accel_steps_per_s2 = 0.0;
+  // Logical samples this motor pulls. Derived from `specimens` when the INI
+  // sets motorN.specimens; only a legacy INI writes motorN.samples.
   std::vector<std::size_t> samples;
+  // motorN.specimens, in sample order: motor 0's specimens become S0.., motor
+  // 1's follow, heated specimens become H0.. in the same order, and the
+  // first specimen of each motor is the one its MAX31865 click reads.
+  std::vector<SpecimenConfig> specimens;
 };
 
 struct HalConfig {

@@ -15,21 +15,22 @@ from typing import Deque, List, Optional
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QAbstractSpinBox, QDoubleSpinBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QScrollArea,
-    QSpinBox, QVBoxLayout, QWidget,
+    QVBoxLayout, QWidget,
 )
 
 from ..protocol import (
-    CommandResponse, PullEvent, validate_accel, validate_current_a,
-    LEAD_MM_PER_REV, MAX_SPEED_HZ, MAX_SPEED_MM_S, validate_move_mm, validate_speed_hz,
+    CommandResponse, PullEvent, validate_accel_mm_s2, validate_current_a,
+    FULL_STEPS_PER_MM, LEAD_MM_PER_REV, MAX_ACCEL_MM_S2, MAX_SPEED_MM_S, mm_s_from_hz,
+    validate_move_mm, validate_speed_mm_s,
 )
 from ..telemetry_log import utc_now_iso
 from . import gating
 from .bend_tracker import BendTracker
 from .dispatch import CommandDispatcher
-from .state import MOTOR_COUNT, MOTOR_SAMPLES, MotorState, OnboardState
+from .state import DEFAULT_LAYOUT, MOTOR_COUNT, Layout, MotorState, OnboardState
 from .widgets import (
     AMBER, BLUE, GRAY, GREEN, MONO_CSS, MUTED, RED, ResponseLine, Segmented, StatusDot,
-    group_box, hrow, make_button,
+    group_box, hrow, make_button, with_unit,
 )
 
 MOTOR_COLORS = ("#2ecc71", "#e67e22")
@@ -37,11 +38,19 @@ MOTOR_COLORS = ("#2ecc71", "#e67e22")
 # stepper.lead_mm_per_rev). At the commissioning defaults (2 mm lead) the
 # largest jog is 2.5 revolutions.
 JOG_MM = (-0.1, -1.0, -5.0, 0.1, 1.0, 5.0)
-DEFAULT_SPEED_HZ = int(MAX_SPEED_HZ)   # the onboard ceiling: 0.5 mm/s at the 2 mm lead
+DEFAULT_SPEED_MM_S = MAX_SPEED_MM_S   # the onboard ceiling (50 full-steps/s at the 2 mm lead)
 DEFAULT_BEND_MM = 2.0   # one revolution at the 2 mm default lead
 DEFAULT_HOLD_S = 5.0
 DEFAULT_CURRENT_A = 0.8
-DEFAULT_ACCEL = 200.0
+DEFAULT_ACCEL_MM_S2 = 2.0             # 200 full-steps/s²
+
+
+def motor_group_text(layout: Layout, motor_id: int) -> str:
+    """`S0 S1 S2 S3 · H0–H3`-style summary of what a motor pulls."""
+    samples = layout.motor_samples[motor_id] if motor_id < len(layout.motor_samples) else ()
+    heaters = layout.heaters_of_motor(motor_id)
+    return (" ".join(f"S{s}" for s in samples) + " · "
+            + (" ".join(f"H{h}" for h in heaters) if heaters else "no heaters"))
 
 
 class MotorCard(QFrame):
@@ -51,12 +60,12 @@ class MotorCard(QFrame):
         self.setObjectName("motorCard")
         self.setStyleSheet("QFrame#motorCard { background: #111; border: 1px solid #333; border-radius: 4px; }")
         lay = QVBoxLayout(self); lay.setContentsMargins(8, 6, 8, 6); lay.setSpacing(3)
-        samples = MOTOR_SAMPLES[motor_id]
         title = QLabel(f"M{motor_id}")
         title.setStyleSheet(f"font-weight: bold; font-size: 12pt; color: {MOTOR_COLORS[motor_id]}; border: none;")
-        sub = QLabel(f"S{samples[0]}–S{samples[-1]}")
-        sub.setStyleSheet(f"color: {MUTED}; font-size: 9pt; border: none;")
-        lay.addWidget(hrow(title, sub, stretch_last=True))
+        self.group = QLabel(motor_group_text(DEFAULT_LAYOUT, motor_id))
+        self.group.setStyleSheet(f"color: {MUTED}; font-size: 9pt; border: none;")
+        self.group.setWordWrap(True); self.group.setMinimumWidth(1)
+        lay.addWidget(hrow(title, self.group, stretch_last=True))
         dots = QHBoxLayout(); dots.setSpacing(1)
         self.dots = {}
         tips = {"EN": "driver power stage enabled", "ZERO": "software zero set (SET_POSITION_ZERO)",
@@ -140,8 +149,8 @@ class MotorCard(QFrame):
         if motor.mm is not None and motor.mm_tgt is not None:
             pos_text = f"{motor.mm:.3f} / {motor.mm_tgt:.3f} mm"
             if motor.moving and motor.hz > 0:
-                # ETA from |distance| / (full-steps/s × lead / 200).
-                mm_s = motor.hz * 2.0 / 200.0
+                # ETA from |distance| / speed.
+                mm_s = mm_s_from_hz(motor.hz)
                 eta = abs(motor.mm_tgt - motor.mm) / mm_s if mm_s > 0 else 0.0
                 pos_text += f" · ~{eta:.0f} s left"
             elif motor.holding and motor.hold_s > 0:
@@ -151,11 +160,11 @@ class MotorCard(QFrame):
         else:
             self.pos.setText(f"{motor.position} / {motor.target} µst")
             self.pos.setToolTip("no mm telemetry (old firmware) — raw microsteps shown")
-        speed = f"{motor.hz:.0f} Hz · µ{motor.microstep}"
+        speed = f"{mm_s_from_hz(motor.hz):.2f} mm/s · µ{motor.microstep}"
         if motor.amps is not None:
             speed += f" · {motor.amps:.2f} A"
         if motor.accel is not None:
-            speed += f" · {motor.accel:.0f} st/s²"
+            speed += f" · {motor.accel / FULL_STEPS_PER_MM:.2f} mm/s²"
         if motor.missed:
             speed += f" · missed {motor.missed}"
         self.speed.setText(speed)
@@ -244,28 +253,32 @@ class MotionTab(QScrollArea):
         outer.addWidget(frame)
 
         frame, lay = group_box("Drive settings (per motor)")
-        self.speed = QSpinBox(); self.speed.setRange(1, int(MAX_SPEED_HZ)); self.speed.setValue(DEFAULT_SPEED_HZ); self.speed.setSuffix(" Hz")
-        self.btn_speed = make_button("SET SPEED", "primary", sends="STEPPER_SET_SPEED <motor_id> <hz>", min_height=24, slot=self._set_speed)
-        s_lbl = QLabel(f"full-step Hz, 1–{int(MAX_SPEED_HZ)} · {int(MAX_SPEED_HZ)} Hz = {MAX_SPEED_MM_S:g} mm/s at the "
-                       f"{LEAD_MM_PER_REV:g} mm lead (stepper.max_speed_mm_s ceiling)"); s_lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
+        self.speed = QDoubleSpinBox(); self.speed.setRange(0.01, MAX_SPEED_MM_S); self.speed.setDecimals(2)
+        self.speed.setSingleStep(0.01); self.speed.setValue(DEFAULT_SPEED_MM_S)
+        self.btn_speed = make_button("SET SPEED", "primary", sends="STEPPER_SET_SPEED <motor_id> <full-steps/s>",
+                                     min_height=24, slot=self._set_speed)
+        s_lbl = QLabel(f"ball-screw travel speed, up to {MAX_SPEED_MM_S:g} mm/s (stepper.max_speed_mm_s); "
+                       f"sent as full-steps/s at the {LEAD_MM_PER_REV:g} mm lead")
+        s_lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         s_lbl.setWordWrap(True)
-        lay.addWidget(hrow(self.speed, self.btn_speed, stretch_last=True))
+        lay.addWidget(hrow(with_unit(self.speed, "mm/s"), self.btn_speed, stretch_last=True))
         lay.addWidget(s_lbl)
         self.current = QDoubleSpinBox(); self.current.setRange(0.05, 3.1); self.current.setDecimals(2)
-        self.current.setSingleStep(0.05); self.current.setValue(DEFAULT_CURRENT_A); self.current.setSuffix(" A")
+        self.current.setSingleStep(0.05); self.current.setValue(DEFAULT_CURRENT_A)
         self.btn_current = make_button("SET CURRENT", "primary", sends="STEPPER_SET_CURRENT <motor_id> <a_rms>",
                                        min_height=24, slot=self._set_current)
         c_lbl = QLabel("run current A RMS; onboard rejects what the sense resistor cannot deliver")
         c_lbl.setWordWrap(True); c_lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
-        lay.addWidget(hrow(self.current, self.btn_current, stretch_last=True))
+        lay.addWidget(hrow(with_unit(self.current, "A"), self.btn_current, stretch_last=True))
         lay.addWidget(c_lbl)
-        self.accel = QDoubleSpinBox(); self.accel.setRange(1.0, 5000.0); self.accel.setDecimals(0)
-        self.accel.setSingleStep(50.0); self.accel.setValue(DEFAULT_ACCEL); self.accel.setSuffix(" st/s²")
-        self.btn_accel = make_button("SET ACCEL", "primary", sends="STEPPER_SET_ACCEL <motor_id> <steps_s2>",
+        self.accel = QDoubleSpinBox(); self.accel.setRange(0.01, MAX_ACCEL_MM_S2); self.accel.setDecimals(2)
+        self.accel.setSingleStep(0.5); self.accel.setValue(DEFAULT_ACCEL_MM_S2)
+        self.btn_accel = make_button("SET ACCEL", "primary", sends="STEPPER_SET_ACCEL <motor_id> <full-steps/s²>",
                                      min_height=24, slot=self._set_accel)
-        a_lbl = QLabel("trapezoid slope, full-steps/s² (ceiling stepper.max_accel_steps_per_s2)")
+        a_lbl = QLabel(f"trapezoid acceleration, up to {MAX_ACCEL_MM_S2:g} mm/s² "
+                       "(stepper.max_accel_steps_per_s2); sent as full-steps/s²")
         a_lbl.setWordWrap(True); a_lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
-        lay.addWidget(hrow(self.accel, self.btn_accel, stretch_last=True))
+        lay.addWidget(hrow(with_unit(self.accel, "mm/s²"), self.btn_accel, stretch_last=True))
         lay.addWidget(a_lbl)
         self.drive_now = QLabel("—"); self.drive_now.setStyleSheet(f"{MONO_CSS} color: {MUTED}; font-size: 8pt;")
         self.drive_now.setWordWrap(True); self.drive_now.setMinimumWidth(1)
@@ -277,15 +290,16 @@ class MotionTab(QScrollArea):
         frame, lay = group_box("Bend")
         self.bend_target = QDoubleSpinBox(); self.bend_target.setRange(-500.0, 500.0); self.bend_target.setDecimals(3)
         self.bend_target.setValue(DEFAULT_BEND_MM)
-        self.bend_target.setSuffix(" mm"); self.bend_target.setFixedWidth(84)
+        self.bend_target.setFixedWidth(66)
         self.bend_target.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.bend_hold = QDoubleSpinBox(); self.bend_hold.setRange(0.0, 3600.0); self.bend_hold.setDecimals(1)
-        self.bend_hold.setValue(DEFAULT_HOLD_S); self.bend_hold.setSuffix(" s"); self.bend_hold.setFixedWidth(64)
+        self.bend_hold.setValue(DEFAULT_HOLD_S); self.bend_hold.setFixedWidth(52)
         self.bend_hold.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self.btn_bend = make_button("BEND", "success", sends="STEPPER_MOVETO_MM <motor_id> <mm> <hold_s>", min_height=30, slot=self._bend)
         t_lbl = QLabel("target"); t_lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         h_lbl = QLabel("hold"); h_lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
-        lay.addWidget(hrow(t_lbl, self.bend_target, h_lbl, self.bend_hold, self.btn_bend))
+        lay.addWidget(hrow(t_lbl, with_unit(self.bend_target, "mm"), h_lbl, with_unit(self.bend_hold, "s"),
+                           self.btn_bend))
         self.btn_pull = make_button("STANDARD PULL", "primary", sends="PULL_EXECUTE <motor_id>", min_height=26, slot=self._pull)
         p_lbl = QLabel("pulls to 2.0 mm (one revolution), holds 5 s, retracts to 0 · config pull.*; emits EVT,PULL")
         p_lbl.setWordWrap(True); p_lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
@@ -325,7 +339,7 @@ class MotionTab(QScrollArea):
         self._send(f"STEPPER_MOVE_MM {self.motor_id()} {norm}")
 
     def _set_speed(self) -> None:
-        ok, norm = validate_speed_hz(self.speed.value())
+        ok, norm = validate_speed_mm_s(self.speed.value())
         if not ok:
             self.resp_drive.show_note(f"✖ {norm}", RED); return
         self._send(f"STEPPER_SET_SPEED {self.motor_id()} {norm}")
@@ -337,7 +351,7 @@ class MotionTab(QScrollArea):
         self._send(f"STEPPER_SET_CURRENT {self.motor_id()} {norm}")
 
     def _set_accel(self) -> None:
-        ok, norm = validate_accel(self.accel.value())
+        ok, norm = validate_accel_mm_s2(self.accel.value())
         if not ok:
             self.resp_drive.show_note(f"✖ {norm}", RED); return
         self._send(f"STEPPER_SET_ACCEL {self.motor_id()} {norm}")
@@ -360,6 +374,10 @@ class MotionTab(QScrollArea):
             self._disp.send(f"STEPPER_STOP {motor_id}", tag=self)
 
     # -- inputs --------------------------------------------------------------------
+    def set_layout(self, layout: Layout) -> None:
+        for card in self.cards:
+            card.group.setText(motor_group_text(layout, card.motor_id))
+
     def update_state(self, state: OnboardState) -> None:
         self.state = state
         self.tracker.update(state, utc_now_iso())
@@ -397,8 +415,8 @@ class MotionTab(QScrollArea):
         self.btn_accel.set_reason(gating.generic_reason(state))
         if state.have_packet and motor.present:
             amps = f"{motor.amps:.2f} A" if motor.amps is not None else "? A"
-            acc = f"{motor.accel:.0f} st/s²" if motor.accel is not None else "? st/s²"
-            self.drive_now.setText(f"M{motor_id} now: {motor.hz:.0f} Hz · {amps} · {acc}")
+            acc = f"{motor.accel / FULL_STEPS_PER_MM:.2f} mm/s²" if motor.accel is not None else "? mm/s²"
+            self.drive_now.setText(f"M{motor_id} now: {mm_s_from_hz(motor.hz):.2f} mm/s · {amps} · {acc}")
         else:
             self.drive_now.setText("—")
         bend_reason = gating.motion_reason(state, motor_id, needs_zero=True)

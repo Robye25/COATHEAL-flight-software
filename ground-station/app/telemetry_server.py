@@ -517,7 +517,8 @@ def add_subparser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser
                         help="Log root; every onboard session gets its own directory "
                              "under <root>/sessions/ (same layout as the GUI).")
     parser.add_argument("--plot", action="store_true", help="Enable live matplotlib plot")
-    parser.add_argument("--alert-temp-c", type=float, default=80.0)
+    # Warn at the highest settable target, before the onboard's 80 C latch.
+    parser.add_argument("--alert-temp-c", type=float, default=75.0)
     # Longer than the slowest legal tick (SET_TICK_HZ 0.1 = 10 s per frame).
     parser.add_argument("--timeout-s", type=float, default=12.0)
     parser.add_argument("--discovery-enabled", action=argparse.BooleanOptionalAction, default=True)

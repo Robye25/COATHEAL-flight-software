@@ -8,22 +8,87 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Dict, FrozenSet, List, Optional
+from typing import Dict, FrozenSet, List, Optional, Tuple
 
 from ..protocol import TelemetryPacket
+from ..reply_format import parse_kv_body
 
 MOTOR_COUNT = 2
 HEATER_COUNT = 6
 SAMPLE_COUNT = 8
-# Heater i is fed by sample i (heater.temperature_channels=0..5 in the
-# flight config). Motor 0 pulls samples 0..3, motor 1 pulls 4..7.
-HEATER_SAMPLE = tuple(range(HEATER_COUNT))
-MOTOR_SAMPLES = ((0, 1, 2, 3), (4, 5, 6, 7))
-# Owner decision (2026-08-29): specimen resistance is measured on exactly
-# two samples, one per motor group, by the two MAX31865 RTD clicks —
-# mirrors the onboard's sensor.max31865_sample_indices=0,4 (click 1 -> S0,
-# click 2 -> S4). Every other RESISTANCE slot is always '-' on the wire.
-RESISTANCE_SAMPLES = (0, 4)
+
+
+@dataclass(frozen=True)
+class Layout:
+    """Which samples and heaters each motor group has, and the wiring behind
+    them, as the onboard reports it (GET_LAYOUT; derived onboard from
+    motor0.specimens / motor1.specimens). The defaults are the schematic
+    frame: heater i reads sample i, motor 0 pulls S0-S3 and motor 1 S4-S7,
+    and the two MAX31865 clicks read the first sample of each group. Firmware
+    without GET_LAYOUT runs exactly that."""
+    motor_samples: Tuple[Tuple[int, ...], ...] = ((0, 1, 2, 3), (4, 5, 6, 7))
+    heater_samples: Tuple[int, ...] = (0, 1, 2, 3, 4, 5)   # heater h reads sample heater_samples[h]
+    clicks: Tuple[int, ...] = (0, 4)                       # click n+1 reads sample clicks[n]
+    rtd_channels: Tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7, 8)
+    heater_lines: Tuple[int, ...] = (19, 13, 6, 5, 24, 23)
+    reported: bool = False                                  # the onboard answered GET_LAYOUT
+
+    def sample_of_heater(self, heater: int) -> Optional[int]:
+        return self.heater_samples[heater] if 0 <= heater < len(self.heater_samples) else None
+
+    def heater_of_sample(self, sample: int) -> Optional[int]:
+        return self.heater_samples.index(sample) if sample in self.heater_samples else None
+
+    def motor_of_sample(self, sample: int) -> Optional[int]:
+        return next((m for m, samples in enumerate(self.motor_samples) if sample in samples), None)
+
+    def motor_of_heater(self, heater: int) -> Optional[int]:
+        sample = self.sample_of_heater(heater)
+        return None if sample is None else self.motor_of_sample(sample)
+
+    def heaters_of_motor(self, motor: int) -> Tuple[int, ...]:
+        """Heater indexes whose specimen the motor pulls, in sample order."""
+        samples = self.motor_samples[motor] if 0 <= motor < len(self.motor_samples) else ()
+        return tuple(h for s in samples for h in [self.heater_of_sample(s)] if h is not None)
+
+    def click_of_sample(self, sample: int) -> Optional[int]:
+        """1-based MAX31865 click number reading this sample, or None."""
+        return self.clicks.index(sample) + 1 if sample in self.clicks else None
+
+    def as_dict(self) -> Dict[str, object]:
+        return {
+            "motor_samples": [list(s) for s in self.motor_samples],
+            "heater_samples": list(self.heater_samples), "clicks": list(self.clicks),
+            "rtd_channels": list(self.rtd_channels), "heater_lines": list(self.heater_lines),
+        }
+
+
+DEFAULT_LAYOUT = Layout()
+
+
+def parse_layout(body: str) -> Optional[Layout]:
+    """A GET_LAYOUT reply body (`samples=8;heaters=6;motor0=0,1,2,3;...`), or
+    None when it does not describe a usable layout."""
+    kv = parse_kv_body(body)
+
+    def numbers(key: str) -> Tuple[int, ...]:
+        raw = kv.get(key, "")
+        return tuple(int(piece) for piece in raw.split(",") if piece.strip()) if raw else ()
+
+    try:
+        samples = int(kv.get("samples", SAMPLE_COUNT))
+        motors = tuple(numbers(f"motor{m}") for m in range(MOTOR_COUNT))
+        layout = Layout(motor_samples=motors, heater_samples=numbers("heater_samples"),
+                        clicks=numbers("clicks"), rtd_channels=numbers("rtd_channels"),
+                        heater_lines=numbers("heater_lines"), reported=True)
+    except ValueError:
+        return None
+    covered = sorted(s for group in motors for s in group)
+    if (covered != list(range(samples)) or len(layout.heater_samples) != HEATER_COUNT
+            or any(s not in covered for s in layout.heater_samples)
+            or len(set(layout.heater_samples)) != len(layout.heater_samples)):
+        return None
+    return layout
 
 
 @dataclass(frozen=True)
@@ -53,10 +118,6 @@ class MotorState:
     # Driver die thermal state: "ok" / "warn" (>=~120 °C) / "hot"
     # (>=~150 °C, onboard safety disabled the motor). None: old firmware.
     thermal: Optional[str] = None
-
-    @property
-    def samples(self) -> tuple:
-        return MOTOR_SAMPLES[self.motor_id] if 0 <= self.motor_id < MOTOR_COUNT else ()
 
 
 @dataclass(frozen=True)
@@ -102,6 +163,8 @@ class OnboardState:
     # the last live frame reported.
     replay_live_panels: bool = False
     replay_backlog_frames: Optional[int] = None
+    # Which samples and heaters each motor group has (GET_LAYOUT).
+    layout: Layout = DEFAULT_LAYOUT
 
     # -- derived -------------------------------------------------------------
     def flag(self, token: str) -> bool:
@@ -118,9 +181,9 @@ class OnboardState:
     def heater_temp_valid(self, heater: int) -> bool:
         """True when the sample that feeds `heater` has a live, finite
         reading -- the onboard refuses duty/target commands otherwise."""
-        if not (0 <= heater < HEATER_COUNT):
+        sample = self.layout.sample_of_heater(heater)
+        if sample is None:
             return False
-        sample = HEATER_SAMPLE[heater]
         value = self.sample_temps[sample] if sample < len(self.sample_temps) else None
         return value is not None
 
@@ -133,7 +196,8 @@ def _finite(value: float, valid: bool) -> Optional[float]:
 
 
 def state_from_packet(pkt: TelemetryPacket, *, silence: bool = False,
-                      link_age_s: Optional[float] = None) -> OnboardState:
+                      link_age_s: Optional[float] = None,
+                      layout: Layout = DEFAULT_LAYOUT) -> OnboardState:
     samples: List[Optional[float]] = []
     for i in range(SAMPLE_COUNT):
         if i < len(pkt.sample_temps_c):
@@ -184,5 +248,5 @@ def state_from_packet(pkt: TelemetryPacket, *, silence: bool = False,
         queue_depth=pkt.queue_depth, plan_state=pkt.plan_state,
         debug_armed=pkt.debug_armed,
         tune_channel=pkt.tune_channel,
-        silence=silence, link_age_s=link_age_s,
+        silence=silence, link_age_s=link_age_s, layout=layout,
     )

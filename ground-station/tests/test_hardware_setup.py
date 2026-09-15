@@ -43,7 +43,8 @@ class HardwareSetupTests(unittest.TestCase):
 
     def test_validate_candidate_detects_gpio_conflict(self) -> None:
         # motor0.enable_line collides with heater.output_lines[0] (BCM 19,
-        # see FINAL_PIN_VALUES/EXAMPLE_CONFIG) - a plain same-chip collision
+        # the first heater of motor0.specimens in EXAMPLE_CONFIG) - a plain
+        # same-chip collision
         # between two non-reserved owners, distinct from the reserved-line
         # collision covered by test_validate_candidate_detects_reserved_gpio_collision.
         source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
@@ -55,15 +56,26 @@ class HardwareSetupTests(unittest.TestCase):
 
     def test_validate_candidate_detects_reserved_gpio_collision(self) -> None:
         # v3 reserved lines (Sequent RTD HAT + hardware SPI0 chip-selects)
-        # must never be claimable by a heater. Six-entry list (matches
-        # hardware.heater_count=6) so the count check passes and the GPIO
-        # claim check is actually reached.
+        # must never be claimable by a heater. Still six heaters, so the
+        # count check passes and the GPIO claim check is actually reached.
         source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
         broken = hardware_setup.replace_ini(
-            source, {"heater.output_lines": "17,13,6,5,24,23"})
+            source, {"motor0.specimens": "ch1:17,ch2:13,ch3:6,ch4:5"})
         errors = hardware_setup.validate_candidate(broken)
         self.assertTrue(
             any("reserved: sequent_hat" in error for error in errors))
+
+    def test_gpio_conflict_names_the_heater_and_its_specimen_list(self) -> None:
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        broken = hardware_setup.replace_ini(
+            source, {"motor1.specimens": "ch5:24,ch6:21,ch7,ch8"})
+        self.assertIn("/dev/gpiochip0 line 21 used by heater H5 (motor1.specimens) and "
+                      "motor1.enable_line", hardware_setup.validate_candidate(broken))
+        without_specimens = "\n".join(line for line in source.splitlines()
+                                      if not line.startswith(("motor0.specimens=", "motor1.specimens=")))
+        legacy = hardware_setup.replace_ini(without_specimens, {"heater.output_lines": "19,13,6,5,24,21"})
+        self.assertIn("/dev/gpiochip0 line 21 used by heater.output_lines[5] and "
+                      "motor1.enable_line", hardware_setup.validate_candidate(legacy))
 
     def test_validate_candidate_rejects_retired_tmc2240_driver(self) -> None:
         source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
@@ -88,43 +100,66 @@ class HardwareSetupTests(unittest.TestCase):
         errors = hardware_setup.validate_candidate(broken)
         self.assertIn("sensor.sequent_rtd_stack must be 0..7", errors)
 
-    def test_validate_candidate_detects_duplicate_sequent_rtd_channel(self) -> None:
-        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
-        broken = hardware_setup.replace_ini(
-            source, {"sensor.sequent_rtd_channels": "1,2,3,4,5,6,7,7"})
-        errors = hardware_setup.validate_candidate(broken)
-        self.assertIn(
-            "sensor.sequent_rtd_channels contains duplicates", errors)
+    # --- motor groups: motorN.specimens (mirrors config.cpp) ----------------
 
-    def test_validate_candidate_channel_count_tracks_sample_count(self) -> None:
-        # config.cpp compares sequent_rtd_channels.size() against the
-        # *variable* hardware.sample_count, not a literal 8. Shrink
-        # sample_count to 4 (heater.output_lines/temperature_channels must
-        # shrink to match hardware.heater_count too, or an unrelated
-        # required-mapping error fires first) and confirm the still-8-long
-        # channel list is now rejected against the new count of 4, not 8.
+    def test_validate_candidate_detects_a_terminal_listed_twice(self) -> None:
         source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
         broken = hardware_setup.replace_ini(
-            source,
-            {
-                "hardware.sample_count": "4",
-                "hardware.heater_count": "4",
-                "heater.output_lines": "17,18,27,5",
-                "heater.temperature_channels": "0,1,2,3",
-            },
-        )
+            source, {"motor1.specimens": "ch5:24,ch6:23,ch7,ch1"})
         errors = hardware_setup.validate_candidate(broken)
-        self.assertIn(
-            "sensor.sequent_rtd_channels must list hardware.sample_count "
-            "entries", errors)
+        self.assertIn("ch1 is listed twice in motor0.specimens / motor1.specimens", errors)
 
-    def test_validate_candidate_detects_sequent_rtd_channel_out_of_range(self) -> None:
+    def test_validate_candidate_detects_a_heater_line_listed_twice(self) -> None:
         source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
         broken = hardware_setup.replace_ini(
-            source, {"sensor.sequent_rtd_channels": "1,2,3,4,5,6,7,9"})
+            source, {"motor1.specimens": "ch5:19,ch6:23,ch7,ch8"})
         errors = hardware_setup.validate_candidate(broken)
         self.assertIn(
-            "sensor.sequent_rtd_channels entries must be 1..8", errors)
+            "BCM 19 heats two specimens in motor0.specimens / motor1.specimens", errors)
+
+    def test_validate_candidate_specimen_counts_track_the_hardware_counts(self) -> None:
+        # config.cpp compares against the *variable* hardware counts, not a
+        # literal 8 and 6.
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        broken = hardware_setup.replace_ini(
+            source, {"hardware.sample_count": "4", "hardware.heater_count": "4"})
+        errors = hardware_setup.validate_candidate(broken)
+        self.assertIn("motor0.specimens and motor1.specimens list 8 specimens; "
+                      "hardware.sample_count is 4", errors)
+        self.assertIn("motor0.specimens and motor1.specimens list 6 heated specimens; "
+                      "hardware.heater_count is 4", errors)
+
+    def test_validate_candidate_detects_a_terminal_out_of_range(self) -> None:
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        broken = hardware_setup.replace_ini(
+            source, {"motor1.specimens": "ch5:24,ch6:23,ch7,ch9"})
+        errors = hardware_setup.validate_candidate(broken)
+        self.assertIn("motor1.specimens: ch9 is not a card terminal (ch1..ch8)", errors)
+
+    def test_validate_candidate_accepts_uneven_groups(self) -> None:
+        # Three heated and one unheated specimen per motor.
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        candidate = hardware_setup.replace_ini(
+            source, {"motor0.specimens": "ch8:19,ch2:13,ch3:6,ch4",
+                     "motor1.specimens": "ch5:5,ch7:24,ch1:23,ch6"})
+        self.assertEqual(hardware_setup.validate_candidate(candidate), [])
+        layout = hardware_setup.layout_from_values(hardware_setup._ini_values(candidate))
+        self.assertEqual(layout.heater_samples, [0, 1, 2, 4, 5, 6])
+        self.assertEqual(layout.clicks, [0, 4])
+
+    def test_validate_candidate_refuses_half_or_mixed_layouts(self) -> None:
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        legacy_too = hardware_setup.replace_ini(source, {"sensor.sequent_rtd_channels": "1,2,3,4,5,6,7,8"})
+        self.assertEqual(hardware_setup.validate_candidate(legacy_too),
+                         ["sensor.sequent_rtd_channels is derived from motor0.specimens / "
+                          "motor1.specimens: remove it"])
+        half = "\n".join(line for line in source.splitlines()
+                         if not line.startswith("motor1.specimens=")) + "\n"
+        self.assertEqual(hardware_setup.validate_candidate(half),
+                         ["motor0.specimens and motor1.specimens must be set together"])
+        garbled = hardware_setup.replace_ini(source, {"motor0.specimens": "8:19,ch2:13,ch3:6,ch4:5"})
+        self.assertTrue(hardware_setup.validate_candidate(garbled)[0].startswith(
+            "'8:19': give a PT100 terminal"))
 
     SENSOR_TYPE_ERROR = (
         "sensor.sequent_rtd_expect_sensor_type must be pt100 "
@@ -298,52 +333,21 @@ class HardwareSetupTests(unittest.TestCase):
         errors = hardware_setup.validate_candidate(broken)
         self.assertIn("sensor.max31865_poll_ms must be > 0", errors)
 
-    def test_validate_candidate_detects_wrong_count_max31865_sample_indices(
-            self) -> None:
-        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
-        broken = hardware_setup.replace_ini(
-            source, {"sensor.max31865_sample_indices": "0,1,2"})
-        errors = hardware_setup.validate_candidate(broken)
-        self.assertIn(
-            "sensor.max31865_sample_indices must have exactly two entries",
-            errors)
+    def test_the_clicks_read_the_first_specimen_of_each_motor(self) -> None:
+        values = hardware_setup._ini_values(
+            hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8"))
+        values.update({"motor0.specimens": "ch8:19,ch2:13,ch3:6,ch4:5,ch1",
+                       "motor1.specimens": "ch5:24,ch7:23,ch6"})
+        self.assertEqual(hardware_setup.layout_from_values(values).clicks, [0, 5])
 
-    def test_validate_candidate_detects_duplicate_max31865_sample_indices(
-            self) -> None:
-        # Isolates the distinctness rule: the count is exactly two and both
-        # entries are in range, so only a duplicate-entries check can fire.
-        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
-        broken = hardware_setup.replace_ini(
-            source, {"sensor.max31865_sample_indices": "3,3"})
-        errors = hardware_setup.validate_candidate(broken)
-        self.assertIn(
-            "sensor.max31865_sample_indices entries must be distinct", errors)
-
-    def test_validate_candidate_detects_out_of_range_max31865_sample_indices(
-            self) -> None:
-        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
-        broken = hardware_setup.replace_ini(
-            source, {"sensor.max31865_sample_indices": "0,8"})
-        errors = hardware_setup.validate_candidate(broken)
-        self.assertIn(
-            "sensor.max31865_sample_indices entries must be less than "
-            "hardware.sample_count", errors)
-
-    def test_validate_candidate_detects_max31865_duplicate_after_parsing(
-            self) -> None:
-        # Fix-round 1 minor: "0" and "00" are different raw INI strings but
-        # the same parsed index -- a raw-string distinctness check (the
-        # pre-fix bug) would miss this entirely, unlike config.cpp, which
-        # compares the parsed std::size_t values. Distinct from
-        # test_validate_candidate_detects_duplicate_max31865_sample_indices
-        # above (which uses two textually-identical entries and would pass
-        # under either the buggy or fixed comparison).
-        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
-        broken = hardware_setup.replace_ini(
-            source, {"sensor.max31865_sample_indices": "0,00"})
-        errors = hardware_setup.validate_candidate(broken)
-        self.assertIn(
-            "sensor.max31865_sample_indices entries must be distinct", errors)
+    def test_owner_limits_and_motor0_direction_are_pinned(self) -> None:
+        pins = hardware_setup.FINAL_PIN_VALUES
+        self.assertEqual(pins["motor0.invert_direction"], "true")
+        self.assertNotIn("motor1.invert_direction", pins)
+        self.assertEqual(pins["heater.max_sample_temp_c"], "80.0")
+        self.assertEqual(pins["heater.target_max_c"], "75.0")
+        for key in (*hardware_setup.LAYOUT_KEYS, *hardware_setup.SPECIMEN_KEYS):
+            self.assertNotIn(key, pins)  # bench wiring is never pinned
 
     def test_same_line_on_different_gpio_chips_is_valid(self) -> None:
         # BCM 17 is a v3-reserved line (Sequent HAT rs485_dir) on the default
@@ -462,6 +466,36 @@ class HardwareSetupTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             hardware_setup.boot_gpio_lines({"heater.output_lines": "19,40"})
 
+    def test_boot_gpio_lines_follow_the_specimen_heater_lines(self) -> None:
+        values = hardware_setup._ini_values(
+            hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8"))
+        values["motor0.specimens"] = "ch8:24,ch1:13,ch6:16,ch2:5"
+        values["motor1.specimens"] = "ch3:19,ch5:23,ch4,ch7"
+        self.assertEqual(hardware_setup.boot_gpio_lines(values)[0],
+                         "gpio=5,13,16,19,23,24=op,dl,pd")
+
+    def test_boot_block_problem_names_a_stale_or_missing_block(self) -> None:
+        values = hardware_setup._ini_values(
+            hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as tmp:
+            config_txt = Path(tmp) / "config.txt"
+            config_txt.write_text("dtparam=spi=on\n", encoding="utf-8")
+            problem = hardware_setup.boot_block_problem(values, config_txt)
+            self.assertIn("has no COATHEAL boot-time GPIO block", problem)
+            config_txt.write_text(hardware_setup.upsert_boot_gpio_block(
+                "dtparam=spi=on\n",
+                hardware_setup.render_boot_gpio_block(hardware_setup.boot_gpio_lines(values))),
+                encoding="utf-8")
+            self.assertIsNone(hardware_setup.boot_block_problem(values, config_txt))
+            # A heater moved to BCM 16 after the last deploy.
+            values["motor0.specimens"] = "ch1:19,ch2:13,ch3:16,ch4:5"
+            problem = hardware_setup.boot_block_problem(values, config_txt)
+            self.assertIn("holds gpio=5,6,13,19,23,24=op,dl,pd", problem)
+            self.assertIn("needs gpio=5,13,16,19,23,24=op,dl,pd", problem)
+            self.assertIn("run coatheal-deploy, then reboot", problem)
+        with mock.patch.object(hardware_setup, "BOOT_CONFIG_PATHS", (Path("/nonexistent/config.txt"),)):
+            self.assertIsNone(hardware_setup.boot_block_problem(values))
+
     def test_boot_gpio_block_upsert_is_idempotent_and_replaces_stale(self) -> None:
         block = hardware_setup.render_boot_gpio_block(["gpio=5,6=op,dl,pd"])
         base = "dtparam=i2c_arm=on\ndtparam=spi=on\n\n[all]\n"
@@ -537,8 +571,8 @@ class HardwareSetupTests(unittest.TestCase):
             ):
                 self.assertNotIn(retired, values)
             self.assertEqual(values["sensor.sequent_rtd_stack"], "0")
-            self.assertEqual(
-                values["sensor.sequent_rtd_channels"], "1,2,3,4,5,6,7,8")
+            self.assertEqual(values["motor0.specimens"], "ch1:19,ch2:13,ch3:6,ch4:5")
+            self.assertEqual(values["motor0.invert_direction"], "true")
             self.assertNotIn("stepper.microstep=", migrated)
             self.assertNotIn("motor0.sense_resistor=", migrated)
             self.assertNotIn("motor0.step_line=", migrated)
@@ -577,43 +611,77 @@ class HardwareSetupTests(unittest.TestCase):
             ):
                 self.assertNotIn(retired, values)
             self.assertEqual(values["sensor.sequent_rtd_stack"], "0")
-            self.assertEqual(
-                values["sensor.sequent_rtd_channels"], "1,2,3,4,5,6,7,8")
+            self.assertEqual(values["motor1.specimens"], "ch5:24,ch6:23,ch7,ch8")
 
     def test_migrate_config_keeps_the_measured_wiring(self) -> None:
-        # The bench wiring lives in heater.output_lines (set for the harness)
-        # and sensor.sequent_rtd_channels (measured by
-        # scripts/associate_heaters.py); every coatheal-deploy migrates the
-        # local config, and must not reset either to the schematic order.
-        # heater.temperature_channels stays pinned: heater i reads sample i.
+        # The bench wiring lives in motor0.specimens / motor1.specimens
+        # (measured or assigned by scripts/associate_heaters.py); every
+        # coatheal-deploy migrates the local config and must not reset it.
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "onboard.local.ini"
             source.write_text(hardware_setup.replace_ini(
                 hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8"),
-                {"heater.output_lines": "19,13,16,5,24,23",
-                 "sensor.sequent_rtd_channels": "3,1,6,2,8,5,4,7",
-                 "heater.temperature_channels": "1,0,2,3,4,5"}), encoding="utf-8")
+                {"motor0.specimens": "ch8:24,ch1:13,ch6:16,ch2:5",
+                 "motor1.specimens": "ch3:19,ch5:23,ch4,ch7"}), encoding="utf-8")
             values = migrated_values(source)
-            self.assertEqual(values["heater.output_lines"], "19,13,16,5,24,23")
-            self.assertEqual(values["sensor.sequent_rtd_channels"], "3,1,6,2,8,5,4,7")
-            self.assertEqual(values["heater.temperature_channels"], "0,1,2,3,4,5")
+            self.assertEqual(values["motor0.specimens"], "ch8:24,ch1:13,ch6:16,ch2:5")
+            self.assertEqual(values["motor1.specimens"], "ch3:19,ch5:23,ch4,ch7")
+
+    def test_migrate_config_converts_the_index_layout_keys(self) -> None:
+        # An INI from before motorN.specimens (the bench Pi on 2026-09-15):
+        # its wiring must come through in the new form and the old keys go.
+        # Heater 0 reading sample 1 keeps its line on that sample's PT100;
+        # each motor's click sample comes first.
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "onboard.local.ini"
+            template = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+            old = "\n".join(line for line in template.splitlines()
+                            if not line.startswith(hardware_setup.SPECIMEN_KEYS)) + "\n"
+            source.write_text(old + (
+                "heater.output_lines=19,13,6,5,24,23\n"
+                "heater.temperature_channels=1,0,2,3,4,5\n"
+                "sensor.sequent_rtd_channels=8,2,3,4,5,7,1,6\n"
+                "sensor.max31865_sample_indices=0,5\n"
+                "motor0.samples=0,1,2,3\nmotor1.samples=4,5,6,7\n"
+                "heater.max_sample_temp_c=85.0\nheater.target_max_c=80.0\n"), encoding="utf-8")
+            values = migrated_values(source)
+            self.assertEqual(values["motor0.specimens"], "ch8:13,ch2:19,ch3:6,ch4:5")
+            self.assertEqual(values["motor1.specimens"], "ch7:23,ch5:24,ch1,ch6")
+            for key in hardware_setup.LAYOUT_KEYS:
+                self.assertNotIn(key, values)
+            self.assertEqual(values["heater.max_sample_temp_c"], "80.0")
+            self.assertEqual(values["heater.target_max_c"], "75.0")
+            text = hardware_setup._candidate_from_existing(source)
+            self.assertEqual(hardware_setup.validate_candidate(text), [])
+
+    def test_migrate_config_reports_an_unreadable_old_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "onboard.local.ini"
+            # Two motors claiming S3: no specimen list can say that.
+            source.write_text("motor0.samples=0,1,2,3\nmotor1.samples=3,4,5,6\n",
+                              encoding="utf-8")
+            with mock.patch("builtins.print") as printed:
+                rc = hardware_setup.migrate_config(argparse.Namespace(
+                    config=Path(tmp) / "new.ini", migrate_from=source, yes=True))
+            self.assertEqual(rc, 2)
+            self.assertIn("cannot convert", printed.call_args[0][0])
+            self.assertFalse((Path(tmp) / "new.ini").exists())
 
     def test_pin_check_leaves_the_measured_wiring_to_the_bench(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "onboard.local.ini"
             config.write_text(hardware_setup.replace_ini(
                 hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8"),
-                {"heater.output_lines": "19,13,16,5,24,23",
-                 "sensor.sequent_rtd_channels": "3,1,6,2,8,5,4,7"}), encoding="utf-8")
+                {"motor0.specimens": "ch8:24,ch1:13,ch6:16,ch2:5",
+                 "motor1.specimens": "ch3:19,ch5:23,ch4,ch7"}), encoding="utf-8")
             with mock.patch("builtins.print") as printed:
                 hardware_setup.pin_check(argparse.Namespace(config=config))
             complaints = " ".join(str(call.args[0]) for call in printed.call_args_list)
-            self.assertNotIn("sequent_rtd_channels", complaints)
-            self.assertNotIn("output_lines", complaints)
+            self.assertNotIn("specimens", complaints)
             # A line the validator must still refuse (reserved by the HAT).
             config.write_text(hardware_setup.replace_ini(
                 hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8"),
-                {"heater.output_lines": "19,13,17,5,24,23"}), encoding="utf-8")
+                {"motor0.specimens": "ch1:19,ch2:13,ch3:17,ch4:5"}), encoding="utf-8")
             with mock.patch("builtins.print") as printed:
                 self.assertEqual(hardware_setup.pin_check(argparse.Namespace(config=config)), 1)
             complaints = " ".join(str(call.args[0]) for call in printed.call_args_list)
