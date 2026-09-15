@@ -181,6 +181,7 @@ SystemController::SystemController(OnboardConfig config)
                         config_.comms.rediscover_period_s,
                         config_.comms.failover_grace_s,
                         config_.comms.priority),
+      telemetry_drain_(&telemetry_queue_, &telemetry_client_),
       fallback_planner_(FallbackPlannerConfig{config_.fallback.bend_min_c,
                                               config_.fallback.bend_max_c,
                                               config_.fallback.bend_deadline_s},
@@ -388,6 +389,8 @@ bool SystemController::Initialize(std::string* error) {
               << degraded_error << '\n';
   }
 
+  command_server_.SetLinkBudget(&link_budget_);
+  telemetry_client_.SetLinkBudget(&link_budget_);
   if (!command_server_.Start(
           [this](const std::string& line, const std::string& peer_ip) {
             return HandleCommandLine(line, peer_ip);
@@ -1150,24 +1153,36 @@ int SystemController::Run() {
     queued_frame.seq = record.seq;
     queued_frame.frame = line;
 
-    if (!telemetry_queue_.Enqueue(queued_frame, &queue_error)) {
+    std::uint64_t live_index = TelemetryDrain::kNoLiveFrame;
+    if (!telemetry_queue_.Enqueue(queued_frame, &queue_error, &live_index)) {
       last_link_ok = false;
     }
     COATHEAL_PERF_STAMP(perf_enqueue_end);  // sub-stage: enqueue-only latency
 
-    std::string drain_error;
-    // DrainTelemetryQueue sets last_link_ok itself: false until a frame is
-    // acknowledged this tick, true from the first ACK on. A failure later
-    // in the same batch (a backlog frame the ground station will not
-    // acknowledge) is a drain error, not a dead link -- forcing link_ok
-    // false here used to engage link-loss fallback, after
+    // This tick's frame, pending events, then the backlog by bisection while
+    // the link budget has room (docs/link-budget.md). Live frames may wait
+    // for room until 40 % of the tick; replay stops early enough to leave the
+    // next tick's live frame its room (ReplayDeadline). The drain reports link_ok
+    // itself: true from the first ACK, or while connected but held back by
+    // the budget. A failure later in the same tick (a backlog frame the
+    // ground station will not acknowledge) is a drain error, not a dead link
+    // -- forcing link_ok false here used to engage link-loss fallback, after
     // link_loss_fallback_s, over a perfectly working link.
-    if (!DrainTelemetryQueue(&last_link_ok, &drain_error)) {
+    const auto tick_fraction = [&](double fraction) {
+      return tick_start + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                              tick_duration * fraction);
+    };
+    const DrainResult drain = telemetry_drain_.Drain(
+        live_index, CurrentUnixEpochSeconds(), tick_fraction(0.4),
+        ReplayDeadline(tick_start, std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                       tick_duration)));
+    last_link_ok = drain.link_ok;
+    if (drain.error) {
       // Log on transition only. While no ground station is reachable this
       // fails every tick, and one journal line per tick for the steady
       // state buries the lines that mark actual changes.
       if (!drain_error_logged_) {
-        std::cerr << "[telemetry] drain error: " << drain_error
+        std::cerr << "[telemetry] drain error: " << drain.error_text
                   << " (suppressing repeats until recovery)" << '\n';
         drain_error_logged_ = true;
       }
@@ -1334,85 +1349,6 @@ int SystemController::Run() {
   return 0;
 }
 
-bool SystemController::DrainTelemetryQueue(bool* link_ok, std::string* error) {
-  if (link_ok != nullptr) {
-    *link_ok = false;
-  }
-
-  // Rev C: limit drain to a small batch per tick so the control loop is not
-  // blocked by a large backlog (the Pi was accumulating 12k+ frames). The
-  // batch bound is applied inside DrainBatch too: copying the entire
-  // backlog out of the queue every tick is O(backlog) on the control loop.
-  // The batch is this tick's frame first, then the backlog oldest-first
-  // (see TelemetryQueue::DrainBatch), and every DATA line is stamped with
-  // its age on the wire so the ground station can tell live from replay
-  // without synchronised clocks.
-  constexpr std::size_t kMaxDrainPerTick = 10;
-  std::vector<QueuedTelemetryFrame> pending =
-      telemetry_queue_.DrainBatch(kMaxDrainPerTick);
-  if (pending.empty()) {
-    if (link_ok != nullptr) {
-      *link_ok = telemetry_client_.is_connected();
-    }
-    return true;
-  }
-
-  std::size_t drained = 0;
-  const std::int64_t now_epoch = CurrentUnixEpochSeconds();
-
-  for (const QueuedTelemetryFrame& frame : pending) {
-    if (drained >= kMaxDrainPerTick) break;
-    const bool newest = drained == 0;
-    TelemetryAck ack;
-    if (!telemetry_client_.SendFrameAwaitAck(
-            TagFrameForTransmit(frame.frame, frame.queued_epoch_s, now_epoch), &ack)) {
-      if (error != nullptr) {
-        *error = "failed to send telemetry frame";
-      }
-      return false;
-    }
-
-    const bool event_ack =
-        frame.frame.rfind("EVT,", 0) == 0 &&
-        ack.session_id == frame.session_id &&
-        ack.seq == 0U;
-    if (event_ack) {
-      if (!telemetry_queue_.AcknowledgeExact(frame, error)) {
-        return false;
-      }
-      if (link_ok != nullptr) {
-        *link_ok = true;
-      }
-      ++drained;
-      continue;
-    }
-
-    if (ack.session_id != frame.session_id || ack.seq < frame.seq) {
-      if (error != nullptr) {
-        *error = "received mismatched telemetry ACK";
-      }
-      return false;
-    }
-
-    if (newest) {
-      // The live frame is out of order: a cumulative ack of its seq would
-      // discard every older frame still waiting in the queue.
-      if (!telemetry_queue_.AcknowledgeExact(frame, error)) {
-        return false;
-      }
-    } else if (!telemetry_queue_.Acknowledge(ack.session_id, ack.seq, error)) {
-      return false;
-    }
-
-    if (link_ok != nullptr) {
-      *link_ok = true;
-    }
-    ++drained;
-  }
-
-  return true;
-}
-
 std::string SystemController::HandleCommandLine(const std::string& line,
                                                 const std::string& peer_ip) {
   if (!peer_ip.empty() && (config_.runtime.bench_mode || !IsLoopbackPeer(peer_ip))) {
@@ -1558,6 +1494,9 @@ std::string SystemController::HandleCommandLine(const std::string& line,
              << ";telemetry_target=" << telemetry_client_.current_host()
              << ";queue_depth=" << telemetry_queue_.size()
              << ";tick_hz=" << live_tick_hz_.load()
+             << ";link_codec=" << telemetry_client_.link_codec()
+             << ";link_bytes=" << link_budget_.InWindow() << '/' << link_budget_.share_bytes()
+             << ";link_ack_timeouts=" << telemetry_client_.ack_timeouts()
              << ";silence=" << (telemetry_client_.transmit_enabled() ? "0" : "1")
              << ";simulated=" << (sensor_manager_.simulated() ? "1" : "0")
              << ";i2c_ok=" << (sensor_manager_.i2c_ok() ? "1" : "0")
@@ -2259,7 +2198,8 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       result << ";heater_samples=" << join(config_.heaters.temperature_channels)
              << ";clicks=" << join(config_.sensors.max31865_sample_indices)
              << ";rtd_channels=" << join(config_.sensors.sequent_rtd_channels)
-             << ";heater_lines=" << join(config_.heaters.output_lines);
+             << ";heater_lines=" << join(config_.heaters.output_lines)
+             << ";lead_mm=" << config_.stepper.lead_mm_per_rev;
       return Ack(cmd_name, result.str());
     }
 
@@ -2301,8 +2241,10 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       if (!ParseDouble(command.args[0], &hz)) {
         return Nack(cmd_name, "invalid hz value");
       }
-      // Clamp to a safe band: 0.1 Hz floor (one frame / 10 s) and 5 Hz ceiling
-      // (well below the 2 Mbps E-Link budget at our ~600 B frame size).
+      // Clamp to a safe band: 0.1 Hz floor (one frame / 10 s) and 5 Hz
+      // ceiling. The rate never threatens the 24 kbps E-Link cap: every frame
+      // waits for room in the link budget, and frames produced faster than
+      // the budget lets out stay queued and are replayed later.
       constexpr double kMinHz = 0.1;
       constexpr double kMaxHz = 5.0;
       if (hz < kMinHz || hz > kMaxHz) {

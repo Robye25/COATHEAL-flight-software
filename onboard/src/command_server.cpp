@@ -1,5 +1,6 @@
 #include "coatheal/command_server.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <sstream>
@@ -51,6 +52,42 @@ constexpr int kSendFlags = MSG_NOSIGNAL;
 constexpr int kSendFlags = 0;
 #endif
 
+// Largest reply chunk: a STATUS reply fits one chunk, and a chunk still fits
+// the 1 600 B share next to a live telemetry frame.
+constexpr std::size_t kReplyChunkBytes = 600;
+// Budget wait for a whole reply: under the ground station's 3 s default.
+constexpr auto kReplyBudgetWait = std::chrono::milliseconds(2500);
+constexpr auto kEmissionTail = std::chrono::milliseconds(50);
+
+bool IsLoopback(const std::string& peer_ip) {
+  return peer_ip.rfind("127.", 0) == 0 || peer_ip == "::1";
+}
+
+bool SendAll(int fd, const char* data, std::size_t size) {
+  while (size > 0) {
+#ifdef _WIN32
+    const int sent = send(static_cast<SOCKET>(fd), data, static_cast<int>(size), 0);
+#else
+    const int sent = static_cast<int>(send(fd, data, size, kSendFlags));
+#endif
+    if (sent <= 0) {
+      return false;
+    }
+    data += sent;
+    size -= static_cast<std::size_t>(sent);
+  }
+  return true;
+}
+
+void ResetOnClose(int fd) {
+#ifndef _WIN32
+  const linger reset_on_close{1, 0};
+  setsockopt(fd, SOL_SOCKET, SO_LINGER, &reset_on_close, sizeof(reset_on_close));
+#else
+  (void)fd;
+#endif
+}
+
 void SetClientTimeouts(int fd) {
 #ifdef _WIN32
   const DWORD timeout = static_cast<DWORD>(kClientTimeoutMs);
@@ -97,6 +134,11 @@ bool CommandServer::Start(Handler handler, std::string* error) {
 }
 
 void CommandServer::CloseListenSocket() {
+#ifndef _WIN32
+  // close() alone does not wake a thread blocked in accept() on Linux, and
+  // Stop() would wait for it forever; shutdown() does.
+  if (listen_fd_ >= 0) shutdown(listen_fd_, SHUT_RDWR);
+#endif
   CloseFd(&listen_fd_);
 }
 
@@ -210,22 +252,66 @@ void CommandServer::HandleClient(int client_fd, const std::string& peer_ip) {
     }
     response.push_back('\n');
 
-    const char* ptr = response.c_str();
-    std::size_t remain = response.size();
-    while (remain > 0) {
-#ifdef _WIN32
-      const int sent = send(static_cast<SOCKET>(client_fd), ptr, static_cast<int>(remain), 0);
-#else
-      const int sent = static_cast<int>(send(client_fd, ptr, remain, kSendFlags));
-#endif
-      if (sent <= 0) {
-        return;
-      }
-      ptr += sent;
-      remain -= static_cast<std::size_t>(sent);
+    if (budget_ == nullptr || (IsLoopback(peer_ip) && !pace_loopback_)) {
+      SendAll(client_fd, response.data(), response.size());
+    } else {
+      SendPacedReply(client_fd, response);
     }
     return;  // replied once; the caller closes the connection
   }
+}
+
+bool CommandServer::SendPacedReply(int client_fd, const std::string& response) {
+  const auto deadline = std::chrono::steady_clock::now() + kReplyBudgetWait;
+  std::size_t offset = 0;
+  bool first = true;
+  while (offset < response.size()) {
+    const std::size_t chunk = std::min(kReplyChunkBytes, response.size() - offset);
+    // The ground station's charge for the exchange already holds the
+    // headers of a one-segment reply; every later chunk is a segment of its
+    // own. Each chunk holds the ground station's ACK of it, our reset if that
+    // ACK is late, and the reset our kernel answers the late ACK with.
+    const std::uint32_t headers =
+        (first ? 0U : wire::kTcpHeaders + wire::kFrameOverhead) + wire::kPureAck;
+    const std::uint32_t cost = static_cast<std::uint32_t>(chunk) + headers + 2 * wire::kReset;
+    LinkBudget::Ticket ticket;
+    if (!budget_->WaitHold(cost, LinkPriority::kCommandReply, deadline, &ticket)) {
+      ResetOnClose(client_fd);
+      return false;
+    }
+    // Gives up with a reset; answers already on their way draw resets from
+    // our kernel for a while longer.
+    const auto abort_reply = [&]() {
+      wire::TcpState state;
+      const bool known = wire::ReadTcpState(client_fd, &state);
+      const auto release_at =
+          std::chrono::steady_clock::now() + wire::kAbortTail +
+          std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+              known ? state.srtt : std::chrono::microseconds(0));
+      ResetOnClose(client_fd);
+      budget_->ReleaseAt(ticket, release_at);
+    };
+    const std::chrono::milliseconds ack_deadline = wire::AckDeadline(client_fd);
+    if (!SendAll(client_fd, response.data() + offset, chunk)) {
+      abort_reply();
+      return false;
+    }
+    // The chunk itself is on the wire; its ACK and the resets are not.
+    budget_->ReleasePart(ticket, cost - 2 * wire::kReset - wire::kPureAck,
+                         std::chrono::steady_clock::now());
+    // Reset before Linux could retransmit the chunk (wire::kAckDeadline).
+    // The ground station reads the reply and closes at once, so its ACK is
+    // back within a round trip.
+    if (!wire::WaitAllAcknowledged(client_fd, ack_deadline)) {
+      abort_reply();
+      return false;
+    }
+    budget_->Refund(ticket, 2 * wire::kReset);  // acknowledged: no resets
+    budget_->ReleaseAt(ticket, std::chrono::steady_clock::now() + kEmissionTail);
+    offset += chunk;
+    first = false;
+  }
+  return true;
 }
 
 }  // namespace coatheal

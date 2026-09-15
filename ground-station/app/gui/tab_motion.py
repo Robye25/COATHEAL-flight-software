@@ -35,14 +35,14 @@ from .widgets import (
 
 MOTOR_COLORS = ("#2ecc71", "#e67e22")
 # Jog distances in mm (STEPPER_MOVE_MM; the onboard converts through
-# stepper.lead_mm_per_rev). At the commissioning defaults (2 mm lead) the
-# largest jog is 2.5 revolutions.
+# stepper.lead_mm_per_rev). At the 1 mm lead the largest jog is five
+# revolutions.
 JOG_MM = (-0.1, -1.0, -5.0, 0.1, 1.0, 5.0)
-DEFAULT_SPEED_MM_S = MAX_SPEED_MM_S   # the onboard ceiling (50 full-steps/s at the 2 mm lead)
-DEFAULT_BEND_MM = 2.0   # one revolution at the 2 mm default lead
+DEFAULT_SPEED_MM_S = MAX_SPEED_MM_S   # the onboard ceiling (100 full-steps/s at the 1 mm lead)
+DEFAULT_BEND_MM = 2.0   # two revolutions at the 1 mm lead
 DEFAULT_HOLD_S = 5.0
 DEFAULT_CURRENT_A = 0.8
-DEFAULT_ACCEL_MM_S2 = 2.0             # 200 full-steps/s²
+DEFAULT_ACCEL_MM_S2 = 2.0             # 400 full-steps/s² at the 1 mm lead
 
 
 def motor_group_text(layout: Layout, motor_id: int) -> str:
@@ -244,7 +244,7 @@ class MotionTab(QScrollArea):
         lay.addLayout(jog)
         self.jog_note = QLabel(""); self.jog_note.setWordWrap(True); self.jog_note.setMinimumWidth(1)
         self.jog_note.setStyleSheet(f"color: {AMBER}; font-size: 8pt;")
-        j_lbl = QLabel("converted onboard via stepper.lead_mm_per_rev (2 mm/rev default)")
+        j_lbl = QLabel(f"converted onboard via stepper.lead_mm_per_rev ({LEAD_MM_PER_REV:g} mm/rev)")
         j_lbl.setWordWrap(True); j_lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(j_lbl)
         lay.addWidget(self.jog_note)
@@ -301,7 +301,7 @@ class MotionTab(QScrollArea):
         lay.addWidget(hrow(t_lbl, with_unit(self.bend_target, "mm"), h_lbl, with_unit(self.bend_hold, "s"),
                            self.btn_bend))
         self.btn_pull = make_button("STANDARD PULL", "primary", sends="PULL_EXECUTE <motor_id>", min_height=26, slot=self._pull)
-        p_lbl = QLabel("pulls to 2.0 mm (one revolution), holds 5 s, retracts to 0 · config pull.*; emits EVT,PULL")
+        p_lbl = QLabel("pulls to 2.0 mm (two revolutions), holds 5 s, retracts to 0 · config pull.*; emits EVT,PULL")
         p_lbl.setWordWrap(True); p_lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(self.btn_pull)
         lay.addWidget(p_lbl)
@@ -430,7 +430,7 @@ class MotionTab(QScrollArea):
         # live divisor is the fallback for old firmware). Re-deriving on
         # render would silently rewrite history after STEPPER_SET_MICROSTEP.
         us = ev.microstep or self.state.motor(ev.motor_id).microstep or 4
-        mm = ev.steps_moved / (200.0 * us / 2.0)
+        mm = ev.steps_moved / (FULL_STEPS_PER_MM * us)
         self._pulls.appendleft((ev, mm))
         for lbl, entry in zip(self.pull_lines, list(self._pulls) + [None] * 3):
             if entry is None:

@@ -5,10 +5,27 @@ import json
 import socket
 import time
 from pathlib import Path
+from typing import Optional
 
+from .link_budget import (
+    LinkBudget,
+    Priority,
+    budget_wait_error,
+    command_budget_wait_s,
+    command_exchange_bytes,
+    ground_budget,
+    paced_connection,
+    priority_for,
+    request_too_long,
+    udp_datagram,
+)
 from .protocol import build_command, recv_reply_line, timeout_for
 
 DEFAULT_STATIC_HOST = "169.254.10.10"
+
+
+class LinkBudgetRefusal(RuntimeError):
+    """The command cannot go out within the 24 kbps link budget."""
 
 
 DANGEROUS_COMMANDS = {
@@ -37,9 +54,13 @@ def load_discovered_host(path: Path) -> str | None:
     return None
 
 
-def discover_onboard_host(discovery_port: int, command_port: int, timeout: float) -> str | None:
+def discover_onboard_host(discovery_port: int, command_port: int, timeout: float,
+                          budget: Optional[LinkBudget] = None) -> str | None:
+    """`budget` defaults to this process's ledger (`link_budget.ground_budget()`),
+    the one `send_command` paces the command through."""
+    budget = budget if budget is not None else ground_budget()
     nonce = str(int(time.time() * 1000))
-    hello = f"GS_HELLO,{nonce},0,{command_port}\n"
+    hello = f"GS_HELLO,{nonce},0,{command_port}\n".encode("utf-8")
 
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -47,8 +68,12 @@ def discover_onboard_host(discovery_port: int, command_port: int, timeout: float
 
         sent = False
         for target in ("255.255.255.255", DEFAULT_STATIC_HOST):
+            # Each datagram is charged before it is sent; one the link
+            # budget cannot take is skipped.
+            if budget.try_charge(udp_datagram(len(hello)), Priority.DISCOVERY) is None:
+                continue
             try:
-                sock.sendto(hello.encode("utf-8"), (target, discovery_port))
+                sock.sendto(hello, (target, discovery_port))
                 sent = True
             except OSError:
                 continue
@@ -78,10 +103,24 @@ def discover_onboard_host(discovery_port: int, command_port: int, timeout: float
     return None
 
 
-def send_command(host: str, port: int, command: str, timeout: float) -> str:
-    payload = build_command(command)
-    with socket.create_connection((host, port), timeout=timeout) as sock:
-        sock.sendall(payload.encode("utf-8"))
+def send_command(host: str, port: int, command: str, timeout: float,
+                 budget: Optional[LinkBudget] = None) -> str:
+    """One command exchange, paced like the GUI dispatcher's: held on the
+    link budget (this process's `ground_budget()` unless given) from before
+    connecting until the connection is closed (`paced_connection`). Raises
+    `LinkBudgetRefusal` for a request line that can never fit, or when the
+    budget stays full."""
+    payload = build_command(command).encode("utf-8")
+    refusal = request_too_long(len(payload))
+    if refusal is not None:
+        raise LinkBudgetRefusal(refusal)
+    budget = budget if budget is not None else ground_budget()
+    wait_s = command_budget_wait_s(timeout)
+    ticket = budget.hold(command_exchange_bytes(len(payload)), priority_for(command), wait_s)
+    if ticket is None:
+        raise LinkBudgetRefusal(budget_wait_error(wait_s))
+    with paced_connection(budget, ticket, host, port, timeout) as sock:
+        sock.sendall(payload)
         return recv_reply_line(sock)
 
 
@@ -131,6 +170,10 @@ def _handle(args: argparse.Namespace) -> int:
         print(f"[command] discovery unavailable, using static host {host}")
 
     timeout = args.timeout if args.timeout is not None else timeout_for(args.cmd)
-    response = send_command(host, args.port, args.cmd, timeout)
+    try:
+        response = send_command(host, args.port, args.cmd, timeout)
+    except LinkBudgetRefusal as exc:
+        print(f"[command] not sent: {exc}")
+        return 1
     print(response)
     return 0

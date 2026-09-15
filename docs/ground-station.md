@@ -145,9 +145,13 @@ state, and the resistance readout: `R now`, `bend start` and `Δ %` for the
 card's monitored specimen — the bend confirmation. The selector (M0 | M1)
 drives the shared controls: `ENABLE`, `DISABLE`, `SET ZERO`, `HOME`, `STOP`
 · jog ±0.1/±1/±5 mm (allowed before zeroing) · drive settings in SI units:
-speed 0.01–0.5 mm/s, run current in A RMS, acceleration 0.01–50 mm/s²
-(the wire stays in full steps: ×100 at the 2 mm lead, so 0.5 mm/s is
-`STEPPER_SET_SPEED <id> 50.000` and 2 mm/s² is `STEPPER_SET_ACCEL <id> 200.0`)
+speed 0.01–0.5 mm/s, run current in A RMS, acceleration 0.01–25 mm/s²
+(the wire stays in full steps: ×200 at the 1 mm lead, so 0.5 mm/s is
+`STEPPER_SET_SPEED <id> 100.000` and 2 mm/s² is `STEPPER_SET_ACCEL <id> 400.0`).
+The onboard reports its lead in `GET_LAYOUT`; when it is not the 1 mm the
+console converts at, the events log a warning and the console shows
+`LEAD MISMATCH`, because converted speeds, accelerations, sequences and
+fallback plans would then be wrong (jog and BEND mm are converted onboard)
 · **BEND** (`STEPPER_MOVETO_MM <id> <mm> <hold>`) and
 **STANDARD PULL** (`PULL_EXECUTE <id>`, the config-defined pull). BEND and
 STANDARD PULL are disabled — with the reason shown — until the motor is
@@ -185,16 +189,15 @@ decodes the TMC5160's own registers:
   are the driver's fault flags (open-load is only valid at standstill).
 - Derived over a 3 s window: sequencer rate (full-steps/s from ΔMSCNT),
   ramp rate (from ΔXACTUAL), rev/s and rpm (200 full steps per revolution),
-  mm/s using the *ball-screw lead* you enter (persisted; default 1.5 mm/rev
-  -- the mechanism does ~1–2 mm per revolution), and travel since the probe
-  started.
+  mm/s using the *ball-screw lead* you enter (persisted; default 1 mm/rev,
+  the flight lead), and travel since the probe started.
 - A verdict line: MOVING; COMMANDED BUT NOT STEPPING (ramp moves, MSCNT
   frozen); firmware says moving but the chip is at standstill; power stage
   off; SD_MODE strap; DRIVER FAULT.
 - A plot of MSCNT and XACTUAL against seconds since the probe started.
 
-At the 0.5 mm/s ceiling (50 full-steps/s) a BEND of 800 µsteps at µ4 is one revolution in 4 s,
-about 1.5 mm -- invisible on a remote camera, unmistakable in MSCNT. The
+At the 0.5 mm/s ceiling (100 full-steps/s) a BEND of 800 µsteps at µ4 is one revolution in 2 s,
+1 mm -- invisible on a remote camera, unmistakable in MSCNT. The
 probe stops itself when radio silence starts or the link is lost.
 
 ### Plots
@@ -229,11 +232,15 @@ directory automatically.
 
 ### Backlog replay
 
-After a link outage the onboard replays its queued frames at ~10/s. With
-current firmware the drain is **live-first**: each tick's frame is sent
-before the backlog and every frame carries its age (`TX=`), so the panels,
-gating and alarms stay on live frames throughout; the replayed frames only
-fill the plots (inserted at their onboard time) and the session logs. The
+After a link outage the onboard replays its queued frames with whatever the
+24 kbps link budget leaves after the live frame: at 1 Hz, up to one replayed
+frame per second ([link-budget.md](link-budget.md#replay-order)). The replay
+goes by **bisection**: the middle of the gap first, then the quarters, the
+eighths, and so on, so the plots show the whole outage coarsely within
+seconds and fill in from there. With current firmware each tick's frame is
+sent before the backlog and every frame carries its age (`TX=`), so the
+panels, gating and alarms stay on live frames throughout; the replayed frames
+only fill the plots (inserted at their onboard time) and the session logs. The
 top strip shows `REPLAY <n> queued · ETA`, and one amber `BACKLOG` alarm
 replaces the queue-depth alarm until the queue is empty. The previous
 session's backlog and the current session's live frames interleave; each
@@ -272,6 +279,14 @@ as ignored.
   `silence=1`) the ground station stops its beacon and probe and refuses to
   send anything except `RADIO_RESUME`, `RADIO_SILENCE`, `STATUS`, `PING`;
   refused commands appear in the console and `commands.csv` with the reason.
+- **Link budget** ([link-budget.md](link-budget.md)): commands go out one at
+  a time, about one per second, safety commands first; the latency shown
+  includes the wait. A command line over 230 B is refused, and a command that
+  finds no room within 10 s (or its own longer timeout) fails with `waited …
+  s for link budget`. A background poll whose previous request has not come
+  back is skipped. While telemetry arrives the beacon goes out every 15 s and
+  the command probe stops. Run one ground station on the E-Link at a time:
+  each keeps its own share.
 
 ### Shortcuts
 

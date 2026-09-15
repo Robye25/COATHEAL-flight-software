@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
     QFileDialog, QHBoxLayout, QLabel, QPushButton, QTabWidget, QVBoxLayout, QWidget,
 )
 
-from ..protocol import PullEvent, TelemetryPacket
+from ..protocol import FULL_STEPS_PER_MM, PullEvent, TelemetryPacket
 from ..session_dir import session_epoch
 from .series_store import SeriesStore, format_elapsed, window_bounds
 from .state import DEFAULT_LAYOUT, MOTOR_COUNT, Layout
@@ -408,10 +408,10 @@ class PlotArea(QWidget):
                 values[f"M{m} tgt"] = float(snap["mm_tgt"])
             else:
                 # Pre-mm firmware / replayed old logs: derive mm from
-                # microsteps at the commissioning geometry (200 full-steps
-                # per rev, 2 mm ball-screw lead, divisor from the frame).
+                # microsteps at the ball-screw geometry (200 full-steps per
+                # rev, 1 mm lead, divisor from the frame).
                 us = max(1, int(snap.get("microstep") or 4))
-                per_mm = 200.0 * us / 2.0
+                per_mm = FULL_STEPS_PER_MM * us
                 values[f"M{m} pos"] = float(snap["position"]) / per_mm
                 values[f"M{m} tgt"] = float(snap["target"]) / per_mm
         self.store.append(t, values)

@@ -9,6 +9,10 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from .link_budget import (
+    GROUND_SHARE, LINK_HEALTHY_S, TELEMETRY_CLOSE_BYTES, DiscoveryRounds, LinkBudget, Priority,
+)
+from .link_codec import CodecError, decode_line, describe_hello, hello_reply
 from .protocol import (
     HeatingCycleEvent,
     PullEvent,
@@ -125,6 +129,9 @@ class TelemetryServer:
         self.discovered_path = discovered_path
 
         self._stop = threading.Event()
+        # This process's share of the 24 kbps E-Link (docs/link-budget.md):
+        # discovery, and closing a telemetry connection that went quiet.
+        self._budget = LinkBudget(GROUND_SHARE)
         self._last_packet_time = 0.0
         self._last_wait_log_time = 0.0
         self._plotter: Optional[LivePlotter] = None
@@ -230,47 +237,66 @@ class TelemetryServer:
         except OSError:
             pass
 
+    def _link_healthy(self) -> bool:
+        """A telemetry frame arrived within the last LINK_HEALTHY_S."""
+        return self._last_packet_time > 0 and (time.time() - self._last_packet_time) < LINK_HEALTHY_S
+
+    def _discovery_round(self, rounds: DiscoveryRounds, now: float, healthy: bool) -> str:
+        """Start a round: GS_BEACON to every target, and the legacy GS_HELLO
+        too while no telemetry arrives. Returns the round's nonce."""
+        nonce = str(int(time.time() * 1000))
+        lines = [f"GS_BEACON,{nonce},{self.port},{self.command_port},100\n"]
+        if not healthy:
+            lines.insert(0, f"GS_HELLO,{nonce},{self.port},{self.command_port}\n")
+        rounds.start(now, healthy, [(line.encode("utf-8"), target) for line in lines
+                                    for target in ("255.255.255.255", DEFAULT_STATIC_ONBOARD_HOST)])
+        return nonce
+
     def _discovery_loop(self) -> None:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             sock.bind(("", self.discovery_port))
-            sock.settimeout(0.5)
 
+            def send(data: bytes, target) -> None:
+                try:
+                    sock.sendto(data, (target, self.discovery_port))
+                except OSError:
+                    pass
+
+            # Every 2 s while no telemetry arrives, GS_BEACON alone every 15 s
+            # while it does; each datagram charged to the link budget.
+            rounds = DiscoveryRounds(self._budget)
+            nonce = ""
             while not self._stop.is_set():
-                nonce = str(int(time.time() * 1000))
-                hello = f"GS_HELLO,{nonce},{self.port},{self.command_port}\n"
-                beacon = f"GS_BEACON,{nonce},{self.port},{self.command_port},100\n"
-                for line in (hello, beacon):
-                    for target in ("255.255.255.255", DEFAULT_STATIC_ONBOARD_HOST):
-                        try:
-                            sock.sendto(line.encode("utf-8"), (target, self.discovery_port))
-                        except OSError:
-                            pass
+                now = time.monotonic()
+                healthy = self._link_healthy()
+                if rounds.due(now, healthy):
+                    nonce = self._discovery_round(rounds, now, healthy)
+                rounds.send_pending(healthy, send)
+                sock.settimeout(max(0.05, min(0.5, rounds.next_check_s(time.monotonic(), healthy))))
+                try:
+                    data, addr = sock.recvfrom(2048)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    self._stop.wait(0.5)
+                    continue
 
-                end_time = time.time() + 1.0
-                while time.time() < end_time and not self._stop.is_set():
-                    try:
-                        data, addr = sock.recvfrom(2048)
-                    except socket.timeout:
-                        continue
-                    except OSError:
-                        break
+                line = data.decode("utf-8", errors="replace").strip()
+                parts = [p.strip() for p in line.split(",")]
+                if parts[0] == "ONBOARD_HELLO" and len(parts) >= 6 and parts[1] == nonce:
+                    session = parts[2]
+                elif parts[0] == "ONBOARD_BEACON" and len(parts) >= 5:
+                    session = parts[1]
+                else:
+                    continue
 
-                    line = data.decode("utf-8", errors="replace").strip()
-                    parts = [p.strip() for p in line.split(",")]
-                    if parts[0] == "ONBOARD_HELLO" and len(parts) >= 6 and parts[1] == nonce:
-                        session = parts[2]
-                    elif parts[0] == "ONBOARD_BEACON" and len(parts) >= 5:
-                        session = parts[1]
-                    else:
-                        continue
-
-                    with self._lock:
-                        self._last_onboard_ip = addr[0]
-                        self._last_onboard_session = session
-                        self._persist_discovered()
-                    print(f"[discovery] onboard={addr[0]} session={session}")
+                with self._lock:
+                    self._last_onboard_ip = addr[0]
+                    self._last_onboard_session = session
+                    self._persist_discovered()
+                print(f"[discovery] onboard={addr[0]} session={session}")
 
     def _network_loop(self) -> None:
         try:
@@ -323,6 +349,10 @@ class TelemetryServer:
                     and self._last_packet_time > 0
                     and (time.time() - self._last_packet_time) > self.timeout_s
                 ):
+                    # The FIN and the onboard's ACK of it are charged first;
+                    # with no room yet, the quiet connection waits a second.
+                    if self._budget.try_charge(TELEMETRY_CLOSE_BYTES, Priority.COMMAND) is None:
+                        continue
                     if not timeout_warned:
                         print(
                             f"[alert] telemetry timeout > {self.timeout_s:.1f}s, "
@@ -341,6 +371,26 @@ class TelemetryServer:
                 line = line.strip()
                 if not line:
                     continue
+                reply = hello_reply(line)
+                if reply is not None:
+                    # Codec negotiation (docs/link-budget.md): not a frame,
+                    # never ACKed, answered on the same socket.
+                    try:
+                        conn.sendall(reply.encode("utf-8"))
+                    except OSError:
+                        return
+                    print(f"[telemetry] {describe_hello(line, reply)}")
+                    continue
+                if line.startswith("Z1,"):
+                    try:
+                        line = decode_line(line).strip()
+                    except CodecError as exc:
+                        # Nothing identifies the frame, so nothing is ACKed.
+                        if not self._ack_unparseable(conn, line, exc):
+                            return
+                        continue
+                    if not line:
+                        continue
                 rx_utc = utc_now_iso()
                 if line.startswith("EVT,CYCLE,"):
                     try:
@@ -422,14 +472,20 @@ class TelemetryServer:
                     if seen is None:
                         seen = self._received_by_session[packet.session_id] = SeqSet()
                     is_duplicate = not seen.add(packet.seq)
-                    if not is_duplicate:
-                        self._persist_cursor()
 
+                # ACK before the cursor write: the onboard resets a link whose
+                # ACK misses its 180 ms deadline (docs/link-budget.md).
                 ack_line = build_ack(packet.session_id, packet.seq)
                 try:
                     conn.sendall(ack_line.encode("utf-8"))
                 except OSError:
+                    if not is_duplicate:
+                        with self._lock:
+                            self._persist_cursor()
                     return
+                if not is_duplicate:
+                    with self._lock:
+                        self._persist_cursor()
 
                 if is_duplicate:
                     print(f"[telemetry] duplicate dropped session={packet.session_id} seq={packet.seq}")

@@ -508,9 +508,10 @@ void TestUnackedFramesStillSurviveRestart() {
   std::filesystem::remove_all(queue_dir, ec);
 }
 
-// The drain sends this tick's frame before the backlog, and the ground
-// station must be able to tell the two apart from the wire alone.
-void TestDrainBatchSendsTheNewestFrameFirst() {
+// The ground station must be able to tell a live frame from a replayed one
+// from the wire alone (frames leave out of order; see test_link_budget.cpp
+// for the bisection replay itself).
+void TestTransmitStampMarksFrameAge() {
   const std::filesystem::path queue_dir =
       std::filesystem::temp_directory_path() /
       ("coatheal_queue_test5_" +
@@ -518,7 +519,7 @@ void TestDrainBatchSendsTheNewestFrameFirst() {
   std::string error;
   coatheal::TelemetryQueue queue(queue_dir.string(), 72.0, 1024 * 1024);
   assert(queue.Initialize(&error));
-  assert(queue.DrainBatch(10).empty());
+  assert(!queue.NextReplay(nullptr));
   for (std::uint64_t seq = 1; seq <= 6; ++seq) {
     coatheal::QueuedTelemetryFrame f;
     // Retention pruning is relative to now: a 1970 timestamp would be dropped.
@@ -526,26 +527,18 @@ void TestDrainBatchSendsTheNewestFrameFirst() {
     f.session_id = "s3";
     f.seq = seq;
     f.frame = "DATA,s3," + std::to_string(seq) + ",frame";
-    assert(queue.Enqueue(f, &error));
+    std::uint64_t index = 0;
+    assert(queue.Enqueue(f, &error, &index));
+    assert(index == seq - 1);
   }
-  const auto batch = queue.DrainBatch(4);
-  assert(batch.size() == 4);
-  assert(batch[0].seq == 6);  // this tick's frame goes first
-  assert(batch[1].seq == 1 && batch[2].seq == 2 && batch[3].seq == 3);
-  // MUTATION: make DrainBatch return PendingFrames(max) and confirm the
-  // batch[0].seq == 6 assertion fails.
-
-  // Exactly the newest is acked; the backlog is untouched and the next
-  // batch again leads with the newest remaining frame.
-  assert(queue.AcknowledgeExact(batch[0], &error));
+  // Exactly the newest is acked; the backlog is untouched.
+  coatheal::QueuedTelemetryFrame newest;
+  assert(queue.FrameAt(5, &newest) && newest.seq == 6);
+  assert(queue.AcknowledgeExact(newest, &error));
   assert(queue.size() == 5);
-  assert(queue.DrainBatch(10).front().seq == 5);
   // A cumulative ack of a backlog frame never reaches newer frames.
   assert(queue.Acknowledge("s3", 3, &error));
   assert(queue.size() == 2);
-  // Healthy steady state: one pending frame is the whole batch.
-  assert(queue.Acknowledge("s3", 4, &error));
-  assert(queue.DrainBatch(10).size() == 1);
 
   // The wire stamp: age in seconds, clamped, DATA frames only.
   assert(coatheal::TagFrameForTransmit("DATA,s3,1,x", 100, 130) == "DATA,s3,1,x,TX=30");
@@ -1492,10 +1485,10 @@ void TestMotionEnvelopeConfig() {
     assert(!cfg.motors[0].stealth_chop && !cfg.motors[1].stealth_chop);
     assert(cfg.stepper.max_speed_mm_s == 0.5);
     assert(cfg.stepper.max_direct_usteps == 1000);
-    // 0.5 mm/s at 2 mm/rev and 200 steps/rev = 50 full-steps/s, which
-    // binds below the fixture's pull.max_step_hz=100.
-    assert(std::abs(cfg.stepper.LinearMaxStepHz() - 50.0) < 1e-9);
-    assert(std::abs(coatheal::EffectiveMaxStepHz(cfg) - 50.0) < 1e-9);
+    // 0.5 mm/s at the 1 mm lead and 200 steps/rev = 100 full-steps/s.
+    assert(cfg.stepper.lead_mm_per_rev == 1.0);
+    assert(std::abs(cfg.stepper.LinearMaxStepHz() - 100.0) < 1e-9);
+    assert(std::abs(coatheal::EffectiveMaxStepHz(cfg) - 100.0) < 1e-9);
   }
   {
     // A looser linear limit lets pull.max_step_hz bind instead; the keys
@@ -1503,10 +1496,10 @@ void TestMotionEnvelopeConfig() {
     coatheal::OnboardConfig cfg;
     std::string error;
     assert(coatheal::LoadConfigFromIni(
-        WriteTempConfig("stepper.max_speed_mm_s=2.0\nstepper.lead_mm_per_rev=4.0\n"
+        WriteTempConfig("stepper.max_speed_mm_s=2.0\nstepper.lead_mm_per_rev=1.0\n"
                         "stepper.max_direct_usteps=800\nmotor0.stealth_chop=true\n"),
         &cfg, &error));
-    assert(std::abs(cfg.stepper.LinearMaxStepHz() - 100.0) < 1e-9);
+    assert(std::abs(cfg.stepper.LinearMaxStepHz() - 400.0) < 1e-9);
     assert(std::abs(coatheal::EffectiveMaxStepHz(cfg) - 100.0) < 1e-9);
     assert(cfg.stepper.max_direct_usteps == 800);
     assert(cfg.motors[0].stealth_chop && !cfg.motors[1].stealth_chop);
@@ -1538,13 +1531,13 @@ void TestDirectMicrostepCapAndSpeedCeiling() {
   assert(ContainsText(at_cap, "stepper unavailable"));
   assert(ContainsText(controller.HandleCommandLine("STEPPER_MOVETO 0 -1000", ""), "stepper unavailable"));
 
-  // Speed validation uses the derived 50 full-steps/s ceiling, not the
-  // fixture's pull.max_step_hz=100, and names it.
-  const std::string fast = controller.HandleCommandLine("FALLBACK_PLAN 0 800 5 60", "");
+  // Speed validation uses the derived ceiling -- 0.5 mm/s is 100
+  // full-steps/s at the 1 mm lead -- and names it.
+  const std::string fast = controller.HandleCommandLine("FALLBACK_PLAN 0 800 5 101", "");
   assert(ContainsText(fast, "invalid speed_hz"));
-  assert(ContainsText(fast, "50 full-steps/s = 0.5 mm/s"));
-  assert(controller.HandleCommandLine("FALLBACK_PLAN 0 800 5 50", "") ==
-         "ACK,FALLBACK_PLAN,motor=0;target=800;hold_s=5;speed_hz=50");
+  assert(ContainsText(fast, "100 full-steps/s = 0.5 mm/s"));
+  assert(controller.HandleCommandLine("FALLBACK_PLAN 0 800 5 100", "") ==
+         "ACK,FALLBACK_PLAN,motor=0;target=800;hold_s=5;speed_hz=100");
 
   std::filesystem::remove_all(queue_dir);
 }
@@ -1653,7 +1646,7 @@ void TestGetLayoutReportsTheGroups() {
   assert(controller.HandleCommandLine("GET_LAYOUT", "") ==
          "ACK,GET_LAYOUT,samples=8;heaters=6;motor0=0,1,2,3;motor1=4,5,6,7;"
          "heater_samples=0,1,2,4,5,6;clicks=0,4;rtd_channels=8,2,3,4,5,7,1,6;"
-         "heater_lines=19,13,6,5,24,23");
+         "heater_lines=19,13,6,5,24,23;lead_mm=1");
   assert(ContainsText(controller.HandleCommandLine("GET_LAYOUT extra", ""),
                       "invalid argument count for GET_LAYOUT"));
   std::filesystem::remove_all(queue_dir);
@@ -1669,7 +1662,7 @@ int main() {
   TestTelemetryQueueDeferredCompactionRetentionAndTornLines();
   TestDrainedQueueLeavesNothingToReplay();
   TestUnackedFramesStillSurviveRestart();
-  TestDrainBatchSendsTheNewestFrameFirst();
+  TestTransmitStampMarksFrameAge();
   TestConfigParsesReliabilityFields();
   TestConfigRejectsGpioCollisions();
   TestConfigRejectsReservedGpioCollisions();

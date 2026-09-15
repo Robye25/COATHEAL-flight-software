@@ -4,8 +4,8 @@ so they lead; the estimator survives as one verdict + one rate line).
 
 Polls `MOTOR_DEBUG <id>` through the dispatcher's quiet path, decodes the
 chip's motion-truth and health registers, and states a one-line verdict.
-The ball-screw lead for the mm/s rate is the onboard's configured 2 mm/rev
-(stepper.lead_mm_per_rev) — no local override.
+The ball-screw lead for the mm/s rate is the onboard's configured 1 mm/rev
+(stepper.lead_mm_per_rev, protocol.LEAD_MM_PER_REV) — no local override.
 """
 from __future__ import annotations
 
@@ -138,16 +138,20 @@ class DebugTab(QScrollArea):
         if self._disp.silence:
             self.resp.show_note("✖ radio silence — RADIO RESUME first", RED)
             return
-        self._disp.send(f"MOTOR_DEBUG {self.motor_id()}", tag=self, quiet=True)
-        self.polls_sent += 1
+        self._send_poll()
 
     def _poll(self) -> None:
         if self._disp.silence:
             self.stop_probe()
             self.resp.show_note("✖ probe stopped: radio silence", RED)
             return
-        self._disp.send(f"MOTOR_DEBUG {self.motor_id()}", tag=self, quiet=True)
-        self.polls_sent += 1
+        self._send_poll()
+
+    def _send_poll(self) -> None:
+        # The dispatcher drops a poll while the previous one is still
+        # waiting for the link budget; only polls that went out count.
+        if self._disp.send(f"MOTOR_DEBUG {self.motor_id()}", tag=self, quiet=True) is not False:
+            self.polls_sent += 1
 
     def _restart_estimator(self) -> None:
         self.estimator.reset()

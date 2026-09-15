@@ -29,7 +29,7 @@ fallback.
 8. Feed the `FallbackPlanner` (link-loss failsafe plan): starts an armed bend only while fallback is active at `PRE_FLOAT`/`FLOAT`; applies `fallback.landed_safe` at `LANDED`.
 9. Tick the bend sequences and both `StepperChannel` instances.
 10. Serialize telemetry and write it to CSV plus durable queue.
-11. Drain queued telemetry to the ground station and process ACKs.
+11. Drain queued telemetry to the ground station inside the 24 kbps link budget: this tick's frame, pending events, then the backlog by bisection, each frame acknowledged exactly ([link-budget.md](link-budget.md)).
 12. Emit `EVT,PULL` after a motor finishes a pull.
 13. Toggle status LEDs and feed the systemd watchdog.
 

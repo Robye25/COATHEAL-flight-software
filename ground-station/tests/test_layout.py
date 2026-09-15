@@ -12,11 +12,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.gui import gating  # noqa: E402
 from app.gui.alarms import evaluate  # noqa: E402
-from app.gui.state import DEFAULT_LAYOUT, Layout, parse_layout, state_from_packet  # noqa: E402
+from app.gui.state import DEFAULT_LAYOUT, Layout, parse_layout, parse_lead_mm, state_from_packet  # noqa: E402
 from app.protocol import (  # noqa: E402
-    MAX_ACCEL_MM_S2, MAX_SPEED_HZ, MAX_SPEED_MM_S, OVERTEMP_LATCH_C, TARGET_MAX_C, hz_from_mm_s,
-    mm_s_from_hz, parse_telemetry_csv, validate_accel_mm_s2, validate_speed_mm_s,
-    validate_temperature_target,
+    FULL_STEPS_PER_MM, LEAD_MM_PER_REV, MAX_ACCEL_MM_S2, MAX_SPEED_HZ, MAX_SPEED_MM_S, OVERTEMP_LATCH_C,
+    TARGET_MAX_C, hz_from_mm_s, mm_s_from_hz, parse_telemetry_csv, validate_accel_mm_s2,
+    validate_speed_mm_s, validate_temperature_target,
 )
 
 # The reply the onboard unit test pins for a bench wiring (tests/unit/test_suite.cpp).
@@ -173,27 +173,48 @@ class TemperatureLimitTests(unittest.TestCase):
 
 class SiMotionUnitTests(unittest.TestCase):
     def test_conversions_follow_the_lead(self) -> None:
-        # 2 mm lead, 200 full steps per revolution: 100 full steps per mm.
+        # 1 mm lead (owner 2026-09-15), 200 full steps per revolution: 200
+        # full steps per mm.
+        self.assertEqual(LEAD_MM_PER_REV, 1.0)
+        self.assertEqual(FULL_STEPS_PER_MM, 200)
+        self.assertEqual(MAX_SPEED_HZ, 100.0)
         self.assertEqual(hz_from_mm_s(MAX_SPEED_MM_S), MAX_SPEED_HZ)
-        self.assertEqual(hz_from_mm_s(0.25), 25.0)
-        self.assertEqual(mm_s_from_hz(100.0), 1.0)
+        self.assertEqual(hz_from_mm_s(0.25), 50.0)
+        self.assertEqual(mm_s_from_hz(100.0), 0.5)
         for mm_s in (0.001, 0.123, 0.5):
             self.assertAlmostEqual(mm_s_from_hz(hz_from_mm_s(mm_s)), mm_s)
 
     def test_speed_validator(self) -> None:
-        self.assertEqual(validate_speed_mm_s(0.25), (True, "25.000"))
-        self.assertEqual(validate_speed_mm_s(0.5), (True, "50.000"))
+        self.assertEqual(validate_speed_mm_s(0.25), (True, "50.000"))
+        self.assertEqual(validate_speed_mm_s(0.5), (True, "100.000"))
         for bad in (0.0, -0.1, 0.51, math.nan, math.inf, "fast", None):
             ok, message = validate_speed_mm_s(bad)
             self.assertFalse(ok, bad)
             self.assertTrue("mm/s" in message or "numeric" in message, message)
 
     def test_accel_validator(self) -> None:
-        self.assertEqual(MAX_ACCEL_MM_S2, 50.0)
-        self.assertEqual(validate_accel_mm_s2(4.0), (True, "400.0"))
-        self.assertEqual(validate_accel_mm_s2(50.0), (True, "5000.0"))
-        for bad in (0.0, -1.0, 50.1, math.nan, "quick"):
+        self.assertEqual(MAX_ACCEL_MM_S2, 25.0)
+        self.assertEqual(validate_accel_mm_s2(4.0), (True, "800.0"))
+        self.assertEqual(validate_accel_mm_s2(25.0), (True, "5000.0"))
+        for bad in (0.0, -1.0, 25.1, math.nan, "quick"):
             self.assertFalse(validate_accel_mm_s2(bad)[0], bad)
+
+    # MUTATION: set protocol.LEAD_MM_PER_REV back to 2.0 and confirm
+    # test_conversions_follow_the_lead and test_speed_validator fail.
+
+
+class LeadReportTests(unittest.TestCase):
+    """GET_LAYOUT's `lead_mm=` (added onboard 2026-09-15)."""
+
+    def test_lead_is_read_when_present(self) -> None:
+        self.assertEqual(parse_lead_mm(FIRMWARE_REPLY + ";lead_mm=1"), 1.0)
+        self.assertEqual(parse_lead_mm(FIRMWARE_REPLY + ";lead_mm=2.5"), 2.5)
+        self.assertIsNotNone(parse_layout(FIRMWARE_REPLY + ";lead_mm=1"), "the extra key keeps the layout usable")
+
+    def test_absent_or_unusable_lead_is_none(self) -> None:
+        self.assertIsNone(parse_lead_mm(FIRMWARE_REPLY))
+        for bad in ("lead_mm=", "lead_mm=fast", "lead_mm=0", "lead_mm=-1", "lead_mm=nan", "lead_mm=inf"):
+            self.assertIsNone(parse_lead_mm(f"{FIRMWARE_REPLY};{bad}"), bad)
 
 
 if __name__ == "__main__":

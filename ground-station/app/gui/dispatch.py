@@ -21,6 +21,19 @@ from typing import Callable, Deque, Optional
 
 from PyQt6.QtCore import QObject, QRunnable, QThread, QThreadPool, pyqtSignal
 
+from ..link_budget import (
+    TELEMETRY_CLOSE_BYTES,
+    LinkBudget,
+    Priority,
+    budget_wait_error,
+    command_budget_wait_s,
+    command_exchange_bytes,
+    ground_budget,
+    paced_connection,
+    priority_for,
+    request_too_long,
+)
+from ..link_codec import CodecError, decode_line, describe_hello, hello_reply
 from ..protocol import (
     CommandResponse,
     PullEvent,
@@ -46,6 +59,7 @@ DEFAULT_COMMAND_HOST = "169.254.10.10"
 # network, so a mis-click cannot break the silence.
 SILENCE_WHITELIST = frozenset({"RADIO_RESUME", "RADIO_SILENCE", "STATUS", "PING"})
 SILENCE_BLOCK_ERROR = "blocked: radio silence active (only RADIO_RESUME, STATUS, PING are sent)"
+CLOSING_ERROR = "not sent: the ground station is closing"
 
 
 def command_verb(command: str) -> str:
@@ -77,8 +91,11 @@ class TelemetryReceiver(QThread):
     # top tick rate); once a second is plenty for a crash-recovery hint.
     _CURSOR_MIN_INTERVAL_S = 1.0
 
-    def __init__(self, bind: str, port: int, log_manager: LogManager, parent=None):
+    def __init__(self, bind: str, port: int, log_manager: LogManager, parent=None,
+                 budget: Optional[LinkBudget] = None):
         super().__init__(parent)
+        # Closing a quiet connection is ground-station traffic too.
+        self._budget = budget if budget is not None else ground_budget()
         self.parse_errors = 0  # malformed frames/events since start (status bar)
         self._bind = bind
         self._port = port
@@ -189,6 +206,10 @@ class TelemetryReceiver(QThread):
             except socket.timeout:
                 idle = time.monotonic() - last_data
                 if idle > self._DATA_TIMEOUT_S:
+                    # The FIN and the onboard's ACK of it are charged first;
+                    # with no room yet, the quiet connection waits a second.
+                    if self._budget.try_charge(TELEMETRY_CLOSE_BYTES, Priority.COMMAND) is None:
+                        continue
                     self.log_message.emit(
                         f"[telemetry] no data for {self._DATA_TIMEOUT_S:.0f}s "
                         "— closing stale connection, waiting for reconnect"
@@ -214,6 +235,26 @@ class TelemetryReceiver(QThread):
                 line = line.strip()
                 if not line:
                     continue
+                reply = hello_reply(line)
+                if reply is not None:
+                    # Codec negotiation (docs/link-budget.md): not a frame,
+                    # never ACKed, answered on the same socket.
+                    try:
+                        conn.sendall(reply.encode("utf-8"))
+                    except OSError:
+                        return
+                    self.log_message.emit(f"[telemetry] {describe_hello(line, reply)}")
+                    continue
+                if line.startswith("Z1,"):
+                    try:
+                        line = decode_line(line).strip()
+                    except CodecError as exc:
+                        # Nothing identifies the frame, so nothing is ACKed.
+                        if not self._ack_unparseable(conn, line, exc):
+                            return
+                        continue
+                    if not line:
+                        continue
                 rx_utc = utc_now_iso()
                 # Route PULL events to their own signal + ACK them
                 # cumulatively (seq=0). Same framing as EVT,CYCLE so
@@ -253,12 +294,15 @@ class TelemetryReceiver(QThread):
                 is_dup = not seen.add(pkt.seq)
                 if not is_dup:
                     self._cursor_dirty = True
-                    self._persist_cursor()
 
+                # ACK before the cursor write: the onboard resets a link whose
+                # ACK misses its 180 ms deadline (docs/link-budget.md).
                 try:
                     conn.sendall(build_ack(pkt.session_id, pkt.seq).encode("utf-8"))
                 except OSError:
                     return
+                if not is_dup:
+                    self._persist_cursor()
 
                 if is_dup:
                     self.log_message.emit(
@@ -303,7 +347,9 @@ class CommandHistoryEntry:
 
 class _SendJob(QRunnable):
     def __init__(self, host: str, port: int, command: str, timeout: float,
-                 tag: Optional[object], signal_emit: Callable[[str, CommandResponse, float, object], None]):
+                 tag: Optional[object], signal_emit: Callable[[str, CommandResponse, float, object], None],
+                 priority: Priority = Priority.COMMAND, budget: Optional[LinkBudget] = None,
+                 cancel: Optional[threading.Event] = None):
         super().__init__()
         self._host = host
         self._port = port
@@ -311,20 +357,41 @@ class _SendJob(QRunnable):
         self._timeout = timeout
         self._tag = tag
         self._emit = signal_emit
+        self._priority = priority
+        self._budget = budget if budget is not None else ground_budget()
+        self._cancel = cancel
 
     def run(self) -> None:
         start = time.monotonic()
-        payload = (self._cmd.strip() + "\n").encode("utf-8")
-        try:
-            with socket.create_connection((self._host, self._port), timeout=self._timeout) as s:
-                s.sendall(payload)
-                raw = recv_reply_line(s)
-            resp = parse_command_response(raw) if raw else CommandResponse(
-                ok=False, command=self._cmd, error="empty reply", raw="")
-        except Exception as exc:
-            resp = CommandResponse(ok=False, command=self._cmd, error=str(exc), raw="")
+        resp = self._exchange((self._cmd.strip() + "\n").encode("utf-8"))
+        # Includes the wait for the link budget: the operator sees how long
+        # the command really took.
         latency_ms = (time.monotonic() - start) * 1000.0
         self._emit(self._cmd, resp, latency_ms, self._tag)
+
+    def _exchange(self, payload: bytes) -> CommandResponse:
+        refusal = request_too_long(len(payload))
+        if refusal is not None:
+            return CommandResponse(ok=False, command=self._cmd, error=refusal, raw="")
+        # The whole exchange (SYN to the last FIN) is held on the ground
+        # station's 1 150 B share from before connecting until the socket is
+        # closed (docs/link-budget.md).
+        wait_s = command_budget_wait_s(self._timeout)
+        ticket = self._budget.hold(command_exchange_bytes(len(payload)), self._priority, wait_s, self._cancel)
+        if ticket is None:
+            error = (CLOSING_ERROR if self._cancel is not None and self._cancel.is_set()
+                     else budget_wait_error(wait_s))
+            return CommandResponse(ok=False, command=self._cmd, error=error, raw="")
+        try:
+            # Releases the hold once the connection is closed (a failed
+            # exchange is reset, so no late reply can follow it).
+            with paced_connection(self._budget, ticket, self._host, self._port, self._timeout) as s:
+                s.sendall(payload)
+                raw = recv_reply_line(s)
+            return parse_command_response(raw) if raw else CommandResponse(
+                ok=False, command=self._cmd, error="empty reply", raw="")
+        except Exception as exc:
+            return CommandResponse(ok=False, command=self._cmd, error=str(exc), raw="")
 
 
 class CommandDispatcher(QObject):
@@ -334,6 +401,10 @@ class CommandDispatcher(QObject):
     fires back on the Qt event thread. Every response -- including the
     local refusals of the radio-silence gate -- lands in the history and
     in the session's `commands.csv`.
+
+    Every exchange waits for room on the ground station's link budget
+    (`link_budget.ground_budget()`, shared with discovery), safety commands
+    first; at most about one exchange a second fits the 24 kbps share.
     """
 
     response_received = pyqtSignal(str, object, float, object)  # cmd, CommandResponse, ms, tag
@@ -344,15 +415,21 @@ class CommandDispatcher(QObject):
     silence_changed = pyqtSignal(bool)
 
     def __init__(self, host: str, port: int, history_size: int = 200,
-                 log_manager: Optional[LogManager] = None):
+                 log_manager: Optional[LogManager] = None, budget: Optional[LinkBudget] = None):
         super().__init__()
         self.host = self._normalize_host(host)
         self.port = port
         self._pool = QThreadPool.globalInstance()
+        self._budget = budget if budget is not None else ground_budget()
         self._history: Deque[CommandHistoryEntry] = deque(maxlen=history_size)
         self._log_manager = log_manager
         self._silence = False
+        # Set by close(): commands still waiting for the link budget give up.
+        self._closing = threading.Event()
+        # (command, tag) of quiet polls still waiting or in flight.
+        self._quiet_pending: set[tuple[str, int]] = set()
         self.response_received.connect(self._on_response)
+        self.quiet_response.connect(self._on_quiet_response)
 
     @staticmethod
     def _normalize_host(host: str) -> str:
@@ -385,7 +462,11 @@ class CommandDispatcher(QObject):
         return None
 
     def send(self, command: str, tag: Optional[object] = None,
-             timeout: Optional[float] = None, quiet: bool = False) -> None:
+             timeout: Optional[float] = None, quiet: bool = False) -> bool:
+        """Queue `command`. False only for a quiet poll whose previous send
+        for the same tag has not come back yet: it is dropped, not queued
+        behind it (a 2 Hz poll outruns a link that carries about one
+        exchange a second)."""
         emit = self.quiet_response.emit if quiet else self.response_received.emit
         reason = self.blocked_reason(command)
         if reason is not None:
@@ -394,14 +475,33 @@ class CommandDispatcher(QObject):
             # every consumer (history, log, response line) must see it in
             # the same order as the click that caused it.
             emit(command, resp, 0.0, tag)
-            return
+            return True
+        if quiet:
+            key = (command.strip(), id(tag))
+            if key in self._quiet_pending:
+                return False
+            self._quiet_pending.add(key)
         # `timeout=None` (the default) resolves per-verb via
         # protocol.timeout_for -- CHECK gets a longer budget than the plain
         # 3.0s default (see protocol.COMMAND_TIMEOUTS for why). An
         # explicitly-passed timeout always wins over the table.
         resolved_timeout = timeout if timeout is not None else timeout_for(command)
-        job = _SendJob(self.host, self.port, command, resolved_timeout, tag, emit)
-        self._pool.start(job)
+        priority = priority_for(command, quiet)
+        job = _SendJob(self.host, self.port, command, resolved_timeout, tag, emit,
+                       priority=priority, budget=self._budget, cancel=self._closing)
+        # Jobs waiting for a pool thread leave in link-budget priority order,
+        # so a safety command never queues behind a batch of ordinary ones.
+        self._pool.start(job, int(Priority.DISCOVERY) - int(priority))
+        return True
+
+    def _on_quiet_response(self, cmd: str, _resp: CommandResponse, _ms: float, tag) -> None:
+        self._quiet_pending.discard((cmd.strip(), id(tag)))
+
+    def close(self) -> None:
+        """The window is closing: every command still waiting for the link
+        budget fails at once instead of keeping its pool thread (and the
+        process) alive for up to its budget wait."""
+        self._closing.set()
 
     def _on_response(self, cmd: str, resp: CommandResponse, ms: float, _tag) -> None:
         ts = datetime.now().strftime("%H:%M:%S")

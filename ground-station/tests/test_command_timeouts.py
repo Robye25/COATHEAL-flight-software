@@ -126,7 +126,7 @@ class _FakePool:
     def __init__(self) -> None:
         self.jobs: list = []
 
-    def start(self, job) -> None:
+    def start(self, job, priority: int = 0) -> None:
         self.jobs.append(job)
 
 

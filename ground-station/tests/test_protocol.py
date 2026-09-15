@@ -346,16 +346,16 @@ class ValidatorTests(unittest.TestCase):
 
     def test_speed_hz(self) -> None:
         # The onboard motion envelope is 0.5 mm/s (stepper.max_speed_mm_s),
-        # 50 full-steps/s at the 2 mm lead; anything above it would be
+        # 100 full-steps/s at the 1 mm lead; anything above it would be
         # clamped onboard, so the ground station refuses it up front
-        # (redesign spec §3 item 2; owner rule 2026-09-11).
+        # (redesign spec §3 item 2; owner rules 2026-09-11 and 2026-09-15).
         from app.protocol import MAX_SPEED_HZ
-        self.assertEqual(MAX_SPEED_HZ, 50.0)
+        self.assertEqual(MAX_SPEED_HZ, 100.0)
         self.assertTrue(validate_speed_hz(1)[0])
-        self.assertTrue(validate_speed_hz(50)[0])
+        self.assertTrue(validate_speed_hz(100)[0])
         self.assertFalse(validate_speed_hz(0)[0])
-        self.assertFalse(validate_speed_hz(50.5)[0])
-        self.assertFalse(validate_speed_hz(100)[0], "the pre-2026-09-11 100 Hz ceiling must be rejected")
+        self.assertFalse(validate_speed_hz(100.5)[0])
+        self.assertFalse(validate_speed_hz(200)[0], "1 mm/s, the pre-2026-09-11 ceiling, must be rejected")
         self.assertFalse(validate_speed_hz(400)[0], "the old Rev-A 400 Hz default must be rejected")
         # Explicit ceiling still honoured for bench use.
         self.assertTrue(validate_speed_hz(400, max_hz=5000.0)[0])
@@ -382,8 +382,8 @@ class ValidatorTests(unittest.TestCase):
         self.assertFalse(validate_revolutions(2e6)[0])
 
     def test_move_mm(self) -> None:
-        # 500 mm mirrors the onboard travel limit at the commissioning
-        # defaults (200000 microsteps, u4, 2 mm lead).
+        # 500 mm is a coarse bound; the onboard enforces max_position_steps
+        # (200000 microsteps at u4 is 250 mm at the 1 mm lead).
         self.assertEqual(validate_move_mm(0.1), (True, "0.100"))
         self.assertEqual(validate_move_mm(-5), (True, "-5.000"))
         self.assertTrue(validate_move_mm(500.0)[0])

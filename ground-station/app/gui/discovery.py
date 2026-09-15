@@ -1,11 +1,18 @@
 """Plug-and-play UDP discovery for the ground station.
 
-Two QThreads:
-  * GsBeacon        — broadcasts GS_BEACON every interval seconds.
+Three QThreads:
+  * GsBeacon        — broadcasts GS_BEACON (and the legacy GS_HELLO) every
+                      2 s while no telemetry arrives, GS_BEACON alone every
+                      15 s while it does (docs/link-budget.md).
   * OnboardListener — binds UDP :4100, emits a signal when an ONBOARD_*
                       announcement (legacy HELLO or new BEACON) arrives.
                       Also forwards peer GS_BEACON sightings so the operator
                       can see a conflicting ground station on the network.
+  * CommandProbe    — PINGs the candidate command hosts every 2 s while no
+                      telemetry arrives.
+
+The beacon and the probe charge the ground station's link budget
+(`link_budget.ground_budget()`) and never wait for it.
 
 Wire format (locked, shared with onboard agent):
     GS_BEACON,<nonce>,<tel_port>,<cmd_port>,<priority>
@@ -24,6 +31,11 @@ import time
 from typing import Optional
 
 from PyQt6.QtCore import QThread, pyqtSignal
+
+from ..link_budget import (
+    DISCOVERY_HEALTHY_INTERVAL_S, DISCOVERY_INTERVAL_S, DiscoveryRounds, LinkBudget, Priority,
+    command_exchange_bytes, ground_budget, paced_connection,
+)
 
 try:  # optional enrichment of broadcast addresses
     import psutil  # type: ignore
@@ -204,28 +216,50 @@ def _discovery_targets() -> list[str]:
 
 # ── GS -> broadcast beacon ───────────────────────────────────────────────────
 class GsBeacon(QThread):
-    """Periodically broadcasts GS_BEACON on every up interface."""
+    """Broadcasts GS_BEACON on every up interface: every 2 s together with
+    the legacy GS_HELLO while no telemetry arrives, GS_BEACON alone every
+    15 s while it does (docs/link-budget.md). Every datagram is charged to
+    the ground station's link budget; one the budget cannot take is skipped
+    and tried again at the next check of the same round -- the beacon thread
+    never waits for the budget."""
 
     log_message = pyqtSignal(str)
+
+    # The longest sleep between checks: a link that drops mid-way through a
+    # 15 s wait brings the 2 s cadence back within this.
+    _CHECK_S = 0.5
+    _TARGET_REFRESH_S = 30.0
 
     def __init__(self, tel_port: int, cmd_port: int,
                  priority: int = 100,
                  discovery_port: int = DISCOVERY_PORT_DEFAULT,
-                 interval_s: float = 2.0,
+                 interval_s: float = DISCOVERY_INTERVAL_S,
                  sent_nonces: Optional[SentNonceRegistry] = None,
+                 healthy_interval_s: float = DISCOVERY_HEALTHY_INTERVAL_S,
+                 budget: Optional[LinkBudget] = None,
                  parent=None):
         super().__init__(parent)
         self._tel_port = tel_port
         self._cmd_port = cmd_port
         self._priority = max(0, min(999, int(priority)))
         self._disc_port = discovery_port
-        self._interval = float(interval_s)
         self._sent_nonces = sent_nonces
+        self._rounds = DiscoveryRounds(budget if budget is not None else ground_budget(),
+                                       interval_s, healthy_interval_s)
+        self._targets: list[str] = []
+        self._targets_at: Optional[float] = None
         self._stop = threading.Event()
         # Radio silence (spec §9): while quiet the thread keeps running but
         # sends nothing, so RADIO_RESUME brings discovery back instantly.
         self._quiet = threading.Event()
+        # Telemetry arrived within the last 5 s (MainWindow decides).
+        self._healthy = threading.Event()
         self.beacons_sent = 0
+        self.hellos_sent = 0
+
+    @property
+    def datagrams_skipped(self) -> int:
+        return self._rounds.skipped
 
     def set_priority(self, priority: int) -> None:
         self._priority = max(0, min(999, int(priority)))
@@ -239,6 +273,15 @@ class GsBeacon(QThread):
     def is_quiet(self) -> bool:
         return self._quiet.is_set()
 
+    def set_link_healthy(self, healthy: bool) -> None:
+        if healthy:
+            self._healthy.set()
+        else:
+            self._healthy.clear()
+
+    def is_link_healthy(self) -> bool:
+        return self._healthy.is_set()
+
     def stop(self) -> None:
         self._stop.set()
 
@@ -251,46 +294,57 @@ class GsBeacon(QThread):
             self.log_message.emit(f"[discovery] beacon socket error: {exc}")
             return
         try:
-            last_refresh = 0.0
-            targets: list[str] = []
             while not self._stop.is_set():
-                if self._quiet.is_set():
-                    self._stop.wait(self._interval)
-                    continue
                 now = time.monotonic()
-                if now - last_refresh > 30.0:
-                    targets = _discovery_targets()
-                    last_refresh = now
-                nonce = str(int(time.time() * 1000))
-                # Register before the first sendto: the loopback copy can
-                # reach our own listener before the send loop finishes.
-                if self._sent_nonces is not None:
-                    self._sent_nonces.add(nonce)
-                line = (
-                    f"GS_BEACON,{nonce},{self._tel_port},"
-                    f"{self._cmd_port},{self._priority}\n"
-                ).encode("utf-8")
-                for addr in targets:
-                    try:
-                        sock.sendto(line, (addr, self._disc_port))
-                        self.beacons_sent += 1
-                    except OSError:
-                        continue
-                # also legacy GS_HELLO for older onboard builds
-                legacy = (
-                    f"GS_HELLO,{nonce},{self._tel_port},{self._cmd_port}\n"
-                ).encode("utf-8")
-                for addr in targets:
-                    try:
-                        sock.sendto(legacy, (addr, self._disc_port))
-                    except OSError:
-                        continue
-                self._stop.wait(self._interval)
+                self.poll(sock, now)
+                wait = (self._CHECK_S if self._quiet.is_set()
+                        else self._rounds.next_check_s(now, self._healthy.is_set()))
+                self._stop.wait(min(self._CHECK_S, max(0.01, wait)))
         finally:
             try:
                 sock.close()
             except OSError:
                 pass
+
+    def poll(self, sock, now: float) -> None:
+        """One check: start a round when one is due, then send what the link
+        budget lets out. `now` is monotonic seconds (tests pass their own)."""
+        if self._quiet.is_set():
+            self._rounds.clear()
+            return
+        healthy = self._healthy.is_set()
+        if self._rounds.due(now, healthy):
+            if self._targets_at is None or now - self._targets_at > self._TARGET_REFRESH_S:
+                self._targets = _discovery_targets()
+                self._targets_at = now
+            nonce = str(int(time.time() * 1000))
+            # Register before the first sendto: the loopback copy can
+            # reach our own listener before the send loop finishes.
+            if self._sent_nonces is not None:
+                self._sent_nonces.add(nonce)
+            line = (
+                f"GS_BEACON,{nonce},{self._tel_port},"
+                f"{self._cmd_port},{self._priority}\n"
+            ).encode("utf-8")
+            datagrams = [(line, addr) for addr in self._targets]
+            if not healthy:
+                # also legacy GS_HELLO for older onboard builds
+                legacy = (
+                    f"GS_HELLO,{nonce},{self._tel_port},{self._cmd_port}\n"
+                ).encode("utf-8")
+                datagrams += [(legacy, addr) for addr in self._targets]
+            self._rounds.start(now, healthy, datagrams)
+        self._rounds.send_pending(healthy, lambda data, addr: self._send(sock, data, addr))
+
+    def _send(self, sock, data: bytes, addr: str) -> None:
+        try:
+            sock.sendto(data, (addr, self._disc_port))
+        except OSError:
+            return
+        if data.startswith(b"GS_BEACON,"):
+            self.beacons_sent += 1
+        else:
+            self.hellos_sent += 1
 
 
 # ── listener for onboard + peer GS announcements ─────────────────────────────
@@ -379,15 +433,24 @@ class OnboardListener(QThread):
 
 
 class CommandProbe(QThread):
-    """Low-rate TCP command probe for deterministic link-local bring-up."""
+    """Low-rate TCP command probe for deterministic link-local bring-up.
+
+    Probes only while no telemetry arrives (docs/link-budget.md). Each PING
+    exchange is held on the ground station's link budget, at discovery
+    priority, for the connection's duration; a probe the budget cannot take
+    at once is not waited for but retried shortly, with the same host."""
 
     onboard_reachable = pyqtSignal(str, int)
     log_message = pyqtSignal(str)
 
+    _PING = b"PING\n"
+    _BUDGET_RETRY_S = DiscoveryRounds.RETRY_S
+
     def __init__(self, hosts: list[str], cmd_port: int,
-                 interval_s: float = 2.0,
+                 interval_s: float = DISCOVERY_INTERVAL_S,
                  timeout_s: float = 0.7,
                  include_static: bool = True,
+                 budget: Optional[LinkBudget] = None,
                  parent=None):
         super().__init__(parent)
         self._include_static = include_static
@@ -395,13 +458,18 @@ class CommandProbe(QThread):
         self._cmd_port = int(cmd_port)
         self._interval = float(interval_s)
         self._timeout = float(timeout_s)
+        self._budget = budget if budget is not None else ground_budget()
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._last_success: tuple[str, int] | None = None
         # Radio silence: every probe makes the onboard answer, so the probe
         # is parked while silent and resumes on RADIO_RESUME.
         self._quiet = threading.Event()
+        # Telemetry arrived within the last 5 s: the onboard is found.
+        self._healthy = threading.Event()
+        self._round: Optional[list[str]] = None   # hosts still to probe this round
         self.probes_sent = 0
+        self.budget_skips = 0
 
     def set_candidates(self, hosts: list[str]) -> None:
         with self._lock:
@@ -417,34 +485,60 @@ class CommandProbe(QThread):
     def is_quiet(self) -> bool:
         return self._quiet.is_set()
 
+    def set_link_healthy(self, healthy: bool) -> None:
+        if healthy:
+            self._healthy.set()
+        else:
+            self._healthy.clear()
+
+    def is_link_healthy(self) -> bool:
+        return self._healthy.is_set()
+
     def stop(self) -> None:
         self._stop.set()
 
     def run(self) -> None:
         while not self._stop.is_set():
-            if self._quiet.is_set():
+            if self._quiet.is_set() or self._healthy.is_set():
+                self._round = None
                 self._stop.wait(self._interval)
                 continue
-            with self._lock:
-                hosts = list(self._hosts)
-            for host in hosts:
-                if self._stop.is_set():
-                    break
-                if self._try_ping(host):
-                    key = (host, self._cmd_port)
-                    if key != self._last_success:
-                        self.log_message.emit(f"[discovery] command probe {host}:{self._cmd_port}")
-                        self._last_success = key
-                    self.onboard_reachable.emit(host, self._cmd_port)
-                    break
-            self._stop.wait(self._interval)
+            finished = self.probe_round()
+            self._stop.wait(self._interval if finished else self._BUDGET_RETRY_S)
 
-    def _try_ping(self, host: str) -> bool:
+    def probe_round(self) -> bool:
+        """Probe the candidates in order until one answers. False when the
+        link budget cannot take the next probe now; the next call resumes the
+        round with that host."""
+        if self._round is None:
+            with self._lock:
+                self._round = list(self._hosts)
+        while self._round and not self._stop.is_set():
+            host = self._round[0]
+            ticket = self._budget.hold(command_exchange_bytes(len(self._PING)), Priority.DISCOVERY)
+            if ticket is None:
+                self.budget_skips += 1
+                return False
+            reachable = self._try_ping(host, ticket)
+            self._round.pop(0)
+            if reachable:
+                key = (host, self._cmd_port)
+                if key != self._last_success:
+                    self.log_message.emit(f"[discovery] command probe {host}:{self._cmd_port}")
+                    self._last_success = key
+                self.onboard_reachable.emit(host, self._cmd_port)
+                break
+        self._round = None
+        return True
+
+    def _try_ping(self, host: str, ticket) -> bool:
+        """One PING exchange; `paced_connection` releases `ticket` once the
+        connection is closed."""
         self.probes_sent += 1
         try:
-            with socket.create_connection((host, self._cmd_port), timeout=self._timeout) as sock:
+            with paced_connection(self._budget, ticket, host, self._cmd_port, self._timeout) as sock:
                 sock.settimeout(self._timeout)
-                sock.sendall(b"PING\n")
+                sock.sendall(self._PING)
                 data = sock.recv(256)
         except OSError:
             return False
