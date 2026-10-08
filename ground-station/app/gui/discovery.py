@@ -34,7 +34,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 from ..link_budget import (
     DISCOVERY_HEALTHY_INTERVAL_S, DISCOVERY_INTERVAL_S, DiscoveryRounds, LinkBudget, Priority,
-    command_exchange_bytes, ground_budget, paced_connection,
+    command_exchange_bytes, command_exchange_egress, ground_budget, paced_connection,
 )
 
 try:  # optional enrichment of broadcast addresses
@@ -515,7 +515,8 @@ class CommandProbe(QThread):
                 self._round = list(self._hosts)
         while self._round and not self._stop.is_set():
             host = self._round[0]
-            ticket = self._budget.hold(command_exchange_bytes(len(self._PING)), Priority.DISCOVERY)
+            ticket = self._budget.hold(command_exchange_bytes(len(self._PING)), Priority.DISCOVERY,
+                                       tx_bytes=command_exchange_egress(len(self._PING)))
             if ticket is None:
                 self.budget_skips += 1
                 return False

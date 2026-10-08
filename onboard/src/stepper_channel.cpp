@@ -125,7 +125,33 @@ std::int64_t StepperChannel::IssuePulses(std::int64_t allowed_usteps) {
 
   std::int64_t issued = 0;
   for (std::int64_t i = 0; i < allowed_usteps; ++i) {
-    if (!driver_->Step(forward)) {
+    const std::uint64_t events_before = step_loss_events_;
+    const bool stepped = driver_->Step(forward);
+    const bool stop_requested = AbsorbDriverStepLoss();
+    if (stepped) {
+      position_ += forward ? 1 : -1;
+      ++issued;
+    }
+    if (stop_requested) {
+      // The driver found the rotor not following (a stall): stop here and
+      // keep holding. Every further pulse would be counted and not taken.
+      std::cerr << "[stepper] motor " << cfg_.channel_id
+                << ": step loss -- move stopped at " << position_
+                << " usteps, motor left enabled: " << step_loss_reason_
+                << '\n';
+      AbortMoveForStepLoss();
+      break;
+    }
+    if (!stepped) {
+      // The driver refused the step: it is unhealthy, or its power stage is
+      // off. De-energised mid-move, the rotor is wherever the load left it.
+      // (A driver that said why -- a short -- has already been counted.)
+      if (step_loss_events_ == events_before) {
+        const std::string why = driver_->last_error();
+        LatchStepLoss("motor disabled mid-move: " +
+                      (why.empty() ? std::string("the driver refused a step")
+                                   : why));
+      }
       driver_->Enable(false);
       enabled_ = false;
       target_ = position_;
@@ -133,13 +159,64 @@ std::int64_t StepperChannel::IssuePulses(std::int64_t allowed_usteps) {
       mode_ = Mode::kIdle;
       hold_remaining_s_ = 0.0;
       retract_after_hold_ = false;
+      last_source_ = "safety:STEPLOSS";
       ReleaseLockIfHeld();
       break;
     }
-    position_ += forward ? 1 : -1;
-    ++issued;
+  }
+  if (issued > 0 && enabled_ && position_ == target_) {
+    // End of the leg: no later position command will overwrite this one.
+    driver_->ConfirmTarget();
+    AbsorbDriverStepLoss();
   }
   return issued;
+}
+
+bool StepperChannel::AbsorbDriverStepLoss() {
+  if (!driver_) return false;
+  const std::uint64_t events = driver_->step_loss_events();
+  if (events != driver_loss_seen_) {
+    step_loss_events_ += events - driver_loss_seen_;
+    driver_loss_seen_ = events;
+    position_uncertain_ = true;
+    step_loss_reason_ = driver_->step_loss_reason();
+  }
+  return driver_->TakeStepLossStop();
+}
+
+void StepperChannel::LatchStepLoss(const std::string& reason) {
+  ++step_loss_events_;
+  position_uncertain_ = true;
+  step_loss_reason_ = reason;
+}
+
+void StepperChannel::AbortMoveForStepLoss() {
+  target_ = position_;
+  retract_target_ = position_;
+  moving_ = false;
+  mode_ = Mode::kIdle;
+  hold_remaining_s_ = 0.0;
+  retract_after_hold_ = false;
+  current_step_hz_ = 0.0;
+  fractional_steps_ = 0.0;
+  last_source_ = "safety:STEPLOSS";
+  ReleaseLockIfHeld();
+}
+
+void StepperChannel::ReportStepRateToDriver() {
+  if (!driver_) return;
+  // Steady = cruising at the commanded rate; a ramp (up, or down into the
+  // target) is not.
+  const bool steady =
+      current_step_hz_ > 0.0 &&
+      std::fabs(current_step_hz_ - step_hz_) <= 1e-9 * std::max(1.0, step_hz_);
+  driver_->NoteStepRate(current_step_hz_, steady);
+}
+
+void StepperChannel::AcknowledgeStepLoss() {
+  std::lock_guard<std::mutex> lock(mu_);
+  position_uncertain_ = false;
+  step_loss_reason_.clear();
 }
 
 void StepperChannel::Tick(double dt_s) {
@@ -158,13 +235,24 @@ void StepperChannel::Tick(double dt_s) {
           enabled_ = driver_->Enable(true);
         }
       }
+      AbsorbDriverStepLoss();
     }
   } else if (driver_ != nullptr && enabled_ &&
              (mode_ == Mode::kIdle || mode_ == Mode::kHolding)) {
     // Once per tick while energised but not stepping: lets the driver
     // notice a chip that lost its configuration (supply dip) and restore
-    // it, so an "enabled" motor really holds and the next move works.
+    // it, so an "enabled" motor really holds and the next move works. The
+    // same poll finds an undervoltage, a short, and a chip that is not at
+    // the position it was commanded to.
+    driver_->NoteStepRate(0.0, false);
     driver_->Poll();
+    if (AbsorbDriverStepLoss() && mode_ == Mode::kHolding) {
+      std::cerr << "[stepper] motor " << cfg_.channel_id
+                << ": step loss while holding -- hold ended, motor left"
+                << " enabled: " << step_loss_reason_ << '\n';
+      AbortMoveForStepLoss();
+      return;
+    }
   }
 
   // Thermal safety: a driver that latched over-temperature shutdown
@@ -178,6 +266,8 @@ void StepperChannel::Tick(double dt_s) {
               << ": driver over-temperature shutdown -- stopping motion and"
               << " disabling the channel; STEPPER_ENABLE re-arms after"
               << " cool-down\n";
+    LatchStepLoss(
+        "driver over-temperature shutdown: the chip cut its power stage");
     driver_->Enable(false);
     enabled_ = false;
     target_ = position_;
@@ -254,6 +344,7 @@ void StepperChannel::Tick(double dt_s) {
 
   const std::int64_t remaining_usteps = std::abs(target_ - position_);
   UpdateRampSpeed(dt_s, remaining_usteps);
+  ReportStepRateToDriver();
 
   const double ustep_rate = current_step_hz_ * static_cast<double>(microstep_);
   fractional_steps_ += ustep_rate * dt_s;
@@ -323,6 +414,7 @@ void StepperChannel::PulseThreadBody() {
       cv_.wait_for(lock, std::chrono::milliseconds(2));
       continue;
     }
+    ReportStepRateToDriver();
     IssuePulses(1);
     const auto period = std::chrono::duration_cast<clock::duration>(
         std::chrono::duration<double>(1.0 / ustep_rate));
@@ -481,6 +573,9 @@ void StepperChannel::SetPositionZero() {
   mode_ = Mode::kIdle;
   retract_after_hold_ = false;
   last_source_ = "cmd:ZERO";
+  // A new reference: whatever made the old position uncertain is behind it.
+  position_uncertain_ = false;
+  step_loss_reason_.clear();
   ReleaseLockIfHeld();
 }
 
@@ -584,6 +679,11 @@ bool StepperChannel::SetEnabled(bool enable) {
     //
     // So the local state is cleared on both paths and only the return value
     // carries the driver's verdict -- the caller still learns it failed.
+    if (mode_ == Mode::kMoving || mode_ == Mode::kRetracting) {
+      // De-energised with the rotor turning: it coasts, and the load decides
+      // where it stops.
+      LatchStepLoss("motor disabled while moving");
+    }
     enabled_ = false;
     moving_ = false;
     mode_ = Mode::kIdle;
@@ -678,6 +778,9 @@ StepperStatus StepperChannel::Snapshot() const {
   s.pulses_total = driver_ ? driver_->pulses_issued() : 0;
   s.missed_deadlines = missed_deadlines_;
   s.last_source = last_source_;
+  s.step_loss_events = step_loss_events_;
+  s.position_uncertain = position_uncertain_;
+  s.step_loss_reason = step_loss_reason_;
   return s;
 }
 

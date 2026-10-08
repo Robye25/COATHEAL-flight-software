@@ -32,6 +32,48 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(s.faults, ())
         self.assertEqual(s.sw_hz, 100.0)
 
+    def test_parse_step_loss_statistics(self) -> None:
+        extra = (";loss=2;unc=1;loss_reason=chip reset while the motor was enabled (found on step)"
+                 ";drv_loss=2;stall_mode=monitor;sgt=-3;sg_thr=40;sg_last=310;sg_min=280;sg_n=12;stalls=1"
+                 ";uv=1;shorts=0;openload=0;xt_repairs=0")
+        s = MotorDebugSample.parse(body() + extra, t=1.0)
+        self.assertEqual(s.loss, 2)
+        self.assertIs(s.uncertain, True)
+        self.assertIn("chip reset", s.loss_reason)
+        self.assertEqual(s.stall_mode, "monitor")
+        self.assertEqual((s.sg_min, s.sg_samples, s.stalls), (280, 12, 1))
+        self.assertEqual((s.undervoltage, s.shorts, s.open_load, s.xtarget_repairs), (1, 0, 0, 0))
+        # Before the first StallGuard sample of a move the onboard sends "-".
+        idle = MotorDebugSample.parse(body() + ";loss=0;unc=0;loss_reason=-;sg_last=-;sg_min=-;sg_n=0", t=1.0)
+        self.assertIsNone(idle.sg_min)
+        self.assertEqual(idle.sg_samples, 0)
+        self.assertIs(idle.uncertain, False)
+        self.assertEqual(idle.loss_reason, "")
+        # Firmware that predates the keys: unknown everywhere.
+        old = MotorDebugSample.parse(body(), t=1.0)
+        self.assertIsNone(old.loss)
+        self.assertIsNone(old.uncertain)
+        self.assertEqual(old.stall_mode, "")
+
+    def test_verdict_names_step_loss_and_what_caused_it(self) -> None:
+        est = MotionEstimator()
+        e = None
+        for i in range(6):
+            e = est.add(MotorDebugSample.parse(
+                body(mscnt=(i * 256) % 1024) + ";loss=1;unc=1;loss_reason=motor supply undervoltage;uv=1;stalls=2"
+                                                ";stall_mode=monitor;xt_repairs=1", t=i * 0.5))
+        self.assertEqual(e.color, "amber", "moving, but the position can no longer be trusted")
+        self.assertIn("POSITION UNCERTAIN after a step-loss event: motor supply undervoltage", e.verdict)
+        self.assertIn("STEPLOSS_ACK", e.verdict)
+        self.assertIn("undervoltage ×1", e.verdict)
+        self.assertIn("StallGuard stall verdict ×2 (stall_detect=monitor)", e.verdict)
+        self.assertIn("XTARGET rewritten ×1", e.verdict)
+        est.reset()
+        for i in range(6):
+            e = est.add(MotorDebugSample.parse(body(mscnt=(i * 256) % 1024) + ";loss=1;unc=0;uv=0;stalls=0", t=i * 0.5))
+        self.assertEqual(e.color, "green", "an acknowledged latch does not colour the verdict")
+        self.assertNotIn("UNCERTAIN", e.verdict)
+
     def test_delta_wraps(self) -> None:
         self.assertEqual(mscnt_delta(1000, 20), 44)
         self.assertEqual(mscnt_delta(20, 1000), -44)

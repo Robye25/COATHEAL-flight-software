@@ -182,11 +182,21 @@ bool FallbackPlanner::AllSettled() const {
   for (const FallbackMotorPlan& plan : motors_) {
     if (!plan.configured) continue;
     if (plan.state != FallbackMotorState::kDone &&
-        plan.state != FallbackMotorState::kSkipped) {
+        plan.state != FallbackMotorState::kSkipped &&
+        plan.state != FallbackMotorState::kFailed) {
       return false;
     }
   }
   return true;
+}
+
+bool FallbackPlanner::AnyFailed() const {
+  for (const FallbackMotorPlan& plan : motors_) {
+    if (plan.configured && plan.state == FallbackMotorState::kFailed) {
+      return true;
+    }
+  }
+  return false;
 }
 
 std::optional<FallbackAction> FallbackPlanner::Tick(const FallbackTickInput& in) {
@@ -199,12 +209,22 @@ std::optional<FallbackAction> FallbackPlanner::Tick(const FallbackTickInput& in)
     const bool still_moving =
         i < in.motors.size() && in.motors[i].moving_or_holding;
     if (ticks_since_start_[i] >= 1 && !still_moving) {
-      plan.state = FallbackMotorState::kDone;
+      // Stopped is not the same as arrived: a bend a safety abort cut short
+      // must not be recorded as done.
+      const bool aborted = i < in.motors.size() && in.motors[i].aborted;
+      if (aborted) {
+        plan.state = FallbackMotorState::kFailed;
+        const std::string& reason = in.motors[i].abort_reason;
+        last_error_ = "M" + std::to_string(i) + " bend aborted" +
+                      (reason.empty() ? std::string() : ": " + reason);
+      } else {
+        plan.state = FallbackMotorState::kDone;
+      }
       MarkDirty();
     }
   }
   if (state_ == FallbackPlanState::kRunning && AllSettled()) {
-    state_ = FallbackPlanState::kDone;
+    state_ = AnyFailed() ? FallbackPlanState::kFailed : FallbackPlanState::kDone;
     MarkDirty();
   }
   if (state_ != FallbackPlanState::kArmed && state_ != FallbackPlanState::kRunning) {
@@ -261,7 +281,7 @@ std::optional<FallbackAction> FallbackPlanner::Tick(const FallbackTickInput& in)
   }
 
   if (AllSettled()) {
-    state_ = FallbackPlanState::kDone;
+    state_ = AnyFailed() ? FallbackPlanState::kFailed : FallbackPlanState::kDone;
     MarkDirty();
   }
   return std::nullopt;

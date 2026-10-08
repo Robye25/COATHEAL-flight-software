@@ -43,7 +43,12 @@ void AppendStepperSegment(std::ostringstream& oss, const StepperStatus& st,
       // safety has disabled the motor).
       << "|therm:"
       << (st.thermal_state >= 2 ? "hot"
-                                : (st.thermal_state == 1 ? "warn" : "ok"));
+                                : (st.thermal_state == 1 ? "warn" : "ok"))
+      // Step-loss protection (2026-10-05): events since boot, and whether
+      // the position is latched uncertain (cleared by SET_POSITION_ZERO or
+      // STEPLOSS_ACK). Appended last, as above.
+      << "|loss:" << st.step_loss_events
+      << "|unc:" << (st.position_uncertain ? 1 : 0);
 }
 
 void AppendCtrlSegment(std::ostringstream& oss, const CtrlStatus& ctrl) {

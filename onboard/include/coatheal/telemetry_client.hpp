@@ -116,6 +116,10 @@ class TelemetryClient : public FrameSender {
   // No retransmission is budgeted because none can reach the wire (see
   // wire::kAckDeadline). Public so the budget tests use the same model.
   static std::uint32_t FrameCostBytes(const std::string& line, std::size_t payload);
+  // The part of FrameCostBytes our side sends when the exchange goes well:
+  // the segment and our ACK of the ACK line. This is what the frame takes
+  // from the modelled egress shaper (LinkBudget::SetEgressShaper).
+  static std::uint32_t FrameEgressBytes(std::size_t payload);
 
  private:
   bool ConnectLocked();
@@ -123,6 +127,9 @@ class TelemetryClient : public FrameSender {
   // What a connection attempt can put on the wire, the HELLO exchange
   // included (docs/link-budget.md).
   std::uint32_t ConnectCostBytesLocked() const;
+  // The part of it our side sends: SYN, ACK, the HELLO line, our ACK of the
+  // answer.
+  std::uint32_t ConnectEgressBytesLocked() const;
   void ReleaseConnectHoldLocked(std::chrono::steady_clock::time_point when);
   // When a charge covering a connection being reset now may be released:
   // after wire::kAbortTail plus the connection's round trip.

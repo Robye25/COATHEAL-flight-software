@@ -85,6 +85,58 @@ class HardwareSetupTests(unittest.TestCase):
         self.assertIn(
             "motor0.driver=tmc2240 is retired; use tmc5160", errors)
 
+    def test_validate_candidate_checks_the_stall_detect_keys(self) -> None:
+        # Mirrors config.cpp: mode word, spreadCycle for "stop", register ranges.
+        source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+        self.assertEqual(hardware_setup.validate_candidate(source), [])
+        cases = {
+            ("motor0.stall_detect", "on"): "motor0.stall_detect must be off, monitor or stop",
+            ("motor1.stallguard_sgt", "64"): "motor1.stallguard_sgt must be in [-64, 63]",
+            ("motor1.stallguard_sgt", "x"): "motor1.stallguard_sgt must be in [-64, 63]",
+            ("motor0.stall_sg_min", "1024"): "motor0.stall_sg_min must be in [0, 1023]",
+        }
+        for (key, value), message in cases.items():
+            errors = hardware_setup.validate_candidate(hardware_setup.replace_ini(source, {key: value}))
+            self.assertIn(message, errors, key)
+        stealth_stop = hardware_setup.replace_ini(
+            source, {"motor1.stall_detect": "stop", "motor1.stealth_chop": "true"})
+        self.assertIn("motor1.stall_detect=stop needs spreadCycle (stealth_chop=false)",
+                      hardware_setup.validate_candidate(stealth_stop))
+        calibrated = hardware_setup.replace_ini(
+            source, {"motor0.stall_detect": "stop", "motor0.stallguard_sgt": "-12", "motor0.stall_sg_min": "40"})
+        self.assertEqual(hardware_setup.validate_candidate(calibrated), [])
+
+    def test_migrate_config_keeps_a_calibrated_stall_setup(self) -> None:
+        # StallGuard is calibrated per motor on the bench; every
+        # coatheal-deploy migrates the local config and must not put the
+        # example's monitor/0/0 back. An INI from before the keys gets them.
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "onboard.local.ini"
+            template = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
+            source.write_text(hardware_setup.replace_ini(template, {
+                "motor0.stall_detect": "stop", "motor0.stallguard_sgt": "-12", "motor0.stall_sg_min": "40",
+                "motor1.stall_detect": "off",
+                "stepper.stall_min_step_hz": "80.0", "stepper.stall_confirm_samples": "5"}), encoding="utf-8")
+            values = migrated_values(source)
+            self.assertEqual(values["motor0.stall_detect"], "stop")
+            self.assertEqual(values["motor0.stallguard_sgt"], "-12")
+            self.assertEqual(values["motor0.stall_sg_min"], "40")
+            self.assertEqual(values["motor1.stall_detect"], "off")
+            self.assertEqual(values["stepper.stall_min_step_hz"], "80.0")
+            self.assertEqual(values["stepper.stall_confirm_samples"], "5")
+
+            stall_keys = ("stall_detect", "stallguard_sgt", "stall_sg_min", "stall_min_step_hz",
+                          "stall_confirm_samples")
+            old = "\n".join(line for line in template.splitlines()
+                            if not any(f".{key}=" in line for key in stall_keys)) + "\n"
+            self.assertFalse([k for k in hardware_setup._ini_values(old) if k.split(".")[-1] in stall_keys],
+                             "the old INI must not carry the keys")
+            source.write_text(old, encoding="utf-8")
+            values = migrated_values(source)
+            self.assertEqual(values["motor0.stall_detect"], "monitor")
+            self.assertEqual(values["motor1.stall_sg_min"], "0")
+            self.assertEqual(values["stepper.stall_confirm_samples"], "3")
+
     def test_validate_candidate_rejects_bad_sense_resistor(self) -> None:
         source = hardware_setup.EXAMPLE_CONFIG.read_text(encoding="utf-8")
         broken = hardware_setup.replace_ini(

@@ -228,6 +228,14 @@ struct StepperConfig {
   // full-steps/s². Bounds runtime experimentation the same way
   // the speed ceiling bounds STEPPER_SET_SPEED.
   double max_accel_steps_per_s2 = 5000.0;
+  // StallGuard2 stall detection, shared by both motors (per-motor mode and
+  // thresholds are motorN.stall_*). The load measurement is only sampled
+  // while a motor cruises at a steady rate of at least stall_min_step_hz
+  // full-steps/s: below that the back-EMF it measures is too small. A stall
+  // is that many consecutive samples (one per four full steps) at or under
+  // motorN.stall_sg_min.
+  double stall_min_step_hz = 50.0;
+  int stall_confirm_samples = 3;
 
   // max_speed_mm_s expressed in full-steps per second at this lead.
   double LinearMaxStepHz() const {
@@ -285,6 +293,18 @@ struct MotorConfig {
   // this motor only. Runtime-adjustable via STEPPER_SET_ACCEL, bounded by
   // stepper.max_accel_steps_per_s2 either way.
   double accel_steps_per_s2 = 0.0;
+  // StallGuard2 stall detection (spreadCycle only): "off", "monitor"
+  // (default: the driver samples the load measure, counts and journals a
+  // stall verdict, and the move continues) or "stop" (a verdict stops the
+  // move and latches the position uncertain). "stop" is for a rig whose
+  // stallguard_sgt / stall_sg_min were calibrated on the bench
+  // (docs/tmc5160-commissioning.md, "Step-loss protection").
+  std::string stall_detect = "monitor";
+  // COOLCONF.sgt, -64..63: raises (positive) or lowers the SG_RESULT the
+  // chip reports for the same load.
+  int stallguard_sgt = 0;
+  // A sample is "stalled" when SG_RESULT (0..1023) is at or under this.
+  int stall_sg_min = 0;
   // Logical samples this motor pulls. Derived from `specimens` when the INI
   // sets motorN.specimens; only a legacy INI writes motorN.samples.
   std::vector<std::size_t> samples;

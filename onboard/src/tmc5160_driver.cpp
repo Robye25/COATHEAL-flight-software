@@ -37,7 +37,17 @@ constexpr std::uint8_t kRegD1 = 0x2A;
 constexpr std::uint8_t kRegVSTOP = 0x2B;
 constexpr std::uint8_t kRegXTARGET = 0x2D;
 constexpr std::uint8_t kRegCHOPCONF = 0x6C;
+constexpr std::uint8_t kRegCOOLCONF = 0x6D;
 constexpr std::uint8_t kWriteBit = 0x80;
+
+// SPI status byte: bits 39..32 of every reply, whatever was asked. Bit 0
+// mirrors GSTAT.reset and bit 1 GSTAT.drv_err, so each XTARGET write already
+// says whether the chip lost its configuration or shut its power stage down.
+constexpr std::uint8_t kSpiStatusReset = 0x01U;
+constexpr std::uint8_t kSpiStatusDriverError = 0x02U;
+// A status-byte flag starts one supervision read, then none for this many
+// steps (see status_holdoff_steps_).
+constexpr std::uint32_t kStatusHoldoffSteps = 8U;
 
 constexpr std::uint8_t kExpectedVersion = 0x30;
 
@@ -94,7 +104,35 @@ constexpr std::uint32_t kVmax = 4U * 100U * 256U;
 
 // GSTAT flags (write 1 to clear): bit 0 reset, bit 1 drv_err, bit 2 uv_cp.
 constexpr std::uint32_t kGstatReset = 0x1U;
+constexpr std::uint32_t kGstatDrvErr = 0x2U;
+constexpr std::uint32_t kGstatUvCp = 0x4U;
 constexpr std::uint32_t kGstatClearAll = 0x7U;
+
+// DRV_STATUS. SG_RESULT (bits 9:0) is the StallGuard2 load measure: high
+// with a free-running motor, falling towards 0 as the load angle approaches
+// a stall. The short flags latch, with that bridge switched off, until the
+// driver is disabled and enabled again; the open-load flags are only an
+// indication, and only while the motor turns slowly in spreadCycle.
+constexpr std::uint32_t kDrvSgResultMask = 0x3FFU;
+constexpr std::uint32_t kDrvS2vsa = 1U << 12;
+constexpr std::uint32_t kDrvS2vsb = 1U << 13;
+constexpr std::uint32_t kDrvOt = 1U << 25;
+constexpr std::uint32_t kDrvOtpw = 1U << 26;
+constexpr std::uint32_t kDrvS2ga = 1U << 27;
+constexpr std::uint32_t kDrvS2gb = 1U << 28;
+constexpr std::uint32_t kDrvOla = 1U << 29;
+constexpr std::uint32_t kDrvOlb = 1U << 30;
+constexpr std::uint32_t kDrvShortMask = kDrvS2vsa | kDrvS2vsb | kDrvS2ga | kDrvS2gb;
+
+// COOLCONF: sfilt (bit 24) filters SG_RESULT over four full steps, which
+// takes out the difference between the two coils; sgt sits in bits 22:16.
+constexpr std::uint32_t kCoolconfSfilt = 1U << 24;
+// StallGuard is sampled once per electrical period: four full steps.
+constexpr std::uint32_t kFullStepsPerElectricalPeriod = 4U;
+// XACTUAL must differ from the target on this many consecutive idle polls
+// (about a second apart) before it counts: the first poll after a move can
+// catch the ramp generator a few milliseconds short of its target.
+constexpr int kPositionMismatchPolls = 2;
 // Step() re-reads GSTAT this often. One 5-byte datagram per 64 steps is
 // noise next to the XTARGET write every step, and a brown-out that wiped
 // the chip mid-move is caught within 0.64 s at 100 Hz.
@@ -250,6 +288,37 @@ bool Tmc5160Driver::CalculateCurrent(double a_rms, double sense_ohm,
   return true;
 }
 
+std::uint32_t Tmc5160Driver::EncodeCoolconf(int sgt) {
+  const int clamped = std::clamp(sgt, -64, 63);
+  return kCoolconfSfilt |
+         ((static_cast<std::uint32_t>(clamped) & 0x7FU) << 16);
+}
+
+bool Tmc5160Driver::ParseStallDetect(const std::string& text,
+                                     Tmc5160Config::StallDetect* mode) {
+  Tmc5160Config::StallDetect parsed;
+  if (text == "off") {
+    parsed = Tmc5160Config::StallDetect::kOff;
+  } else if (text == "monitor") {
+    parsed = Tmc5160Config::StallDetect::kMonitor;
+  } else if (text == "stop") {
+    parsed = Tmc5160Config::StallDetect::kStop;
+  } else {
+    return false;
+  }
+  if (mode != nullptr) *mode = parsed;
+  return true;
+}
+
+const char* Tmc5160Driver::StallDetectName(Tmc5160Config::StallDetect mode) {
+  switch (mode) {
+    case Tmc5160Config::StallDetect::kOff: return "off";
+    case Tmc5160Config::StallDetect::kMonitor: return "monitor";
+    case Tmc5160Config::StallDetect::kStop: return "stop";
+  }
+  return "off";
+}
+
 std::uint32_t Tmc5160Driver::EncodeChopconf(std::uint8_t toff) const {
   // MRES is pinned to 0 = native 256 microsteps. The TMC5160's motion
   // controller counts XACTUAL/XTARGET/VMAX in the microstep resolution
@@ -386,7 +455,9 @@ bool Tmc5160Driver::WriteRegister(std::uint8_t address, std::uint32_t value) {
   tx[2] = static_cast<std::uint8_t>((value >> 16) & 0xFFU);
   tx[3] = static_cast<std::uint8_t>((value >> 8) & 0xFFU);
   tx[4] = static_cast<std::uint8_t>(value & 0xFFU);
-  return Transfer(tx, rx);
+  if (!Transfer(tx, rx)) return false;
+  last_spi_status_ = rx[0];
+  return true;
 }
 
 bool Tmc5160Driver::ReadRegister(std::uint8_t address, std::uint32_t* value) {
@@ -397,6 +468,7 @@ bool Tmc5160Driver::ReadRegister(std::uint8_t address, std::uint32_t* value) {
   // Two-phase read: the first exchange latches the address, the reply data
   // for THIS request only appears on the second exchange.
   if (!Transfer(tx, rx) || !Transfer(tx, rx)) return false;
+  last_spi_status_ = rx[0];
   *value = (static_cast<std::uint32_t>(rx[1]) << 24) |
            (static_cast<std::uint32_t>(rx[2]) << 16) |
            (static_cast<std::uint32_t>(rx[3]) << 8) |
@@ -512,6 +584,12 @@ bool Tmc5160Driver::ReinitializeUnlocked() {
     healthy_ = false;
     return false;
   }
+  // StallGuard2 threshold and filter. Write-only on the TMC5160, so there
+  // is no readback; coolStep stays off (see EncodeCoolconf).
+  if (!WriteRegister(kRegCOOLCONF, EncodeCoolconf(cfg_.stallguard_sgt))) {
+    healthy_ = false;
+    return false;
+  }
   if (!WriteRegister(kRegGLOBALSCALER, gs_reg)) {
     healthy_ = false;
     return false;
@@ -593,6 +671,11 @@ bool Tmc5160Driver::ReinitializeUnlocked() {
 
   healthy_ = true;
   last_error_message_.clear();
+  // All three GSTAT flags were just cleared, and XACTUAL is the target.
+  uv_cp_active_ = false;
+  drv_err_active_ = false;
+  drv_err_unexplained_ = false;
+  position_mismatch_polls_ = 0;
   return true;
 }
 
@@ -765,26 +848,148 @@ bool Tmc5160Driver::EnableUnlocked(bool enable) {
   // A successful operator re-enable is the release path for the thermal
   // shutdown latch (the chip's own ot flag clears once the die cools; the
   // latch exists so the channel safety cannot race that self-clear). Read
-  // the flags fresh so a still-hot chip immediately re-latches.
+  // the flags fresh so a still-hot chip immediately re-latches. The same
+  // goes for a short: the TOFF cycle above re-armed the bridge the chip
+  // had switched off, and a short that is still there shows again here.
   ot_latched_ = false;
   otpw_now_ = false;
-  CheckThermalUnlocked();
+  short_active_ = false;
+  open_load_active_ = false;
+  open_load_logged_ = false;
+  position_mismatch_polls_ = 0;
+  CheckDriverStatusUnlocked(/*stepping=*/false, /*sample_stallguard=*/false);
   return true;
 }
 
 bool Tmc5160Driver::Poll() {
   std::lock_guard<std::mutex> lock(io_mu_);
   if (bus_ == nullptr || !spi_open_ || !healthy_ || !enabled_) return healthy_;
-  const bool ok = RecoverFromChipResetUnlocked("idle");
-  if (ok) CheckThermalUnlocked();
-  return ok;
+  if (!RecoverFromChipResetUnlocked("idle")) return false;
+  CheckDriverStatusUnlocked(/*stepping=*/false, /*sample_stallguard=*/false);
+  CheckPositionUnlocked();
+  return healthy_;
 }
 
-void Tmc5160Driver::CheckThermalUnlocked() {
+void Tmc5160Driver::RecordStepLossUnlocked(const std::string& reason,
+                                           bool stop) {
+  ++step_loss_count_;
+  step_loss_reason_ = reason;
+  if (stop) step_loss_stop_ = true;
+  std::cerr << "[tmc5160] " << cfg_.spi_device << " cs=" << cfg_.cs_line
+            << ": STEP LOSS #" << step_loss_count_ << " -- " << reason
+            << (stop ? "; stopping the move" : "") << '\n';
+}
+
+std::uint64_t Tmc5160Driver::step_loss_events() const {
+  std::lock_guard<std::mutex> lock(io_mu_);
+  return step_loss_count_;
+}
+
+std::string Tmc5160Driver::step_loss_reason() const {
+  std::lock_guard<std::mutex> lock(io_mu_);
+  return step_loss_reason_;
+}
+
+bool Tmc5160Driver::TakeStepLossStop() {
+  std::lock_guard<std::mutex> lock(io_mu_);
+  const bool stop = step_loss_stop_;
+  step_loss_stop_ = false;
+  return stop;
+}
+
+bool Tmc5160Driver::StallSamplingActiveUnlocked() const {
+  return cfg_.stall_detect != Tmc5160Config::StallDetect::kOff &&
+         !cfg_.stealth_chop && step_rate_steady_ &&
+         step_rate_hz_ >= cfg_.stall_min_step_hz;
+}
+
+void Tmc5160Driver::NoteStepRate(double full_step_hz, bool steady) {
+  std::lock_guard<std::mutex> lock(io_mu_);
+  if (!(full_step_hz > 0.0)) {
+    // No move in progress: the next rate report opens a new one.
+    step_rate_hz_ = 0.0;
+    step_rate_steady_ = false;
+    move_open_ = false;
+    sg_low_run_ = 0;
+    return;
+  }
+  if (!move_open_) {
+    move_open_ = true;
+    sg_samples_ = 0;
+    sg_last_ = 0;
+    sg_min_ = 0;
+    sg_low_run_ = 0;
+    steps_since_sg_sample_ = 0;
+    stall_logged_this_move_ = false;
+  }
+  const bool was_active = StallSamplingActiveUnlocked();
+  step_rate_hz_ = full_step_hz;
+  step_rate_steady_ = steady;
+  const bool active = StallSamplingActiveUnlocked();
+  if (active && !was_active) {
+    // Cruise just began: with sfilt set the first value still averages the
+    // end of the ramp, so one sample is skipped.
+    steps_since_sg_sample_ = 0;
+    sg_settle_samples_ = 1;
+    sg_low_run_ = 0;
+  } else if (!active) {
+    sg_low_run_ = 0;
+  }
+}
+
+bool Tmc5160Driver::ConfirmTarget() {
+  std::lock_guard<std::mutex> lock(io_mu_);
+  if (bus_ == nullptr || !spi_open_ || !healthy_ || !enabled_) return healthy_;
+  std::uint32_t xtarget = 0;
+  if (!ReadRegister(kRegXTARGET, &xtarget)) {
+    healthy_ = false;
+    return false;
+  }
+  if (static_cast<std::int32_t>(xtarget) == target_) return true;
+  ++xtarget_repairs_;
+  std::cerr << "[tmc5160] " << cfg_.spi_device << " cs=" << cfg_.cs_line
+            << ": XTARGET read back " << static_cast<std::int32_t>(xtarget)
+            << " at the end of a move, commanded " << target_
+            << " -- rewriting it (repair #" << xtarget_repairs_
+            << " since boot; a corrupted SPI write)\n";
+  std::uint32_t verify = 0;
+  if (!WriteRegister(kRegXTARGET, static_cast<std::uint32_t>(target_)) ||
+      !ReadRegister(kRegXTARGET, &verify) ||
+      static_cast<std::int32_t>(verify) != target_) {
+    ReportError(cfg_.spi_device + " cs=" + std::to_string(cfg_.cs_line) +
+                ": XTARGET does not hold the commanded target " +
+                std::to_string(target_) + " after a rewrite");
+    healthy_ = false;
+    return false;
+  }
+  return true;
+}
+
+void Tmc5160Driver::CheckPositionUnlocked() {
+  std::uint32_t xactual = 0;
+  if (!ReadRegister(kRegXACTUAL, &xactual)) return;
+  const auto actual = static_cast<std::int32_t>(xactual);
+  if (actual == target_) {
+    position_mismatch_polls_ = 0;
+    return;
+  }
+  if (++position_mismatch_polls_ < kPositionMismatchPolls) return;
+  position_mismatch_polls_ = 0;
+  const std::string what =
+      "chip position " + std::to_string(actual) + " is not the commanded " +
+      std::to_string(target_) + " at standstill (1/256 full steps)";
+  RecordStepLossUnlocked(what, /*stop=*/true);
+  ReportError(cfg_.spi_device + " cs=" + std::to_string(cfg_.cs_line) + ": " +
+              what + " -- the ramp generator did not execute the move");
+  healthy_ = false;
+}
+
+bool Tmc5160Driver::CheckDriverStatusUnlocked(bool stepping,
+                                              bool sample_stallguard) {
   std::uint32_t drv = 0;
-  if (!ReadRegister(kRegDRV_STATUS, &drv)) return;
-  const bool otpw = ((drv >> 26) & 1U) != 0U;
-  const bool ot = ((drv >> 25) & 1U) != 0U;
+  if (!ReadRegister(kRegDRV_STATUS, &drv)) return true;
+  const bool otpw = (drv & kDrvOtpw) != 0U;
+  const bool ot = (drv & kDrvOt) != 0U;
   if (otpw && !otpw_now_) {
     ++otpw_events_;
     std::cerr << "[tmc5160] " << cfg_.spi_device << " cs=" << cfg_.cs_line
@@ -799,6 +1004,130 @@ void Tmc5160Driver::CheckThermalUnlocked() {
               << " has cut its outputs; latching until the next"
               << " STEPPER_ENABLE\n";
   }
+
+  // A short to ground or to the supply: the chip has switched that bridge
+  // off and keeps it off until the driver is disabled and enabled again.
+  // Every step from here on would be counted and not taken.
+  const bool short_now = (drv & kDrvShortMask) != 0U;
+  if (short_now && !short_active_) {
+    ++short_events_;
+    std::string flags;
+    if ((drv & kDrvS2ga) != 0U) flags += " s2ga";
+    if ((drv & kDrvS2gb) != 0U) flags += " s2gb";
+    if ((drv & kDrvS2vsa) != 0U) flags += " s2vsa";
+    if ((drv & kDrvS2vsb) != 0U) flags += " s2vsb";
+    if (enabled_) {
+      RecordStepLossUnlocked(
+          "short circuit on a motor coil (" + flags.substr(1) +
+              "): the driver switched that bridge off",
+          /*stop=*/!stepping);
+    }
+  }
+  if (short_now) short_active_ = true;
+
+  // drv_err with neither a short nor a thermal shutdown to explain it: the
+  // power stage was shut down for a reason that is gone by now.
+  if (drv_err_unexplained_) {
+    drv_err_unexplained_ = false;
+    if (!short_now && !ot && !ot_latched_ && enabled_) {
+      RecordStepLossUnlocked(
+          "driver error (GSTAT.drv_err): the power stage was shut down",
+          /*stop=*/false);
+    }
+  }
+
+  if (stepping) {
+    const bool open_load = (drv & (kDrvOla | kDrvOlb)) != 0U;
+    if (open_load && !open_load_active_) {
+      ++open_load_events_;
+      if (!open_load_logged_) {
+        open_load_logged_ = true;
+        std::cerr << "[tmc5160] " << cfg_.spi_device << " cs=" << cfg_.cs_line
+                  << ": open load flagged while stepping (ola="
+                  << ((drv & kDrvOla) != 0U ? 1 : 0) << " olb="
+                  << ((drv & kDrvOlb) != 0U ? 1 : 0)
+                  << ") -- check the motor connector and coils\n";
+      }
+    }
+    open_load_active_ = open_load;
+  }
+  if (short_now && stepping) return false;
+
+  if (sample_stallguard) {
+    if (sg_settle_samples_ > 0) {
+      --sg_settle_samples_;
+      return true;
+    }
+    const int sg = static_cast<int>(drv & kDrvSgResultMask);
+    sg_last_ = sg;
+    if (sg_samples_ == 0 || sg < sg_min_) sg_min_ = sg;
+    ++sg_samples_;
+    if (sg <= cfg_.stall_sg_min) {
+      ++sg_low_run_;
+    } else {
+      sg_low_run_ = 0;
+    }
+    if (sg_low_run_ == cfg_.stall_confirm_samples) {
+      ++stall_verdicts_;
+      const bool stop = cfg_.stall_detect == Tmc5160Config::StallDetect::kStop;
+      std::ostringstream what;
+      what << "StallGuard stall: SG_RESULT " << sg << " <= " << cfg_.stall_sg_min
+           << " on " << cfg_.stall_confirm_samples << " samples in a row at "
+           << step_rate_hz_ << " full-steps/s";
+      if (stop) {
+        sg_low_run_ = 0;
+        RecordStepLossUnlocked(what.str(), /*stop=*/true);
+        return false;
+      }
+      if (!stall_logged_this_move_) {
+        stall_logged_this_move_ = true;
+        std::cerr << "[tmc5160] " << cfg_.spi_device << " cs=" << cfg_.cs_line
+                  << ": " << what.str() << " (verdict #" << stall_verdicts_
+                  << " since boot; stall_detect=monitor, the move continues)\n";
+      }
+    }
+  }
+  return true;
+}
+
+std::uint32_t Tmc5160Driver::undervoltage_count() const {
+  std::lock_guard<std::mutex> lock(io_mu_);
+  return uv_cp_events_;
+}
+
+std::uint32_t Tmc5160Driver::short_count() const {
+  std::lock_guard<std::mutex> lock(io_mu_);
+  return short_events_;
+}
+
+std::uint32_t Tmc5160Driver::open_load_count() const {
+  std::lock_guard<std::mutex> lock(io_mu_);
+  return open_load_events_;
+}
+
+std::uint32_t Tmc5160Driver::stall_verdict_count() const {
+  std::lock_guard<std::mutex> lock(io_mu_);
+  return stall_verdicts_;
+}
+
+std::uint32_t Tmc5160Driver::xtarget_repair_count() const {
+  std::lock_guard<std::mutex> lock(io_mu_);
+  return xtarget_repairs_;
+}
+
+std::uint32_t Tmc5160Driver::stallguard_samples() const {
+  std::lock_guard<std::mutex> lock(io_mu_);
+  return sg_samples_;
+}
+
+int Tmc5160Driver::stallguard_last() const {
+  std::lock_guard<std::mutex> lock(io_mu_);
+  return sg_last_;
+}
+
+int Tmc5160Driver::stallguard_min() const {
+  std::lock_guard<std::mutex> lock(io_mu_);
+  return sg_min_;
 }
 
 int Tmc5160Driver::thermal_state() const {
@@ -877,7 +1206,25 @@ std::string Tmc5160Driver::DebugRegisters() {
       << ";pwm_scale_sum=" << (pwm_scale & 0xFFU)
       << ";pwm_scale_auto=" << pwm_scale_auto
       << ";pwm_ofs_auto=" << (pwm_auto & 0xFFU)
-      << ";pwm_grad_auto=" << ((pwm_auto >> 16) & 0xFFU);
+      << ";pwm_grad_auto=" << ((pwm_auto >> 16) & 0xFFU)
+      // Step-loss supervision: the driver's own event count, the StallGuard
+      // settings in force and the statistics of the move in progress (or of
+      // the last one; "-" before the first sample).
+      << ";drv_loss=" << step_loss_count_
+      << ";stall_mode=" << StallDetectName(cfg_.stall_detect)
+      << ";sgt=" << cfg_.stallguard_sgt
+      << ";sg_thr=" << cfg_.stall_sg_min;
+  if (sg_samples_ > 0) {
+    out << ";sg_last=" << sg_last_ << ";sg_min=" << sg_min_;
+  } else {
+    out << ";sg_last=-;sg_min=-";
+  }
+  out << ";sg_n=" << sg_samples_
+      << ";stalls=" << stall_verdicts_
+      << ";uv=" << uv_cp_events_
+      << ";shorts=" << short_events_
+      << ";openload=" << open_load_events_
+      << ";xt_repairs=" << xtarget_repairs_;
   return out.str();
 }
 
@@ -915,6 +1262,34 @@ std::string Tmc5160Driver::warning() const {
             std::to_string(cfg_.cs_line) +
             "): reduce run current or duty cycle";
   }
+  const auto append = [&text](const std::string& piece) {
+    if (!text.empty()) text += "; ";
+    text += piece;
+  };
+  if (uv_cp_events_ > 0) {
+    append("motor supply undervoltage " + std::to_string(uv_cp_events_) +
+           "x (uv_cp): the power stage was off while the supply was low --"
+           " check the 12 V motor supply");
+  }
+  if (short_events_ > 0) {
+    append("short circuit on a motor coil " + std::to_string(short_events_) +
+           "x" + (short_active_ ? " ACTIVE" : "") +
+           ": check the motor wiring; STEPPER_DISABLE then STEPPER_ENABLE"
+           " re-arms the bridge");
+  }
+  if (open_load_events_ > 0) {
+    append("open load flagged " + std::to_string(open_load_events_) +
+           "x while stepping (ola/olb): check the motor connector and coils");
+  }
+  if (stall_verdicts_ > 0) {
+    append(std::string("StallGuard stall verdict ") +
+           std::to_string(stall_verdicts_) + "x (stall_detect=" +
+           StallDetectName(cfg_.stall_detect) + ")");
+  }
+  if (xtarget_repairs_ > 0) {
+    append("XTARGET rewritten " + std::to_string(xtarget_repairs_) +
+           "x after a readback mismatch: SPI writes are being corrupted");
+  }
   return text;
 }
 
@@ -926,7 +1301,34 @@ bool Tmc5160Driver::RecoverFromChipResetUnlocked(const char* where) {
     healthy_ = false;
     return false;
   }
-  if ((gstat & kGstatReset) == 0U) return true;
+  if ((gstat & kGstatReset) == 0U) {
+    // Not reset, but the supply or the power stage may still have gone
+    // under it. Both flags are counted on their rising edge and cleared, so
+    // the next read shows whether the condition is still there.
+    const bool uv_cp = (gstat & kGstatUvCp) != 0U;
+    const bool drv_err = (gstat & kGstatDrvErr) != 0U;
+    if (uv_cp && !uv_cp_active_) {
+      ++uv_cp_events_;
+      if (enabled_) {
+        RecordStepLossUnlocked(
+            "motor supply undervoltage (GSTAT.uv_cp): the power stage was"
+            " off while the supply was low",
+            /*stop=*/false);
+      }
+    }
+    uv_cp_active_ = uv_cp;
+    // What shut the power stage down is in DRV_STATUS, which the caller
+    // reads next (a short or a thermal shutdown).
+    if (drv_err && !drv_err_active_) drv_err_unexplained_ = true;
+    drv_err_active_ = drv_err;
+    const std::uint32_t handled = gstat & (kGstatUvCp | kGstatDrvErr);
+    if (handled != 0U && !WriteRegister(kRegGSTAT, handled)) {
+      healthy_ = false;
+      return false;
+    }
+    return true;
+  }
+  const bool was_enabled = enabled_;
   ++reset_count_;
   std::cerr << "[tmc5160] " << cfg_.spi_device << " cs=" << cfg_.cs_line
             << ": chip reset detected on " << where
@@ -941,17 +1343,44 @@ bool Tmc5160Driver::RecoverFromChipResetUnlocked(const char* where) {
   }
   target_ = 0;  // Reinitialize zeroed XACTUAL/XTARGET; the stall lost the position anyway.
   // ReinitializeUnlocked restored TOFF=3 iff enabled_.
+  if (was_enabled) {
+    // Energised when it happened: the rotor was let go, and every step
+    // written since the reset went to a ramp generator that could not move.
+    RecordStepLossUnlocked(
+        std::string("chip reset while the motor was enabled (found on ") +
+            where + "): the supply dropped and the driver let go",
+        /*stop=*/false);
+  }
   return true;
 }
 
 bool Tmc5160Driver::Step(bool direction_forward) {
   std::lock_guard<std::mutex> lock(io_mu_);
   if (!healthy_ || !enabled_) return false;
+  // A bridge the chip switched off stays off until the driver is disabled
+  // and enabled again: no step can be taken.
+  if (short_active_) return false;
+  position_mismatch_polls_ = 0;
 
-  if (++steps_since_reset_check_ >= kResetCheckInterval) {
+  bool sample_stallguard = false;
+  if (StallSamplingActiveUnlocked()) {
+    const std::uint32_t interval =
+        kFullStepsPerElectricalPeriod * static_cast<std::uint32_t>(microstep_);
+    if (++steps_since_sg_sample_ >= interval) {
+      steps_since_sg_sample_ = 0;
+      sample_stallguard = true;
+    }
+  } else {
+    steps_since_sg_sample_ = 0;
+  }
+  const bool supervise = ++steps_since_reset_check_ >= kResetCheckInterval;
+  if (supervise) {
     steps_since_reset_check_ = 0;
     if (!RecoverFromChipResetUnlocked("step")) return false;
-    CheckThermalUnlocked();
+  }
+  if ((supervise || sample_stallguard) &&
+      !CheckDriverStatusUnlocked(/*stepping=*/true, sample_stallguard)) {
+    return false;
   }
 
   const bool physical_forward = direction_forward != cfg_.invert_direction;
@@ -967,6 +1396,21 @@ bool Tmc5160Driver::Step(bool direction_forward) {
   }
   target_ = next32;
   ++pulses_;
+
+  // The reply to that write carried the chip's status byte. reset_flag: the
+  // chip lost its configuration since it was set up, and this step went to
+  // a ramp generator with VMAX=0. driver_error: the power stage was shut
+  // down. Either way, find out now rather than at the next periodic check.
+  if (status_holdoff_steps_ > 0) {
+    --status_holdoff_steps_;
+  } else if ((last_spi_status_ & (kSpiStatusReset | kSpiStatusDriverError)) != 0U) {
+    status_holdoff_steps_ = kStatusHoldoffSteps;
+    steps_since_reset_check_ = 0;
+    if (!RecoverFromChipResetUnlocked("step")) return false;
+    if (!CheckDriverStatusUnlocked(/*stepping=*/true, /*sample_stallguard=*/false)) {
+      return false;
+    }
+  }
   return true;
 }
 

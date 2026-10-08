@@ -96,6 +96,49 @@ class ConsoleTabTests(unittest.TestCase):
     # MUTATION: make gating.motion_reason return None unconditionally and
     # confirm test_motion_gating_reasons fails on the "not enabled" assertion.
 
+    def test_step_loss_latch_on_the_motion_tab(self) -> None:
+        sent = capture_sends(self.win._dispatcher)
+        self.feed()
+        motion = self.win._motion
+        motion.selector.set_value(0)
+        motion.update_state(self.win._state)
+        card = motion.cards[0]
+        # Old firmware / nothing latched: no banner, nothing to acknowledge...
+        self.assertTrue(card.loss_note.isHidden())
+        self.assertIsNone(motion.btn_ack_loss.reason(), "unknown (old firmware) never blocks")
+        self.feed(m0="en:1|ok:1|mv:0|hold:0|zeroed:1|therm:ok|loss:0|unc:0")
+        self.assertIn("no step-loss latch", motion.btn_ack_loss.reason() or "")
+        self.assertIsNone(motion.btn_pull.reason())
+
+        # ...latched: the card says so, the standard pull is refused with the
+        # reason, BEND and jog stay live, and ACK sends the acknowledge.
+        self.feed(m0="en:1|ok:1|mv:0|hold:0|zeroed:1|therm:ok|loss:2|unc:1")
+        self.assertFalse(card.loss_note.isHidden())
+        self.assertIn("STEP LOSS (2×)", card.loss_note.text())
+        self.assertIn("position uncertain", motion.btn_pull.reason() or "")
+        self.assertIn("STANDARD PULL disabled", motion.bend_note.text())
+        self.assertIsNone(motion.btn_bend.reason(), "a manual BEND stays the operator's call")
+        self.assertIsNone(motion.jog_buttons[0].reason())
+        self.assertIsNone(motion.btn_home.reason())
+        self.assertTrue(motion.cards[1].loss_note.isHidden(), "the other motor is not latched")
+        self.assertIsNone(motion.btn_ack_loss.reason())
+        motion.btn_ack_loss.click()
+        self.assertEqual(sent[-1], "STEPLOSS_ACK 0")
+        # The sequence controls on the Advanced tab follow the same latch.
+        self.assertIn("position uncertain", self.win._advanced.btn_seq_run.reason() or "")
+        # The alarm strip's model raises it too.
+        from app.gui.alarms import evaluate
+        self.assertIn("M0_STEPLOSS", {a.key for a in evaluate(self.win._state)})
+
+        # Acknowledged onboard: the count stays visible, the gates open.
+        self.feed(m0="en:1|ok:1|mv:0|hold:0|zeroed:1|therm:ok|loss:2|unc:0")
+        self.assertIn("acknowledged", card.loss_note.text())
+        self.assertIsNone(motion.btn_pull.reason())
+        self.assertEqual(motion.bend_note.text(), "")
+
+    # MUTATION: drop `or gating.position_trust_reason(...)` from the pull
+    # button in tab_motion.update_state and confirm this test fails.
+
     def test_esc_and_stop_motors_send_both_stops(self) -> None:
         from PyQt6.QtGui import QKeySequence, QShortcut
         sent = capture_sends(self.win._dispatcher)
@@ -348,6 +391,21 @@ class ConsoleTabTests(unittest.TestCase):
         self.assertEqual(debug._regs["sd_mode"].text(), "0")
         # Driver health line: thermal state leads (ot=0/otpw=0 in the body).
         self.assertIn("die < 120", debug.health.text())
+        # Step-loss rows: unknown on a reply without the keys...
+        self.assertEqual(debug._regs["unc"].text(), "—")
+        # ...and decoded, with the health line naming the latch, when present.
+        latched = (body + ";loss=1;unc=1;loss_reason=StallGuard stall;drv_loss=1;stall_mode=stop;sgt=0;sg_thr=40"
+                          ";sg_last=12;sg_min=0;sg_n=9;stalls=1;uv=0;shorts=0;openload=0;xt_repairs=0")
+        clock[0] += 0.5
+        self.win._dispatcher.quiet_response.emit(
+            "MOTOR_DEBUG 1", CommandResponse(ok=True, command="MOTOR_DEBUG", body=latched, raw=""), 3.0, debug)
+        self.assertEqual(debug._regs["unc"].text(), "1")
+        self.assertEqual(debug._regs["loss"].text(), "1")
+        self.assertEqual(debug._regs["stall_mode"].text(), "stop")
+        self.assertEqual(debug._regs["sg_min"].text(), "0")
+        self.assertEqual(debug._regs["loss_reason"].text().replace("\u200b", ""), "StallGuard stall")
+        self.assertIn("POSITION UNCERTAIN", debug.health.text().replace("\u200b", ""))
+        self.assertIn("StallGuard stall verdict ×1 (stall_detect=stop)", debug.verdict.text().replace("\u200b", ""))
 
     # ── PID autotune ──
     def test_pid_autotune_start_and_result_flow(self) -> None:

@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Optional
 
 from .link_budget import (
-    GROUND_SHARE, LINK_HEALTHY_S, TELEMETRY_CLOSE_BYTES, DiscoveryRounds, LinkBudget, Priority,
+    LINK_HEALTHY_S, PURE_ACK, SYN, TELEMETRY_CLOSE_BYTES, DiscoveryRounds, Priority, send_answer,
+    shaped_ground_budget,
 )
 from .link_codec import CodecError, decode_line, describe_hello, hello_reply
 from .protocol import (
@@ -98,7 +99,7 @@ class LivePlotter:
 
 class TelemetryServer:
     """Headless telemetry receiver. Writes exactly the files the GUI writes
-    (`telemetry_log.LogManager`, schema v6, one directory per onboard
+    (`telemetry_log.LogManager`, schema v7, one directory per onboard
     session under `<log_root>/sessions/`)."""
 
     def __init__(
@@ -131,7 +132,7 @@ class TelemetryServer:
         self._stop = threading.Event()
         # This process's share of the 24 kbps E-Link (docs/link-budget.md):
         # discovery, and closing a telemetry connection that went quiet.
-        self._budget = LinkBudget(GROUND_SHARE)
+        self._budget = shaped_ground_budget()
         self._last_packet_time = 0.0
         self._last_wait_log_time = 0.0
         self._plotter: Optional[LivePlotter] = None
@@ -339,6 +340,7 @@ class TelemetryServer:
     def _handle_connection(self, conn: socket.socket) -> None:
         buffer = ""
         conn.settimeout(1.0)
+        self._budget.debit_egress(SYN)   # the SYN-ACK our kernel answered with
         timeout_warned = False
         while not self._stop.is_set():
             try:
@@ -351,7 +353,8 @@ class TelemetryServer:
                 ):
                     # The FIN and the onboard's ACK of it are charged first;
                     # with no room yet, the quiet connection waits a second.
-                    if self._budget.try_charge(TELEMETRY_CLOSE_BYTES, Priority.COMMAND) is None:
+                    if self._budget.try_charge(TELEMETRY_CLOSE_BYTES, Priority.COMMAND,
+                                               tx_bytes=PURE_ACK) is None:
                         continue
                     if not timeout_warned:
                         print(
@@ -376,7 +379,7 @@ class TelemetryServer:
                     # Codec negotiation (docs/link-budget.md): not a frame,
                     # never ACKed, answered on the same socket.
                     try:
-                        conn.sendall(reply.encode("utf-8"))
+                        send_answer(self._budget, conn, reply)
                     except OSError:
                         return
                     print(f"[telemetry] {describe_hello(line, reply)}")
@@ -403,7 +406,7 @@ class TelemetryServer:
                     self._append_cycle(event, line, rx_utc)
                     ack_line = build_ack(event.session_id, 0)
                     try:
-                        conn.sendall(ack_line.encode("utf-8"))
+                        send_answer(self._budget, conn, ack_line)
                     except OSError:
                         return
                     print(
@@ -435,7 +438,7 @@ class TelemetryServer:
                     # and never touches DATA frames (their seqs start at 1).
                     ack_line = build_ack(pull.session_id, 0)
                     try:
-                        conn.sendall(ack_line.encode("utf-8"))
+                        send_answer(self._budget, conn, ack_line)
                     except OSError:
                         return
                     samples_str = "|".join(str(s) for s in pull.samples) or "-"
@@ -477,7 +480,7 @@ class TelemetryServer:
                 # ACK misses its 180 ms deadline (docs/link-budget.md).
                 ack_line = build_ack(packet.session_id, packet.seq)
                 try:
-                    conn.sendall(ack_line.encode("utf-8"))
+                    send_answer(self._budget, conn, ack_line)
                 except OSError:
                     if not is_duplicate:
                         with self._lock:
@@ -531,7 +534,7 @@ class TelemetryServer:
         if ack is None:
             return True
         try:
-            conn.sendall(ack.encode("utf-8"))
+            send_answer(self._budget, conn, ack)
         except OSError:
             return False
         return True

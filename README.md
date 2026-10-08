@@ -41,6 +41,14 @@ coatheal-deploy                               # every time after that
 The script ends with a green `DEPLOYED and RUNNING` banner and the Pi's IP
 addresses. Add `--dry-run` to see every action without changing anything.
 
+For flight, deploy with `--flight`: it refuses bench values in the config and
+switches on the **E-Link hard cap**, a kernel shaper that holds everything
+the Pi sends on the E-Link port inside its part of the 24 kbps
+([docs/link-budget.md](docs/link-budget.md#hard-cap)). The cap takes the
+whole port, `ssh` included: `coatheal-link-cap off` for bench work on a
+shared LAN, `coatheal-link-cap on` before flight. The ground station's
+side is `./COATHEAL-GroundStation.sh --link-cap <port>`.
+
 **Ground station** — a fixed-layout mission console (System / Thermal /
 Motion / Advanced tabs, mission-time plots, alarm strip, command console;
 see [docs/ground-station.md](docs/ground-station.md)). Every session's
@@ -172,6 +180,7 @@ python -m unittest discover -s ground-station/tests -p "test_*.py"
 | `HEATER_TEST <i> <duty> <seconds>` | Bench-only bounded heater pulse after debug arm |
 | `HEATERS_OFF` | Emergency heater shutoff |
 | `SET_POSITION_ZERO <id>` | Declare the current physical motor position as zero |
+| `STEPLOSS_ACK <id>` | Clear a motor's position-uncertain latch after a step-loss event, keeping the zero |
 | `BENDSEQ_LOAD` / `BENDSEQ_RUN` | Define and execute absolute bend sequences |
 | `STEPPER_*` | Direct motor movement commands |
 | `PULL_EXECUTE <id>` | One config-defined standard pull (the console's STANDARD PULL) |

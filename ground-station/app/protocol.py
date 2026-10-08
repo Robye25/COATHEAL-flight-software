@@ -36,6 +36,14 @@ class StepperSnapshot:
     # "ok" (< ~120 °C), "warn" (>= ~120 °C pre-warning), "hot" (>= ~150 °C
     # shutdown; the onboard safety disabled the motor). None: old firmware.
     thermal: Optional[str] = None
+    # Step-loss protection (2026-10-05). `step_loss`: events since onboard
+    # boot that made the open-loop position untrustworthy (chip reset or
+    # supply undervoltage while enabled, a driver fault or stall that ended
+    # a move, a thermal shutdown, a disable while moving).
+    # `position_uncertain`: the latch those events set, cleared onboard by
+    # SET_POSITION_ZERO or STEPLOSS_ACK. None: old firmware.
+    step_loss: Optional[int] = None
+    position_uncertain: Optional[bool] = None
 
 
 @dataclass
@@ -198,6 +206,10 @@ def _parse_stepper_segment(value: str) -> StepperSnapshot:
                 s.mm_tgt = float(raw)
             elif key == "therm":
                 s.thermal = raw
+            elif key == "loss":
+                s.step_loss = int(raw)
+            elif key == "unc":
+                s.position_uncertain = raw not in ("0", "false", "False")
             # unknown keys silently ignored (forward-compat)
         except ValueError as exc:
             raise TelemetryParseError(f"invalid STEPPER {key}={raw!r}: {exc}") from exc
@@ -227,6 +239,8 @@ def _snapshot_to_dict(snap: StepperSnapshot, motor_id: int) -> Dict:
         "mm": snap.mm,
         "mm_tgt": snap.mm_tgt,
         "thermal": snap.thermal,
+        "step_loss": snap.step_loss,
+        "position_uncertain": snap.position_uncertain,
     }
 
 
@@ -504,6 +518,7 @@ KNOWN_COMMANDS = {
     "STEPPER_DISABLE",
     "STEPPER_BEND",
     "SET_POSITION_ZERO",
+    "STEPLOSS_ACK",
     "BENDSEQ_LOAD",
     "BENDSEQ_RUN",
     "BENDSEQ_PAUSE",

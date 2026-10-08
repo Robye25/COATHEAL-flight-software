@@ -133,6 +133,29 @@ def motion_reason(state: OnboardState, motor_id: int, *, needs_zero: bool,
     return None
 
 
+def position_trust_reason(state: OnboardState, motor_id: int) -> Optional[str]:
+    """PULL_ARM / PULL_EXECUTE / BENDSEQ_RUN / BENDSEQ_RESUME: the onboard
+    refuses them while a step-loss event has the position latched uncertain.
+    Jog, BEND, HOME and STOP stay available -- the operator may need them to
+    back the mechanism off."""
+    motor = state.motor(motor_id)
+    if state.have_packet and motor.present and motor.position_uncertain:
+        return (f"M{motor_id} position uncertain after a step-loss event — check the mechanism, "
+                f"then SET ZERO or ACK STEP LOSS")
+    return None
+
+
+def step_loss_ack_reason(state: OnboardState, motor_id: int) -> Optional[str]:
+    """STEPLOSS_ACK: nothing to acknowledge unless the latch is set. Unknown
+    (no telemetry, old firmware) never blocks."""
+    if state.silence:
+        return SILENCE
+    motor = state.motor(motor_id)
+    if state.have_packet and motor.present and motor.position_uncertain is False:
+        return f"M{motor_id} has no step-loss latch to acknowledge"
+    return None
+
+
 def enable_reason(state: OnboardState, motor_id: int) -> Optional[str]:
     if state.silence:
         return SILENCE
@@ -146,7 +169,8 @@ def enable_reason(state: OnboardState, motor_id: int) -> Optional[str]:
 
 
 def sequence_run_reason(state: OnboardState, motor_id: int) -> Optional[str]:
-    reason = motion_reason(state, motor_id, needs_zero=True)
+    reason = (motion_reason(state, motor_id, needs_zero=True)
+              or position_trust_reason(state, motor_id))
     if reason:
         return reason
     motor = state.motor(motor_id)

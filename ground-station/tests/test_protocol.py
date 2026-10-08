@@ -6,7 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.protocol import (
-    PullEvent, StepperSnapshot, TelemetryParseError, build_ack,
+    KNOWN_COMMANDS, PullEvent, StepperSnapshot, TelemetryParseError, build_ack,
     parse_command_response, parse_pull_event, parse_telemetry_csv,
     validate_accel, validate_current_a, validate_duty,
     validate_heater_index, validate_microstep, validate_move_mm,
@@ -132,6 +132,32 @@ class DataFrameTests(unittest.TestCase):
         self.assertEqual(s.mm_tgt, 5.0)
         self.assertEqual(pkt.steppers[0]["amps"], 0.80)
         self.assertEqual(pkt.steppers[0]["mm"], 3.085)
+
+    def test_stepper_step_loss_keys(self) -> None:
+        # 2026-10-05 step-loss protection: loss/unc trail therm.
+        line = STEPPER_DATA.replace("|src:cmd:MOVE", "|src:safety:STEPLOSS|therm:ok|loss:3|unc:1")
+        pkt = parse_telemetry_csv(line)
+        s = pkt.stepper
+        assert isinstance(s, StepperSnapshot)
+        self.assertEqual(s.step_loss, 3)
+        self.assertIs(s.position_uncertain, True)
+        self.assertEqual(s.source, "safety:STEPLOSS")
+        self.assertEqual(pkt.steppers[0]["step_loss"], 3)
+        self.assertIs(pkt.steppers[0]["position_uncertain"], True)
+        clear = parse_telemetry_csv(STEPPER_DATA.replace("|src:cmd:MOVE", "|src:cmd:MOVE|loss:3|unc:0")).stepper
+        self.assertEqual(clear.step_loss, 3, "an acknowledged latch keeps its event count")
+        self.assertIs(clear.position_uncertain, False)
+        # Old firmware says nothing: unknown, not "no step loss".
+        old = parse_telemetry_csv(STEPPER_DATA).stepper
+        self.assertIsNone(old.step_loss)
+        self.assertIsNone(old.position_uncertain)
+        self.assertIsNone(parse_telemetry_csv(STEPPER_DATA).steppers[0]["position_uncertain"])
+        with self.assertRaises(TelemetryParseError):
+            parse_telemetry_csv(STEPPER_DATA.replace("|src:cmd:MOVE", "|src:cmd:MOVE|loss:many"))
+        self.assertIn("STEPLOSS_ACK", KNOWN_COMMANDS)
+
+    # MUTATION: drop the `elif key == "unc"` branch from _parse_stepper_segment
+    # and confirm test_stepper_step_loss_keys fails on position_uncertain.
 
     def test_stepper_drive_settings_absent_on_old_firmware(self) -> None:
         s = parse_telemetry_csv(STEPPER_DATA).stepper

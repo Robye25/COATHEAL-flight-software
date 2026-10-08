@@ -62,6 +62,9 @@ enum class CommandType {
   kStepperDisable,
   kStepperBend,
   kSetPositionZero,
+  // STEPLOSS_ACK <id>: clear the position-uncertain latch a step-loss event
+  // set, keeping the zero (SET_POSITION_ZERO clears it with a new zero).
+  kStepLossAck,
   kBendSeqLoad,
   kBendSeqRun,
   kBendSeqPause,

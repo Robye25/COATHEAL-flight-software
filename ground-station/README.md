@@ -21,6 +21,12 @@ Same flow via **`./COATHEAL-GroundStation.sh`** — bootstraps `.venv`,
 installs dependencies (offering `python3-venv`/`libxcb-cursor0` via apt if
 missing), opens `ufw` ports on request, then launches. `--check` supported.
 
+For flight, add `--link-cap <port>` (the Ethernet port the E-Link is on):
+it installs the ground station's side of the E-Link hard cap, a kernel
+shaper that holds everything this machine sends on that port to its part of
+the 24 kbps ([docs/link-budget.md](../docs/link-budget.md#hard-cap)).
+`--link-cap off` removes it.
+
 ## Requirements
 
 ```bash
@@ -93,7 +99,7 @@ answers `HELLO,plain` and the onboard sends plain lines.
 ### Logs
 
 Every onboard session gets its own directory under `logs/sessions/`
-(`telemetry.csv` schema v6, `pulls.csv`, `commands.csv`, `events.log`,
+(`telemetry.csv` schema v7, `pulls.csv`, `commands.csv`, `events.log`,
 `session.json`); `logs/latest_session.txt` points at the one in use. The
 headless `telemetry-server` writes exactly the same files.
 

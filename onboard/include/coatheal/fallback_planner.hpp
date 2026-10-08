@@ -16,6 +16,9 @@
 // still not ready when the deadline has passed is skipped. Motors run in id
 // order. A refused start fails the plan; a completed/failed plan never runs
 // again, across restarts included, until the operator disarms it.
+// A bend that a safety abort ended before its target (step loss, driver
+// over-temperature) fails that motor, not the plan: the other motor still
+// gets its bend, and the plan ends `failed` once every motor has settled.
 
 #include <chrono>
 #include <cstddef>
@@ -62,6 +65,10 @@ struct FallbackMotorInput {
   bool zeroed = false;
   bool healthy = false;
   bool moving_or_holding = false;
+  // The motor's last move was ended by a safety abort (step loss, driver
+  // over-temperature) instead of reaching its target, and why.
+  bool aborted = false;
+  std::string abort_reason;
   // Mean of the motor's VALID sample temperatures; empty when none is valid.
   std::optional<double> group_temp_c;
 };
@@ -128,6 +135,7 @@ class FallbackPlanner {
 
  private:
   bool AllSettled() const;
+  bool AnyFailed() const;
   void ResetToNone();
   void ClearMotors();
   void MarkDirty() { dirty_ = true; }

@@ -144,6 +144,31 @@ class GatingTests(unittest.TestCase):
         # therm parses through to MotorState.
         self.assertEqual(hot.motor(0).thermal, "hot")
 
+    def test_step_loss_latch_gates_pull_and_sequence_not_manual_moves(self) -> None:
+        latched = state(m0="en:1|zeroed:1|therm:ok|loss:1|unc:1")
+        self.assertIs(latched.motor(0).position_uncertain, True)
+        self.assertEqual(latched.motor(0).step_loss, 1)
+        reason = gating.position_trust_reason(latched, 0) or ""
+        self.assertIn("M0 position uncertain", reason)
+        self.assertIn("SET ZERO", reason)
+        self.assertIn("position uncertain", gating.sequence_run_reason(latched, 0) or "")
+        # Jog, BEND and HOME stay the operator's: the onboard accepts them.
+        self.assertIsNone(gating.motion_reason(latched, 0, needs_zero=False))
+        self.assertIsNone(gating.motion_reason(latched, 0, needs_zero=True))
+        # The acknowledge is offered exactly while there is a latch.
+        self.assertIsNone(gating.step_loss_ack_reason(latched, 0))
+        clear = state(m0="en:1|zeroed:1|therm:ok|loss:1|unc:0")
+        self.assertIsNone(gating.position_trust_reason(clear, 0))
+        self.assertIsNone(gating.sequence_run_reason(clear, 0))
+        self.assertIn("no step-loss latch", gating.step_loss_ack_reason(clear, 0) or "")
+        # Old firmware (no keys) and no telemetry never block either way.
+        old = state()
+        self.assertIsNone(old.motor(0).position_uncertain)
+        self.assertIsNone(gating.position_trust_reason(old, 0))
+        self.assertIsNone(gating.step_loss_ack_reason(old, 0))
+        self.assertIsNone(gating.step_loss_ack_reason(OnboardState(), 0))
+        self.assertEqual(gating.step_loss_ack_reason(state(silence=True), 0), gating.SILENCE)
+
     def test_enable_gate_on_failed_motor(self) -> None:
         st = state()
         self.assertIsNone(gating.enable_reason(st, 0))

@@ -170,6 +170,14 @@ bool StepperController::SetPositionZero(int motor_id, std::string* error) {
   return true;
 }
 
+bool StepperController::AcknowledgeStepLoss(int motor_id,
+                                            std::string* error) {
+  StepperChannel* ch = ChannelById(motor_id);
+  if (!ch) { if (error) *error = "unknown motor id"; return false; }
+  ch->AcknowledgeStepLoss();
+  return true;
+}
+
 bool StepperController::Stop(int motor_id, std::string* error) {
   StepperChannel* ch = ChannelById(motor_id);
   if (!ch) { if (error) *error = "unknown motor id"; return false; }

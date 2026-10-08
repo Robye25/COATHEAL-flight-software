@@ -86,6 +86,12 @@ class MotorCard(QFrame):
         self.thermal_note.setStyleSheet(f"color: {RED}; font-size: 8pt; font-weight: bold; border: none;")
         self.thermal_note.hide()
         lay.addWidget(self.thermal_note)
+        # Step loss: the position below is a count of commanded steps, and
+        # this says when it can no longer be taken at face value.
+        self.loss_note = QLabel(""); self.loss_note.setWordWrap(True); self.loss_note.setMinimumWidth(1)
+        self.loss_note.setStyleSheet(f"color: {RED}; font-size: 8pt; font-weight: bold; border: none;")
+        self.loss_note.hide()
+        lay.addWidget(self.loss_note)
         self.pos = self._kv(lay, "pos / tgt")
         # The operator's primary number during a bend — give it weight.
         self.pos.setStyleSheet(f"{MONO_CSS} border: none; font-size: 11pt; font-weight: bold;")
@@ -109,6 +115,7 @@ class MotorCard(QFrame):
     def update_card(self, motor: MotorState, readout) -> None:
         if not motor.present:
             self.thermal_note.hide()
+            self.loss_note.hide()
             for dot in self.dots.values():
                 dot.set_color(GRAY)
             for lbl in (self.pos, self.speed, self.src, self.seq, self.r_now, self.r_start, self.r_delta):
@@ -146,6 +153,17 @@ class MotorCard(QFrame):
             self.thermal_note.show()
         else:
             self.thermal_note.hide()
+        if motor.position_uncertain:
+            events = f" ({motor.step_loss}×)" if motor.step_loss else ""
+            self.loss_note.setText(f"STEP LOSS{events} — position uncertain; check, then SET ZERO or ACK")
+            self.loss_note.setStyleSheet(f"color: {RED}; font-size: 8pt; font-weight: bold; border: none;")
+            self.loss_note.show()
+        elif motor.step_loss:
+            self.loss_note.setText(f"step-loss events since boot: {motor.step_loss} (acknowledged)")
+            self.loss_note.setStyleSheet(f"color: {MUTED}; font-size: 8pt; border: none;")
+            self.loss_note.show()
+        else:
+            self.loss_note.hide()
         if motor.mm is not None and motor.mm_tgt is not None:
             pos_text = f"{motor.mm:.3f} / {motor.mm_tgt:.3f} mm"
             if motor.moving and motor.hz > 0:
@@ -225,6 +243,11 @@ class MotionTab(QScrollArea):
         self.btn_stop = make_button("STOP", "danger", sends="STEPPER_STOP <motor_id>", min_height=30, slot=lambda: self._send_motor("STEPPER_STOP"))
         grid.addWidget(self.btn_enable, 0, 0); grid.addWidget(self.btn_disable, 0, 1); grid.addWidget(self.btn_zero, 0, 2)
         grid.addWidget(self.btn_home, 1, 0); grid.addWidget(self.btn_stop, 1, 1, 1, 2)
+        # Clears the onboard's position-uncertain latch without moving the
+        # zero: the operator checked the mechanism and accepts the position.
+        self.btn_ack_loss = make_button("ACK STEP LOSS", "neutral", sends="STEPLOSS_ACK <motor_id>", min_height=24,
+                                        slot=lambda: self._send_motor("STEPLOSS_ACK"))
+        grid.addWidget(self.btn_ack_loss, 2, 0, 1, 3)
         lay.addLayout(grid)
         self.motor_note = QLabel(""); self.motor_note.setWordWrap(True); self.motor_note.setMinimumWidth(1)
         self.motor_note.setStyleSheet(f"color: {AMBER}; font-size: 8pt;")
@@ -406,6 +429,7 @@ class MotionTab(QScrollArea):
         self.btn_zero.set_reason(gating.generic_reason(state))
         self.btn_stop.set_reason(gating.generic_reason(state))
         self.btn_home.set_reason(gating.motion_reason(state, motor_id, needs_zero=True))
+        self.btn_ack_loss.set_reason(gating.step_loss_ack_reason(state, motor_id))
         jog_reason = gating.motion_reason(state, motor_id, needs_zero=False)
         for btn in self.jog_buttons:
             btn.set_reason(jog_reason)
@@ -421,8 +445,16 @@ class MotionTab(QScrollArea):
             self.drive_now.setText("—")
         bend_reason = gating.motion_reason(state, motor_id, needs_zero=True)
         self.btn_bend.set_reason(bend_reason)
-        self.btn_pull.set_reason(bend_reason)
-        self.bend_note.setText(f"BEND / STANDARD PULL disabled: {bend_reason}" if bend_reason else "")
+        # The onboard refuses a standard pull while the position is latched
+        # uncertain; a manual BEND stays the operator's call.
+        pull_reason = bend_reason or gating.position_trust_reason(state, motor_id)
+        self.btn_pull.set_reason(pull_reason)
+        if bend_reason:
+            self.bend_note.setText(f"BEND / STANDARD PULL disabled: {bend_reason}")
+        elif pull_reason:
+            self.bend_note.setText(f"STANDARD PULL disabled: {pull_reason}")
+        else:
+            self.bend_note.setText("")
 
     def on_pull_event(self, ev: PullEvent) -> None:
         # Freeze the mm value at arrival: steps_moved is in µsteps at the

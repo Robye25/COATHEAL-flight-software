@@ -1,6 +1,10 @@
 #include "coatheal/link_budget.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <cstdlib>
+#include <fstream>
 #include <thread>
 #include <utility>
 
@@ -78,6 +82,27 @@ std::chrono::milliseconds AckDeadline(int fd) {
 
 }  // namespace wire
 
+std::string LinkCapState(const std::string& state_file) {
+  std::string path = state_file;
+  if (path.empty()) {
+    const char* env = std::getenv("COATHEAL_LINK_CAP_STATE");
+    path = (env != nullptr && *env != '\0') ? env : "/run/coatheal-link-cap.state";
+  }
+  std::ifstream state(path);
+  std::string word, port;
+  if (!(state >> word >> port) || word != "on") return "off";
+  // Ports are named by the kernel: letters, digits, '.', '_', '-'.
+  for (const char c : port) {
+    if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '_' || c == '-')) {
+      return "off";
+    }
+  }
+  std::ifstream mtu_file("/sys/class/net/" + port + "/mtu");
+  std::uint32_t mtu = 0;
+  if (!(mtu_file >> mtu) || mtu > wire::kLinkMtu) return "stale:" + port;
+  return "on:" + port;
+}
+
 LinkBudget::LinkBudget(std::uint32_t share_bytes, Clock::duration window, NowFn now)
     : share_(share_bytes), window_(window), now_(std::move(now)) {
   if (!now_) now_ = [] { return Clock::now(); };
@@ -85,18 +110,19 @@ LinkBudget::LinkBudget(std::uint32_t share_bytes, Clock::duration window, NowFn 
 
 LinkBudget::Clock::time_point LinkBudget::Now() const { return now_(); }
 
-bool LinkBudget::TryCharge(std::uint32_t bytes, LinkPriority priority) {
+bool LinkBudget::TryCharge(std::uint32_t bytes, LinkPriority priority, std::uint32_t tx_bytes) {
   std::lock_guard<std::mutex> lock(mu_);
-  return AdmitLocked(bytes, priority, now_(), /*open=*/false, nullptr);
+  return AdmitLocked(bytes, priority, now_(), /*open=*/false, nullptr, tx_bytes);
 }
 
-bool LinkBudget::TryHold(std::uint32_t bytes, LinkPriority priority, Ticket* ticket) {
+bool LinkBudget::TryHold(std::uint32_t bytes, LinkPriority priority, Ticket* ticket,
+                         std::uint32_t tx_bytes) {
   std::lock_guard<std::mutex> lock(mu_);
-  return AdmitLocked(bytes, priority, now_(), /*open=*/true, ticket);
+  return AdmitLocked(bytes, priority, now_(), /*open=*/true, ticket, tx_bytes);
 }
 
 bool LinkBudget::WaitHold(std::uint32_t bytes, LinkPriority priority,
-                          Clock::time_point deadline, Ticket* ticket) {
+                          Clock::time_point deadline, Ticket* ticket, std::uint32_t tx_bytes) {
   std::unique_lock<std::mutex> lock(mu_);
   // A request larger than the whole share can never be admitted.
   if (bytes > share_) return false;
@@ -107,7 +133,7 @@ bool LinkBudget::WaitHold(std::uint32_t bytes, LinkPriority priority,
     // Leave the waiter list before the admission check so this waiter does
     // not count as "more urgent" against itself.
     waiting_.erase(std::find(waiting_.begin(), waiting_.end(), static_cast<int>(priority)));
-    if (AdmitLocked(bytes, priority, now, /*open=*/true, ticket)) {
+    if (AdmitLocked(bytes, priority, now, /*open=*/true, ticket, tx_bytes)) {
       admitted = true;
       break;
     }
@@ -187,11 +213,64 @@ bool LinkBudget::MoreUrgentWaitingLocked(LinkPriority priority) const {
                      [&](int waiter) { return waiter < static_cast<int>(priority); });
 }
 
+void LinkBudget::SetEgressShaper(std::uint32_t burst_bytes, std::uint32_t rate_bytes_per_s) {
+  std::lock_guard<std::mutex> lock(mu_);
+  egress_burst_ = burst_bytes;
+  egress_rate_ = rate_bytes_per_s;
+  egress_tokens_ = burst_bytes;
+  egress_stamp_ = now_();
+  cv_.notify_all();
+}
+
+void LinkBudget::RefillEgressLocked(Clock::time_point now) const {
+  if (now > egress_stamp_) {
+    egress_tokens_ = std::min(
+        egress_burst_,
+        egress_tokens_ + egress_rate_ * std::chrono::duration<double>(now - egress_stamp_).count());
+    egress_stamp_ = now;
+  }
+}
+
+void LinkBudget::DebitEgress(std::uint32_t bytes) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (egress_burst_ <= 0.0) return;
+  RefillEgressLocked(now_());
+  // The kernel's bucket is never emptier than empty: what does not fit waits
+  // in its queue (at most a second's worth) or is dropped. The model's debt
+  // is bounded the same way, or a burst nobody scheduled -- a port scan of
+  // the command port -- would hold our own traffic back long after the
+  // kernel has let it go.
+  egress_tokens_ = std::max(egress_tokens_ - bytes, -egress_burst_);
+}
+
+void LinkBudget::RefundEgress(std::uint32_t bytes) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (egress_burst_ <= 0.0) return;
+  RefillEgressLocked(now_());
+  egress_tokens_ = std::min(egress_burst_, egress_tokens_ + bytes);
+  cv_.notify_all();
+}
+
+std::int64_t LinkBudget::EgressTokens() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (egress_burst_ <= 0.0) return 0;
+  RefillEgressLocked(now_());
+  return static_cast<std::int64_t>(std::floor(egress_tokens_));
+}
+
 bool LinkBudget::AdmitLocked(std::uint32_t bytes, LinkPriority priority,
-                             Clock::time_point now, bool open, Ticket* ticket) {
+                             Clock::time_point now, bool open, Ticket* ticket,
+                             std::uint32_t tx_bytes) {
   if (bytes > share_) return false;
   if (MoreUrgentWaitingLocked(priority)) return false;
   if (InWindowLocked(now) + static_cast<std::uint64_t>(bytes) > share_) return false;
+  if (egress_burst_ > 0.0 && tx_bytes > 0) {
+    RefillEgressLocked(now);
+    // A charge larger than the bucket goes when the bucket is full, and
+    // leaves it in debt.
+    if (egress_tokens_ < std::min<double>(tx_bytes, egress_burst_)) return false;
+    egress_tokens_ -= tx_bytes;
+  }
   Entry entry;
   entry.id = next_id_++;
   entry.end = open ? Clock::time_point::max() : now;

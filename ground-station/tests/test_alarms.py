@@ -65,6 +65,25 @@ class EvaluateTests(unittest.TestCase):
         self.assertNotIn("M1_TEMP", {a.key for a in evaluate(state(m1="mv:0|therm:ok"))})
         self.assertNotIn("M1_TEMP", {a.key for a in evaluate(state())})
 
+    def test_step_loss_alarm_names_the_motor_and_the_way_out(self) -> None:
+        latched = {a.key: a for a in evaluate(state(m1="mv:0|therm:ok|loss:2|unc:1"))}
+        alarm = latched["M1_STEPLOSS"]
+        self.assertEqual(alarm.severity, "red")
+        self.assertIn("M1 STEP LOSS (2 events)", alarm.text)
+        self.assertIn("position uncertain", alarm.text)
+        self.assertIn("CHECK MOTOR1", alarm.text)
+        self.assertIn("STEPLOSS_ACK 1", alarm.text)
+        self.assertIn("SET ZERO", alarm.text)
+        self.assertNotIn("M0_STEPLOSS", latched)
+        self.assertIn("(1 event)", {a.key: a for a in evaluate(state(m1="mv:0|loss:1|unc:1"))}["M1_STEPLOSS"].text)
+        # Acknowledged onboard (events counted, latch clear), and old
+        # firmware that reports neither key: no alarm.
+        self.assertNotIn("M1_STEPLOSS", {a.key for a in evaluate(state(m1="mv:0|loss:2|unc:0"))})
+        self.assertNotIn("M1_STEPLOSS", {a.key for a in evaluate(state())})
+
+    # MUTATION: remove the position_uncertain branch from evaluate and
+    # confirm test_step_loss_alarm_names_the_motor_and_the_way_out fails.
+
     def test_debug_arm_energy_prealarm_and_rtc(self) -> None:
         armed = {a.key: a for a in evaluate(state(ctrl="fallback:0|queue:0|debug:1"))}
         self.assertEqual(armed["DEBUG_ARM"].severity, "amber")

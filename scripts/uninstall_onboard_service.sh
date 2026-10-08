@@ -10,6 +10,7 @@ UNITS=(
   coatheal-onboard-debug.service
   coatheal-link-watch.service
   coatheal-link-watch.path
+  coatheal-link-cap.service
 )
 
 SUDO=""
@@ -37,5 +38,9 @@ $SUDO systemctl reset-failed || true
 
 # Clean up runtime cool-down file left by link-watch.
 $SUDO rm -f /run/coatheal-link-watch.cooldown || true
+
+# Disabling the hard-cap unit above removed the shaper (its ExecStop); the
+# command and the switch go with it.
+$SUDO rm -f /usr/local/bin/coatheal-link-cap /etc/coatheal/link-cap.env || true
 
 echo "[uninstall-service] done."
