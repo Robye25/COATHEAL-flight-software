@@ -39,6 +39,16 @@ struct StepperStatus {
   std::uint64_t pulses_total = 0;       // driver.pulses_issued() mirror
   std::uint64_t missed_deadlines = 0;
   std::string last_source;              // "phase:FLOAT_HOLD", "cmd:MOVE", ...
+  // Step-loss protection. The motors run open loop, so the position above
+  // is a count of commanded steps. `step_loss_events` counts, since boot,
+  // everything that made that count untrustworthy (chip reset or supply
+  // undervoltage while enabled, a driver fault or stall that ended a move,
+  // a thermal shutdown, a disable while moving). `position_uncertain` is
+  // the latch those events set; SET_POSITION_ZERO or STEPLOSS_ACK clears
+  // it. Wire: `|loss:<n>|unc:<0|1>`.
+  std::uint64_t step_loss_events = 0;
+  bool position_uncertain = false;
+  std::string step_loss_reason;         // the event that set the latch
   // Filled by SystemController (the channel does not know them): whether
   // SET_POSITION_ZERO has run since boot, and the bend-sequence state.
   // Wire: `|zeroed:<0|1>|seq:<name or ->|seqst:<idle|run|pause>`.
@@ -106,6 +116,9 @@ class StepperController {
   bool Rotate(int motor_id, double revolutions, std::string* error);
   bool Home(int motor_id, std::string* error);
   bool SetPositionZero(int motor_id, std::string* error);
+  // STEPLOSS_ACK: clears the position-uncertain latch without moving the
+  // zero (the operator checked the mechanism and accepts the position).
+  bool AcknowledgeStepLoss(int motor_id, std::string* error);
   bool Stop(int motor_id, std::string* error);
   bool SetSpeed(int motor_id, double step_hz, std::string* error);
   bool SetAccel(int motor_id, double accel_steps_per_s2, std::string* error);

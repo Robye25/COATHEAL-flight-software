@@ -91,6 +91,18 @@ def parse_layout(body: str) -> Optional[Layout]:
     return layout
 
 
+def parse_lead_mm(body: str) -> Optional[float]:
+    """The ball-screw lead (`lead_mm=<mm per revolution>`) a GET_LAYOUT reply
+    carries, or None when the firmware does not report it (or reports
+    something that is not a positive number)."""
+    raw = parse_kv_body(body).get("lead_mm")
+    try:
+        value = float(raw) if raw is not None else math.nan
+    except ValueError:
+        return None
+    return value if math.isfinite(value) and value > 0 else None
+
+
 @dataclass(frozen=True)
 class MotorState:
     motor_id: int
@@ -118,6 +130,11 @@ class MotorState:
     # Driver die thermal state: "ok" / "warn" (>=~120 °C) / "hot"
     # (>=~150 °C, onboard safety disabled the motor). None: old firmware.
     thermal: Optional[str] = None
+    # Step-loss protection: events since onboard boot, and the onboard's
+    # position-uncertain latch (SET ZERO or STEPLOSS_ACK clears it). None:
+    # old firmware.
+    step_loss: Optional[int] = None
+    position_uncertain: Optional[bool] = None
 
 
 @dataclass(frozen=True)
@@ -231,6 +248,8 @@ def state_from_packet(pkt: TelemetryPacket, *, silence: bool = False,
             amps=snap.get("amps"), accel=snap.get("accel"),
             mm=snap.get("mm"), mm_tgt=snap.get("mm_tgt"),
             thermal=snap.get("thermal"),
+            step_loss=snap.get("step_loss"),
+            position_uncertain=snap.get("position_uncertain"),
         ))
     return OnboardState(
         have_packet=True, session_id=pkt.session_id, seq=pkt.seq,

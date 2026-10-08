@@ -217,6 +217,11 @@ wrong chopper mode. The flight bend runs at ≤ 0.5 mm/s
 StealthChop's silence does not; set `true` only for a bench experiment.
 `MOTOR_DEBUG` reports the live mode as `stealth=0|1`.
 
+`motor*.stall_detect` (`monitor`), `motor*.stallguard_sgt` (`0`) and
+`motor*.stall_sg_min` (`0`), with `stepper.stall_min_step_hz` (`50.0`) and
+`stepper.stall_confirm_samples` (`3`), configure the StallGuard2 part of the
+step-loss protection: section 12.
+
 `motor*.current_range_a_peak` and `motor*.pulse_high_us` no longer exist —
 the TMC5160 does not use TMC2240-style fixed peak-current ranges (section 6
 below), and there is no STEP pulse to time.
@@ -304,8 +309,8 @@ Step(fwd) -> target_ += (fwd XOR invert_direction) ? +Δ : -Δ
 
 The ramp generator then smooths that single-microstep nudge into the actual
 coil drive waveform in hardware, at a demanded rate the pacing thread paces
-(≤ the speed ceiling: 50 full-steps/s = `stepper.max_speed_mm_s` 0.5 mm/s at
-the 2 mm lead, or `pull.max_step_hz` if that is lower). `Δ = 256 / microstep_divisor`
+(≤ the speed ceiling: 100 full-steps/s = `stepper.max_speed_mm_s` 0.5 mm/s at
+the 1 mm lead, or `pull.max_step_hz` if that is lower). `Δ = 256 / microstep_divisor`
 because XTARGET always counts in the ramp generator's fixed 256
 internal-microsteps-per-fullstep resolution, regardless of the configured
 `MRES`/microstep divisor.
@@ -624,6 +629,10 @@ CHOPCONF readback mismatch, and re-probes on the next `driver_retry_ms`
 interval or explicit `CHECK`. Expect the small re-init transient described in
 section 7 on each such re-probe; do not chase it as a fault in isolation.
 
+A move that stops short with `src:safety:STEPLOSS` was ended by the
+step-loss protection (section 12): `CHECK MOTORn` and `MOTOR_DEBUG n` name
+the event, and `BENDSEQ_STATUS` shows `fault=step loss: <reason>`.
+
 ## 11. Acceptance Checklist
 
 - [ ] QHV5160 v2 carrier pinout confirmed against its own documentation, not
@@ -645,6 +654,149 @@ section 7 on each such re-probe; do not chase it as a fault in isolation.
 - [ ] Phase current and carrier temperature measured at the commissioning
       `run_current_a_rms`.
 - [ ] Driver-fault shutdown and service-restart behaviour verified.
+- [ ] Step-loss protection (section 12): `loss:0|unc:0` on both motors after
+      the out-and-back tests; a `STEPPER_DISABLE` during a move raises the
+      alarm and `STEPLOSS_ACK` clears it.
+- [ ] StallGuard free-run and loaded `sg_min` recorded for both motors at
+      flight speed and current (section 12); `motor*.stall_detect` left at
+      `monitor`, or set to `stop` with the calibration verified.
+
+## 12. Step-Loss Protection
+
+The motors run open loop. There is no encoder and no limit switch, so the
+position the firmware reports is a count of the steps it commanded. A step is
+"lost" whenever the rotor did not take one that was counted. The firmware
+cannot measure that directly; it watches every signal the TMC5160 gives that
+the rotor could not have followed, counts each as a **step-loss event** and
+latches the motor's position as **uncertain** until the operator has dealt
+with it.
+
+### Always on
+
+Nothing here needs configuring, and none of it adds bus traffic to a step:
+the status byte comes back with every position write, the `GSTAT` and
+`DRV_STATUS` reads every 64 steps and once a second while idle were already
+there, and the two new reads are one `XTARGET` readback per leg and one
+`XACTUAL` read per idle second.
+
+| What is watched | Why it means lost steps | Reaction |
+|---|---|---|
+| Chip reset while the motor is enabled (status-byte reset flag on every `XTARGET` write, `GSTAT.reset`) | the supply dropped: the driver let the rotor go, and steps written since went to a ramp generator with `VMAX=0` | chip re-initialised on that same step (it used to take up to 64); event; the move **continues** |
+| Motor-supply undervoltage (`GSTAT.uv_cp`) while enabled | the power stage is off for as long as the supply is low | flag cleared; one event per episode; the move continues |
+| Driver error (`GSTAT.drv_err`) with no cause left in `DRV_STATUS` | the power stage was shut down and came back | event; the move continues |
+| Short on a coil (`s2ga`, `s2gb`, `s2vsa`, `s2vsb`) | the chip switched that bridge off and keeps it off | event; the step is refused, so the move stops and the motor is **disabled**; `STEPPER_ENABLE` re-arms the bridge |
+| Over-temperature shutdown (`ot`) | the chip cut its outputs | event; motor disabled (unchanged behaviour, now also latched) |
+| Chip not at its commanded position at standstill (`XACTUAL`, two idle polls in a row) | the ramp generator did not execute the move, or the chip is not answering truthfully | event; a hold ends; driver marked unhealthy and re-probed |
+| Last `XTARGET` of a leg reads back wrong | an SPI write was corrupted; uncorrected, the motor would run to a position nobody asked for | rewritten once, counted (`xt_repairs`), a warning — not an event unless the rewrite fails |
+| Driver refuses a step (bus failure) | the motor is disabled mid-move | event; motor disabled (unchanged behaviour, now also latched) |
+| `STEPPER_DISABLE` while moving | the rotor coasts | event |
+| Open load (`ola`/`olb`) while stepping | a coil may be disconnected | counted and journalled; a warning, never a stop |
+
+A chip reset or an undervoltage does not stop the move. Stopping would not
+bring a step back, the retract leg of a pull is what takes the strain off the
+specimens, and under link loss there is nobody to resume. The event and the
+latch say that the position is no longer exact.
+
+### What the operator sees
+
+- Telemetry: `STEPPERn` `loss:<events since start>` and `unc:<0|1>`; `src`
+  reads `safety:STEPLOSS` when an event ended the move.
+- Console: a red `Mn STEP LOSS` alarm, a banner on the motor card, and
+  `ACK STEP LOSS` in the Motion tab's selected-motor controls; STANDARD PULL
+  and the sequence RUN/RESUME buttons are disabled with the reason.
+- `CHECK MOTORn`: `motorN_warn=` lists the counts and `POSITION UNCERTAIN
+  after N step-loss event(s): <reason>`.
+- `MOTOR_DEBUG n` (Debug tab): `loss`, `unc`, `loss_reason`, and the driver
+  statistics `stall_mode`, `sgt`, `sg_thr`, `sg_last`, `sg_min`, `sg_n`,
+  `stalls`, `uv`, `shorts`, `openload`, `xt_repairs`.
+- Journal: `[tmc5160] … STEP LOSS #n -- <reason>` and, when a move was
+  stopped, `[stepper] motor n: step loss -- move stopped at …`.
+
+While the latch is set the onboard refuses `PULL_ARM`, `PULL_EXECUTE`,
+`BENDSEQ_RUN` and `BENDSEQ_RESUME`. Jog, `STEPPER_MOVETO[_MM]`,
+`STEPPER_HOME` and `STEPPER_STOP` still work, so the mechanism can be backed
+off. Clear the latch with `SET_POSITION_ZERO <id>` at the reference position,
+or with `STEPLOSS_ACK <id>` if the position is accepted as it is. The
+link-loss fallback plan does not wait for either; a plan bend that an event
+stopped ends `failed`, and the other motor still gets its bend.
+
+### StallGuard2: monitor by default
+
+The one signal that speaks about the rotor itself is StallGuard2: in
+spreadCycle the TMC5160 measures the motor's load angle from its back-EMF and
+reports it as `SG_RESULT` (0…1023, high when the motor runs free, falling to
+0 at a stall). The driver writes `COOLCONF` (`sgt` from the config, `sfilt`
+on, coolStep left off) and reads `SG_RESULT` once per electrical period
+(four full steps) while the channel cruises at a steady rate of at least
+`stepper.stall_min_step_hz`. `stepper.stall_confirm_samples` consecutive
+samples at or under `motorN.stall_sg_min` are a stall verdict. The chip's own
+stop-on-stall (`SW_MODE.sg_stop`, `TCOOLTHRS`) is not used: a latched stop
+event inside the chip is not something to discover in flight.
+
+`motorN.stall_detect` decides what a verdict does:
+
+| Mode | A stall verdict |
+|---|---|
+| `off` | StallGuard is not sampled |
+| `monitor` (default) | counted (`stalls`), journalled once per move, shown in `CHECK`; the move continues and nothing is latched |
+| `stop` | step-loss event: no further step is issued, the motor stays enabled and holds, the position is latched uncertain |
+
+**The default is `monitor` because the measurement is unproven on this rig.**
+StallGuard2 needs back-EMF, and at the flight speed — 0.5 mm/s, 100
+full-steps/s, half a revolution per second at the 1 mm lead — there is
+little of it; the usual guidance is that it becomes dependable at about one
+revolution per second and above. The position dribble (section 7) also makes
+the chip's velocity ripple between writes. Whether `SG_RESULT` separates a
+loaded bend from a stall here has not been measured: every number that
+exists was taken before the 2026-08-29 units fix, with the motor buzzing in
+place. With thresholds that do not separate the two, `stop` would abort good
+bends, and under link loss an aborted bend is not resumed.
+
+### Calibrating StallGuard on the bench
+
+Do this per motor, in spreadCycle (`stealth_chop=false`), at the flight run
+current and the flight speed, with `stall_detect=monitor`.
+
+1. **Free run.** Screw decoupled from the specimens, a long move at flight
+   speed in each direction (`STEPPER_MOVE_MM <id> 5` is ten seconds of
+   cruise, about 240 samples). Read `MOTOR_DEBUG <id>` afterwards: `sg_n`
+   must be well above zero — if it is 0 the motor never reached a steady
+   rate at or above `stall_min_step_hz` — and note `sg_min`. Repeat a few
+   times.
+2. **Loaded run.** Specimens mounted, the real bend. Note `sg_min` again:
+   this is the lowest reading a good bend produces.
+3. **Stalled.** Stall the motor on purpose and note `sg_last` / `sg_min`. The
+   1 mm screw turns the motor torque into a large axial force: do not stall
+   it against the specimens or the frame. Hold the motor shaft with the
+   screw nut disconnected, or use a spare motor of the same type.
+4. **Judge.** `stop` is usable only if the loaded reading sits clearly above
+   the stalled one on every run. If `SG_RESULT` is 0 or close to it while
+   running free, raise `motorN.stallguard_sgt` (positive makes the same load
+   read higher) and repeat; if it stays high when stalled, lower it. If no
+   `sgt` separates the two at this speed, leave `monitor` — that is a
+   result, not a failure of the procedure.
+5. **Set.** `motorN.stallguard_sgt` as found, `motorN.stall_sg_min` between
+   the stalled reading and the lowest loaded one, nearer the stalled side,
+   `motorN.stall_detect=stop`. `coatheal-deploy` keeps these keys; restart
+   the service and check the journal line `[stepper] step-loss protection:
+   … stall detect …`.
+6. **Verify.** Twenty loaded bends with no stop (`loss` stays put), then a
+   deliberate stall as in step 3: the move must stop, `src` read
+   `safety:STEPLOSS`, `unc` read 1, the motor stay enabled, and
+   `STEPLOSS_ACK <id>` clear it. With three confirming samples, one per four
+   full steps and each filtered over the four before it, the verdict comes
+   twelve to sixteen full steps after the stall begins: 0.06–0.08 mm of
+   commanded travel at the 1 mm lead.
+7. **Cold.** Coil resistance and grease change `SG_RESULT` with temperature.
+   Repeat the free and loaded runs cold if a chamber is available; if not,
+   that is a reason to stay with `monitor`.
+
+### What this does not cover
+
+A rotor that slips under load without a stall verdict, backlash, and a
+coupling that turns on its shaft leave no electrical trace. Only a position
+sensor on the screw would find them. The resistance readout of the monitored
+specimen remains the independent evidence that a bend took place.
 
 ## Bench note 2026-08-28: enable-line verification in both directions
 

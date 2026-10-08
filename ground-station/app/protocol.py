@@ -36,6 +36,14 @@ class StepperSnapshot:
     # "ok" (< ~120 °C), "warn" (>= ~120 °C pre-warning), "hot" (>= ~150 °C
     # shutdown; the onboard safety disabled the motor). None: old firmware.
     thermal: Optional[str] = None
+    # Step-loss protection (2026-10-05). `step_loss`: events since onboard
+    # boot that made the open-loop position untrustworthy (chip reset or
+    # supply undervoltage while enabled, a driver fault or stall that ended
+    # a move, a thermal shutdown, a disable while moving).
+    # `position_uncertain`: the latch those events set, cleared onboard by
+    # SET_POSITION_ZERO or STEPLOSS_ACK. None: old firmware.
+    step_loss: Optional[int] = None
+    position_uncertain: Optional[bool] = None
 
 
 @dataclass
@@ -198,6 +206,10 @@ def _parse_stepper_segment(value: str) -> StepperSnapshot:
                 s.mm_tgt = float(raw)
             elif key == "therm":
                 s.thermal = raw
+            elif key == "loss":
+                s.step_loss = int(raw)
+            elif key == "unc":
+                s.position_uncertain = raw not in ("0", "false", "False")
             # unknown keys silently ignored (forward-compat)
         except ValueError as exc:
             raise TelemetryParseError(f"invalid STEPPER {key}={raw!r}: {exc}") from exc
@@ -227,6 +239,8 @@ def _snapshot_to_dict(snap: StepperSnapshot, motor_id: int) -> Dict:
         "mm": snap.mm,
         "mm_tgt": snap.mm_tgt,
         "thermal": snap.thermal,
+        "step_loss": snap.step_loss,
+        "position_uncertain": snap.position_uncertain,
     }
 
 
@@ -504,6 +518,7 @@ KNOWN_COMMANDS = {
     "STEPPER_DISABLE",
     "STEPPER_BEND",
     "SET_POSITION_ZERO",
+    "STEPLOSS_ACK",
     "BENDSEQ_LOAD",
     "BENDSEQ_RUN",
     "BENDSEQ_PAUSE",
@@ -753,18 +768,20 @@ def validate_tick_hz(hz: float) -> Tuple[bool, str]:
 
 
 # Owner motion envelope (2026-09-11), mirrored from the onboard config:
-# stepper.max_speed_mm_s = 0.5 mm/s of ball-screw travel, which at the 2 mm
-# lead and 200 full steps/rev is 50 full-steps/s, and
-# stepper.max_direct_usteps = 1000, the longest raw-microstep move
-# (STEPPER_MOVE / STEPPER_MOVETO / STEPPER_BEND) the onboard accepts.
-# Change these together with config/onboard.example.ini.
+# stepper.max_speed_mm_s = 0.5 mm/s of ball-screw travel, which at the 1 mm
+# lead (stepper.lead_mm_per_rev, owner 2026-09-15) and 200 full steps/rev is
+# 100 full-steps/s, and stepper.max_direct_usteps = 1000, the longest
+# raw-microstep move (STEPPER_MOVE / STEPPER_MOVETO / STEPPER_BEND) the
+# onboard accepts. Change these together with config/onboard.example.ini; the
+# onboard reports its lead in GET_LAYOUT (`lead_mm=`) and the window warns
+# when it differs.
 MAX_SPEED_MM_S = 0.5
-LEAD_MM_PER_REV = 2.0
+LEAD_MM_PER_REV = 1.0
 FULL_STEPS_PER_REV = 200
-FULL_STEPS_PER_MM = FULL_STEPS_PER_REV / LEAD_MM_PER_REV              # 100
-MAX_SPEED_HZ = MAX_SPEED_MM_S * FULL_STEPS_PER_MM                     # 50.0
+FULL_STEPS_PER_MM = FULL_STEPS_PER_REV / LEAD_MM_PER_REV              # 200
+MAX_SPEED_HZ = MAX_SPEED_MM_S * FULL_STEPS_PER_MM                     # 100.0
 MAX_ACCEL_STEPS_S2 = 5000.0         # stepper.max_accel_steps_per_s2
-MAX_ACCEL_MM_S2 = MAX_ACCEL_STEPS_S2 / FULL_STEPS_PER_MM              # 50.0
+MAX_ACCEL_MM_S2 = MAX_ACCEL_STEPS_S2 / FULL_STEPS_PER_MM              # 25.0
 MAX_DIRECT_USTEPS = 1000
 
 
@@ -783,11 +800,11 @@ def mm_s_from_hz(hz: float) -> float:
 def validate_speed_hz(hz: float, max_hz: float = MAX_SPEED_HZ) -> Tuple[bool, str]:
     """Validate a motor speed in full-step Hz.
 
-    The onboard clamps `STEPPER_SET_SPEED` to its speed ceiling (50
-    full-steps/s = 0.5 mm/s at the 2 mm lead in the flight config) and
+    The onboard clamps `STEPPER_SET_SPEED` to its speed ceiling (100
+    full-steps/s = 0.5 mm/s at the 1 mm lead in the flight config) and
     NACKs `BENDSEQ_LOAD` / `FALLBACK_PLAN` speeds above it, so the ground
     station refuses anything above that bound up front instead of letting
-    a 100 Hz request silently become 50 Hz.
+    a 200 Hz request silently become 100 Hz.
     """
     try:
         v = float(hz)
@@ -856,9 +873,10 @@ def validate_revolutions(revs: float) -> Tuple[bool, str]:
 def validate_move_mm(mm: float, max_mm: float = 500.0) -> Tuple[bool, str]:
     """Validate a linear move distance/target in millimetres.
 
-    The default bound mirrors the onboard travel limit: 200000 microsteps at
-    the commissioning defaults (u4, 200 full-steps/rev, 2 mm lead) is
-    500 mm. The onboard still enforces max_position_steps after conversion.
+    The default bound is a coarse sanity check (200000 microsteps at u4 and
+    200 full-steps/rev is 250 revolutions: 250 mm at the 1 mm lead, 500 mm
+    at the old 2 mm one); the onboard enforces max_position_steps after
+    conversion.
     """
     try:
         v = float(mm)

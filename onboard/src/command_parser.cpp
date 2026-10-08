@@ -130,6 +130,8 @@ std::string CommandTypeToString(CommandType type) {
       return "STEPPER_BEND";
     case CommandType::kSetPositionZero:
       return "SET_POSITION_ZERO";
+    case CommandType::kStepLossAck:
+      return "STEPLOSS_ACK";
     case CommandType::kBendSeqLoad:
       return "BENDSEQ_LOAD";
     case CommandType::kBendSeqRun:
@@ -250,6 +252,7 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
       {"STEPPER_DISABLE", CommandType::kStepperDisable},
       {"STEPPER_BEND", CommandType::kStepperBend},
       {"SET_POSITION_ZERO", CommandType::kSetPositionZero},
+      {"STEPLOSS_ACK", CommandType::kStepLossAck},
       {"BENDSEQ_LOAD", CommandType::kBendSeqLoad},
       {"BENDSEQ_RUN", CommandType::kBendSeqRun},
       {"BENDSEQ_PAUSE", CommandType::kBendSeqPause},
@@ -402,6 +405,7 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
       }
       break;
     case CommandType::kSetPositionZero:
+    case CommandType::kStepLossAck:
     case CommandType::kBendSeqPause:
     case CommandType::kBendSeqResume:
     case CommandType::kBendSeqStop:

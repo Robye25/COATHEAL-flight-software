@@ -21,12 +21,39 @@ else()
   message(WARNING "libgpiod not found: building WITHOUT GPIO (heaters/motors are stubs)")
 endif()
 
+# zlib compresses telemetry lines for the 24 kbps E-Link budget
+# (docs/link-budget.md). Without it the link falls back to plain frames, and
+# a plain DATA frame does not fit the budget at all -- deploy_onboard.sh
+# requires it.
+find_package(ZLIB QUIET)
+option(COATHEAL_REQUIRE_ZLIB "Fail to configure when zlib is not found" OFF)
+if(COATHEAL_REQUIRE_ZLIB AND NOT ZLIB_FOUND)
+  message(FATAL_ERROR "zlib not found. Install zlib1g-dev, or configure with -DCOATHEAL_REQUIRE_ZLIB=OFF.")
+endif()
+if(ZLIB_FOUND)
+  message(STATUS "zlib ${ZLIB_VERSION_STRING}: z1 telemetry compression enabled")
+else()
+  message(WARNING "zlib not found: telemetry is sent uncompressed, and DATA frames do not fit the link budget")
+endif()
+
+# The z1 preset dictionary is shared, byte for byte, with the ground station:
+# embed protocol/telemetry-dictionary-z1.txt instead of copying it.
+set(COATHEAL_DICTIONARY_Z1 "${CMAKE_SOURCE_DIR}/protocol/telemetry-dictionary-z1.txt")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${COATHEAL_DICTIONARY_Z1}")
+file(READ "${COATHEAL_DICTIONARY_Z1}" _coatheal_dictionary_hex HEX)
+string(LENGTH "${_coatheal_dictionary_hex}" _coatheal_dictionary_hex_length)
+math(EXPR COATHEAL_DICTIONARY_Z1_SIZE "${_coatheal_dictionary_hex_length} / 2")
+string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," COATHEAL_DICTIONARY_Z1_BYTES "${_coatheal_dictionary_hex}")
+configure_file(src/telemetry_dictionary_z1.cpp.in
+               "${CMAKE_CURRENT_BINARY_DIR}/generated/telemetry_dictionary_z1.cpp" @ONLY)
+
 add_library(coatheal_onboard_core
   src/command_parser.cpp
   src/command_server.cpp
   src/config.cpp
   src/fallback_planner.cpp
   src/heater_scheduler.cpp
+  src/link_budget.cpp
   src/motion_lock.cpp
   src/pid_autotuner.cpp
   src/pid_controller.cpp
@@ -39,8 +66,11 @@ add_library(coatheal_onboard_core
   src/storage_manager.cpp
   src/system_controller.cpp
   src/telemetry.cpp
+  src/telemetry_codec.cpp
+  src/telemetry_drain.cpp
   src/telemetry_queue.cpp
   src/telemetry_client.cpp
+  "${CMAKE_CURRENT_BINARY_DIR}/generated/telemetry_dictionary_z1.cpp"
   src/thermal_controller.cpp
   src/tmc5160_driver.cpp
   src/hal/i2c_adapter.cpp
@@ -69,6 +99,11 @@ if(COATHEAL_STRICT)
 endif()
 
 target_link_libraries(coatheal_onboard_core PUBLIC Threads::Threads)
+
+if(ZLIB_FOUND)
+  target_compile_definitions(coatheal_onboard_core PUBLIC COATHEAL_HAS_ZLIB=1)
+  target_link_libraries(coatheal_onboard_core PUBLIC ZLIB::ZLIB)
+endif()
 
 # The _WIN32 branches of command_server.cpp and telemetry_client.cpp call
 # Winsock; without this the Windows build links only on Linux-only paths.

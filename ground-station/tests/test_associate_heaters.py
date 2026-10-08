@@ -1171,6 +1171,17 @@ class UnitTests(unittest.TestCase):
         kept = place(layout, {1: 1}, {})
         self.assertEqual([fmt(g) for g in kept.motors],
                          ["ch1:19,ch3:6,ch4:5", "ch5:24,ch2:13,ch6:23,ch7,ch8"])
+        # Bench 2026-09-15: a heater moved into a group lands before the
+        # group's unheated specimen, which stays last (S3, not S2).
+        bench = hardware_setup.layout_from_values({
+            "motor0.specimens": "ch8:19,ch7:23,ch1",
+            "motor1.specimens": "ch2:13,ch3:6,ch4:5,ch5:24,ch6"})
+        moved = place(bench, {3: 0}, {0: 0})
+        self.assertEqual([fmt(g) for g in moved.motors],
+                         ["ch8:19,ch7:23,ch2:13,ch1", "ch3:6,ch4:5,ch5:24,ch6"])
+        self.assertEqual(moved.heater_samples, [0, 1, 2, 4, 5, 6])
+        # An unheated specimen on its motor's click still goes first.
+        self.assertEqual(fmt(place(bench, {3: 0}, {0: 2}).motors[0]), "ch1,ch8:19,ch7:23,ch2:13")
 
     def test_keyboard_hands_over_typed_lines_without_blocking(self) -> None:
         read_fd, write_fd = os.pipe()

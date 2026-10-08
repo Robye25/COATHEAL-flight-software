@@ -12,7 +12,7 @@ ground-station/
   main.py                     CLI entry point (telemetry-server, command)
   app/protocol.py             DATA / EVT,PULL / ACK / command parsing, validators
   app/reply_format.py         key=value; reply-body parsing and pretty-printing
-  app/telemetry_log.py        schema-v6 CSV writer, session directories, command/event logs
+  app/telemetry_log.py        schema-v7 CSV writer, session directories, command/event logs
   app/session_dir.py          per-session directory naming
   app/thermal_presets.py      thermal presets v2 (atomic file, .bak, v1 migration)
   app/telemetry_server.py     headless receiver (same writer as the GUI)
@@ -89,7 +89,9 @@ purple and the panic buttons are disabled (only `RADIO RESUME` is live).
 ### Alarm strip
 Appears while alarms are active. Sources: `OVERTEMP`, `SAMPLE_TEMP` (the
 samples read by a heater that are invalid), `FALLBACK` (link-loss fallback onboard),
-`SEQ_PAUSED`, `ENERGY`, `MOTORn FAILED`, `HEATERS_INHIBITED` (amber, names
+`SEQ_PAUSED`, `ENERGY`, `MOTORn FAILED`, `Mn STEP LOSS` (red while the
+onboard has that motor's position latched uncertain; names the event count
+and the way out), `HEATERS_INHIBITED` (amber, names
 the moving motor), `SENSOR` (any bad component or bus flag), `RX_QUEUE`
 (onboard backlog draining), `LINK STALE` (suppressed during silence).
 Click a chip or `ACK ALL` to acknowledge; an acknowledged alarm stays listed
@@ -143,11 +145,18 @@ Two motor cards, each naming its specimens and heaters (for example
 holding / healthy dots, position and target, speed, last command, sequence
 state, and the resistance readout: `R now`, `bend start` and `Δ %` for the
 card's monitored specimen — the bend confirmation. The selector (M0 | M1)
-drives the shared controls: `ENABLE`, `DISABLE`, `SET ZERO`, `HOME`, `STOP`
+drives the shared controls: `ENABLE`, `DISABLE`, `SET ZERO`, `HOME`, `STOP`,
+`ACK STEP LOSS` (`STEPLOSS_ACK <id>`; live only while that motor's position
+is latched uncertain — the card then shows a red `STEP LOSS` banner and
+STANDARD PULL is disabled with the reason, while jog and BEND stay available)
 · jog ±0.1/±1/±5 mm (allowed before zeroing) · drive settings in SI units:
-speed 0.01–0.5 mm/s, run current in A RMS, acceleration 0.01–50 mm/s²
-(the wire stays in full steps: ×100 at the 2 mm lead, so 0.5 mm/s is
-`STEPPER_SET_SPEED <id> 50.000` and 2 mm/s² is `STEPPER_SET_ACCEL <id> 200.0`)
+speed 0.01–0.5 mm/s, run current in A RMS, acceleration 0.01–25 mm/s²
+(the wire stays in full steps: ×200 at the 1 mm lead, so 0.5 mm/s is
+`STEPPER_SET_SPEED <id> 100.000` and 2 mm/s² is `STEPPER_SET_ACCEL <id> 400.0`).
+The onboard reports its lead in `GET_LAYOUT`; when it is not the 1 mm the
+console converts at, the events log a warning and the console shows
+`LEAD MISMATCH`, because converted speeds, accelerations, sequences and
+fallback plans would then be wrong (jog and BEND mm are converted onboard)
 · **BEND** (`STEPPER_MOVETO_MM <id> <mm> <hold>`) and
 **STANDARD PULL** (`PULL_EXECUTE <id>`, the config-defined pull). BEND and
 STANDARD PULL are disabled — with the reason shown — until the motor is
@@ -185,16 +194,15 @@ decodes the TMC5160's own registers:
   are the driver's fault flags (open-load is only valid at standstill).
 - Derived over a 3 s window: sequencer rate (full-steps/s from ΔMSCNT),
   ramp rate (from ΔXACTUAL), rev/s and rpm (200 full steps per revolution),
-  mm/s using the *ball-screw lead* you enter (persisted; default 1.5 mm/rev
-  -- the mechanism does ~1–2 mm per revolution), and travel since the probe
-  started.
+  mm/s using the *ball-screw lead* you enter (persisted; default 1 mm/rev,
+  the flight lead), and travel since the probe started.
 - A verdict line: MOVING; COMMANDED BUT NOT STEPPING (ramp moves, MSCNT
   frozen); firmware says moving but the chip is at standstill; power stage
   off; SD_MODE strap; DRIVER FAULT.
 - A plot of MSCNT and XACTUAL against seconds since the probe started.
 
-At the 0.5 mm/s ceiling (50 full-steps/s) a BEND of 800 µsteps at µ4 is one revolution in 4 s,
-about 1.5 mm -- invisible on a remote camera, unmistakable in MSCNT. The
+At the 0.5 mm/s ceiling (100 full-steps/s) a BEND of 800 µsteps at µ4 is one revolution in 2 s,
+1 mm -- invisible on a remote camera, unmistakable in MSCNT. The
 probe stops itself when radio silence starts or the link is lost.
 
 ### Plots
@@ -229,11 +237,16 @@ directory automatically.
 
 ### Backlog replay
 
-After a link outage the onboard replays its queued frames at ~10/s. With
-current firmware the drain is **live-first**: each tick's frame is sent
-before the backlog and every frame carries its age (`TX=`), so the panels,
-gating and alarms stay on live frames throughout; the replayed frames only
-fill the plots (inserted at their onboard time) and the session logs. The
+After a link outage the onboard replays its queued frames with whatever the
+24 kbps link budget leaves after the live frame: at 1 Hz, about two
+replayed frames in three seconds while no commands are sent
+([link-budget.md](link-budget.md#replay-order)). The replay
+goes by **bisection**: the middle of the gap first, then the quarters, the
+eighths, and so on, so the plots show the whole outage coarsely within
+seconds and fill in from there. With current firmware each tick's frame is
+sent before the backlog and every frame carries its age (`TX=`), so the
+panels, gating and alarms stay on live frames throughout; the replayed frames
+only fill the plots (inserted at their onboard time) and the session logs. The
 top strip shows `REPLAY <n> queued · ETA`, and one amber `BACKLOG` alarm
 replaces the queue-depth alarm until the queue is empty. The previous
 session's backlog and the current session's live frames interleave; each
@@ -272,6 +285,24 @@ as ignored.
   `silence=1`) the ground station stops its beacon and probe and refuses to
   send anything except `RADIO_RESUME`, `RADIO_SILENCE`, `STATUS`, `PING`;
   refused commands appear in the console and `commands.csv` with the reason.
+- **Link budget** ([link-budget.md](link-budget.md)): commands go out one at
+  a time, about one per second, safety commands first; the latency shown
+  includes the wait. A command line over 230 B is refused, and a command that
+  finds no room within 10 s (or its own longer timeout) fails with `waited …
+  s for link budget`. A background poll whose previous request has not come
+  back is skipped. While telemetry arrives the beacon goes out every 15 s and
+  the command probe stops. Run one ground station on the E-Link at a time:
+  each keeps its own share.
+- **Hard cap** ([link-budget.md](link-budget.md#hard-cap)): for flight, start
+  the console with `./COATHEAL-GroundStation.sh --link-cap <port>` (`<port>`
+  is the Ethernet port the E-Link is on, see `ip -br link`). The kernel then
+  shapes everything this machine sends on that port to 500 B/s, at most
+  1 200 B in any second, so nothing on the laptop can break the 24 kbps.
+  The console's ledger paces commands to that rate either way: sent back to
+  back they go about one every 1.5 s. The event log says `[link cap] kernel
+  shaper ON on <port>` or warns that it is not installed. The cap takes the
+  whole port; `--link-cap off` removes it (it also goes with a reboot).
+  Linux only: on Windows the ledger alone limits what the console sends.
 
 ### Shortcuts
 
@@ -297,7 +328,7 @@ logs/
   ground_ack_cursor.json                   per-session ACK cursor (dedupe across restarts)
   latest_session.txt                       path of the directory in use
   sessions/<YYYYMMDD-HHMMSS>_<session id>/
-    telemetry.csv                          schema v6, one row per accepted DATA frame
+    telemetry.csv                          schema v7, one row per accepted DATA frame
     pulls.csv                              EVT,PULL
     commands.csv                           ts_utc, command, ok, latency_ms, body, raw
     events.log                             the event log
@@ -311,10 +342,12 @@ events that happen before the first frame are buffered and written when
 the directory opens. The headless `telemetry-server` writes exactly the
 same files.
 
-Schema v6 columns: `gs_rx_utc, session_id, seq, timestamp, rtc_valid,
+Schema v7 columns (v7, 2026-10-05, added `loss` and `uncertain` per motor;
+a session directory that already holds a v6 `telemetry.csv` gets its new rows
+in `telemetry.1.csv`): `gs_rx_utc, session_id, seq, timestamp, rtc_valid,
 ambient_temp_c, ambient_pressure_mbar, uv, sample_0..7, h0..5, r0..7, phase,
 mode, status, sensor_valid, sensor_age_ms, component_state,
-stepper{0,1}_{position,target,hz,microstep,enabled,ok,moving,holding,hold_s,pulses,missed,source,zeroed,seq,seqstate},
+stepper{0,1}_{position,target,hz,microstep,enabled,ok,moving,holding,hold_s,pulses,missed,source,zeroed,seq,seqstate,loss,uncertain},
 fallback, link_loss_s, energy_wh, budget_wh, budget_exhausted,
 heaters_active, queue, plan`. Numbers are written losslessly; unmeasured
 values are empty cells.

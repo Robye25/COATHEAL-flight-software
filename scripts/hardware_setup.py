@@ -72,6 +72,15 @@ FINAL_PIN_VALUES = {
     # HeaterScheduler enforces.
     "power.max_active_heaters": "3",
     "power.max_thermal_w": "15.0",
+    # Owner 2026-09-15: the ball screws have a 1 mm lead, and the motion
+    # envelope keeps its millimetre values: 0.5 mm/s = 100 full-steps/s,
+    # 2 mm/s^2 = 400 full-steps/s^2, a 2 mm standard pull = 400 full steps.
+    "stepper.lead_mm_per_rev": "1.0",
+    "stepper.max_speed_mm_s": "0.5",
+    "stepper.default_step_hz": "100.0",
+    "pull.max_step_hz": "100.0",
+    "pull.accel_steps_per_s2": "400.0",
+    "pull.travel_full_steps": "400",
 }
 # motorN.specimens (2026-09-15) replaced these index-based layout keys: the
 # onboard derives them from the two specimen lists and refuses an INI that
@@ -520,6 +529,26 @@ def validate_candidate(text: str) -> list[str]:
             errors.append(f"motor{motor}.driver=tmc2240 is retired; use tmc5160")
         elif driver not in ("tmc5160", "simulated"):
             errors.append(f"motor{motor}.driver must be tmc5160 or simulated")
+        # StallGuard2 stall detection (mirrors config.cpp). The keys are
+        # optional: an INI without them runs the onboard defaults.
+        stall_detect = values.get(f"motor{motor}.stall_detect", "monitor")
+        if stall_detect not in ("off", "monitor", "stop"):
+            errors.append(
+                f"motor{motor}.stall_detect must be off, monitor or stop")
+        elif stall_detect == "stop" and values.get(
+                f"motor{motor}.stealth_chop", "false").lower() in (
+                    "1", "true", "yes", "on"):
+            errors.append(f"motor{motor}.stall_detect=stop needs spreadCycle "
+                          "(stealth_chop=false)")
+        for suffix, low, high in (("stallguard_sgt", -64, 63),
+                                  ("stall_sg_min", 0, 1023)):
+            key = f"motor{motor}.{suffix}"
+            try:
+                in_range = low <= int(values.get(key, "0"), 0) <= high
+            except ValueError:
+                in_range = False
+            if not in_range:
+                errors.append(f"{key} must be in [{low}, {high}]")
         try:
             # v3: the TMC2240 range-select current model
             # (current_range_a_peak -> one of four fixed peak-current

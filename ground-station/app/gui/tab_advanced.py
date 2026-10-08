@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
 
 from ..protocol import (
     CommandResponse, validate_duty, validate_microstep, validate_move_mm, validate_pid_gains,
-    MAX_SPEED_MM_S, validate_speed_mm_s,
+    FULL_STEPS_PER_MM, MAX_SPEED_MM_S, validate_speed_mm_s,
 )
 from ..thermal_presets import PresetStore
 from . import gating
@@ -27,8 +27,9 @@ from .widgets import (
 
 
 def _mm_to_usteps(mm: float, microstep: int) -> int:
-    """mm of linear travel -> microsteps at the 2 mm ball-screw lead."""
-    return int(round(mm / 2.0 * 200.0 * max(1, microstep)))
+    """mm of linear travel -> microsteps at the ball-screw lead
+    (protocol.LEAD_MM_PER_REV, 1 mm: 2.0 mm is 400 full steps)."""
+    return int(round(mm * FULL_STEPS_PER_MM * max(1, microstep)))
 
 
 class AdvancedTab(QScrollArea):
@@ -398,7 +399,8 @@ class AdvancedTab(QScrollArea):
                     self.btn_plan_status):
             btn.set_reason(generic)
         self.btn_seq_pause.set_reason(gating.motion_reason(state, motor_id, needs_zero=False, needs_enable=False))
-        self.btn_seq_resume.set_reason(gating.motion_reason(state, motor_id, needs_zero=True, needs_enable=False))
+        self.btn_seq_resume.set_reason(gating.motion_reason(state, motor_id, needs_zero=True, needs_enable=False)
+                                       or gating.position_trust_reason(state, motor_id))
         for _t, _h, _s, btn in self.plan_rows:
             btn.set_reason(generic)
         for i, btn in enumerate(self.duty_buttons):

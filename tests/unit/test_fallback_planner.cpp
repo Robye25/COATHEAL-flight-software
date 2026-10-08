@@ -183,6 +183,66 @@ void TestNotReadyAtDeadlineIsSkipped() {
   assert(planner.state() == FallbackPlanState::kDone);
 }
 
+// A bend that a safety abort ended before its target (step loss, driver
+// over-temperature) is not "done": that motor fails, with the reason. The
+// other motor still gets its bend -- under link loss a partial experiment
+// beats none -- and the plan ends failed once both have settled.
+void TestAbortedBendFailsTheMotorAndTheOtherStillRuns() {
+  FallbackPlanner planner = ArmedPlanner();
+  const Clock::time_point t0 = Clock::now();
+  std::optional<FallbackAction> a =
+      planner.Tick(In(true, MissionPhase::kPreFloat, t0, Ready(), Ready()));
+  assert(a.has_value() && a->motor_id == 0);
+  planner.ReportStartResult(0, true, false, "");
+  assert(!planner.Tick(In(true, MissionPhase::kPreFloat, t0 + std::chrono::seconds(1),
+                          Ready(5.0, true), Ready())).has_value());
+  assert(planner.motor(0).state == FallbackMotorState::kRunning);
+
+  // M0 stopped -- but by a step-loss stop, short of its target.
+  FallbackMotorInput stalled = Ready(5.0, false);
+  stalled.aborted = true;
+  stalled.abort_reason = "StallGuard stall";
+  a = planner.Tick(In(true, MissionPhase::kPreFloat, t0 + std::chrono::seconds(2), stalled, Ready()));
+  assert(planner.motor(0).state == FallbackMotorState::kFailed);
+  assert(planner.last_error() == "M0 bend aborted: StallGuard stall");
+  // The plan is still running, and M1 starts on this very tick.
+  assert(planner.state() == FallbackPlanState::kRunning);
+  assert(a.has_value() && a->motor_id == 1);
+  planner.ReportStartResult(1, true, false, "");
+  planner.Tick(In(true, MissionPhase::kPreFloat, t0 + std::chrono::seconds(3), stalled, Ready(5.0, true)));
+  assert(planner.motor(1).state == FallbackMotorState::kRunning);
+  planner.Tick(In(true, MissionPhase::kPreFloat, t0 + std::chrono::seconds(9), stalled, Ready(5.0, false)));
+  assert(planner.motor(1).state == FallbackMotorState::kDone);
+  // Both settled, one failed: the plan says so, and names the reason.
+  assert(planner.state() == FallbackPlanState::kFailed);
+  assert(planner.StatusBody().find("m0=800/5/50/failed") != std::string::npos);
+  assert(planner.StatusBody().find("m1=600/3/0/done") != std::string::npos);
+  assert(planner.StatusBody().find("error=M0 bend aborted: StallGuard stall") != std::string::npos);
+  // A failed plan never runs again, and survives a restart as failed.
+  assert(!planner.Tick(In(true, MissionPhase::kFloat, t0 + std::chrono::seconds(20), Ready(), Ready())).has_value());
+  FallbackPlanner restored(Cfg(), 2);
+  assert(restored.Deserialize(planner.Serialize()));
+  assert(restored.state() == FallbackPlanState::kFailed);
+  assert(restored.motor(0).state == FallbackMotorState::kFailed);
+  assert(restored.motor(1).state == FallbackMotorState::kDone);
+
+  // The last motor aborting fails the plan at once; no reason is still a failure.
+  FallbackPlanner single(Cfg(), 2);
+  std::string error;
+  assert(single.SetMotorPlan(0, 800, 5.0, 0.0, &error));
+  assert(single.Arm(&error));
+  assert(single.Tick(In(true, MissionPhase::kFloat, t0, Ready(), Ready())).has_value());
+  single.ReportStartResult(0, true, false, "");
+  FallbackMotorInput overtemp = Ready(5.0, false);
+  overtemp.aborted = true;
+  single.Tick(In(true, MissionPhase::kFloat, t0 + std::chrono::seconds(1), overtemp, Ready()));
+  assert(single.motor(0).state == FallbackMotorState::kFailed);
+  assert(single.state() == FallbackPlanState::kFailed);
+  assert(single.last_error() == "M0 bend aborted");
+  // MUTATION: ignore `aborted` in FallbackPlanner::Tick's completion
+  // tracking and confirm this test fails on motor(0).state == kFailed.
+}
+
 // (e) A refused start fails the motor and the whole plan; M1 is never
 // attempted. A transient refusal (motion lock held) is retried instead.
 void TestRefusedStartFailsPlan() {
@@ -358,6 +418,7 @@ int main() {
   TestWindowNotMetWaitsUntilDeadline();
   TestWindowBoundsAreInclusive();
   TestNotReadyAtDeadlineIsSkipped();
+  TestAbortedBendFailsTheMotorAndTheOtherStillRuns();
   TestRefusedStartFailsPlan();
   TestDonePlanNeverRerunsAndDisarmResets();
   TestOperatorSurfaceRules();

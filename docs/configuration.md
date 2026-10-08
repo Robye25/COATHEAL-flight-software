@@ -165,17 +165,19 @@ guessed range (section 9, gate 5 of the same bring-up doc).
 | Key | Default | Description |
 |---|---:|---|
 | `stepper.steps_per_rev` | `200` | NEMA 17 full-step count. |
-| `stepper.default_step_hz` | `50.0` | Default jog rate, full-steps/s (clamped to the speed ceiling). |
+| `stepper.default_step_hz` | `100.0` | Default jog rate, full-steps/s (clamped to the speed ceiling; 100 = 0.5 mm/s at the 1 mm lead). |
 | `stepper.max_position_steps` | `200000` | Absolute software travel limit. |
 | `stepper.enable_on_boot` | `false` | Keep drivers de-energized until commanded. |
-| `stepper.lead_mm_per_rev` | `2.0` | Ball-screw lead: linear travel per motor revolution. The mm command surface (`STEPPER_MOVE_MM`, `STEPPER_MOVETO_MM`) and the `mm`/`mm_tgt` telemetry keys convert through this value. Validated `(0, 100]`. |
+| `stepper.lead_mm_per_rev` | `1.0` | Ball-screw lead: linear travel per motor revolution. The mm command surface (`STEPPER_MOVE_MM`, `STEPPER_MOVETO_MM`) and the `mm`/`mm_tgt` telemetry keys convert through this value, and `GET_LAYOUT` reports it as `lead_mm`. Validated `(0, 100]`. Owner 2026-09-15: 1 mm; `migrate-config` pins it. |
 | `stepper.max_accel_steps_per_s2` | `5000.0` | Ceiling for `STEPPER_SET_ACCEL` and the per-motor accel overrides, full-steps/s². |
-| `stepper.max_speed_mm_s` | `0.5` | Linear speed ceiling for every motion path (jog, bend, sequences, fallback plan, pulls), in mm/s of ball-screw travel. Converted through `stepper.lead_mm_per_rev` and `stepper.steps_per_rev` into full-steps/s (0.5 mm/s = 50 full-steps/s at the 2 mm lead); the effective ceiling is the lower of this and `pull.max_step_hz`. Validated `(0, 100]`. Owner rule 2026-09-11. |
-| `stepper.max_direct_usteps` | `1000` | Longest raw-microstep command accepted: `\|steps\|` of `STEPPER_MOVE`, `\|target\|` of `STEPPER_MOVETO` / `STEPPER_BEND`, in microsteps at the live divisor (1000 = 1.25 rev = 2.5 mm at µ4 and the 2 mm lead). The mm commands, bend sequences and the fallback plan are bounded by `stepper.max_position_steps` instead. Validated `(0, stepper.max_position_steps]`. Owner rule 2026-09-11. |
-| `pull.max_step_hz` | `50.0` | Pull cycle rate and legacy speed ceiling, full-steps/s. The effective ceiling for every motion path is the lower of this and `stepper.max_speed_mm_s` converted through the lead; a higher value here is clamped (the start-up journal line `[stepper] speed ceiling …` says which binds). |
-| `pull.accel_steps_per_s2` | `200.0` | Trapezoidal acceleration/deceleration shared by all motion (not just pulls) unless a motor overrides it. Must be ≤ `stepper.max_accel_steps_per_s2`. |
+| `stepper.stall_min_step_hz` | `50.0` | StallGuard2 is only sampled while a motor cruises at a steady rate of at least this many full-steps/s (the load measure needs back-EMF); `>= 0` |
+| `stepper.stall_confirm_samples` | `3` | Consecutive StallGuard samples (one per four full steps) at or under `motorN.stall_sg_min` that make a stall verdict; `1..50` |
+| `stepper.max_speed_mm_s` | `0.5` | Linear speed ceiling for every motion path (jog, bend, sequences, fallback plan, pulls), in mm/s of ball-screw travel. Converted through `stepper.lead_mm_per_rev` and `stepper.steps_per_rev` into full-steps/s (0.5 mm/s = 100 full-steps/s at the 1 mm lead); the effective ceiling is the lower of this and `pull.max_step_hz`. Validated `(0, 100]`. Owner rule 2026-09-11. |
+| `stepper.max_direct_usteps` | `1000` | Longest raw-microstep command accepted: `\|steps\|` of `STEPPER_MOVE`, `\|target\|` of `STEPPER_MOVETO` / `STEPPER_BEND`, in microsteps at the live divisor (1000 = 1.25 rev = 1.25 mm at µ4 and the 1 mm lead). The mm commands, bend sequences and the fallback plan are bounded by `stepper.max_position_steps` instead. Validated `(0, stepper.max_position_steps]`. Owner rule 2026-09-11. |
+| `pull.max_step_hz` | `100.0` | Pull cycle rate and legacy speed ceiling, full-steps/s. The effective ceiling for every motion path is the lower of this and `stepper.max_speed_mm_s` converted through the lead; a higher value here is clamped (the start-up journal line `[stepper] speed ceiling …` says which binds). |
+| `pull.accel_steps_per_s2` | `400.0` | Trapezoidal acceleration/deceleration shared by all motion (not just pulls) unless a motor overrides it, full-steps/s² (400 = 2 mm/s² at the 1 mm lead). Must be ≤ `stepper.max_accel_steps_per_s2`. |
 | `pull.microstep` | `4` | Microstep divisor programmed into each TMC5160. |
-| `pull.travel_full_steps` | `200` | Pull travel in full steps; calibrate to ball-screw lead. |
+| `pull.travel_full_steps` | `400` | Pull travel in full steps: 400 = 2 mm, two revolutions at the 1 mm lead. |
 | `pull.hold_s` | `5.0` | Hold time at target. |
 
 ## Motor Channels
@@ -200,6 +202,9 @@ load as unknown motor keys, not merely deprecated.**
 | `motor*.sense_resistor_ohm` | `0.075` | `0.075` | TMC5160 current-sense resistor value (Ω); feeds the GLOBALSCALER/IHOLD_IRUN current calculation. `0.075` is an assumed typical value for this board family — **read the actual value off the board at the bench** (see [TMC5160 Commissioning §6](tmc5160-commissioning.md#6-current-model-globalscaler--irun-two-regimes)). Validated `> 0.0 && < 1.0`. |
 | `motor*.retry_ms` | `2000` | `2000` | Idle driver re-probe interval after a fault. |
 | `motor*.accel_steps_per_s2` | `0` | `0` | Per-motor trapezoid slope, full-steps/s². `0` inherits `pull.accel_steps_per_s2`; a positive value (≤ `stepper.max_accel_steps_per_s2`) overrides it for this motor. `STEPPER_SET_ACCEL` adjusts it at runtime until restart. |
+| `motor*.stall_detect` | `monitor` | `monitor` | StallGuard2 stall detection, spreadCycle only: `off`; `monitor` — sample the load measure, count and journal a stall verdict, the move continues; `stop` — a verdict stops the move, keeps the motor energised and latches the position uncertain. `stop` is refused at load with `stealth_chop=true` (no StallGuard2 in stealthChop). Calibrate before using `stop`: [TMC5160 Commissioning, section 12](tmc5160-commissioning.md#12-step-loss-protection). `migrate-config` keeps the value. |
+| `motor*.stallguard_sgt` | `0` | `0` | `COOLCONF.sgt`, `-64..63`: the chip's StallGuard2 threshold offset. Higher makes `SG_RESULT` read higher for the same load (less sensitive). |
+| `motor*.stall_sg_min` | `0` | `0` | A StallGuard sample counts as stalled when `SG_RESULT` is at or under this, `0..1023`. |
 | `motor*.specimens` | `ch1:19,ch2:13,ch3:6,ch4:5` | `ch5:24,ch6:23,ch7,ch8` | The specimens the motor pulls, each with its PT100 terminal and heater line — see [Motor groups](#motor-groups-motorspecimens). |
 
 ### Motor groups (`motor*.specimens`)

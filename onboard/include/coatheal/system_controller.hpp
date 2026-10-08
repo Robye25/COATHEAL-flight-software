@@ -15,6 +15,7 @@
 #include "coatheal/config.hpp"
 #include "coatheal/fallback_planner.hpp"
 #include "coatheal/heater_scheduler.hpp"
+#include "coatheal/link_budget.hpp"
 #include "coatheal/motion_lock.hpp"
 #include "coatheal/pid_autotuner.hpp"
 #include "coatheal/sensor_manager.hpp"
@@ -23,6 +24,7 @@
 #include "coatheal/storage_manager.hpp"
 #include "coatheal/system_mode.hpp"
 #include "coatheal/telemetry_client.hpp"
+#include "coatheal/telemetry_drain.hpp"
 #include "coatheal/telemetry_queue.hpp"
 #include "coatheal/thermal_controller.hpp"
 #include "coatheal/hal/i2c_adapter.hpp"
@@ -49,7 +51,6 @@ class SystemController {
   bool radio_silent() const { return !telemetry_client_.transmit_enabled(); }
 
  private:
-  bool DrainTelemetryQueue(bool* link_ok, std::string* error);
   void TickBendSequences();
   // Whether the SPI transport itself is working, as opposed to whether
   // the motors on it are usable. See the comment at its definition.
@@ -78,6 +79,10 @@ class SystemController {
 
   OnboardConfig config_;
   CommandParser parser_;
+  // The onboard share of the 24 kbps E-Link budget (docs/link-budget.md),
+  // charged by the command server, the telemetry client and discovery.
+  // Declared before both so it outlives their threads.
+  LinkBudget link_budget_{kOnboardShareBytes};
   CommandServer command_server_;
 
   SpiAdapter spi_;
@@ -103,6 +108,7 @@ class SystemController {
   StorageManager storage_manager_;
   TelemetryQueue telemetry_queue_;
   TelemetryClient telemetry_client_;
+  TelemetryDrain telemetry_drain_;
   std::unique_ptr<StepperController> stepper_;
 
   // Guarded by fallback_mu_: touched by the command thread (FALLBACK_*)

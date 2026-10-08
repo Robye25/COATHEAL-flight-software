@@ -4,6 +4,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -12,6 +13,11 @@ namespace coatheal {
 namespace {
 
 constexpr char kSeparator = '\t';
+constexpr std::uint64_t kLengthKeyBase = std::numeric_limits<std::uint64_t>::max();
+
+bool IsEventFrame(const QueuedTelemetryFrame& frame) {
+  return frame.frame.rfind("EVT,", 0) == 0;
+}
 
 }  // namespace
 
@@ -51,6 +57,11 @@ bool TelemetryQueue::Initialize(std::string* error) {
   }
 
   frames_.clear();
+  by_key_.clear();
+  events_.clear();
+  runs_.clear();
+  runs_by_length_.clear();
+  next_index_ = 0;
   live_bytes_ = 0;
   dead_bytes_ = 0;
 
@@ -91,8 +102,7 @@ bool TelemetryQueue::Initialize(std::string* error) {
       ++expired_frames;
       continue;
     }
-    live_bytes_ += LineBytes(frame);
-    frames_.push_back(std::move(frame));
+    InsertLocked(std::move(frame));
   }
   in.close();
 
@@ -111,14 +121,16 @@ bool TelemetryQueue::Initialize(std::string* error) {
   return true;
 }
 
-bool TelemetryQueue::Enqueue(const QueuedTelemetryFrame& frame, std::string* error) {
+bool TelemetryQueue::Enqueue(const QueuedTelemetryFrame& frame, std::string* error,
+                             std::uint64_t* index) {
   std::lock_guard<std::mutex> lock(mu_);
-  frames_.push_back(frame);
-  live_bytes_ += LineBytes(frame);
+  const std::uint64_t assigned = next_index_;
+  InsertLocked(frame);
+  if (index != nullptr) *index = assigned;
   PruneLocked();
   RetryPersistenceLocked();
   if (!persistence_enabled_) return true;
-  if (!AppendLocked(frame)) {
+  if (!AppendToFileLocked(frame)) {
     if (error != nullptr) {
       *error = "failed to persist queue frame";
     }
@@ -135,22 +147,14 @@ bool TelemetryQueue::Acknowledge(const std::string& session_id,
   (void)error;
   std::lock_guard<std::mutex> lock(mu_);
 
-  std::uint64_t removed_bytes = 0;
-  auto remove_from = std::remove_if(
-      frames_.begin(), frames_.end(),
-      [&](const QueuedTelemetryFrame& frame) {
-        const bool acked = frame.session_id == session_id && frame.seq <= seq;
-        if (acked) removed_bytes += LineBytes(frame);
-        return acked;
-      });
-
-  if (remove_from == frames_.end()) {
+  std::vector<std::uint64_t> acked;
+  for (const auto& [index, frame] : frames_) {
+    if (frame.session_id == session_id && frame.seq <= seq) acked.push_back(index);
+  }
+  if (acked.empty()) {
     return true;
   }
-
-  frames_.erase(remove_from, frames_.end());
-  live_bytes_ -= removed_bytes;
-  dead_bytes_ += removed_bytes;
+  for (const std::uint64_t index : acked) RemoveLocked(index);
   RetryPersistenceLocked();
   MaybeCompactLocked();
   return true;
@@ -161,23 +165,15 @@ bool TelemetryQueue::AcknowledgeExact(const QueuedTelemetryFrame& frame,
   (void)error;
   std::lock_guard<std::mutex> lock(mu_);
 
-  std::uint64_t removed_bytes = 0;
-  auto remove_from = std::remove_if(
-      frames_.begin(), frames_.end(),
-      [&](const QueuedTelemetryFrame& pending) {
-        const bool acked = pending.session_id == frame.session_id &&
-                           pending.seq == frame.seq &&
-                           pending.frame == frame.frame;
-        if (acked) removed_bytes += LineBytes(pending);
-        return acked;
-      });
-  if (remove_from == frames_.end()) {
+  const auto key = by_key_.find({frame.session_id, frame.seq});
+  if (key == by_key_.end()) {
     return true;
   }
-
-  frames_.erase(remove_from, frames_.end());
-  live_bytes_ -= removed_bytes;
-  dead_bytes_ += removed_bytes;
+  const auto pending = frames_.find(key->second);
+  if (pending == frames_.end() || pending->second.frame != frame.frame) {
+    return true;
+  }
+  RemoveLocked(pending->first);
   RetryPersistenceLocked();
   MaybeCompactLocked();
   return true;
@@ -186,27 +182,44 @@ bool TelemetryQueue::AcknowledgeExact(const QueuedTelemetryFrame& frame,
 std::vector<QueuedTelemetryFrame> TelemetryQueue::PendingFrames(
     std::size_t max_frames) const {
   std::lock_guard<std::mutex> lock(mu_);
-  const std::size_t count = std::min(max_frames, frames_.size());
-  return std::vector<QueuedTelemetryFrame>(frames_.begin(),
-                                           frames_.begin() + count);
-}
-
-std::vector<QueuedTelemetryFrame> TelemetryQueue::DrainBatch(
-    std::size_t max_frames) const {
-  std::lock_guard<std::mutex> lock(mu_);
-  std::vector<QueuedTelemetryFrame> batch;
-  if (frames_.empty() || max_frames == 0) return batch;
-  batch.reserve(std::min(max_frames, frames_.size()));
-  batch.push_back(frames_.back());
-  for (std::size_t i = 0; i + 1 < frames_.size() && batch.size() < max_frames; ++i) {
-    batch.push_back(frames_[i]);
+  std::vector<QueuedTelemetryFrame> out;
+  out.reserve(std::min(max_frames, frames_.size()));
+  for (auto it = frames_.begin(); it != frames_.end() && out.size() < max_frames; ++it) {
+    out.push_back(it->second);
   }
-  return batch;
+  return out;
 }
 
 std::vector<QueuedTelemetryFrame> TelemetryQueue::PendingFrames() const {
+  return PendingFrames(std::numeric_limits<std::size_t>::max());
+}
+
+bool TelemetryQueue::FrameAt(std::uint64_t index, QueuedTelemetryFrame* frame) const {
   std::lock_guard<std::mutex> lock(mu_);
-  return std::vector<QueuedTelemetryFrame>(frames_.begin(), frames_.end());
+  const auto it = frames_.find(index);
+  if (it == frames_.end()) return false;
+  if (frame != nullptr) *frame = it->second;
+  return true;
+}
+
+std::vector<QueuedTelemetryFrame> TelemetryQueue::PendingEvents(
+    std::size_t max_frames) const {
+  std::lock_guard<std::mutex> lock(mu_);
+  std::vector<QueuedTelemetryFrame> out;
+  for (auto it = events_.begin(); it != events_.end() && out.size() < max_frames; ++it) {
+    out.push_back(frames_.at(*it));
+  }
+  return out;
+}
+
+bool TelemetryQueue::NextReplay(QueuedTelemetryFrame* frame) const {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (runs_by_length_.empty()) return false;
+  const std::uint64_t start = runs_by_length_.begin()->second;
+  const std::uint64_t end = runs_.at(start);
+  const std::uint64_t middle = start + (end - start) / 2;
+  if (frame != nullptr) *frame = frames_.at(middle);
+  return true;
 }
 
 std::size_t TelemetryQueue::size() const {
@@ -214,7 +227,65 @@ std::size_t TelemetryQueue::size() const {
   return frames_.size();
 }
 
-bool TelemetryQueue::AppendLocked(const QueuedTelemetryFrame& frame) {
+void TelemetryQueue::InsertLocked(QueuedTelemetryFrame frame) {
+  const std::uint64_t index = next_index_++;
+  frame.index = index;
+  live_bytes_ += LineBytes(frame);
+  by_key_[{frame.session_id, frame.seq}] = index;
+  if (IsEventFrame(frame)) events_.insert(index);
+
+  // The new frame extends the newest run when the frame before it is still
+  // pending; otherwise it starts a run of its own.
+  if (!runs_.empty()) {
+    auto last = std::prev(runs_.end());
+    if (last->second + 1 == index) {
+      const std::uint64_t start = last->first;
+      EraseRunLocked(last);
+      AddRunLocked(start, index);
+      frames_.emplace(index, std::move(frame));
+      return;
+    }
+  }
+  AddRunLocked(index, index);
+  frames_.emplace(index, std::move(frame));
+}
+
+void TelemetryQueue::RemoveLocked(std::uint64_t index) {
+  const auto it = frames_.find(index);
+  if (it == frames_.end()) return;
+  const std::uint64_t bytes = LineBytes(it->second);
+  live_bytes_ -= bytes;
+  // The line stays in the file until the next compaction.
+  dead_bytes_ += bytes;
+  const auto key = by_key_.find({it->second.session_id, it->second.seq});
+  if (key != by_key_.end() && key->second == index) by_key_.erase(key);
+  events_.erase(index);
+  frames_.erase(it);
+
+  // Split the run that held `index` around it.
+  auto run = runs_.upper_bound(index);
+  if (run == runs_.begin()) return;
+  --run;
+  const std::uint64_t start = run->first;
+  const std::uint64_t end = run->second;
+  if (index > end) return;
+  EraseRunLocked(run);
+  if (start < index) AddRunLocked(start, index - 1);
+  if (index < end) AddRunLocked(index + 1, end);
+}
+
+void TelemetryQueue::AddRunLocked(std::uint64_t start, std::uint64_t end) {
+  runs_[start] = end;
+  runs_by_length_.insert({kLengthKeyBase - (end - start + 1), start});
+}
+
+void TelemetryQueue::EraseRunLocked(
+    std::map<std::uint64_t, std::uint64_t>::iterator run) {
+  runs_by_length_.erase({kLengthKeyBase - (run->second - run->first + 1), run->first});
+  runs_.erase(run);
+}
+
+bool TelemetryQueue::AppendToFileLocked(const QueuedTelemetryFrame& frame) {
   std::ofstream out(queue_file_, std::ios::app);
   if (!out.is_open()) {
     return false;
@@ -235,8 +306,8 @@ bool TelemetryQueue::CompactLocked(std::string* error) {
       return false;
     }
 
-    for (const QueuedTelemetryFrame& frame : frames_) {
-      out << FormatLine(frame) << '\n';
+    for (const auto& entry : frames_) {
+      out << FormatLine(entry.second) << '\n';
       if (!out.good()) {
         if (error != nullptr) {
           *error = "failed to persist queue frame";
@@ -321,22 +392,14 @@ void TelemetryQueue::PruneLocked() {
   const std::int64_t retention_s =
       static_cast<std::int64_t>(retention_hours_ * 3600.0);
 
-  auto drop_front = [&]() {
-    const std::uint64_t bytes = LineBytes(frames_.front());
-    live_bytes_ -= bytes;
-    // The dropped line may still be in the file until the next compaction.
-    dead_bytes_ += bytes;
-    frames_.pop_front();
-  };
-
   // Frames past retention are dropped outright. The old code only pruned
   // when the queue was over max_bytes AND the frame was stale, so a backlog
   // under the (8 GB default) size cap was kept forever and replayed
   // weeks-old frames at the ground station whenever the link came up.
   if (retention_s > 0) {
     while (!frames_.empty() &&
-           (now - frames_.front().queued_epoch_s) > retention_s) {
-      drop_front();
+           (now - frames_.begin()->second.queued_epoch_s) > retention_s) {
+      RemoveLocked(frames_.begin()->first);
     }
   }
 
@@ -344,7 +407,7 @@ void TelemetryQueue::PruneLocked() {
     return;
   }
   while (!frames_.empty() && live_bytes_ > max_bytes_) {
-    drop_front();
+    RemoveLocked(frames_.begin()->first);
   }
 }
 

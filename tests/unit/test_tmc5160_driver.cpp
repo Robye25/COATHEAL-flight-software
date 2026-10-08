@@ -42,7 +42,20 @@ constexpr std::uint8_t kRegD1 = 0x2A;
 constexpr std::uint8_t kRegVSTOP = 0x2B;
 constexpr std::uint8_t kRegXTARGET = 0x2D;
 constexpr std::uint8_t kRegCHOPCONF = 0x6C;
+constexpr std::uint8_t kRegCOOLCONF = 0x6D;
 constexpr std::uint8_t kRegDRV_STATUS = 0x6F;
+
+// SPI status byte (first byte of every reply) and the register bits the
+// step-loss supervision acts on.
+constexpr std::uint8_t kStatusReset = 0x01;
+constexpr std::uint8_t kStatusDriverError = 0x02;
+constexpr std::uint32_t kGstatReset = 0x1U;
+constexpr std::uint32_t kGstatDrvErr = 0x2U;
+constexpr std::uint32_t kGstatUvCp = 0x4U;
+constexpr std::uint32_t kDrvS2vsa = 1U << 12;
+constexpr std::uint32_t kDrvOt = 1U << 25;
+constexpr std::uint32_t kDrvS2ga = 1U << 27;
+constexpr std::uint32_t kDrvOla = 1U << 29;
 
 void ExpectWrite(FakeSpiBus* bus, std::uint8_t addr, std::uint32_t value) {
   std::vector<std::uint8_t> tx = {
@@ -52,6 +65,18 @@ void ExpectWrite(FakeSpiBus* bus, std::uint8_t addr, std::uint32_t value) {
       static_cast<std::uint8_t>((value >> 8) & 0xFFU),
       static_cast<std::uint8_t>(value & 0xFFU)};
   bus->Expect(tx, {0, 0, 0, 0, 0});
+}
+
+// A write whose reply carries `status` in the SPI status byte.
+void ExpectWriteWithStatus(FakeSpiBus* bus, std::uint8_t addr,
+                           std::uint32_t value, std::uint8_t status) {
+  std::vector<std::uint8_t> tx = {
+      static_cast<std::uint8_t>(addr | 0x80U),
+      static_cast<std::uint8_t>((value >> 24) & 0xFFU),
+      static_cast<std::uint8_t>((value >> 16) & 0xFFU),
+      static_cast<std::uint8_t>((value >> 8) & 0xFFU),
+      static_cast<std::uint8_t>(value & 0xFFU)};
+  bus->Expect(tx, {status, 0, 0, 0, 0});
 }
 
 // Two-phase read: phase 1 latches the address (reply content is whatever the
@@ -124,6 +149,8 @@ void ScriptReinitSequence(FakeSpiBus* bus, const Tmc5160Config& cfg,
                 static_cast<std::uint32_t>(ioin_pin_bits));
   ExpectWrite(bus, kRegGCONF, gconf);
   ExpectWrite(bus, kRegCHOPCONF, chopconf_run);
+  // StallGuard2 threshold + filter; coolStep stays off.
+  ExpectWrite(bus, kRegCOOLCONF, Tmc5160Driver::EncodeCoolconf(cfg.stallguard_sgt));
   ExpectWrite(bus, kRegGLOBALSCALER, gs_reg);
   ExpectWrite(bus, kRegIHOLD_IRUN, ihold_irun);
   ExpectWrite(bus, kRegTPOWERDOWN, 10U);
@@ -143,10 +170,10 @@ void ScriptReinitSequence(FakeSpiBus* bus, const Tmc5160Config& cfg,
   ExpectWrite(bus, kRegGSTAT, 0x7U);  // clear reset/drv_err/uv_cp: config is on the chip now
 }
 
-// Total Expect() entries ScriptReinitSequence() queues: IOIN (2) + 16
+// Total Expect() entries ScriptReinitSequence() queues: IOIN (2) + 17
 // register writes + GCONF/CHOPCONF readback (2*2) + the GSTAT clear (1). Used to prove the
 // version-gate test stops exactly at IOIN, not "eventually, somehow".
-constexpr std::size_t kFullReinitExpectationCount = 23;
+constexpr std::size_t kFullReinitExpectationCount = 24;
 
 void ScriptHealthyReinit(FakeSpiBus* bus, const Tmc5160Config& cfg,
                          std::uint8_t toff = 0) {
@@ -179,6 +206,34 @@ void ScriptEnableTrueChopconf(FakeSpiBus* bus, const Tmc5160Config& cfg,
                               std::uint32_t drv_status = 0) {
   ExpectWrite(bus, kRegCHOPCONF, Chopconf(cfg.microstep, /*toff=*/3));
   ExpectRead(bus, kRegDRV_STATUS, drv_status);
+}
+
+// Enable(true) on a healthy, idle driver: GSTAT clean, TOFF=3, DRV_STATUS.
+void EnableHealthy(FakeSpiBus* bus, Tmc5160Driver* driver,
+                   const Tmc5160Config& cfg) {
+  ExpectRead(bus, kRegGSTAT, 0U);
+  ScriptEnableTrueChopconf(bus, cfg);
+  assert(driver->Enable(true));
+  assert(bus->mismatch_count() == 0);
+  assert(bus->remaining_expectations() == 0);
+}
+
+// One idle Poll(): GSTAT, DRV_STATUS, then XACTUAL against the target.
+void ScriptIdlePoll(FakeSpiBus* bus, std::uint32_t gstat, std::uint32_t drv_status,
+                    std::uint32_t xactual) {
+  ExpectRead(bus, kRegGSTAT, gstat);
+  ExpectRead(bus, kRegDRV_STATUS, drv_status);
+  ExpectRead(bus, kRegXACTUAL, xactual);
+}
+
+// `count` plain forward steps at divisor 4 from `*target` (64 units each).
+void StepForward(FakeSpiBus* bus, Tmc5160Driver* driver, int count,
+                 std::int32_t* target) {
+  for (int i = 0; i < count; ++i) {
+    *target += 64;
+    ExpectWrite(bus, kRegXTARGET, static_cast<std::uint32_t>(*target));
+    assert(driver->Step(true));
+  }
 }
 
 // ---------------------------------------------------------------------
@@ -591,12 +646,15 @@ void TestChipResetOnEnableIsRecovered() {
   // Enable(true): GSTAT says reset -> full re-initialisation, then TOFF=3.
   ExpectRead(&bus, kRegGSTAT, 0x1U);
   ScriptHealthyReinit(&bus, cfg);
-  ExpectWrite(&bus, kRegCHOPCONF, Chopconf(cfg.microstep, /*toff=*/3));
+  ScriptEnableTrueChopconf(&bus, cfg);
   assert(driver->Enable(true));
   assert(bus.mismatch_count() == 0);
   assert(bus.remaining_expectations() == 0);
   assert(driver->reset_count() == 1);
   assert(driver->warning().find("chip reset 1x") != std::string::npos);
+  // The motor was not energised when the chip reset: nothing was holding a
+  // position, so this is not a step-loss event.
+  assert(driver->step_loss_events() == 0);
   assert(driver->DebugRegisters().empty());  // no script -> nothing, but resets= is wired:
   // MUTATION: make RecoverFromChipResetUnlocked ignore GSTAT bit 0 and
   // confirm this test fails on mismatch_count (the reinit never happens).
@@ -609,19 +667,24 @@ void TestChipResetAtIdleIsRecoveredByPoll() {
   // Disabled: Poll() does not touch the bus at all.
   assert(driver->Poll());
   assert(bus.remaining_expectations() == 0);
-  ExpectRead(&bus, kRegGSTAT, 0U);
-  ExpectWrite(&bus, kRegCHOPCONF, Chopconf(cfg.microstep, /*toff=*/3));
-  assert(driver->Enable(true));
+  EnableHealthy(&bus, driver.get(), cfg);
   // Enabled and idle: a reset since the last check is repaired in place,
   // chopper restored (bench 2026-08-29: M1's chip reset right after its
   // move ended and sat with TOFF=0, holding nothing).
   ExpectRead(&bus, kRegGSTAT, 0x1U);
   ScriptHealthyReinit(&bus, cfg, /*toff=*/3);  // enabled: chopper restored by the reinit itself
+  ExpectRead(&bus, kRegDRV_STATUS, 0U);
+  ExpectRead(&bus, kRegXACTUAL, 0U);
   assert(driver->Poll());
   assert(bus.mismatch_count() == 0);
   assert(bus.remaining_expectations() == 0);
   assert(driver->reset_count() == 1);
   assert(driver->enabled());
+  // The motor was energised and let go: the position is no longer known.
+  // Nothing was moving, so there is no move to stop.
+  assert(driver->step_loss_events() == 1);
+  assert(driver->step_loss_reason().find("chip reset") != std::string::npos);
+  assert(!driver->TakeStepLossStop());
 }
 
 void TestChipResetMidMoveIsRecoveredWithinTheCheckInterval() {
@@ -629,9 +692,7 @@ void TestChipResetMidMoveIsRecoveredWithinTheCheckInterval() {
   Tmc5160Config cfg;
   cfg.microstep = 4;
   auto driver = MakeHealthyDriver(&bus, cfg);
-  ExpectRead(&bus, kRegGSTAT, 0U);
-  ExpectWrite(&bus, kRegCHOPCONF, Chopconf(4, /*toff=*/3));
-  assert(driver->Enable(true));
+  EnableHealthy(&bus, driver.get(), cfg);
   // 63 plain steps, then the 64th re-reads GSTAT and finds the chip reset:
   // configuration rewritten, chopper restored, and the step continues from
   // the fresh XACTUAL=0 (target 64, not 64*64).
@@ -651,6 +712,10 @@ void TestChipResetMidMoveIsRecoveredWithinTheCheckInterval() {
   assert(driver->target() == 64);
   assert(driver->reset_count() == 1);
   assert(driver->enabled());
+  // A step-loss event, and the move goes on: stopping would not bring the
+  // lost steps back, and under link loss nobody could resume it.
+  assert(driver->step_loss_events() == 1);
+  assert(!driver->TakeStepLossStop());
 }
 
 // A disabled motor must come out of (re)initialisation with the chopper
@@ -715,6 +780,10 @@ void TestDebugRegistersDecodeMotionTruth() {
   assert(has(";toff=0;"));
   assert(has(";mres=6;usteps=4"));
   assert(has(";pwm_scale_sum=255;pwm_scale_auto=-16;pwm_ofs_auto=30;pwm_grad_auto=12"));
+  // Step-loss supervision statistics trail the registers; "-" until the
+  // first StallGuard sample of a move.
+  assert(has(";drv_loss=0;stall_mode=monitor;sgt=0;sg_thr=0;sg_last=-;sg_min=-;sg_n=0"
+             ";stalls=0;uv=0;shorts=0;openload=0;xt_repairs=0"));
   // A bus failure mid-read yields nothing rather than a half-decoded lie.
   bus.FailNextTransfers(1);
   assert(driver->DebugRegisters().empty());
@@ -957,21 +1026,18 @@ void TestThermalFlagsLatchAndClearOnReenable() {
   assert(driver->thermal_state() == 0);
 
   // Poll (enabled, idle): GSTAT clean, then otpw -> pre-warning, counted.
-  ExpectRead(&bus, kRegGSTAT, 0U);
-  ExpectRead(&bus, kRegDRV_STATUS, 1U << 26);
+  ScriptIdlePoll(&bus, 0U, 1U << 26, 0U);
   assert(driver->Poll());
   assert(driver->thermal_state() == 1);
   assert(driver->otpw_event_count() == 1);
 
   // ot -> shutdown, latched.
-  ExpectRead(&bus, kRegGSTAT, 0U);
-  ExpectRead(&bus, kRegDRV_STATUS, 1U << 25);
+  ScriptIdlePoll(&bus, 0U, 1U << 25, 0U);
   assert(driver->Poll());
   assert(driver->thermal_state() == 2);
 
   // The chip's own flag clears as the die cools — the latch must NOT.
-  ExpectRead(&bus, kRegGSTAT, 0U);
-  ExpectRead(&bus, kRegDRV_STATUS, 0U);
+  ScriptIdlePoll(&bus, 0U, 0U, 0U);
   assert(driver->Poll());
   assert(driver->thermal_state() == 2);
 
@@ -1037,6 +1103,541 @@ void TestSetRunCurrentRejectsUnreachableTargetWithoutBusTraffic() {
          1e-12);
 }
 
+// ---------------------------------------------------------------------
+// Step-loss protection.
+//
+// The TMC5160 runs open loop: the position is a count of the steps that
+// were commanded. Each test below is one way that count stops being true,
+// and what the driver does about it.
+// ---------------------------------------------------------------------
+
+// COOLCONF as written at initialisation. Hand-computed: sfilt is bit 24,
+// sgt a 7-bit two's-complement field in bits 22:16, everything else 0 so
+// coolStep (semin, bits 3:0) stays off.
+void TestCoolconfEncodesSgtAndFilterWithCoolStepOff() {
+  assert(Tmc5160Driver::EncodeCoolconf(0) == 0x01000000U);
+  assert(Tmc5160Driver::EncodeCoolconf(1) == 0x01010000U);
+  assert(Tmc5160Driver::EncodeCoolconf(63) == 0x013F0000U);
+  assert(Tmc5160Driver::EncodeCoolconf(-1) == 0x017F0000U);
+  assert(Tmc5160Driver::EncodeCoolconf(-64) == 0x01400000U);
+  // Out of range is clamped, never wrapped into the neighbouring fields.
+  assert(Tmc5160Driver::EncodeCoolconf(200) == 0x013F0000U);
+  assert(Tmc5160Driver::EncodeCoolconf(-200) == 0x01400000U);
+  // And it reaches the wire: a non-zero sgt comes up healthy only if the
+  // init sequence writes exactly that value.
+  FakeSpiBus bus;
+  Tmc5160Config cfg;
+  cfg.stallguard_sgt = -7;
+  auto driver = MakeHealthyDriver(&bus, cfg);
+  assert(driver->healthy());
+}
+
+void TestParseStallDetect() {
+  Tmc5160Config::StallDetect mode = Tmc5160Config::StallDetect::kOff;
+  assert(Tmc5160Driver::ParseStallDetect("monitor", &mode));
+  assert(mode == Tmc5160Config::StallDetect::kMonitor);
+  assert(Tmc5160Driver::ParseStallDetect("stop", &mode));
+  assert(mode == Tmc5160Config::StallDetect::kStop);
+  assert(Tmc5160Driver::ParseStallDetect("off", &mode));
+  assert(mode == Tmc5160Config::StallDetect::kOff);
+  assert(!Tmc5160Driver::ParseStallDetect("STOP", &mode));
+  assert(!Tmc5160Driver::ParseStallDetect("", &mode));
+  assert(mode == Tmc5160Config::StallDetect::kOff);  // untouched on failure
+  assert(std::string(Tmc5160Driver::StallDetectName(Tmc5160Config::StallDetect::kStop)) == "stop");
+}
+
+// The reply to every datagram starts with the chip's status byte. Its
+// reset flag on an XTARGET write means the chip lost its configuration
+// before that write: the driver recovers on that very step instead of
+// stepping into a dead ramp generator for up to 63 more.
+void TestStatusByteResetFlagRecoversOnTheSameStep() {
+  FakeSpiBus bus;
+  Tmc5160Config cfg;
+  cfg.microstep = 4;
+  auto driver = MakeHealthyDriver(&bus, cfg);
+  EnableHealthy(&bus, driver.get(), cfg);
+  std::int32_t target = 0;
+  StepForward(&bus, driver.get(), 5, &target);
+  assert(driver->step_loss_events() == 0);
+
+  ExpectWriteWithStatus(&bus, kRegXTARGET, 64U * 6U, kStatusReset);
+  ExpectRead(&bus, kRegGSTAT, kGstatReset);
+  ScriptHealthyReinit(&bus, cfg, /*toff=*/3);
+  ExpectRead(&bus, kRegDRV_STATUS, 0U);
+  assert(driver->Step(true));
+  assert(bus.mismatch_count() == 0);
+  assert(bus.remaining_expectations() == 0);
+  assert(driver->reset_count() == 1);
+  assert(driver->target() == 0);  // the chip's coordinates restart at 0
+  assert(driver->step_loss_events() == 1);
+  assert(driver->step_loss_reason().find("chip reset") != std::string::npos);
+  assert(!driver->TakeStepLossStop());  // the move continues
+  // ...and it does, from the fresh origin.
+  target = 0;
+  StepForward(&bus, driver.get(), 3, &target);
+  assert(driver->target() == 192);
+  assert(bus.mismatch_count() == 0);
+  // MUTATION: drop the status-byte check at the end of Step() and confirm
+  // this test fails on remaining_expectations (the recovery never runs).
+}
+
+// A flag the chip will not let go of must not turn every step of a move
+// into a supervision read: one read, then eight plain steps.
+void TestStuckStatusFlagIsRecheckedSparingly() {
+  FakeSpiBus bus;
+  Tmc5160Config cfg;
+  cfg.microstep = 4;
+  auto driver = MakeHealthyDriver(&bus, cfg);
+  EnableHealthy(&bus, driver.get(), cfg);
+
+  // driver_error in the status byte, but GSTAT and DRV_STATUS read clean.
+  ExpectWriteWithStatus(&bus, kRegXTARGET, 64U, kStatusDriverError);
+  ExpectRead(&bus, kRegGSTAT, 0U);
+  ExpectRead(&bus, kRegDRV_STATUS, 0U);
+  assert(driver->Step(true));
+  for (std::uint32_t i = 2; i <= 9; ++i) {
+    ExpectWriteWithStatus(&bus, kRegXTARGET, 64U * i, kStatusDriverError);
+    assert(driver->Step(true));
+  }
+  // The tenth step looks again.
+  ExpectWriteWithStatus(&bus, kRegXTARGET, 64U * 10U, kStatusDriverError);
+  ExpectRead(&bus, kRegGSTAT, 0U);
+  ExpectRead(&bus, kRegDRV_STATUS, 0U);
+  assert(driver->Step(true));
+  assert(bus.mismatch_count() == 0);
+  assert(bus.remaining_expectations() == 0);
+  assert(driver->step_loss_events() == 0);
+}
+
+// A short: the chip has switched the bridge off. The step fails (the
+// channel disables the motor), the event is recorded, and no further step
+// is attempted until STEPPER_ENABLE re-arms the bridge.
+void TestShortCircuitFailsTheStepUntilReenabled() {
+  FakeSpiBus bus;
+  Tmc5160Config cfg;
+  cfg.microstep = 4;
+  auto driver = MakeHealthyDriver(&bus, cfg);
+  EnableHealthy(&bus, driver.get(), cfg);
+
+  ExpectWriteWithStatus(&bus, kRegXTARGET, 64U, kStatusDriverError);
+  ExpectRead(&bus, kRegGSTAT, kGstatDrvErr);
+  ExpectWrite(&bus, kRegGSTAT, kGstatDrvErr);  // counted, then cleared
+  ExpectRead(&bus, kRegDRV_STATUS, kDrvS2ga | kDrvS2vsa);
+  assert(!driver->Step(true));
+  assert(bus.mismatch_count() == 0);
+  assert(bus.remaining_expectations() == 0);
+  assert(driver->healthy());  // the chip answers; it is the motor side that is shorted
+  assert(driver->short_count() == 1);
+  assert(driver->step_loss_events() == 1);  // one event: the short explains the drv_err
+  assert(driver->step_loss_reason().find("short circuit") != std::string::npos);
+  assert(driver->step_loss_reason().find("s2ga s2vsa") != std::string::npos);
+  // Not a "stop and keep holding": the refused step makes the channel
+  // disable the motor, which is also what re-arms the bridge.
+  assert(!driver->TakeStepLossStop());
+  assert(driver->warning().find("short circuit on a motor coil 1x ACTIVE") != std::string::npos);
+
+  // No bus traffic for a step that cannot be taken.
+  assert(!driver->Step(true));
+  assert(bus.mismatch_count() == 0);
+
+  // Disable + enable re-arms; a clean DRV_STATUS lets it step again.
+  ExpectRead(&bus, kRegXACTUAL, 64U);
+  ExpectWrite(&bus, kRegXTARGET, 64U);
+  ExpectWrite(&bus, kRegCHOPCONF, Chopconf(cfg.microstep, /*toff=*/0));
+  assert(driver->Enable(false));
+  EnableHealthy(&bus, driver.get(), cfg);
+  ExpectWrite(&bus, kRegXTARGET, 128U);
+  assert(driver->Step(true));
+  assert(driver->short_count() == 1);
+  assert(driver->warning().find("ACTIVE") == std::string::npos);
+  assert(bus.mismatch_count() == 0);
+  assert(bus.remaining_expectations() == 0);
+  // MUTATION: make CheckDriverStatusUnlocked ignore kDrvShortMask and
+  // confirm this test fails on the first `!driver->Step(true)`.
+}
+
+// A short found while idle (holding): there is no step to fail, so the
+// event asks the channel to end the hold, and the next step is refused.
+void TestShortCircuitWhileIdleAsksForTheHoldToEnd() {
+  FakeSpiBus bus;
+  Tmc5160Config cfg;
+  auto driver = MakeHealthyDriver(&bus, cfg);
+  EnableHealthy(&bus, driver.get(), cfg);
+  ScriptIdlePoll(&bus, 0U, kDrvS2ga, 0U);
+  assert(driver->Poll());
+  assert(driver->step_loss_events() == 1);
+  assert(driver->TakeStepLossStop());
+  assert(!driver->TakeStepLossStop());  // read once
+  assert(!driver->Step(true));
+  assert(bus.mismatch_count() == 0);
+  assert(bus.remaining_expectations() == 0);
+}
+
+// Supply undervoltage (GSTAT.uv_cp): the power stage was off while the
+// supply was low. One event per episode; the flag is cleared so the next
+// read shows whether it is still there; the move continues.
+void TestUndervoltageIsOneEventPerEpisodeAndTheMoveContinues() {
+  FakeSpiBus bus;
+  Tmc5160Config cfg;
+  cfg.microstep = 4;
+  auto driver = MakeHealthyDriver(&bus, cfg);
+  EnableHealthy(&bus, driver.get(), cfg);
+  std::int32_t target = 0;
+  StepForward(&bus, driver.get(), 63, &target);
+
+  // 64th step: the periodic supervision read.
+  ExpectRead(&bus, kRegGSTAT, kGstatUvCp);
+  ExpectWrite(&bus, kRegGSTAT, kGstatUvCp);
+  ExpectRead(&bus, kRegDRV_STATUS, 0U);
+  StepForward(&bus, driver.get(), 1, &target);
+  assert(driver->undervoltage_count() == 1);
+  assert(driver->step_loss_events() == 1);
+  assert(driver->step_loss_reason().find("undervoltage") != std::string::npos);
+  assert(!driver->TakeStepLossStop());
+  assert(driver->healthy());
+
+  // Still low at the next check: the same episode, not a second event.
+  StepForward(&bus, driver.get(), 63, &target);
+  ExpectRead(&bus, kRegGSTAT, kGstatUvCp);
+  ExpectWrite(&bus, kRegGSTAT, kGstatUvCp);
+  ExpectRead(&bus, kRegDRV_STATUS, 0U);
+  StepForward(&bus, driver.get(), 1, &target);
+  assert(driver->undervoltage_count() == 1);
+  assert(driver->step_loss_events() == 1);
+
+  // Recovered, then low again: a new episode.
+  StepForward(&bus, driver.get(), 63, &target);
+  ExpectRead(&bus, kRegGSTAT, 0U);
+  ExpectRead(&bus, kRegDRV_STATUS, 0U);
+  StepForward(&bus, driver.get(), 1, &target);
+  StepForward(&bus, driver.get(), 63, &target);
+  ExpectRead(&bus, kRegGSTAT, kGstatUvCp);
+  ExpectWrite(&bus, kRegGSTAT, kGstatUvCp);
+  ExpectRead(&bus, kRegDRV_STATUS, 0U);
+  StepForward(&bus, driver.get(), 1, &target);
+  assert(driver->undervoltage_count() == 2);
+  assert(driver->step_loss_events() == 2);
+  assert(driver->warning().find("motor supply undervoltage 2x") != std::string::npos);
+  assert(bus.mismatch_count() == 0);
+  assert(bus.remaining_expectations() == 0);
+}
+
+// An undervoltage flagged before the motor was enabled lost nothing: it is
+// cleared and counted, not a step-loss event.
+void TestUndervoltageBeforeEnableIsNotStepLoss() {
+  FakeSpiBus bus;
+  Tmc5160Config cfg;
+  auto driver = MakeHealthyDriver(&bus, cfg);
+  ExpectRead(&bus, kRegGSTAT, kGstatUvCp);
+  ExpectWrite(&bus, kRegGSTAT, kGstatUvCp);
+  ScriptEnableTrueChopconf(&bus, cfg);
+  assert(driver->Enable(true));
+  assert(driver->undervoltage_count() == 1);
+  assert(driver->step_loss_events() == 0);
+  assert(bus.mismatch_count() == 0);
+  assert(bus.remaining_expectations() == 0);
+}
+
+// drv_err with nothing in DRV_STATUS to explain it: the power stage was
+// shut down and has recovered. An event; the move continues. With the
+// over-temperature flag set it is the thermal path's business instead
+// (the channel disables the motor on thermal_state 2).
+void TestDriverErrorIsAnEventUnlessThermalExplainsIt() {
+  {
+    FakeSpiBus bus;
+    Tmc5160Config cfg;
+    auto driver = MakeHealthyDriver(&bus, cfg);
+    EnableHealthy(&bus, driver.get(), cfg);
+    ExpectRead(&bus, kRegGSTAT, kGstatDrvErr);
+    ExpectWrite(&bus, kRegGSTAT, kGstatDrvErr);
+    ExpectRead(&bus, kRegDRV_STATUS, 0U);
+    ExpectRead(&bus, kRegXACTUAL, 0U);
+    assert(driver->Poll());
+    assert(driver->step_loss_events() == 1);
+    assert(driver->step_loss_reason().find("driver error") != std::string::npos);
+    assert(!driver->TakeStepLossStop());
+    assert(bus.mismatch_count() == 0);
+    assert(bus.remaining_expectations() == 0);
+  }
+  {
+    FakeSpiBus bus;
+    Tmc5160Config cfg;
+    auto driver = MakeHealthyDriver(&bus, cfg);
+    EnableHealthy(&bus, driver.get(), cfg);
+    ExpectRead(&bus, kRegGSTAT, kGstatDrvErr);
+    ExpectWrite(&bus, kRegGSTAT, kGstatDrvErr);
+    ExpectRead(&bus, kRegDRV_STATUS, kDrvOt);
+    ExpectRead(&bus, kRegXACTUAL, 0U);
+    assert(driver->Poll());
+    assert(driver->thermal_state() == 2);
+    assert(driver->step_loss_events() == 0);
+    assert(bus.mismatch_count() == 0);
+    assert(bus.remaining_expectations() == 0);
+  }
+}
+
+// Open-load flags are an indication only: counted and warned about, never
+// an event, never a refused step.
+void TestOpenLoadIsCountedAndNeverStops() {
+  FakeSpiBus bus;
+  Tmc5160Config cfg;
+  cfg.microstep = 4;
+  auto driver = MakeHealthyDriver(&bus, cfg);
+  EnableHealthy(&bus, driver.get(), cfg);
+  std::int32_t target = 0;
+  StepForward(&bus, driver.get(), 63, &target);
+  ExpectRead(&bus, kRegGSTAT, 0U);
+  ExpectRead(&bus, kRegDRV_STATUS, kDrvOla);
+  StepForward(&bus, driver.get(), 1, &target);
+  assert(driver->open_load_count() == 1);
+  assert(driver->step_loss_events() == 0);
+  assert(driver->warning().find("open load flagged 1x") != std::string::npos);
+  // At standstill the flags mean nothing and are not looked at.
+  ScriptIdlePoll(&bus, 0U, kDrvOla, static_cast<std::uint32_t>(target));
+  assert(driver->Poll());
+  assert(driver->open_load_count() == 1);
+  assert(bus.mismatch_count() == 0);
+  assert(bus.remaining_expectations() == 0);
+}
+
+// The last XTARGET write of a move has no later write to supersede it: a
+// corrupted one would send the motor to a position nobody asked for.
+// ConfirmTarget() reads it back and rewrites it once.
+void TestConfirmTargetRepairsACorruptedXtarget() {
+  FakeSpiBus bus;
+  Tmc5160Config cfg;
+  cfg.microstep = 4;
+  auto driver = MakeHealthyDriver(&bus, cfg);
+  // Disabled: nothing to confirm, no bus traffic.
+  assert(driver->ConfirmTarget());
+  assert(bus.remaining_expectations() == 0);
+  EnableHealthy(&bus, driver.get(), cfg);
+  std::int32_t target = 0;
+  StepForward(&bus, driver.get(), 2, &target);  // target 128
+
+  ExpectRead(&bus, kRegXTARGET, 128U);
+  assert(driver->ConfirmTarget());
+  assert(driver->xtarget_repair_count() == 0);
+
+  // Bit 20 flipped in the last write: 128 + 1048576.
+  ExpectRead(&bus, kRegXTARGET, 128U + (1U << 20));
+  ExpectWrite(&bus, kRegXTARGET, 128U);
+  ExpectRead(&bus, kRegXTARGET, 128U);
+  assert(driver->ConfirmTarget());
+  assert(driver->healthy());
+  assert(driver->xtarget_repair_count() == 1);
+  assert(driver->step_loss_events() == 0);  // repaired before anything was lost
+  assert(driver->warning().find("XTARGET rewritten 1x") != std::string::npos);
+
+  // A register that will not take the value: the driver cannot be trusted.
+  ExpectRead(&bus, kRegXTARGET, 0U);
+  ExpectWrite(&bus, kRegXTARGET, 128U);
+  ExpectRead(&bus, kRegXTARGET, 0U);
+  assert(!driver->ConfirmTarget());
+  assert(!driver->healthy());
+  assert(driver->last_error().find("XTARGET does not hold") != std::string::npos);
+  assert(bus.mismatch_count() == 0);
+  assert(bus.remaining_expectations() == 0);
+}
+
+// At standstill the chip must be where it was told to go. One mismatch can
+// be the ramp generator finishing its last hop; two polls in a row is a
+// chip that did not execute the move (or is not there at all: an absent
+// chip with MISO low reads XACTUAL=0 and every flag clean).
+void TestIdlePositionMismatchOnTwoPollsIsStepLoss() {
+  FakeSpiBus bus;
+  Tmc5160Config cfg;
+  cfg.microstep = 4;
+  auto driver = MakeHealthyDriver(&bus, cfg);
+  EnableHealthy(&bus, driver.get(), cfg);
+  std::int32_t target = 0;
+  StepForward(&bus, driver.get(), 2, &target);  // target 128
+
+  ScriptIdlePoll(&bus, 0U, 0U, 64U);  // one hop short: still arriving
+  assert(driver->Poll());
+  assert(driver->step_loss_events() == 0);
+  ScriptIdlePoll(&bus, 0U, 0U, 128U);  // arrived: the count starts over
+  assert(driver->Poll());
+  ScriptIdlePoll(&bus, 0U, 0U, 0U);
+  assert(driver->Poll());
+  assert(driver->healthy());
+  assert(driver->step_loss_events() == 0);
+
+  ScriptIdlePoll(&bus, 0U, 0U, 0U);
+  assert(!driver->Poll());
+  assert(!driver->healthy());
+  assert(driver->step_loss_events() == 1);
+  assert(driver->step_loss_reason().find("chip position 0 is not the commanded 128") != std::string::npos);
+  assert(driver->TakeStepLossStop());  // ends a hold; the motor is re-probed
+  assert(driver->last_error().find("did not execute the move") != std::string::npos);
+  assert(bus.mismatch_count() == 0);
+  assert(bus.remaining_expectations() == 0);
+  // MUTATION: drop CheckPositionUnlocked() from Poll() and confirm this
+  // test fails on remaining_expectations.
+}
+
+// StallGuard2. Hand-computed cadence at divisor 4: one electrical period is
+// 4 full steps = 16 Step() calls, so DRV_STATUS is read at steps 16, 32, 48
+// and -- together with the periodic GSTAT check -- 64. The first read after
+// cruise begins is discarded (the filter still holds the ramp), so the
+// samples are steps 32, 48, 64, and with stall_confirm_samples=3 a stall is
+// called on step 64.
+void RunToStallVerdict(FakeSpiBus* bus, Tmc5160Driver* driver,
+                       std::uint32_t sg_a, std::uint32_t sg_b, std::uint32_t sg_c,
+                       bool expect_last_step) {
+  std::int32_t target = 0;
+  driver->NoteStepRate(100.0, /*steady=*/true);
+  StepForward(bus, driver, 15, &target);
+  ExpectRead(bus, kRegDRV_STATUS, 5U);  // discarded
+  StepForward(bus, driver, 1, &target);
+  StepForward(bus, driver, 15, &target);
+  ExpectRead(bus, kRegDRV_STATUS, sg_a);
+  StepForward(bus, driver, 1, &target);
+  StepForward(bus, driver, 15, &target);
+  ExpectRead(bus, kRegDRV_STATUS, sg_b);
+  StepForward(bus, driver, 1, &target);
+  StepForward(bus, driver, 15, &target);
+  ExpectRead(bus, kRegGSTAT, 0U);
+  ExpectRead(bus, kRegDRV_STATUS, sg_c);
+  if (expect_last_step) {
+    StepForward(bus, driver, 1, &target);
+  } else {
+    assert(!driver->Step(true));
+  }
+  assert(bus->mismatch_count() == 0);
+  assert(bus->remaining_expectations() == 0);
+}
+
+void TestStallGuardMonitorCountsAndTheMoveContinues() {
+  FakeSpiBus bus;
+  Tmc5160Config cfg;  // stall_detect = monitor, stall_sg_min = 0, 3 samples
+  cfg.microstep = 4;
+  auto driver = MakeHealthyDriver(&bus, cfg);
+  EnableHealthy(&bus, driver.get(), cfg);
+  RunToStallVerdict(&bus, driver.get(), 0U, 0U, 0U, /*expect_last_step=*/true);
+  assert(driver->stall_verdict_count() == 1);
+  assert(driver->stallguard_samples() == 3);
+  assert(driver->stallguard_last() == 0);
+  assert(driver->stallguard_min() == 0);
+  // Monitor: recorded, never a step-loss event, never a stop.
+  assert(driver->step_loss_events() == 0);
+  assert(!driver->TakeStepLossStop());
+  assert(driver->warning().find("StallGuard stall verdict 1x (stall_detect=monitor)") != std::string::npos);
+}
+
+void TestStallGuardStopRefusesTheStepAndAsksForAStop() {
+  FakeSpiBus bus;
+  Tmc5160Config cfg;
+  cfg.microstep = 4;
+  cfg.stall_detect = Tmc5160Config::StallDetect::kStop;
+  cfg.stall_sg_min = 40;
+  auto driver = MakeHealthyDriver(&bus, cfg);
+  EnableHealthy(&bus, driver.get(), cfg);
+  RunToStallVerdict(&bus, driver.get(), 40U, 12U, 0U, /*expect_last_step=*/false);
+  assert(driver->stall_verdict_count() == 1);
+  assert(driver->step_loss_events() == 1);
+  assert(driver->step_loss_reason().find("StallGuard stall") != std::string::npos);
+  assert(driver->TakeStepLossStop());
+  // Still healthy and enabled: the channel stops the move and keeps holding.
+  assert(driver->healthy());
+  assert(driver->enabled());
+  assert(driver->target() == 63 * 64);  // the refused step was not written
+  // MUTATION: compare `sg < cfg_.stall_sg_min` instead of `<=` and confirm
+  // this test fails (the first sample, exactly at the threshold, no longer counts).
+}
+
+// A healthy reading in between breaks the run: three low samples in a row,
+// not three in total.
+void TestStallGuardNeedsConsecutiveLowSamples() {
+  FakeSpiBus bus;
+  Tmc5160Config cfg;
+  cfg.microstep = 4;
+  cfg.stall_detect = Tmc5160Config::StallDetect::kStop;
+  cfg.stall_sg_min = 40;
+  auto driver = MakeHealthyDriver(&bus, cfg);
+  EnableHealthy(&bus, driver.get(), cfg);
+  RunToStallVerdict(&bus, driver.get(), 10U, 300U, 10U, /*expect_last_step=*/true);
+  assert(driver->stall_verdict_count() == 0);
+  assert(driver->step_loss_events() == 0);
+  assert(driver->stallguard_min() == 10);
+  assert(driver->stallguard_last() == 10);
+  assert(driver->stallguard_samples() == 3);
+}
+
+// No sampling -- no extra datagrams at all -- unless the channel reports a
+// steady rate at or above the minimum, in spreadCycle, with detection on.
+void TestStallGuardIsSampledOnlyAtASteadyRateInSpreadCycle() {
+  struct Case {
+    const char* name;
+    double hz;
+    bool steady;
+    bool stealth;
+    Tmc5160Config::StallDetect mode;
+  };
+  const Case cases[] = {
+      {"ramping", 100.0, false, false, Tmc5160Config::StallDetect::kMonitor},
+      {"too slow", 49.0, true, false, Tmc5160Config::StallDetect::kMonitor},
+      {"stealthChop", 100.0, true, true, Tmc5160Config::StallDetect::kMonitor},
+      {"off", 100.0, true, false, Tmc5160Config::StallDetect::kOff},
+  };
+  for (const Case& c : cases) {
+    FakeSpiBus bus;
+    Tmc5160Config cfg;
+    cfg.microstep = 4;
+    cfg.stealth_chop = c.stealth;
+    cfg.stall_detect = c.mode;
+    auto driver = MakeHealthyDriver(&bus, cfg);
+    EnableHealthy(&bus, driver.get(), cfg);
+    driver->NoteStepRate(c.hz, c.steady);
+    std::int32_t target = 0;
+    // 63 steps with only XTARGET writes scripted: any DRV_STATUS read would
+    // hit the strict fake as a mismatch.
+    StepForward(&bus, driver.get(), 63, &target);
+    assert(bus.mismatch_count() == 0);
+    assert(driver->stallguard_samples() == 0);
+    (void)c.name;
+  }
+  // Never told a rate at all (every pre-existing test): no sampling either.
+  FakeSpiBus bus;
+  Tmc5160Config cfg;
+  cfg.microstep = 4;
+  auto driver = MakeHealthyDriver(&bus, cfg);
+  EnableHealthy(&bus, driver.get(), cfg);
+  std::int32_t target = 0;
+  StepForward(&bus, driver.get(), 63, &target);
+  assert(bus.mismatch_count() == 0);
+}
+
+// The statistics belong to one move: a rate of 0 closes it and the next
+// move starts them afresh. MOTOR_DEBUG reports them.
+void TestStallGuardStatisticsArePerMoveAndReachMotorDebug() {
+  FakeSpiBus bus;
+  Tmc5160Config cfg;
+  cfg.microstep = 4;
+  cfg.stallguard_sgt = 5;
+  cfg.stall_sg_min = 20;
+  auto driver = MakeHealthyDriver(&bus, cfg);
+  EnableHealthy(&bus, driver.get(), cfg);
+  RunToStallVerdict(&bus, driver.get(), 310U, 280U, 295U, /*expect_last_step=*/true);
+  assert(driver->stallguard_samples() == 3);
+  assert(driver->stallguard_min() == 280);
+  assert(driver->stallguard_last() == 295);
+
+  // The twelve MOTOR_DEBUG reads, all zero: only the trailing statistics matter here.
+  for (std::uint8_t reg : {0x21, 0x2D, 0x22, 0x6A, 0x6F, 0x35, 0x12, 0x04, 0x01, 0x6C, 0x71, 0x72}) {
+    ExpectRead(&bus, reg, 0U);
+  }
+  const std::string kv = driver->DebugRegisters();
+  assert(kv.find(";stall_mode=monitor;sgt=5;sg_thr=20;sg_last=295;sg_min=280;sg_n=3;stalls=0") != std::string::npos);
+
+  driver->NoteStepRate(0.0, false);  // the move ended
+  assert(driver->stallguard_samples() == 3);  // kept until the next one starts
+  driver->NoteStepRate(100.0, true);
+  assert(driver->stallguard_samples() == 0);
+  assert(bus.mismatch_count() == 0);
+  assert(bus.remaining_expectations() == 0);
+}
+
 int main() {
   TestEncodeMresTable();
   TestEncodeMresRejectsInvalidDivisor();
@@ -1071,5 +1672,22 @@ int main() {
   TestSetRunCurrentRewritesRegistersAndPersists();
   TestSetRunCurrentRejectsUnreachableTargetWithoutBusTraffic();
   TestThermalFlagsLatchAndClearOnReenable();
+  TestCoolconfEncodesSgtAndFilterWithCoolStepOff();
+  TestParseStallDetect();
+  TestStatusByteResetFlagRecoversOnTheSameStep();
+  TestStuckStatusFlagIsRecheckedSparingly();
+  TestShortCircuitFailsTheStepUntilReenabled();
+  TestShortCircuitWhileIdleAsksForTheHoldToEnd();
+  TestUndervoltageIsOneEventPerEpisodeAndTheMoveContinues();
+  TestUndervoltageBeforeEnableIsNotStepLoss();
+  TestDriverErrorIsAnEventUnlessThermalExplainsIt();
+  TestOpenLoadIsCountedAndNeverStops();
+  TestConfirmTargetRepairsACorruptedXtarget();
+  TestIdlePositionMismatchOnTwoPollsIsStepLoss();
+  TestStallGuardMonitorCountsAndTheMoveContinues();
+  TestStallGuardStopRefusesTheStepAndAsksForAStop();
+  TestStallGuardNeedsConsecutiveLowSamples();
+  TestStallGuardIsSampledOnlyAtASteadyRateInSpreadCycle();
+  TestStallGuardStatisticsArePerMoveAndReachMotorDebug();
   return 0;
 }
