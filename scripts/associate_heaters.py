@@ -36,9 +36,10 @@ feels for the specimen that warms and types the motor it is on (`1`, or `1c`
 when that specimen is the one wired to motor 1's MAX31865 click). Then each
 unheated specimen: the operator holds its PT100 between their fingers, the
 script names the terminal that warms, and the operator types its motor; the
-last one is known by elimination. It moves specimens between the lists and
-puts each click specimen first, and writes no heater/PT100 pair: run auto
-(hands off) first, so the PT100 terminals it moves are the right ones.
+last one is known by elimination. It moves specimens between the lists,
+heated ones first, unheated ones last and each click specimen first, and
+writes no heater/PT100 pair: run auto (hands off) first, so the PT100
+terminals it moves are the right ones.
 
 Heating (heat, auto, touch) needs runtime.bench_mode=true and the motors idle. Each
 HEATER_TEST pulse lapses within seconds on its own, so a dead script cannot
@@ -707,13 +708,17 @@ def parse_answer(text: str, motor_count: int) -> tuple[str, Optional[int], bool]
 
 def place_specimens(layout: Layout, motors: dict[int, int], clicks: dict[int, int]) -> Layout:
     """`layout` with specimen S<s> moved to motor motors[s] (the rest stay).
-    Each motor lists its specimens in their present order, and clicks[motor]
-    -- the specimen wired to that motor's MAX31865 click -- first; a motor
-    with none given keeps its present first specimen first while it stays."""
+    Each motor lists its heated specimens, then its unheated ones -- a
+    group's unheated specimen is its last (bench, owner 2026-09-15), so a
+    heater moved in does not land behind it -- each in their present order,
+    and clicks[motor], the specimen wired to that motor's MAX31865 click,
+    first; a motor with none given keeps its present first specimen first
+    while it stays."""
     placed = {s: motors.get(s, layout.motor_of(s)) for s in range(layout.sample_count)}
     groups = []
     for motor, present in enumerate(layout.motor_samples):
-        samples = [s for s in range(layout.sample_count) if placed[s] == motor]
+        samples = sorted((s for s in range(layout.sample_count) if placed[s] == motor),
+                         key=lambda s: layout.specimens[s].line is None)  # stable: heated first
         first = clicks.get(motor, present[0] if present else None)
         if first in samples:
             samples.remove(first)
