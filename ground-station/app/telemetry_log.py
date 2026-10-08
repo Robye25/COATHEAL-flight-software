@@ -1,10 +1,10 @@
 """Every file the ground station writes about a flight (redesign spec §7).
 
-Schema v6 is the single telemetry CSV layout shared by the GUI receiver and
+Schema v7 is the single telemetry CSV layout shared by the GUI receiver and
 the CLI telemetry server (they used to write two different layouts to the
 same default file). One session directory holds:
 
-    telemetry.csv   one row per accepted DATA frame (schema v6)
+    telemetry.csv   one row per accepted DATA frame (schema v7)
     pulls.csv       one row per EVT,PULL
     commands.csv    every command the operator sent and what came back
     events.log      the event log the operator sees
@@ -29,7 +29,8 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 from .protocol import PullEvent, TelemetryPacket
 from .session_dir import SessionDirectory, session_epoch
 
-TELEMETRY_SCHEMA_VERSION = 6
+# v7 (2026-10-05): stepperN_loss / stepperN_uncertain (step-loss protection).
+TELEMETRY_SCHEMA_VERSION = 7
 SAMPLE_COUNT = 8
 HEATER_COUNT = 6
 MOTOR_COUNT = 2
@@ -41,6 +42,7 @@ STEPPER_COLUMNS = [
     ("moving", "moving"), ("holding", "holding"), ("hold_s", "hold_s"),
     ("pulses", "pulses"), ("missed", "missed_deadlines"), ("source", "source"),
     ("zeroed", "zeroed"), ("seq", "seq_name"), ("seqstate", "seq_state"),
+    ("loss", "step_loss"), ("uncertain", "position_uncertain"),
 ]
 CTRL_COLUMNS = [
     "fallback", "link_loss_s", "energy_wh", "budget_wh", "budget_exhausted",
@@ -99,7 +101,7 @@ def _kv(mapping: Dict[str, Any]) -> str:
 
 
 def packet_to_row(pkt: TelemetryPacket, rx_utc: Optional[str] = None) -> Dict[str, str]:
-    """Schema-v6 row for one packet. Every column is always present."""
+    """Schema-v7 row for one packet. Every column is always present."""
     row: Dict[str, str] = {
         "gs_rx_utc": rx_utc or utc_now_iso(),
         "session_id": pkt.session_id,

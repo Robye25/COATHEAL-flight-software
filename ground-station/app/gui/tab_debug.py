@@ -4,8 +4,8 @@ so they lead; the estimator survives as one verdict + one rate line).
 
 Polls `MOTOR_DEBUG <id>` through the dispatcher's quiet path, decodes the
 chip's motion-truth and health registers, and states a one-line verdict.
-The ball-screw lead for the mm/s rate is the onboard's configured 2 mm/rev
-(stepper.lead_mm_per_rev) — no local override.
+The ball-screw lead for the mm/s rate is the onboard's configured 1 mm/rev
+(stepper.lead_mm_per_rev, protocol.LEAD_MM_PER_REV) — no local override.
 """
 from __future__ import annotations
 
@@ -41,6 +41,15 @@ REGISTER_ROWS = [
     ("pulses", "pulses issued"), ("missed", "missed deadlines"), ("faults", "fault flags"),
     ("gstat", "GSTAT (bit 0 = reset since configured)"), ("resets", "chip resets since boot"),
     ("stealth", "stealthChop active"), ("pwm_scale_sum", "PWM amplitude 0–255 (255 = cannot reach current)"),
+    # Step-loss protection (docs/tmc5160-commissioning.md).
+    ("loss", "step-loss events since boot"), ("unc", "position uncertain (1 = latched)"),
+    ("loss_reason", "last step-loss event"),
+    ("stall_mode", "stall detect (off / monitor / stop)"), ("sgt", "StallGuard threshold (COOLCONF.sgt)"),
+    ("sg_thr", "stall when SG_RESULT ≤"), ("sg_last", "StallGuard: last cruise sample"),
+    ("sg_min", "StallGuard: lowest sample this move"), ("sg_n", "StallGuard: samples this move"),
+    ("stalls", "StallGuard stall verdicts since boot"), ("uv", "motor-supply undervoltage episodes"),
+    ("shorts", "coil short-circuit events"), ("openload", "open-load flags while stepping"),
+    ("xt_repairs", "XTARGET rewrites (SPI corruption)"),
 ]
 
 
@@ -138,16 +147,20 @@ class DebugTab(QScrollArea):
         if self._disp.silence:
             self.resp.show_note("✖ radio silence — RADIO RESUME first", RED)
             return
-        self._disp.send(f"MOTOR_DEBUG {self.motor_id()}", tag=self, quiet=True)
-        self.polls_sent += 1
+        self._send_poll()
 
     def _poll(self) -> None:
         if self._disp.silence:
             self.stop_probe()
             self.resp.show_note("✖ probe stopped: radio silence", RED)
             return
-        self._disp.send(f"MOTOR_DEBUG {self.motor_id()}", tag=self, quiet=True)
-        self.polls_sent += 1
+        self._send_poll()
+
+    def _send_poll(self) -> None:
+        # The dispatcher drops a poll while the previous one is still
+        # waiting for the link budget; only polls that went out count.
+        if self._disp.send(f"MOTOR_DEBUG {self.motor_id()}", tag=self, quiet=True) is not False:
+            self.polls_sent += 1
 
     def _restart_estimator(self) -> None:
         self.estimator.reset()
@@ -201,6 +214,13 @@ class DebugTab(QScrollArea):
             parts.append(f"chip resets ×{s.resets}")
             if color == GREEN:
                 color = AMBER
+        if s.uncertain:
+            parts.append("POSITION UNCERTAIN (step loss)")
+            color = RED
+        elif s.loss:
+            parts.append(f"step-loss events ×{s.loss}")
+            if color == GREEN:
+                color = AMBER
         if s.stealth and s.pwm_scale_sum is not None and s.pwm_scale_sum >= 255:
             parts.append("current regulator SATURATED (PWM 255)")
             if color == GREEN:
@@ -223,7 +243,7 @@ class DebugTab(QScrollArea):
                 label.setStyleSheet(f"{MONO_CSS} color: {RED if s.faults else GREEN};")
                 continue
             value = getattr(s, key, None)
-            if value is None:
+            if value is None or value == "":
                 value = s.raw.get(key)
             text = "—" if value is None else (str(int(value)) if isinstance(value, bool) else str(value))
             label.setText(text)
@@ -240,5 +260,9 @@ class DebugTab(QScrollArea):
                 color += f" color: {RED if s.raw.get('ot') == '1' else GREEN};"
             elif key == "otpw":
                 color += f" color: {AMBER if s.raw.get('otpw') == '1' else GREEN};"
+            elif key == "unc":
+                color += f" color: {RED if s.uncertain else GREEN};"
+            elif key in ("loss", "stalls", "uv", "shorts", "openload", "xt_repairs"):
+                color += f" color: {AMBER if s.raw.get(key, '0') not in ('0', '') else GREEN};"
             label.setStyleSheet(color)
         self.raw.setText(soft_breaks(";".join(f"{k}={v}" for k, v in s.raw.items())))

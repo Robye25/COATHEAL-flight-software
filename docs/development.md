@@ -34,10 +34,11 @@
 | CMake | 3.16 |
 | C++ compiler | C++17 support (GCC 10+, Clang 12+) |
 | libgpiod | 1.x or 2.x (for real GPIO output backends) |
+| zlib | 1.2 (z1 telemetry compression; without it no DATA frame fits the 24 kbps budget, see [link-budget.md](link-budget.md)) |
 
 On Raspberry Pi OS:
 ```bash
-sudo apt install cmake g++ libgpiod-dev
+sudo apt install cmake g++ libgpiod-dev zlib1g-dev
 ```
 
 ### Configure and build
@@ -116,6 +117,12 @@ thermal profiles). `test_protocol.py` covers `parse_telemetry_csv` — valid
 frames, variable sample counts, malformed inputs, duplicate detection
 logic. Run the full suite with `python -m unittest discover -s tests` from
 `ground-station/`.
+
+`test_link_cap.py` also runs the E-Link hard cap for real where the machine
+allows it (Linux with `unshare -Urn`, `ip` and `tc`): it installs both kernel
+shapers in throwaway network namespaces, floods them from both ends and
+checks the busiest second ([link-budget.md](link-budget.md#hard-cap)). It
+skips elsewhere. The same check by hand: `python3 scripts/link_cap_selftest.py`.
 
 ---
 

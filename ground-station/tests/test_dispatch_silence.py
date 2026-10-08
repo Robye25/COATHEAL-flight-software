@@ -21,7 +21,7 @@ class _FakePool:
     def __init__(self) -> None:
         self.jobs: list = []
 
-    def start(self, job) -> None:
+    def start(self, job, priority: int = 0) -> None:
         self.jobs.append(job)
 
 
@@ -140,8 +140,9 @@ class DiscoveryQuietTests(unittest.TestCase):
     def test_quiet_probe_sends_nothing(self) -> None:
         import time
         from app.gui.discovery import CommandProbe
+        from app.link_budget import GROUND_SHARE, LinkBudget
         probe = CommandProbe(["127.0.0.1"], cmd_port=1, interval_s=0.05, timeout_s=0.05,
-                             include_static=False)
+                             include_static=False, budget=LinkBudget(GROUND_SHARE))
         probe.set_quiet(True)
         probe.start()
         time.sleep(0.3)
@@ -156,8 +157,11 @@ class DiscoveryQuietTests(unittest.TestCase):
     def test_active_probe_does_send(self) -> None:
         import time
         from app.gui.discovery import CommandProbe
+        from app.link_budget import GROUND_SHARE, LinkBudget
+        # Its own ledger: the process-wide one may still hold another test's
+        # exchanges.
         probe = CommandProbe(["127.0.0.1"], cmd_port=1, interval_s=0.05, timeout_s=0.05,
-                             include_static=False)
+                             include_static=False, budget=LinkBudget(GROUND_SHARE))
         probe.start()
         time.sleep(0.3)
         probe.stop()

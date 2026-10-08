@@ -17,7 +17,33 @@ software on the Pi. Installation is driven by
 | `coatheal-onboard.service`        | Flight profile; `COATHEAL_ENV=flight`; uses `onboard.example.ini`.   | Yes                   |
 | `coatheal-onboard-debug.service`  | Debug profile; `COATHEAL_ENV=debug`; uses `onboard.debug.ini`. Conflicts with flight (they share port 5000). | No |
 | `coatheal-link-watch.path`        | Watches `/sys/class/net` for NIC up/down / dongle replug.            | Yes                   |
-| `coatheal-link-watch.service`     | Oneshot fired by the `.path`; restarts the onboard, cool-down 10 s.  | No (triggered)        |
+| `coatheal-link-watch.service`     | Oneshot fired by the `.path`; re-installs the hard cap when it is on, then restarts the onboard, cool-down 10 s. | No (triggered) |
+| `coatheal-link-cap.service`       | E-Link hard cap: the kernel shaper on the E-Link port (800 B/s, at most 1 800 B in any second). Runs `scripts/link_cap.sh`. | Only while the cap is switched on |
+
+## E-Link hard cap
+
+The kernel shapes everything the Pi sends on its E-Link port, so that no
+program, bug or retransmission can exceed the Pi's part of the 24 kbps
+([`docs/link-budget.md`](../docs/link-budget.md), "Hard cap").
+
+```
+coatheal-link-cap on        # persist + install (flight)
+coatheal-link-cap off       # persist + remove (bench)
+coatheal-link-cap status    # what the kernel has; exit 0 only when capped
+```
+
+- The cap takes the **whole port**: `ssh`, `git` and `apt` on it run at
+  800 B/s too. Leave it off on a bench LAN, switch it on before flight.
+- `coatheal-deploy --flight` switches it on and refuses to finish without
+  it. Any deploy lifts it while it pulls and builds and puts it back at the
+  end, also when the deploy fails.
+- The E-Link port defaults to the one carrying `169.254.10.10`, else `eth0`.
+  Another port: `coatheal-link-cap on --iface <port>` (kept in
+  `/etc/coatheal/link-cap.env`).
+- Every service start logs the state (`[preflight] [link-cap] ON: …`, or a
+  warning when it is off), and `STATUS` reports `link_cap=on:<port>`.
+- `python3 scripts/link_cap_selftest.py` proves the shaper on this kernel in
+  throwaway network namespaces, without touching a real port.
 
 ## Which unit to enable
 

@@ -35,14 +35,14 @@ from .widgets import (
 
 MOTOR_COLORS = ("#2ecc71", "#e67e22")
 # Jog distances in mm (STEPPER_MOVE_MM; the onboard converts through
-# stepper.lead_mm_per_rev). At the commissioning defaults (2 mm lead) the
-# largest jog is 2.5 revolutions.
+# stepper.lead_mm_per_rev). At the 1 mm lead the largest jog is five
+# revolutions.
 JOG_MM = (-0.1, -1.0, -5.0, 0.1, 1.0, 5.0)
-DEFAULT_SPEED_MM_S = MAX_SPEED_MM_S   # the onboard ceiling (50 full-steps/s at the 2 mm lead)
-DEFAULT_BEND_MM = 2.0   # one revolution at the 2 mm default lead
+DEFAULT_SPEED_MM_S = MAX_SPEED_MM_S   # the onboard ceiling (100 full-steps/s at the 1 mm lead)
+DEFAULT_BEND_MM = 2.0   # two revolutions at the 1 mm lead
 DEFAULT_HOLD_S = 5.0
 DEFAULT_CURRENT_A = 0.8
-DEFAULT_ACCEL_MM_S2 = 2.0             # 200 full-steps/s²
+DEFAULT_ACCEL_MM_S2 = 2.0             # 400 full-steps/s² at the 1 mm lead
 
 
 def motor_group_text(layout: Layout, motor_id: int) -> str:
@@ -86,6 +86,12 @@ class MotorCard(QFrame):
         self.thermal_note.setStyleSheet(f"color: {RED}; font-size: 8pt; font-weight: bold; border: none;")
         self.thermal_note.hide()
         lay.addWidget(self.thermal_note)
+        # Step loss: the position below is a count of commanded steps, and
+        # this says when it can no longer be taken at face value.
+        self.loss_note = QLabel(""); self.loss_note.setWordWrap(True); self.loss_note.setMinimumWidth(1)
+        self.loss_note.setStyleSheet(f"color: {RED}; font-size: 8pt; font-weight: bold; border: none;")
+        self.loss_note.hide()
+        lay.addWidget(self.loss_note)
         self.pos = self._kv(lay, "pos / tgt")
         # The operator's primary number during a bend — give it weight.
         self.pos.setStyleSheet(f"{MONO_CSS} border: none; font-size: 11pt; font-weight: bold;")
@@ -109,6 +115,7 @@ class MotorCard(QFrame):
     def update_card(self, motor: MotorState, readout) -> None:
         if not motor.present:
             self.thermal_note.hide()
+            self.loss_note.hide()
             for dot in self.dots.values():
                 dot.set_color(GRAY)
             for lbl in (self.pos, self.speed, self.src, self.seq, self.r_now, self.r_start, self.r_delta):
@@ -146,6 +153,17 @@ class MotorCard(QFrame):
             self.thermal_note.show()
         else:
             self.thermal_note.hide()
+        if motor.position_uncertain:
+            events = f" ({motor.step_loss}×)" if motor.step_loss else ""
+            self.loss_note.setText(f"STEP LOSS{events} — position uncertain; check, then SET ZERO or ACK")
+            self.loss_note.setStyleSheet(f"color: {RED}; font-size: 8pt; font-weight: bold; border: none;")
+            self.loss_note.show()
+        elif motor.step_loss:
+            self.loss_note.setText(f"step-loss events since boot: {motor.step_loss} (acknowledged)")
+            self.loss_note.setStyleSheet(f"color: {MUTED}; font-size: 8pt; border: none;")
+            self.loss_note.show()
+        else:
+            self.loss_note.hide()
         if motor.mm is not None and motor.mm_tgt is not None:
             pos_text = f"{motor.mm:.3f} / {motor.mm_tgt:.3f} mm"
             if motor.moving and motor.hz > 0:
@@ -225,6 +243,11 @@ class MotionTab(QScrollArea):
         self.btn_stop = make_button("STOP", "danger", sends="STEPPER_STOP <motor_id>", min_height=30, slot=lambda: self._send_motor("STEPPER_STOP"))
         grid.addWidget(self.btn_enable, 0, 0); grid.addWidget(self.btn_disable, 0, 1); grid.addWidget(self.btn_zero, 0, 2)
         grid.addWidget(self.btn_home, 1, 0); grid.addWidget(self.btn_stop, 1, 1, 1, 2)
+        # Clears the onboard's position-uncertain latch without moving the
+        # zero: the operator checked the mechanism and accepts the position.
+        self.btn_ack_loss = make_button("ACK STEP LOSS", "neutral", sends="STEPLOSS_ACK <motor_id>", min_height=24,
+                                        slot=lambda: self._send_motor("STEPLOSS_ACK"))
+        grid.addWidget(self.btn_ack_loss, 2, 0, 1, 3)
         lay.addLayout(grid)
         self.motor_note = QLabel(""); self.motor_note.setWordWrap(True); self.motor_note.setMinimumWidth(1)
         self.motor_note.setStyleSheet(f"color: {AMBER}; font-size: 8pt;")
@@ -244,7 +267,7 @@ class MotionTab(QScrollArea):
         lay.addLayout(jog)
         self.jog_note = QLabel(""); self.jog_note.setWordWrap(True); self.jog_note.setMinimumWidth(1)
         self.jog_note.setStyleSheet(f"color: {AMBER}; font-size: 8pt;")
-        j_lbl = QLabel("converted onboard via stepper.lead_mm_per_rev (2 mm/rev default)")
+        j_lbl = QLabel(f"converted onboard via stepper.lead_mm_per_rev ({LEAD_MM_PER_REV:g} mm/rev)")
         j_lbl.setWordWrap(True); j_lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(j_lbl)
         lay.addWidget(self.jog_note)
@@ -301,7 +324,7 @@ class MotionTab(QScrollArea):
         lay.addWidget(hrow(t_lbl, with_unit(self.bend_target, "mm"), h_lbl, with_unit(self.bend_hold, "s"),
                            self.btn_bend))
         self.btn_pull = make_button("STANDARD PULL", "primary", sends="PULL_EXECUTE <motor_id>", min_height=26, slot=self._pull)
-        p_lbl = QLabel("pulls to 2.0 mm (one revolution), holds 5 s, retracts to 0 · config pull.*; emits EVT,PULL")
+        p_lbl = QLabel("pulls to 2.0 mm (two revolutions), holds 5 s, retracts to 0 · config pull.*; emits EVT,PULL")
         p_lbl.setWordWrap(True); p_lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(self.btn_pull)
         lay.addWidget(p_lbl)
@@ -406,6 +429,7 @@ class MotionTab(QScrollArea):
         self.btn_zero.set_reason(gating.generic_reason(state))
         self.btn_stop.set_reason(gating.generic_reason(state))
         self.btn_home.set_reason(gating.motion_reason(state, motor_id, needs_zero=True))
+        self.btn_ack_loss.set_reason(gating.step_loss_ack_reason(state, motor_id))
         jog_reason = gating.motion_reason(state, motor_id, needs_zero=False)
         for btn in self.jog_buttons:
             btn.set_reason(jog_reason)
@@ -421,8 +445,16 @@ class MotionTab(QScrollArea):
             self.drive_now.setText("—")
         bend_reason = gating.motion_reason(state, motor_id, needs_zero=True)
         self.btn_bend.set_reason(bend_reason)
-        self.btn_pull.set_reason(bend_reason)
-        self.bend_note.setText(f"BEND / STANDARD PULL disabled: {bend_reason}" if bend_reason else "")
+        # The onboard refuses a standard pull while the position is latched
+        # uncertain; a manual BEND stays the operator's call.
+        pull_reason = bend_reason or gating.position_trust_reason(state, motor_id)
+        self.btn_pull.set_reason(pull_reason)
+        if bend_reason:
+            self.bend_note.setText(f"BEND / STANDARD PULL disabled: {bend_reason}")
+        elif pull_reason:
+            self.bend_note.setText(f"STANDARD PULL disabled: {pull_reason}")
+        else:
+            self.bend_note.setText("")
 
     def on_pull_event(self, ev: PullEvent) -> None:
         # Freeze the mm value at arrival: steps_moved is in µsteps at the
@@ -430,7 +462,7 @@ class MotionTab(QScrollArea):
         # live divisor is the fallback for old firmware). Re-deriving on
         # render would silently rewrite history after STEPPER_SET_MICROSTEP.
         us = ev.microstep or self.state.motor(ev.motor_id).microstep or 4
-        mm = ev.steps_moved / (200.0 * us / 2.0)
+        mm = ev.steps_moved / (FULL_STEPS_PER_MM * us)
         self._pulls.appendleft((ev, mm))
         for lbl, entry in zip(self.pull_lines, list(self._pulls) + [None] * 3):
             if entry is None:

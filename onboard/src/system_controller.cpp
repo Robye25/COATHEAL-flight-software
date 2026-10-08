@@ -149,11 +149,42 @@ class OwnedBusTmc5160Driver : public StepperDriver {
     return driver_.run_current_a_rms();
   }
   int thermal_state() const override { return driver_.thermal_state(); }
+  std::uint64_t step_loss_events() const override {
+    return driver_.step_loss_events();
+  }
+  std::string step_loss_reason() const override {
+    return driver_.step_loss_reason();
+  }
+  bool TakeStepLossStop() override { return driver_.TakeStepLossStop(); }
+  bool ConfirmTarget() override { return driver_.ConfirmTarget(); }
+  void NoteStepRate(double full_step_hz, bool steady) override {
+    driver_.NoteStepRate(full_step_hz, steady);
+  }
 
  private:
   std::unique_ptr<SpiBus> bus_;
   Tmc5160Driver driver_;
 };
+
+// The motor's last move was ended by a channel safety (step loss, driver
+// over-temperature) rather than by reaching its target or by a command.
+bool EndedBySafetyAbort(const StepperStatus& status) {
+  return status.last_source.rfind("safety:", 0) == 0;
+}
+
+// NACK text for a command that needs a trusted position. No commas or
+// semicolons of its own (reply bodies are comma-framed); the driver's
+// reason is free text and goes through SanitizeForReply at the call site.
+std::string PositionUncertainText(int motor_id, const StepperStatus& status) {
+  std::string text = "position uncertain after a step-loss event";
+  if (!status.step_loss_reason.empty()) {
+    text += " (" + status.step_loss_reason + ")";
+  }
+  text += ": check the mechanism then SET_POSITION_ZERO " +
+          std::to_string(motor_id) + " or STEPLOSS_ACK " +
+          std::to_string(motor_id);
+  return text;
+}
 
 }  // namespace
 
@@ -181,6 +212,7 @@ SystemController::SystemController(OnboardConfig config)
                         config_.comms.rediscover_period_s,
                         config_.comms.failover_grace_s,
                         config_.comms.priority),
+      telemetry_drain_(&telemetry_queue_, &telemetry_client_),
       fallback_planner_(FallbackPlannerConfig{config_.fallback.bend_min_c,
                                               config_.fallback.bend_max_c,
                                               config_.fallback.bend_deadline_s},
@@ -267,6 +299,18 @@ bool SystemController::Initialize(std::string* error) {
         << "/"
         << (config_.motors[1].stealth_chop ? "stealthChop" : "spreadCycle")
         << '\n';
+    // Step-loss protection: what is always supervised, and how each motor's
+    // StallGuard verdict is treated.
+    oss << "[stepper] step-loss protection: chip reset / undervoltage /"
+        << " driver fault / position readback supervised; stall detect "
+        << config_.motors[0].stall_detect << "/"
+        << config_.motors[1].stall_detect << " (sgt "
+        << config_.motors[0].stallguard_sgt << "/"
+        << config_.motors[1].stallguard_sgt << ", sg_min "
+        << config_.motors[0].stall_sg_min << "/"
+        << config_.motors[1].stall_sg_min << ", sampled at >= "
+        << config_.stepper.stall_min_step_hz << " full-steps/s, "
+        << config_.stepper.stall_confirm_samples << " samples)\n";
     std::cerr << oss.str();
   }
   std::vector<StepperChannelConfig> channel_cfgs;
@@ -325,6 +369,12 @@ bool SystemController::Initialize(std::string* error) {
       // what actually governs the runtime divisor.
       tcfg.microstep = config_.pull.microstep;
       tcfg.retry_ms = motor.retry_ms;
+      // Validated at config load; an unknown value keeps the default.
+      Tmc5160Driver::ParseStallDetect(motor.stall_detect, &tcfg.stall_detect);
+      tcfg.stallguard_sgt = motor.stallguard_sgt;
+      tcfg.stall_sg_min = motor.stall_sg_min;
+      tcfg.stall_min_step_hz = config_.stepper.stall_min_step_hz;
+      tcfg.stall_confirm_samples = config_.stepper.stall_confirm_samples;
 
       auto bus = std::make_unique<LinuxSpiBus>();
       auto driver = std::make_unique<OwnedBusTmc5160Driver>(
@@ -388,6 +438,14 @@ bool SystemController::Initialize(std::string* error) {
               << degraded_error << '\n';
   }
 
+  // The ledger also models the kernel shaper of the hard cap on our E-Link
+  // port (docs/link-budget.md, "Hard cap"), installed or not: what flies is
+  // what the bench runs.
+  link_budget_.SetEgressShaper(
+      kOnboardEgressBurstBytes,
+      kOnboardEgressRateBytesPerS * kEgressModelRatePercent / 100);
+  command_server_.SetLinkBudget(&link_budget_);
+  telemetry_client_.SetLinkBudget(&link_budget_);
   if (!command_server_.Start(
           [this](const std::string& line, const std::string& peer_ip) {
             return HandleCommandLine(line, peer_ip);
@@ -560,6 +618,12 @@ void SystemController::TickFallbackPlan(MissionPhase phase,
     motor.zeroed = i < zeroed.size() && zeroed[i];
     motor.healthy = st.healthy;
     motor.moving_or_holding = st.moving || st.holding;
+    motor.aborted = EndedBySafetyAbort(st);
+    if (motor.aborted) {
+      motor.abort_reason = st.last_source == "safety:OVERTEMP"
+                               ? "driver over-temperature shutdown"
+                               : SanitizeForReply(st.step_loss_reason);
+    }
     motor.group_temp_c = MotorGroupTemperature(i, snapshot);
     in.motors.push_back(motor);
   }
@@ -670,7 +734,12 @@ void SystemController::TickBendSequences() {
       if (status.moving || status.holding) continue;
       if (status.position_steps != step.target_usteps) {
         runtime.paused = true;
-        runtime.fault = "motor stopped before target";
+        // A step-loss stop says why; a bare "stopped" would send the
+        // operator looking for a command nobody sent.
+        runtime.fault =
+            status.last_source == "safety:STEPLOSS"
+                ? "step loss: " + SanitizeForReply(status.step_loss_reason)
+                : "motor stopped before target";
         runtime.step_queued = false;
         continue;
       }
@@ -1150,24 +1219,36 @@ int SystemController::Run() {
     queued_frame.seq = record.seq;
     queued_frame.frame = line;
 
-    if (!telemetry_queue_.Enqueue(queued_frame, &queue_error)) {
+    std::uint64_t live_index = TelemetryDrain::kNoLiveFrame;
+    if (!telemetry_queue_.Enqueue(queued_frame, &queue_error, &live_index)) {
       last_link_ok = false;
     }
     COATHEAL_PERF_STAMP(perf_enqueue_end);  // sub-stage: enqueue-only latency
 
-    std::string drain_error;
-    // DrainTelemetryQueue sets last_link_ok itself: false until a frame is
-    // acknowledged this tick, true from the first ACK on. A failure later
-    // in the same batch (a backlog frame the ground station will not
-    // acknowledge) is a drain error, not a dead link -- forcing link_ok
-    // false here used to engage link-loss fallback, after
+    // This tick's frame, pending events, then the backlog by bisection while
+    // the link budget has room (docs/link-budget.md). Live frames may wait
+    // for room until 40 % of the tick; replay stops early enough to leave the
+    // next tick's live frame its room (ReplayDeadline). The drain reports link_ok
+    // itself: true from the first ACK, or while connected but held back by
+    // the budget. A failure later in the same tick (a backlog frame the
+    // ground station will not acknowledge) is a drain error, not a dead link
+    // -- forcing link_ok false here used to engage link-loss fallback, after
     // link_loss_fallback_s, over a perfectly working link.
-    if (!DrainTelemetryQueue(&last_link_ok, &drain_error)) {
+    const auto tick_fraction = [&](double fraction) {
+      return tick_start + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                              tick_duration * fraction);
+    };
+    const DrainResult drain = telemetry_drain_.Drain(
+        live_index, CurrentUnixEpochSeconds(), tick_fraction(0.4),
+        ReplayDeadline(tick_start, std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                       tick_duration)));
+    last_link_ok = drain.link_ok;
+    if (drain.error) {
       // Log on transition only. While no ground station is reachable this
       // fails every tick, and one journal line per tick for the steady
       // state buries the lines that mark actual changes.
       if (!drain_error_logged_) {
-        std::cerr << "[telemetry] drain error: " << drain_error
+        std::cerr << "[telemetry] drain error: " << drain.error_text
                   << " (suppressing repeats until recovery)" << '\n';
         drain_error_logged_ = true;
       }
@@ -1217,7 +1298,7 @@ int SystemController::Run() {
           // StepperChannel::Tick once the retract leg finished. A release
           // by the thermal safety is an ABORT, not a completion — do not
           // record it as a pull or feed the resistance simulator.
-          if (s.last_source == "safety:OVERTEMP") {
+          if (EndedBySafetyAbort(s)) {
             ps.lock_held = false;
             ps.was_moving = false;
             continue;
@@ -1332,85 +1413,6 @@ int SystemController::Run() {
   command_server_.Stop();
   telemetry_client_.Stop();
   return 0;
-}
-
-bool SystemController::DrainTelemetryQueue(bool* link_ok, std::string* error) {
-  if (link_ok != nullptr) {
-    *link_ok = false;
-  }
-
-  // Rev C: limit drain to a small batch per tick so the control loop is not
-  // blocked by a large backlog (the Pi was accumulating 12k+ frames). The
-  // batch bound is applied inside DrainBatch too: copying the entire
-  // backlog out of the queue every tick is O(backlog) on the control loop.
-  // The batch is this tick's frame first, then the backlog oldest-first
-  // (see TelemetryQueue::DrainBatch), and every DATA line is stamped with
-  // its age on the wire so the ground station can tell live from replay
-  // without synchronised clocks.
-  constexpr std::size_t kMaxDrainPerTick = 10;
-  std::vector<QueuedTelemetryFrame> pending =
-      telemetry_queue_.DrainBatch(kMaxDrainPerTick);
-  if (pending.empty()) {
-    if (link_ok != nullptr) {
-      *link_ok = telemetry_client_.is_connected();
-    }
-    return true;
-  }
-
-  std::size_t drained = 0;
-  const std::int64_t now_epoch = CurrentUnixEpochSeconds();
-
-  for (const QueuedTelemetryFrame& frame : pending) {
-    if (drained >= kMaxDrainPerTick) break;
-    const bool newest = drained == 0;
-    TelemetryAck ack;
-    if (!telemetry_client_.SendFrameAwaitAck(
-            TagFrameForTransmit(frame.frame, frame.queued_epoch_s, now_epoch), &ack)) {
-      if (error != nullptr) {
-        *error = "failed to send telemetry frame";
-      }
-      return false;
-    }
-
-    const bool event_ack =
-        frame.frame.rfind("EVT,", 0) == 0 &&
-        ack.session_id == frame.session_id &&
-        ack.seq == 0U;
-    if (event_ack) {
-      if (!telemetry_queue_.AcknowledgeExact(frame, error)) {
-        return false;
-      }
-      if (link_ok != nullptr) {
-        *link_ok = true;
-      }
-      ++drained;
-      continue;
-    }
-
-    if (ack.session_id != frame.session_id || ack.seq < frame.seq) {
-      if (error != nullptr) {
-        *error = "received mismatched telemetry ACK";
-      }
-      return false;
-    }
-
-    if (newest) {
-      // The live frame is out of order: a cumulative ack of its seq would
-      // discard every older frame still waiting in the queue.
-      if (!telemetry_queue_.AcknowledgeExact(frame, error)) {
-        return false;
-      }
-    } else if (!telemetry_queue_.Acknowledge(ack.session_id, ack.seq, error)) {
-      return false;
-    }
-
-    if (link_ok != nullptr) {
-      *link_ok = true;
-    }
-    ++drained;
-  }
-
-  return true;
 }
 
 std::string SystemController::HandleCommandLine(const std::string& line,
@@ -1558,6 +1560,11 @@ std::string SystemController::HandleCommandLine(const std::string& line,
              << ";telemetry_target=" << telemetry_client_.current_host()
              << ";queue_depth=" << telemetry_queue_.size()
              << ";tick_hz=" << live_tick_hz_.load()
+             << ";link_codec=" << telemetry_client_.link_codec()
+             << ";link_bytes=" << link_budget_.InWindow() << '/' << link_budget_.share_bytes()
+             << ";link_ack_timeouts=" << telemetry_client_.ack_timeouts()
+             << ";link_cap=" << LinkCapState()
+             << ";link_tokens=" << link_budget_.EgressTokens() << '/' << kOnboardEgressBurstBytes
              << ";silence=" << (telemetry_client_.transmit_enabled() ? "0" : "1")
              << ";simulated=" << (sensor_manager_.simulated() ? "1" : "0")
              << ";i2c_ok=" << (sensor_manager_.i2c_ok() ? "1" : "0")
@@ -1681,7 +1688,14 @@ std::string SystemController::HandleCommandLine(const std::string& line,
         // DRV_ENN): the motor is usable, the operator must still know.
         for (int motor = 0; motor < 2; ++motor) {
           if (!(motor == 0 ? check_motor0 : check_motor1)) continue;
-          const std::string warn = stepper_->DriverWarning(motor);
+          std::string warn = stepper_->DriverWarning(motor);
+          const StepperStatus motor_status = stepper_->Snapshot(motor);
+          if (motor_status.position_uncertain) {
+            if (!warn.empty()) warn += "; ";
+            warn += "POSITION UNCERTAIN after " +
+                    std::to_string(motor_status.step_loss_events) +
+                    " step-loss event(s): " + motor_status.step_loss_reason;
+          }
           if (!warn.empty()) {
             result << ";motor" << motor << "_warn=" << SanitizeForReply(warn);
           }
@@ -2259,7 +2273,8 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       result << ";heater_samples=" << join(config_.heaters.temperature_channels)
              << ";clicks=" << join(config_.sensors.max31865_sample_indices)
              << ";rtd_channels=" << join(config_.sensors.sequent_rtd_channels)
-             << ";heater_lines=" << join(config_.heaters.output_lines);
+             << ";heater_lines=" << join(config_.heaters.output_lines)
+             << ";lead_mm=" << config_.stepper.lead_mm_per_rev;
       return Ack(cmd_name, result.str());
     }
 
@@ -2301,8 +2316,10 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       if (!ParseDouble(command.args[0], &hz)) {
         return Nack(cmd_name, "invalid hz value");
       }
-      // Clamp to a safe band: 0.1 Hz floor (one frame / 10 s) and 5 Hz ceiling
-      // (well below the 2 Mbps E-Link budget at our ~600 B frame size).
+      // Clamp to a safe band: 0.1 Hz floor (one frame / 10 s) and 5 Hz
+      // ceiling. The rate never threatens the 24 kbps E-Link cap: every frame
+      // waits for room in the link budget, and frames produced faster than
+      // the budget lets out stay queued and are replayed later.
       constexpr double kMinHz = 0.1;
       constexpr double kMaxHz = 5.0;
       if (hz < kMinHz || hz > kMaxHz) {
@@ -2356,6 +2373,24 @@ std::string SystemController::HandleCommandLine(const std::string& line,
         motor_zeroed_[motor] = true;
       }
       return Ack(cmd_name, "motor=" + std::to_string(motor) + ";zeroed=1");
+    }
+
+    case CommandType::kStepLossAck: {
+      std::size_t motor = 0;
+      if (!ParseIndex(command.args[0], &motor) ||
+          !valid_motor(static_cast<int>(motor))) {
+        return Nack(cmd_name, "invalid motor id");
+      }
+      std::string error;
+      if (!stepper_->AcknowledgeStepLoss(static_cast<int>(motor), &error)) {
+        return Nack(cmd_name, error);
+      }
+      const StepperStatus st = stepper_->Snapshot(static_cast<int>(motor));
+      std::cerr << "[stepper] motor " << motor
+                << ": step-loss latch acknowledged by the operator"
+                << " (events since boot: " << st.step_loss_events << ")\n";
+      return Ack(cmd_name, "motor=" + std::to_string(motor) + ";unc=0;loss=" +
+                               std::to_string(st.step_loss_events));
     }
 
     case CommandType::kBendSeqLoad: {
@@ -2422,8 +2457,15 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       if (!motor_zeroed(static_cast<int>(motor))) {
         return Nack(cmd_name, "motor must be zeroed first");
       }
-      if (!stepper_->Snapshot(static_cast<int>(motor)).enabled) {
+      const StepperStatus run_status =
+          stepper_->Snapshot(static_cast<int>(motor));
+      if (!run_status.enabled) {
         return Nack(cmd_name, "motor must be enabled first");
+      }
+      // A sequence is absolute positions: it needs a position to trust.
+      if (run_status.position_uncertain) {
+        return Nack(cmd_name, SanitizeForReply(PositionUncertainText(
+                                  static_cast<int>(motor), run_status)));
       }
       std::lock_guard<std::mutex> lock(sequence_mu_);
       BendSequenceRuntime& runtime = bend_sequences_[motor];
@@ -2473,6 +2515,12 @@ std::string SystemController::HandleCommandLine(const std::string& line,
         }
         if (!motor_zeroed(static_cast<int>(motor))) {
           return Nack(cmd_name, "motor must be zeroed first");
+        }
+        const StepperStatus resume_status =
+            stepper_->Snapshot(static_cast<int>(motor));
+        if (resume_status.position_uncertain) {
+          return Nack(cmd_name, SanitizeForReply(PositionUncertainText(
+                                    static_cast<int>(motor), resume_status)));
         }
         std::lock_guard<std::mutex> lock(sequence_mu_);
         BendSequenceRuntime& runtime = bend_sequences_[motor];
@@ -2670,6 +2718,11 @@ std::string SystemController::HandleCommandLine(const std::string& line,
           << ";moving=" << (st.moving ? 1 : 0)
           << ";holding=" << (st.holding ? 1 : 0)
           << ";pulses=" << st.pulses_total << ";missed=" << st.missed_deadlines
+          << ";loss=" << st.step_loss_events
+          << ";unc=" << (st.position_uncertain ? 1 : 0)
+          << ";loss_reason="
+          << (st.step_loss_reason.empty() ? std::string("-")
+                                          : SanitizeForReply(st.step_loss_reason))
           << ';' << regs;
       return Ack(cmd_name, out.str());
     }
@@ -2768,6 +2821,13 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       if (link_loss_fallback_active_) {
         return Nack(cmd_name, "manual motion blocked during link-loss fallback");
       }
+      {
+        const StepperStatus pull_status = stepper_->Snapshot(command.motor_id);
+        if (pull_status.position_uncertain) {
+          return Nack(cmd_name, SanitizeForReply(PositionUncertainText(
+                                    command.motor_id, pull_status)));
+        }
+      }
       std::string err;
       InhibitHeatersForMotion();
       if (!stepper_->ArmPull(command.motor_id, &err)) return Nack(cmd_name, err);
@@ -2784,6 +2844,13 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       }
       if (link_loss_fallback_active_) {
         return Nack(cmd_name, "manual motion blocked during link-loss fallback");
+      }
+      {
+        const StepperStatus pull_status = stepper_->Snapshot(command.motor_id);
+        if (pull_status.position_uncertain) {
+          return Nack(cmd_name, SanitizeForReply(PositionUncertainText(
+                                    command.motor_id, pull_status)));
+        }
       }
       std::string err;
       // Routing fix (Agent C, 2026-04-17): use the non-blocking ArmPull

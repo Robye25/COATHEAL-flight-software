@@ -20,6 +20,10 @@ ExecStart=/bin/sh -c '\
     fi; \
   fi; \
   echo "$NOW" > "$COOLDOWN"; \
+  if /usr/bin/systemctl is-enabled --quiet coatheal-link-cap.service 2>/dev/null; then \
+    echo "[link-watch] link change detected, re-installing the E-Link hard cap"; \
+    /usr/bin/systemctl restart coatheal-link-cap.service || true; \
+  fi; \
   echo "[link-watch] link change detected, restarting coatheal-onboard.service"; \
   /usr/bin/systemctl restart coatheal-onboard.service || true'
 

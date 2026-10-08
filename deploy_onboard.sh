@@ -18,7 +18,9 @@ set -euo pipefail
 #   --dry-run   print every action instead of executing it
 #   --flight    refuse a config that is not at flight values (bench mode,
 #               simulated backends, a bench heater.max_duty); without it
-#               those are only warned about, loudly
+#               those are only warned about, loudly. Also switches the
+#               E-Link hard cap on (docs/link-budget.md) and refuses to
+#               finish without it; a bench deploy leaves the cap as it is
 #   <dir>       project directory (default /bexus/code/coatheal)
 
 PROJECT_DIR="/bexus/code/coatheal"
@@ -35,6 +37,8 @@ done
 
 LOCAL_INI="$PROJECT_DIR/config/onboard.local.ini"
 BINARY="$PROJECT_DIR/build/onboard/coatheal_onboard"
+LINK_CAP_ENV="/etc/coatheal/link-cap.env"
+LINK_CAP_UNIT="coatheal-link-cap.service"
 
 say()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 die()  { printf '\n\033[1;31mDEPLOY FAILED: %s\033[0m\n' "$*" >&2; exit 1; }
@@ -51,6 +55,30 @@ if [[ "$DRY_RUN" != "1" && "$(uname -s)" != "Linux" ]]; then
 fi
 
 [[ -d "$PROJECT_DIR/.git" ]] || die "no git repository at $PROJECT_DIR"
+
+# --- 0. E-Link hard cap. While it is on, this machine's port passes 800 B/s:
+#        the pull and the package installs below would take hours. Lift it
+#        for the deploy and put it back whatever happens -- a deploy that
+#        dies must not leave a flight unit uncapped.
+link_cap_wanted() {
+  [[ -r "$LINK_CAP_ENV" ]] && grep -qx 'COATHEAL_LINK_CAP=on' "$LINK_CAP_ENV"
+}
+restore_link_cap() {
+  if [[ "${COATHEAL_DEPLOY_CAP_LIFTED:-0}" == "1" ]] && link_cap_wanted; then
+    printf '\n\033[1;36m==> Putting the E-Link hard cap back\033[0m\n'
+    sudo systemctl start "$LINK_CAP_UNIT" \
+      || printf '\033[1;31m    the hard cap could NOT be restored: coatheal-link-cap on\033[0m\n' >&2
+  fi
+}
+if [[ "$DRY_RUN" != "1" ]]; then
+  trap restore_link_cap EXIT
+  if [[ "${COATHEAL_DEPLOY_PULLED:-0}" != "1" ]] && link_cap_wanted \
+     && systemctl is-active --quiet "$LINK_CAP_UNIT" 2>/dev/null; then
+    say "Lifting the E-Link hard cap for the deploy"
+    sudo systemctl stop "$LINK_CAP_UNIT" || die "could not lift the hard cap"
+    export COATHEAL_DEPLOY_CAP_LIFTED=1
+  fi
+fi
 
 # --- 1. Self-update: pull, then re-exec the freshly pulled copy of this
 #        script exactly once, so the deploy logic in use is always current.
@@ -71,7 +99,7 @@ say "Installing system dependencies"
 run sudo apt-get update -y
 run sudo apt-get install -y \
   build-essential cmake git pkg-config \
-  libgpiod-dev libi2c-dev i2c-tools \
+  libgpiod-dev libi2c-dev i2c-tools zlib1g-dev \
   python3 python3-pip python3-venv
 
 say "Ensuring the coatheal service user exists"
@@ -113,7 +141,7 @@ say "Building the onboard software"
 # Release build, and refuse a binary built without libgpiod: that one
 # compiles and "runs" with every heater and motor output stubbed out.
 run cmake -S "$PROJECT_DIR" -B "$PROJECT_DIR/build" \
-  -DCMAKE_BUILD_TYPE=Release -DCOATHEAL_REQUIRE_LIBGPIOD=ON
+  -DCMAKE_BUILD_TYPE=Release -DCOATHEAL_REQUIRE_LIBGPIOD=ON -DCOATHEAL_REQUIRE_ZLIB=ON
 run cmake --build "$PROJECT_DIR/build" -j"$(nproc)"
 if [[ "$DRY_RUN" != "1" ]]; then
   [[ -x "$BINARY" ]] || die "build produced no binary at $BINARY"
@@ -183,6 +211,23 @@ else
   echo "    all flight invariants hold (bench mode and simulated backends off, heater.max_duty 1.0, spreadCycle)"
 fi
 
+# --- 5a'. E-Link hard cap. A flight deploy switches it on (the installer in
+#          step 6 starts the unit); a bench deploy keeps what is there, since
+#          the cap also takes ssh and git on a shared LAN port.
+if [[ "$FLIGHT" == "1" ]] && ! link_cap_wanted; then
+  say "Switching the E-Link hard cap on (flight deploy)"
+  run sudo mkdir -p "$(dirname "$LINK_CAP_ENV")"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    run sudo tee "$LINK_CAP_ENV"
+  else
+    {
+      echo "COATHEAL_LINK_CAP=on"
+      [[ -r "$LINK_CAP_ENV" ]] && grep '^COATHEAL_ELINK_IFACE=' "$LINK_CAP_ENV" || true
+    } | sudo tee "$LINK_CAP_ENV.new" >/dev/null
+    sudo mv "$LINK_CAP_ENV.new" "$LINK_CAP_ENV"
+  fi
+fi
+
 # --- 5b. Boot-time GPIO safe states. Schematic v4 fits no pull resistors on
 #         the heater or motor-driver control lines, and the Pi powers on with
 #         BCM 5/6 pulled UP (HEATER4/HEATER3 driven on) and BCM 20-22/27
@@ -250,11 +295,24 @@ if ! systemctl is-active --quiet coatheal-onboard.service; then
   die "coatheal-onboard.service is not active — status above, logs: journalctl -u coatheal-onboard.service"
 fi
 
+# The installer has started the cap unit when it is wanted; nothing is left
+# for the exit trap to restore.
+export COATHEAL_DEPLOY_CAP_LIFTED=0
+LINK_CAP_STATE="$(bash "$PROJECT_DIR/scripts/link_cap.sh" status --role onboard 2>&1)" && LINK_CAP_ON=1 || LINK_CAP_ON=0
+if [[ "$FLIGHT" == "1" && "$LINK_CAP_ON" != "1" ]]; then
+  die "the E-Link hard cap is not in place ($LINK_CAP_STATE) — see: systemctl status $LINK_CAP_UNIT"
+fi
+
 printf '\n\033[1;32m================================================================\033[0m\n'
 printf '\033[1;32m  COATHEAL onboard DEPLOYED and RUNNING\033[0m\n'
 printf '  Service : coatheal-onboard.service (active)\n'
 printf '  Config  : %s\n' "$LOCAL_INI"
 printf '  IPs     : %s\n' "$(hostname -I 2>/dev/null || echo unknown)"
+if [[ "$LINK_CAP_ON" == "1" ]]; then
+  printf '  Hard cap: ON  %s\n' "${LINK_CAP_STATE#\[link-cap\] ON: }"
+else
+  printf '\033[1;33m  Hard cap: OFF — only the ledger limits E-Link traffic. Before flight: coatheal-link-cap on\033[0m\n'
+fi
 printf '  The ground station can now discover this onboard automatically.\n'
 printf '  Next deploy: just run   coatheal-deploy\n'
 if [[ "$REBOOT_NEEDED" == "1" ]]; then

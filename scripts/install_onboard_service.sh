@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Install COATHEAL onboard systemd units (flight + debug + link-watch) from
-# the deploy/ tree. Idempotent: safe to re-run.
+# Install COATHEAL onboard systemd units (flight + debug + link-watch + the
+# E-Link hard cap) from the deploy/ tree. Idempotent: safe to re-run.
 
 PROJECT_DIR="${1:-/bexus/code/coatheal}"
 if [[ $# -ge 2 ]]; then
@@ -22,6 +22,7 @@ UNITS=(
   coatheal-onboard-debug.service
   coatheal-link-watch.service
   coatheal-link-watch.path
+  coatheal-link-cap.service
 )
 
 if [[ ! -x "$HEALTHCHECK_PATH" ]]; then
@@ -86,6 +87,25 @@ $SUDO chmod 0644 /etc/coatheal/env
 echo "[install-service] config path written to /etc/coatheal/env"
 
 $SUDO systemctl daemon-reload
+
+# The E-Link hard cap (docs/link-budget.md) takes the whole port, ssh and
+# git included, so it is switched on by hand, or by a --flight deploy:
+#   coatheal-link-cap on | off | status
+$SUDO chmod +x "$PROJECT_DIR/scripts/link_cap.sh" || true
+$SUDO ln -sf "$PROJECT_DIR/scripts/link_cap.sh" /usr/local/bin/coatheal-link-cap
+LINK_CAP="off"
+if [[ -r /etc/coatheal/link-cap.env ]] && grep -qx 'COATHEAL_LINK_CAP=on' /etc/coatheal/link-cap.env; then
+  LINK_CAP="on"
+fi
+if [[ "$LINK_CAP" == "on" ]]; then
+  echo "[install-service] E-Link hard cap: on (coatheal-link-cap.service)"
+  $SUDO systemctl enable coatheal-link-cap.service
+  $SUDO systemctl restart coatheal-link-cap.service || \
+    echo "[install-service] WARNING: the hard cap could not be installed; see: systemctl status coatheal-link-cap.service" >&2
+else
+  echo "[install-service] E-Link hard cap: off (bench). Before flight: coatheal-link-cap on"
+  $SUDO systemctl disable --now coatheal-link-cap.service >/dev/null 2>&1 || true
+fi
 
 # Flight + link-watch on by default; debug installed but left disabled.
 $SUDO systemctl enable --now coatheal-onboard.service coatheal-link-watch.path

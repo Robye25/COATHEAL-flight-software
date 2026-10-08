@@ -147,6 +147,10 @@ class ValuesPanel(QScrollArea):
                 flags.append("DRV OVERTEMP")
             elif motor.thermal == "warn":
                 flags.append("drv ≥120 °C")
+            if motor.position_uncertain:
+                flags.append("POS UNCERTAIN")
+            elif motor.step_loss:
+                flags.append(f"step loss ×{motor.step_loss}")
             f[f"m{m}_flags"].setText(" · ".join(flags))
             f[f"m{m}_src"].setText(f"{motor.source or '—'} · {motor.seq_name or '-'}/{motor.seq_state or '-'}")
         f["fallback"].setText("—" if state.fallback is None else ("ACTIVE" if state.fallback else "inactive"))

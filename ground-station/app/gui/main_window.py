@@ -23,7 +23,9 @@ from PyQt6.QtWidgets import (
     QSplitter, QStatusBar, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
-from ..protocol import CommandResponse, PullEvent, TelemetryPacket
+from .. import link_cap
+from ..link_budget import LINK_HEALTHY_S
+from ..protocol import LEAD_MM_PER_REV, CommandResponse, PullEvent, TelemetryPacket
 from ..telemetry_log import LogManager
 from ..thermal_presets import PresetStore
 from . import firewall, gating
@@ -41,7 +43,7 @@ from .panels_health import HealthPanel
 from .plots import PlotArea
 from .replay import ReplayClassifier, ReplayVerdict, parse_onboard_timestamp
 from .scale import UiScale
-from .state import DEFAULT_LAYOUT, Layout, OnboardState, parse_layout, state_from_packet
+from .state import DEFAULT_LAYOUT, Layout, OnboardState, parse_layout, parse_lead_mm, state_from_packet
 from .tab_advanced import AdvancedTab
 from .tab_debug import DebugTab
 from .tab_motion import MotionTab
@@ -51,6 +53,7 @@ from .widgets import apply_number_locale, confirm, install_input_policy
 
 STATE_TICK_MS = 500
 DISK_TICK_MS = 10_000
+LINK_CAP_TICK_MS = 30_000   # re-read the kernel shaper: a network manager may drop it
 # A GET_LAYOUT that never reached the onboard (refused, timed out) is asked
 # again on the first live frame after this long.
 LAYOUT_RETRY_S = 10.0
@@ -91,6 +94,7 @@ class MainWindow(QMainWindow):
         self._discovered_host: Optional[str] = None
         self._discovered_cmd_port: Optional[int] = None
         self._target_how = ""
+        self._link_cap_reported: Optional[tuple] = None
         self._last_pkt: Optional[TelemetryPacket] = None
         self._last_rx_mono: Optional[float] = None
         self._frames = 0
@@ -115,6 +119,13 @@ class MainWindow(QMainWindow):
         self._layout: Layout = DEFAULT_LAYOUT
         self._layout_session = ""
         self._layout_retry_mono = 0.0
+        # Discovery follows the link (docs/link-budget.md): the beacon slows
+        # to 15 s and the probe stops while telemetry arrives.
+        self._discovery_link_healthy = False
+        # Console notes: radio silence, and a ball-screw lead that differs
+        # from the onboard's.
+        self._silence_note = ""
+        self._lead_note = ""
 
         self._dispatcher = CommandDispatcher(cmd_host, cmd_port, log_manager=self._logs)
         self._dispatcher.response_received.connect(self._on_response)
@@ -230,6 +241,9 @@ class MainWindow(QMainWindow):
 
         self._state_timer = QTimer(self); self._state_timer.timeout.connect(self._tick); self._state_timer.start(STATE_TICK_MS)
         self._disk_timer = QTimer(self); self._disk_timer.timeout.connect(self._refresh_disk); self._disk_timer.start(DISK_TICK_MS)
+        self._link_cap_timer = QTimer(self)
+        self._link_cap_timer.timeout.connect(lambda: self._report_link_cap(self._dispatcher.host))
+        self._link_cap_timer.start(LINK_CAP_TICK_MS)
 
         geo = self._settings.value("window/geometry")
         if geo:
@@ -300,6 +314,7 @@ class MainWindow(QMainWindow):
         self._verdict = self._replay.classify(onboard_ts, rx_time, tx_age_s=pkt.tx_age_s,
                                               queue_depth=pkt.queue_depth)
         self._last_rx_mono = now_mono
+        self._update_discovery_cadence()
         self._frames += 1
         self._top.on_packet_received(pkt.session_id, now_mono)
         # Plots and logs take every frame, at its onboard time; the live
@@ -364,6 +379,7 @@ class MainWindow(QMainWindow):
             self._events.append("[layout] the onboard does not report its motor groups "
                                 f"({resp.error or resp.raw}); showing the schematic groups", "WARN")
             return
+        self._check_lead(parse_lead_mm(resp.body))
         layout = parse_layout(resp.body)
         if layout is None:
             self._events.append(f"[layout] unreadable GET_LAYOUT reply: {resp.body}", "WARN")
@@ -376,6 +392,30 @@ class MainWindow(QMainWindow):
                            for m, samples in enumerate(layout.motor_samples))
         self._events.append(f"[layout] motor groups from the onboard: {groups}; heaters read "
                             + " ".join(f"H{h}=S{s}" for h, s in enumerate(layout.heater_samples)))
+
+    def _check_lead(self, lead_mm: Optional[float]) -> None:
+        """The ground station converts mm/s and mm/s² to full steps, and
+        µsteps back to mm, at `protocol.LEAD_MM_PER_REV`; an onboard running
+        another `stepper.lead_mm_per_rev` would move by other distances than
+        the operator typed. Firmware that does not report its lead: no check."""
+        if lead_mm is None:
+            return
+        if abs(lead_mm - LEAD_MM_PER_REV) <= 1e-6:
+            if self._lead_note:
+                self._events.append(f"[layout] onboard ball-screw lead {lead_mm:g} mm/rev matches the ground station")
+                self._lead_note = ""
+                self._refresh_console_note()
+            return
+        self._lead_note = (f"LEAD MISMATCH: onboard {lead_mm:g} mm/rev, this ground station converts mm at "
+                           f"{LEAD_MM_PER_REV:g} mm/rev")
+        self._events.append(f"[layout] WARNING: the onboard reports a ball-screw lead of {lead_mm:g} mm/rev "
+                            f"but the ground station converts mm at {LEAD_MM_PER_REV:g} mm/rev: the speeds, "
+                            "accelerations, bend sequences, fallback plans and pull distances it converts are "
+                            "wrong until the two agree (jog and BEND mm are converted onboard)", "WARN")
+        self._refresh_console_note()
+
+    def _refresh_console_note(self) -> None:
+        self._console.set_note(" · ".join(note for note in (self._lead_note, self._silence_note) if note))
 
     def set_layout(self, layout: Layout) -> None:
         """Rearrange every per-motor view for `layout`."""
@@ -398,12 +438,24 @@ class MainWindow(QMainWindow):
             worker.set_quiet(active)
         self._events.append("[radio] silence ACTIVE — beacons/probes paused, only RADIO_RESUME / STATUS / PING are sent"
                             if active else "[radio] silence lifted — discovery resumed", "WARN" if active else "INFO")
-        self._console.set_note("radio silence: only RADIO_RESUME, STATUS and PING are sent" if active else "")
+        self._silence_note = "radio silence: only RADIO_RESUME, STATUS and PING are sent" if active else ""
+        self._refresh_console_note()
         self._apply_state()
 
     # ── state fan-out ──
     def _link_age(self) -> Optional[float]:
         return None if self._last_rx_mono is None else time.monotonic() - self._last_rx_mono
+
+    def _update_discovery_cadence(self) -> None:
+        """Beacon every 15 s without GS_HELLO and no PING probe while a frame
+        arrived within LINK_HEALTHY_S; every 2 s otherwise."""
+        age = self._link_age()
+        healthy = age is not None and age < LINK_HEALTHY_S
+        if healthy == self._discovery_link_healthy:
+            return
+        self._discovery_link_healthy = healthy
+        for worker in (self._beacon, self._probe):
+            worker.set_link_healthy(healthy)
 
     def _apply_state(self) -> None:
         silence = self._dispatcher.silence
@@ -458,7 +510,9 @@ class MainWindow(QMainWindow):
         self._checkout.update_state(state, link_ok=self._link_ok, unacked_alarms=self._alarms.unacked_count)
 
     def _tick(self) -> None:
-        # Link age changes between frames; alarms and gating must follow it.
+        # Link age changes between frames; alarms, gating and the discovery
+        # cadence must follow it.
+        self._update_discovery_cadence()
         self._apply_state()
         self._refresh_link_info()
 
@@ -479,7 +533,21 @@ class MainWindow(QMainWindow):
         self._discovered_cmd_port = cmd_port
         self._target_how = how
         self._events.append(f"[discovery] command target => {host}:{cmd_port} ({how})")
+        self._report_link_cap(host)
         self._refresh_link_info()
+
+    def _report_link_cap(self, host: str) -> None:
+        """Say once per port and state whether the kernel shaper of the hard
+        cap is on the port that reaches the onboard (docs/link-budget.md)."""
+        try:
+            status = link_cap.ground_cap_status(host)
+        except Exception as exc:  # never let a diagnostic stop the console
+            status = link_cap.CapStatus("unknown", "", f"check failed: {exc}")
+        key = (status.port, status.state)
+        if key == self._link_cap_reported:
+            return
+        self._link_cap_reported = key
+        self._events.append(f"[link cap] {status.detail}", None if status.ok else "WARN")
 
     def _refresh_link_info(self) -> None:
         target = f"{self._dispatcher.host}:{self._dispatcher.port}"
@@ -634,6 +702,7 @@ class MainWindow(QMainWindow):
         self._settings.setValue("splitter/main", self._main_splitter.saveState())
         self._settings.setValue("splitter/body", self._body_splitter.saveState())
         self._settings.setValue("splitter/bottom", self._bottom.saveState())
+        self._dispatcher.close()
         if self._receiver is not None:
             self._receiver.stop(); self._receiver.wait(2000)
         for worker in (self._beacon, self._listener, self._probe):

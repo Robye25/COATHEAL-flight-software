@@ -86,4 +86,16 @@ if [[ "$have_link" -ne 1 ]]; then
   echo "[preflight] warn: no network link; onboard will wait for one" >&2
 fi
 
+# E-Link hard cap (docs/link-budget.md): the kernel shaper that keeps this
+# machine's traffic inside its part of the 24 kbps whatever sends it. Reading
+# it needs no privilege. Warn only: the ledger still paces our own traffic.
+LINK_CAP_SCRIPT="$PROJECT_ROOT/scripts/link_cap.sh"
+if [[ -f "$LINK_CAP_SCRIPT" ]] && command -v tc >/dev/null 2>&1; then
+  if LINK_CAP_STATUS="$(bash "$LINK_CAP_SCRIPT" status --role onboard 2>&1)"; then
+    echo "[preflight] $LINK_CAP_STATUS"
+  else
+    echo "[preflight] warn: E-Link hard cap is OFF -- nothing but the ledger limits this machine's traffic. Before flight: coatheal-link-cap on" >&2
+  fi
+fi
+
 echo "[preflight] ok config=$CONFIG_PATH"

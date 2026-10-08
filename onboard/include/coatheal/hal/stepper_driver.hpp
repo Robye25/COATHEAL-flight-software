@@ -73,6 +73,35 @@ class StepperDriver {
   // on a supply dip) while nothing was stepping. Default: nothing to do.
   virtual bool Poll() { return true; }
   virtual std::uint64_t pulses_issued() const = 0;
+
+  // --- Step-loss supervision ---------------------------------------------
+  // The motors run open loop: the position is a count of the steps that
+  // were commanded. A step-loss event is anything that makes that count
+  // untrustworthy as a statement about the rotor -- the chip lost its
+  // configuration, its power stage was off under it, it reported a stall,
+  // the chip is not where it was told to go. Backends count events since
+  // boot; the channel latches "position uncertain" on every new one.
+  // Backends with nothing to supervise report none.
+  virtual std::uint64_t step_loss_events() const { return 0; }
+  // The last event in operator-readable terms, empty when there was none.
+  virtual std::string step_loss_reason() const { return {}; }
+  // True once after an event that asks the channel to stop the move in
+  // progress and keep the motor energised (a stall with stall detection
+  // set to stop: pushing on loses every further step). Reading clears it.
+  virtual bool TakeStepLossStop() { return false; }
+  // Called by the channel when a leg has reached its target: the last
+  // position command of a move has no later one to supersede it, so this is
+  // where a backend proves the chip holds the target it was given. False
+  // when it does not and could not be made to.
+  virtual bool ConfirmTarget() { return true; }
+  // How fast the channel is stepping (full-steps/s) and whether that rate
+  // is steady (cruise, not a ramp); 0 while no move is in progress.
+  // Load-sensing backends trust their stall measurement only at a steady
+  // rate above their minimum.
+  virtual void NoteStepRate(double full_step_hz, bool steady) {
+    (void)full_step_hz;
+    (void)steady;
+  }
 };
 
 class SimulatedStepperDriver : public StepperDriver {

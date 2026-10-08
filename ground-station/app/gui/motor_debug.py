@@ -15,14 +15,15 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque, Dict, List, Optional, Tuple
 
+from ..protocol import LEAD_MM_PER_REV
 from ..reply_format import parse_kv_body
 
 FULL_STEPS_PER_REV = 200
 MSCNT_PER_FULL_STEP = 256
 XACTUAL_PER_FULL_STEP = 256
 MSCNT_MODULUS = 1024
-# The onboard's confirmed ball-screw lead (stepper.lead_mm_per_rev).
-DEFAULT_MM_PER_REV = 2.0
+# The onboard's confirmed ball-screw lead (stepper.lead_mm_per_rev): 1 mm.
+DEFAULT_MM_PER_REV = LEAD_MM_PER_REV
 WINDOW_S = 3.0
 
 
@@ -71,6 +72,18 @@ class MotorDebugSample:
     pwm_scale_sum: Optional[int]
     faults: Tuple[str, ...]
     raw: Dict[str, str] = field(default_factory=dict)
+    # Step-loss protection (2026-10-05); None on firmware that predates it.
+    loss: Optional[int] = None             # step-loss events since boot (channel)
+    uncertain: Optional[bool] = None       # position-uncertain latch
+    loss_reason: str = ""                  # the event that set the latch
+    stall_mode: str = ""                   # off | monitor | stop
+    sg_min: Optional[int] = None           # lowest StallGuard sample of the move ("-" -> None)
+    sg_samples: Optional[int] = None
+    stalls: Optional[int] = None           # StallGuard stall verdicts since boot
+    undervoltage: Optional[int] = None     # motor-supply undervoltage episodes
+    shorts: Optional[int] = None
+    open_load: Optional[int] = None
+    xtarget_repairs: Optional[int] = None
 
     @classmethod
     def parse(cls, body: str, t: float) -> "MotorDebugSample":
@@ -94,6 +107,12 @@ class MotorDebugSample:
             gstat=_int(kv, "gstat"), resets=_int(kv, "resets"),
             stealth=_flag(kv, "stealth"), pwm_scale_sum=_int(kv, "pwm_scale_sum"),
             faults=faults, raw=kv,
+            loss=_int(kv, "loss"), uncertain=_flag(kv, "unc"),
+            loss_reason="" if kv.get("loss_reason", "-") == "-" else kv.get("loss_reason", ""),
+            stall_mode=kv.get("stall_mode", ""),
+            sg_min=_int(kv, "sg_min"), sg_samples=_int(kv, "sg_n"), stalls=_int(kv, "stalls"),
+            undervoltage=_int(kv, "uv"), shorts=_int(kv, "shorts"), open_load=_int(kv, "openload"),
+            xtarget_repairs=_int(kv, "xt_repairs"),
         )
 
 
@@ -171,6 +190,25 @@ class MotionEstimator:
             text += f" · chip reset ×{last.resets} since boot — check the 12 V motor supply"
             if color == "green":
                 color = "amber"
+        if last is not None:
+            if last.undervoltage:
+                text += f" · motor supply undervoltage ×{last.undervoltage} — check the 12 V motor supply"
+                if color == "green":
+                    color = "amber"
+            if last.stalls:
+                text += (f" · StallGuard stall verdict ×{last.stalls}"
+                         + (f" (stall_detect={last.stall_mode})" if last.stall_mode else ""))
+                if color == "green":
+                    color = "amber"
+            if last.xtarget_repairs:
+                text += f" · XTARGET rewritten ×{last.xtarget_repairs} — SPI writes are being corrupted"
+                if color == "green":
+                    color = "amber"
+            if last.uncertain:
+                why = f": {last.loss_reason}" if last.loss_reason else ""
+                text += f" · POSITION UNCERTAIN after a step-loss event{why} — SET ZERO or STEPLOSS_ACK"
+                if color in ("green", "gray"):
+                    color = "amber"
         return text, color
 
     def _verdict_core(self, last: Optional[MotorDebugSample], seq_rate: float, ramp_rate: float) -> Tuple[str, str]:
@@ -181,7 +219,8 @@ class MotionEstimator:
                     "cannot move — the 12 V or VCC_IO rail dropped; the firmware re-initialises on the next "
                     "ENABLE or within 64 steps"), "red"
         if last.faults:
-            return "DRIVER FAULT: " + " ".join(last.faults) + " (open-load flags are only valid at standstill)", "red"
+            return ("DRIVER FAULT: " + " ".join(last.faults)
+                    + " (open-load flags only mean something while the motor turns slowly)"), "red"
         if last.sd_mode:
             return "SD_MODE=1: module strapped for STEP/DIR — SPI motion can never move it", "red"
         power_off = bool(last.drv_enn) or last.toff == 0

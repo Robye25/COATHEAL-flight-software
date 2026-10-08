@@ -783,11 +783,322 @@ void TestThermalShutdownDisablesChannelAndReleasesLock() {
   assert(s.thermal_state == 2);
   assert(s.last_source == "safety:OVERTEMP");
   assert(lock.holder() == -1);
+  // The chip cut its outputs mid-move: the position is uncertain too.
+  assert(s.position_uncertain);
+  assert(s.step_loss_events == 1);
+  assert(s.step_loss_reason.find("over-temperature") != std::string::npos);
 
   // Cooled down: STEPPER_ENABLE re-arms and motion works again.
   drv->thermal = 0;
   assert(ch->SetEnabled(true));
   assert(ch->MoveSteps(100, &err));
+}
+
+
+// ---------------------------------------------------------------------
+// Step-loss protection at the channel.
+//
+// The driver reports step-loss events (tests/unit/test_tmc5160_driver.cpp
+// covers how it finds them); the channel counts them, latches "position
+// uncertain", and stops, disables or carries on as the event asks.
+// ---------------------------------------------------------------------
+
+// A simulated driver whose step-loss surface the test scripts.
+class StepLossScriptDriver : public SimulatedStepperDriver {
+ public:
+  // On the Nth Step() call (1-based; 0 = never) one event is raised.
+  int event_at_step = 0;
+  std::string event_reason = "chip reset while the motor was enabled";
+  // ...which also asks for a stop and refuses that step (a stall), or
+  bool event_stops = false;
+  // from the Nth Step() call on, every step is refused (0 = never).
+  int refuse_from_step = 0;
+  std::string error;
+
+  int steps = 0;
+  std::uint64_t events = 0;
+  std::string reason;
+  bool stop = false;
+  int confirm_calls = 0;
+  int steady_reports = 0;
+  int ramp_reports = 0;
+  double last_rate = -1.0;
+
+  bool Step(bool forward) override {
+    ++steps;
+    if (event_at_step != 0 && steps == event_at_step) {
+      ++events;
+      reason = event_reason;
+      if (event_stops) {
+        stop = true;
+        return false;
+      }
+    }
+    if (refuse_from_step != 0 && steps >= refuse_from_step) return false;
+    return SimulatedStepperDriver::Step(forward);
+  }
+  std::uint64_t step_loss_events() const override { return events; }
+  std::string step_loss_reason() const override { return reason; }
+  bool TakeStepLossStop() override {
+    const bool was = stop;
+    stop = false;
+    return was;
+  }
+  bool ConfirmTarget() override {
+    ++confirm_calls;
+    return true;
+  }
+  void NoteStepRate(double full_step_hz, bool steady) override {
+    last_rate = full_step_hz;
+    if (full_step_hz > 0.0) ++(steady ? steady_reports : ramp_reports);
+  }
+  std::string last_error() const override { return error; }
+};
+
+struct StepLossRig {
+  MotionLock lock;
+  StepLossScriptDriver* drv = nullptr;
+  std::unique_ptr<StepperChannel> ch;
+
+  StepLossRig() {
+    auto owned = std::make_unique<StepLossScriptDriver>();
+    drv = owned.get();
+    ch = std::make_unique<StepperChannel>(MakeChannelCfg(0), std::move(owned), &lock);
+  }
+  // Ticks at 1 kHz until the channel is neither moving nor holding.
+  void RunUntilIdle() {
+    for (int i = 0; i < 60000; ++i) {
+      ch->Tick(0.001);
+      const StepperStatus s = ch->Snapshot();
+      if (!s.moving && !s.holding) return;
+    }
+    assert(false && "channel never went idle");
+  }
+};
+
+// A chip reset or an undervoltage: the position is no longer certain, and
+// the move goes on to its target -- stopping would not bring a step back.
+void TestStepLossEventLatchesAndTheMoveContinues() {
+  StepLossRig rig;
+  rig.drv->event_at_step = 10;
+  std::string err;
+  assert(rig.ch->MoveSteps(400, &err));
+  rig.RunUntilIdle();
+  StepperStatus s = rig.ch->Snapshot();
+  assert(s.position_steps == 400);
+  assert(s.enabled);
+  assert(s.step_loss_events == 1);
+  assert(s.position_uncertain);
+  assert(s.step_loss_reason == "chip reset while the motor was enabled");
+  assert(s.last_source == "cmd:MOVE");  // not an abort
+  assert(rig.lock.holder() == -1);
+
+  // STEPLOSS_ACK: the latch goes, the count stays.
+  rig.ch->AcknowledgeStepLoss();
+  s = rig.ch->Snapshot();
+  assert(!s.position_uncertain);
+  assert(s.step_loss_reason.empty());
+  assert(s.step_loss_events == 1);
+
+  // A later event latches again; a new zero clears it too.
+  ++rig.drv->events;
+  rig.drv->reason = "motor supply undervoltage";
+  rig.ch->Tick(0.001);  // idle poll absorbs it
+  s = rig.ch->Snapshot();
+  assert(s.position_uncertain);
+  assert(s.step_loss_events == 2);
+  assert(s.step_loss_reason == "motor supply undervoltage");
+  rig.ch->SetPositionZero();
+  s = rig.ch->Snapshot();
+  assert(!s.position_uncertain);
+  assert(s.step_loss_events == 2);
+  // MUTATION: drop the AbsorbDriverStepLoss() call in IssuePulses and
+  // confirm this test fails on step_loss_events == 1.
+}
+
+// A stall (stall_detect=stop): the driver refuses the step and asks for a
+// stop. The move ends where it is, the motor stays energised to hold the
+// load, the MotionLock (and with it the heater inhibit) is released.
+void TestStepLossStopEndsTheMoveAndKeepsTheMotorEnabled() {
+  StepLossRig rig;
+  rig.drv->event_at_step = 20;
+  rig.drv->event_stops = true;
+  rig.drv->event_reason = "StallGuard stall";
+  std::string err;
+  assert(rig.ch->MoveSteps(400, &err));
+  assert(rig.lock.holder() == 0);
+  rig.RunUntilIdle();
+  StepperStatus s = rig.ch->Snapshot();
+  assert(s.position_steps == 19);  // the refused step is not counted
+  assert(s.target_steps == 19);
+  assert(s.enabled);
+  assert(!s.moving);
+  assert(s.last_source == "safety:STEPLOSS");
+  assert(s.step_loss_events == 1);
+  assert(s.position_uncertain);
+  assert(s.step_loss_reason == "StallGuard stall");
+  assert(rig.lock.holder() == -1);
+  assert(rig.drv->enabled());
+  assert(rig.drv->steps == 20);  // nothing was pushed against the stall
+
+  // The operator can still jog the mechanism back by hand.
+  assert(rig.ch->MoveSteps(-19, &err));
+  rig.RunUntilIdle();
+  s = rig.ch->Snapshot();
+  assert(s.position_steps == 0);
+  assert(s.position_uncertain);  // a move does not clear the latch
+  assert(s.last_source == "cmd:MOVE");
+  // MUTATION: ignore the stop request in IssuePulses and confirm this
+  // test fails on `s.enabled` (the refused step then disables the motor).
+}
+
+// A refused step with no stop request is a driver that cannot drive: the
+// channel disables it, as before -- and now says the position is uncertain.
+void TestRefusedStepDisablesTheChannelAndLatches() {
+  {
+    StepLossRig rig;
+    rig.drv->refuse_from_step = 5;
+    rig.drv->error = "SPI write failed";
+    std::string err;
+    assert(rig.ch->MoveSteps(400, &err));
+    rig.RunUntilIdle();
+    const StepperStatus s = rig.ch->Snapshot();
+    assert(s.position_steps == 4);
+    assert(!s.enabled);
+    assert(!rig.drv->enabled());
+    assert(s.last_source == "safety:STEPLOSS");
+    assert(s.step_loss_events == 1);
+    assert(s.position_uncertain);
+    assert(s.step_loss_reason == "motor disabled mid-move: SPI write failed");
+    assert(rig.lock.holder() == -1);
+  }
+  {
+    // The driver said why (a short): one event, with the driver's reason.
+    StepLossRig rig;
+    rig.drv->event_at_step = 5;
+    rig.drv->event_reason = "short circuit on a motor coil (s2ga)";
+    rig.drv->refuse_from_step = 5;
+    std::string err;
+    assert(rig.ch->MoveSteps(400, &err));
+    rig.RunUntilIdle();
+    const StepperStatus s = rig.ch->Snapshot();
+    assert(!s.enabled);
+    assert(s.step_loss_events == 1);
+    assert(s.step_loss_reason == "short circuit on a motor coil (s2ga)");
+  }
+}
+
+// While holding a bend: an event without a stop request latches and the
+// hold runs on; one with a stop request ends the hold (the lock, and the
+// heater inhibit with it, must not stay latched behind a dead driver).
+void TestStepLossWhileHolding() {
+  StepLossRig rig;
+  std::string err;
+  assert(rig.ch->MoveToSteps(40, 5.0, &err));
+  for (int i = 0; i < 5000 && !rig.ch->Snapshot().holding; ++i) rig.ch->Tick(0.001);
+  assert(rig.ch->Snapshot().holding);
+  assert(rig.lock.holder() == 0);
+
+  ++rig.drv->events;
+  rig.drv->reason = "chip reset while the motor was enabled";
+  rig.ch->Tick(0.001);
+  StepperStatus s = rig.ch->Snapshot();
+  assert(s.holding);
+  assert(s.position_uncertain);
+  assert(rig.lock.holder() == 0);
+
+  ++rig.drv->events;
+  rig.drv->reason = "chip position 0 is not the commanded 2560";
+  rig.drv->stop = true;
+  rig.ch->Tick(0.001);
+  s = rig.ch->Snapshot();
+  assert(!s.holding);
+  assert(!s.moving);
+  assert(s.enabled);
+  assert(s.hold_remaining_s == 0.0);
+  assert(s.last_source == "safety:STEPLOSS");
+  assert(s.step_loss_events == 2);
+  assert(rig.lock.holder() == -1);
+}
+
+// De-energising a turning motor lets it coast: latch. Disabling one that
+// is standing still is the operator's ordinary STEPPER_DISABLE: no latch.
+void TestDisableWhileMovingLatches() {
+  StepLossRig rig;
+  std::string err;
+  assert(rig.ch->SetEnabled(false));
+  assert(!rig.ch->Snapshot().position_uncertain);
+  assert(rig.ch->Snapshot().step_loss_events == 0);
+
+  assert(rig.ch->SetEnabled(true));
+  assert(rig.ch->MoveSteps(400, &err));
+  rig.ch->Tick(0.001);
+  assert(rig.ch->Snapshot().moving);
+  assert(rig.ch->SetEnabled(false));
+  const StepperStatus s = rig.ch->Snapshot();
+  assert(s.position_uncertain);
+  assert(s.step_loss_events == 1);
+  assert(s.step_loss_reason == "motor disabled while moving");
+}
+
+// Every leg end is confirmed with the driver, and the driver is told the
+// step rate: steady only in cruise, 0 once the move is over.
+void TestLegEndsAreConfirmedAndTheStepRateIsReported() {
+  StepLossRig rig;
+  std::string err;
+  assert(rig.ch->ArmPullCycle(&err));  // out, hold, retract: two legs
+  rig.RunUntilIdle();
+  assert(rig.ch->Snapshot().position_steps == 0);
+  assert(rig.drv->confirm_calls == 2);
+  assert(rig.drv->steady_reports > 0);  // cruise at 100 full-steps/s
+  assert(rig.drv->ramp_reports > 0);    // accelerating and braking
+  rig.ch->Tick(0.001);
+  assert(rig.drv->last_rate == 0.0);
+
+  // A move too short to reach the commanded rate is never "steady".
+  StepLossRig brief;
+  assert(brief.ch->MoveSteps(8, &err));
+  brief.RunUntilIdle();
+  assert(brief.drv->confirm_calls == 1);
+  assert(brief.drv->steady_reports == 0);
+  assert(brief.drv->ramp_reports > 0);
+}
+
+void TestControllerAcknowledgeStepLoss() {
+  std::vector<StepperChannelConfig> cfgs;
+  cfgs.push_back(MakeChannelCfg(0, {0, 1, 2, 3}));
+  cfgs.push_back(MakeChannelCfg(1, {4, 5, 6, 7}));
+  std::vector<std::unique_ptr<StepperDriver>> drvs;
+  drvs.emplace_back(std::make_unique<SimulatedStepperDriver>());
+  auto scripted = std::make_unique<StepLossScriptDriver>();
+  StepLossScriptDriver* drv1 = scripted.get();
+  drvs.emplace_back(std::move(scripted));
+  StepperController ctl(std::move(cfgs), std::move(drvs));
+
+  ++drv1->events;
+  drv1->reason = "motor supply undervoltage";
+  ctl.Tick(MissionPhase::kFloat, 0.001);
+  assert(ctl.Snapshot(1).position_uncertain);
+  assert(!ctl.Snapshot(0).position_uncertain);  // the other motor is untouched
+
+  std::string err;
+  assert(!ctl.AcknowledgeStepLoss(9, &err));
+  assert(err == "unknown motor id");
+  assert(ctl.AcknowledgeStepLoss(1, &err));
+  assert(!ctl.Snapshot(1).position_uncertain);
+  assert(ctl.Snapshot(1).step_loss_events == 1);
+}
+
+void TestParserStepLossAck() {
+  CommandParser parser;
+  auto r = parser.ParseLine("STEPLOSS_ACK 1");
+  assert(r.ok);
+  assert(r.command.type == CommandType::kStepLossAck);
+  assert(r.command.name == "STEPLOSS_ACK");
+  assert(r.command.args.size() == 1 && r.command.args[0] == "1");
+  assert(parser.ParseLine("steploss_ack 0").ok);
+  assert(!parser.ParseLine("STEPLOSS_ACK").ok);
+  assert(!parser.ParseLine("STEPLOSS_ACK 0 1").ok);
 }
 
 }  // namespace
@@ -815,6 +1126,14 @@ int main() {
   TestSetAccelBounds();
   TestControllerSetRunCurrent();
   TestThermalShutdownDisablesChannelAndReleasesLock();
+  TestStepLossEventLatchesAndTheMoveContinues();
+  TestStepLossStopEndsTheMoveAndKeepsTheMotorEnabled();
+  TestRefusedStepDisablesTheChannelAndLatches();
+  TestStepLossWhileHolding();
+  TestDisableWhileMovingLatches();
+  TestLegEndsAreConfirmedAndTheStepRateIsReported();
+  TestControllerAcknowledgeStepLoss();
+  TestParserStepLossAck();
   std::cout << "Rev C stepper tests passed" << std::endl;
   return 0;
 }

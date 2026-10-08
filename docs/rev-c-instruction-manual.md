@@ -34,7 +34,9 @@ ground link is lost, the onboard software:
 8. Test motors unloaded, at `0.8 A RMS`, and at low speed before attaching the
    ball-screw mechanisms.
 9. There are no limit switches or encoders. Software zero is not a physical
-   home sensor.
+   home sensor, and the reported position is a count of commanded steps. The
+   onboard flags a position it can no longer vouch for (`unc:1`, the
+   `STEP LOSS` alarm — section 19); check the mechanism before trusting it.
 10. A heater is inhibited whenever its mapped PT100 reading is invalid or
     stale, including when manual duty control is used.
 
@@ -158,6 +160,27 @@ Config OK: config/onboard.example.ini
 An `unknown config key` error after a Git pull normally means the configuration
 is newer than the compiled executable. Rebuild the executable before starting
 the service.
+
+### E-Link hard cap
+
+Before flight the Pi's E-Link port is capped in the kernel: everything the Pi
+sends on it, from any program, is held to 800 B/s and at most 1 800 B in any
+second — the Pi's part of the 24 kbps ([link-budget.md](link-budget.md#hard-cap)).
+
+```bash
+coatheal-deploy --flight     # switches the cap on and refuses to finish without it
+coatheal-link-cap status     # ON / OFF, and the port
+coatheal-link-cap off        # bench: the cap also takes ssh, git and apt on that port
+coatheal-link-cap on         # back on before flight
+```
+
+`STATUS` reports `link_cap=on:<port>`; every service start logs the state.
+With the cap on, an `ssh` session over the E-Link port is slow by design.
+To prove the shaper on the Pi's own kernel without touching the port:
+
+```bash
+python3 /bexus/code/coatheal/scripts/link_cap_selftest.py
+```
 
 ## 6. Raspberry Pi Header Numbering
 
@@ -387,8 +410,10 @@ by hand, after `auto` has measured the pairs:
   gives to a heated specimen means the pairs are not measured yet.
 
 `touch` then moves each specimen, with its heater line and PT100 terminal,
-into the list of the motor you gave, in the lists' present order with each
-motor's click specimen first, and prints the resulting table and the heater
+into the list of the motor you gave: heated specimens first and unheated
+ones last (a group's unheated specimen is its last), each in the lists'
+present order, with each motor's click specimen first. It prints the
+resulting table and the heater
 numbers that change (thermal presets and per-heater PID gains follow the
 numbers, not the heaters). It warns when a motor's click specimen changed
 without being marked, and when a heater's PT100 from the config stayed cold
@@ -809,6 +834,36 @@ printf 'STEPPER_DISABLE 0\n' | nc 127.0.0.1 5000
 
 Repeat with motor ID `1` for the second actuator.
 
+### Step loss
+
+The telemetry `STEPPERn` segment carries `loss:<n>` (step-loss events since
+the service started) and `unc:<0|1>` (position latched uncertain). An event
+is a driver chip reset or a motor-supply undervoltage while the motor was
+enabled, a driver fault, a StallGuard stall with `motorN.stall_detect=stop`,
+a chip that is not where it was commanded, or a disable while moving. The
+console raises a red `Mn STEP LOSS` alarm.
+
+When it happens:
+
+```bash
+printf 'CHECK MOTOR0\n' | nc 127.0.0.1 5000      # motor0_warn= says what and why
+printf 'MOTOR_DEBUG 0\n' | nc 127.0.0.1 5000     # loss_reason=, sg_min=, uv=, shorts= ...
+```
+
+Look at the mechanism. Jog, `STEPPER_MOVETO`, `STEPPER_HOME` and
+`STEPPER_STOP` still work; `PULL_ARM`, `PULL_EXECUTE`, `BENDSEQ_RUN` and
+`BENDSEQ_RESUME` are refused until the latch is cleared, either with a new
+zero at the reference position or, if the position is accepted as it is:
+
+```bash
+printf 'SET_POSITION_ZERO 0\n' | nc 127.0.0.1 5000
+printf 'STEPLOSS_ACK 0\n' | nc 127.0.0.1 5000
+```
+
+A rising `loss` with `uv=` or `resets=` climbing in `MOTOR_DEBUG` is the 12 V
+motor supply. Full description and the StallGuard calibration:
+[TMC5160 Commissioning, section 12](tmc5160-commissioning.md#12-step-loss-protection).
+
 ## 20. Bend Sequences
 
 Each step is:
@@ -840,6 +895,10 @@ printf 'BENDSEQ_CLEAR 0 flex\n' | nc 127.0.0.1 5000
 Only one motor moves at a time. All heater outputs are inhibited while the
 motion lock is active.
 
+A sequence whose move was stopped by the step-loss protection pauses with
+`fault=step loss: <reason>` in `BENDSEQ_STATUS`; `BENDSEQ_RESUME` is refused
+until `SET_POSITION_ZERO` or `STEPLOSS_ACK` (section 19).
+
 ## 21. Ground Station Installation and Startup
 
 For installation steps, see the root [README.md](../README.md) *Quick
@@ -858,6 +917,17 @@ Explicit mode:
 ```powershell
 python gui_app.py --host 169.254.10.10 --tel-port 4000 --cmd-port 5000
 ```
+
+For flight on a Linux ground station, start it with the hard cap on the
+Ethernet port the E-Link is plugged into (`ip -br link` lists the ports):
+
+```bash
+./COATHEAL-GroundStation.sh --link-cap enp3s0
+```
+
+The event log then shows `[link cap] kernel shaper ON on enp3s0`. On Windows
+there is no such shaper: the console's own ledger is all that limits what
+the ground station sends, and the event log says so.
 
 ## 22. Fault Recovery
 
@@ -945,7 +1015,9 @@ working line flips `DRV_ENN` within a millisecond.
 Verify motor voltage, enable polarity, coil pairs, driver current (against
 [TMC5160 Commissioning §6](tmc5160-commissioning.md#6-current-model-globalscaler--irun-two-regimes)),
 and mechanical freedom. There is no STEP/DIR wiring to check — motion is
-SPI-only. Software cannot prove physical movement without an encoder.
+SPI-only. Software cannot prove physical movement without an encoder; what
+it can see of a motor that did not follow is reported as step loss
+(section 19).
 
 ### Heater duty remains zero
 
@@ -977,6 +1049,11 @@ printf 'PING\n' | nc 127.0.0.1 5000
 
 Confirm the Pi has `169.254.10.10/16`, the ground station is listening on TCP
 4000, and Windows Firewall permits TCP 4000/5000 and UDP 4100.
+
+With the hard cap on (`coatheal-link-cap status`), anything else using the
+E-Link port — an `ssh` session, a file copy, a second ground-station program —
+takes its bytes from the same 800 B/s and the telemetry stalls. Close it; do
+not switch the cap off in flight.
 
 ## 23. Emergency Stop
 

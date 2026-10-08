@@ -211,6 +211,11 @@ void TestCtrlBlockAndStepperExtrasTokenOrder() {
   m0.position_mm = 0.25;
   m0.target_mm = 0.5;
   m0.thermal_state = 1;  // driver otpw pre-warning
+  // Step-loss protection (2026-10-05): event count and the
+  // position-uncertain latch trail therm, for the same reason again.
+  m0.step_loss_events = 3;
+  m0.position_uncertain = true;
+  m0.step_loss_reason = "chip reset, with a comma; and a semicolon";  // never on the wire
   StepperStatus m1;  // defaults: never zeroed, no sequence, no source
   r.steppers = {m0, m1};
 
@@ -223,9 +228,15 @@ void TestCtrlBlockAndStepperExtrasTokenOrder() {
                   "|budget_exhausted:0|heaters_active:2|queue:7|plan:none|debug:1|tune:H4,STEPPER0="));
   assert(Contains(line, "|src:cmd:MOVE|zeroed:1|seq:flex|seqst:run"
                         "|amps:0.80|acc:200.0|mm:0.250|mm_tgt:0.500"
-                        "|therm:warn,STEPPER1="));
+                        "|therm:warn|loss:3|unc:1,STEPPER1="));
   assert(Contains(line, "|src:-|zeroed:0|seq:-|seqst:idle"
-                        "|amps:0.00|acc:0.0|mm:0.000|mm_tgt:0.000|therm:ok"));
+                        "|amps:0.00|acc:0.0|mm:0.000|mm_tgt:0.000|therm:ok"
+                        "|loss:0|unc:0"));
+  // The reason is free text (commas, semicolons): it stays in MOTOR_DEBUG
+  // and CHECK and is never put into the comma-framed DATA line.
+  assert(!Contains(line, "chip reset"));
+  // The frame ends with the last stepper segment: loss/unc are the tail.
+  assert(line.size() >= 13 && line.compare(line.size() - 13, 13, "|loss:0|unc:0") == 0);
   assert(line.find("COMPONENT_STATE=") < line.find(",CTRL="));
 
   // An empty plan string still serialises as the documented default word.

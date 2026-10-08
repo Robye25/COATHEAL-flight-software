@@ -1,0 +1,22 @@
+[Unit]
+Description=COATHEAL E-Link hard cap (kernel shaper, 24 kbps both ways)
+Documentation=file:///bexus/code/coatheal/docs/link-budget.md
+# In place before anything of ours sends. Ordering only: the flight software
+# starts whether or not this unit could install the shaper.
+After=network-online.target
+Wants=network-online.target
+Before=coatheal-onboard.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# COATHEAL_ELINK_IFACE=<port> when the E-Link is not on the default port.
+EnvironmentFile=-/etc/coatheal/link-cap.env
+ExecStart=/usr/bin/bash /bexus/code/coatheal/scripts/link_cap.sh apply --role onboard
+ExecStop=/usr/bin/bash /bexus/code/coatheal/scripts/link_cap.sh clear
+# The port may not be there yet (USB adapter still enumerating): keep trying.
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
