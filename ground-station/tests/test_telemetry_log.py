@@ -49,17 +49,18 @@ def _rows(path: Path) -> list:
 
 
 class SchemaTests(unittest.TestCase):
-    def test_field_list_is_v6_and_unique(self) -> None:
-        self.assertEqual(TELEMETRY_SCHEMA_VERSION, 6)
+    def test_field_list_is_v7_and_unique(self) -> None:
+        self.assertEqual(TELEMETRY_SCHEMA_VERSION, 7)
         self.assertEqual(len(TELEMETRY_CSV_FIELDS), len(set(TELEMETRY_CSV_FIELDS)))
         self.assertEqual(TELEMETRY_CSV_FIELDS[:3], ["gs_rx_utc", "session_id", "seq"])
         for column in ("sample_7", "h5", "r7", "stepper1_zeroed", "stepper1_seqstate",
+                       "stepper0_loss", "stepper1_uncertain",
                        "fallback", "energy_wh", "queue", "plan"):
             self.assertIn(column, TELEMETRY_CSV_FIELDS, column)
         self.assertEqual(TELEMETRY_CSV_FIELDS[-len(CTRL_COLUMNS):], CTRL_COLUMNS)
 
     # MUTATION: delete ("zeroed", "zeroed") from STEPPER_COLUMNS and confirm
-    # test_field_list_is_v6_and_unique fails naming stepper1_zeroed.
+    # test_field_list_is_v7_and_unique fails naming stepper1_zeroed.
 
     def test_row_is_lossless_and_complete(self) -> None:
         pkt = parse_telemetry_csv(FRAME_A)
@@ -79,6 +80,13 @@ class SchemaTests(unittest.TestCase):
         self.assertEqual(row["stepper1_zeroed"], "1")
         self.assertEqual(row["stepper0_zeroed"], "0")
         self.assertEqual(row["stepper1_source"], "cmd:BEND")
+        # FRAME_A predates the step-loss keys: blank, not a made-up 0.
+        self.assertEqual(row["stepper1_loss"], "")
+        self.assertEqual(row["stepper1_uncertain"], "")
+        latched = packet_to_row(parse_telemetry_csv(FRAME_A + "|therm:ok|loss:2|unc:1"), rx_utc="x")
+        self.assertEqual(latched["stepper1_loss"], "2")
+        self.assertEqual(latched["stepper1_uncertain"], "1")
+        self.assertEqual(latched["stepper0_loss"], "", "the other motor's segment did not carry the keys")
         self.assertEqual(row["energy_wh"], "12.4")
         self.assertEqual(row["heaters_active"], "3")
         self.assertEqual(row["plan"], "none")

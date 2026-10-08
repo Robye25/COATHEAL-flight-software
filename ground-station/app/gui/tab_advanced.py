@@ -399,7 +399,8 @@ class AdvancedTab(QScrollArea):
                     self.btn_plan_status):
             btn.set_reason(generic)
         self.btn_seq_pause.set_reason(gating.motion_reason(state, motor_id, needs_zero=False, needs_enable=False))
-        self.btn_seq_resume.set_reason(gating.motion_reason(state, motor_id, needs_zero=True, needs_enable=False))
+        self.btn_seq_resume.set_reason(gating.motion_reason(state, motor_id, needs_zero=True, needs_enable=False)
+                                       or gating.position_trust_reason(state, motor_id))
         for _t, _h, _s, btn in self.plan_rows:
             btn.set_reason(generic)
         for i, btn in enumerate(self.duty_buttons):

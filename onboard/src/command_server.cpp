@@ -52,9 +52,14 @@ constexpr int kSendFlags = MSG_NOSIGNAL;
 constexpr int kSendFlags = 0;
 #endif
 
-// Largest reply chunk: a STATUS reply fits one chunk, and a chunk still fits
-// the 1 600 B share next to a live telemetry frame.
-constexpr std::size_t kReplyChunkBytes = 600;
+// Largest reply chunk: one TCP segment at the capped E-Link MTU (wire::kMss),
+// which still fits the 1 600 B share next to a live telemetry frame.
+constexpr std::size_t kReplyChunkBytes = 520;
+// What our kernel sends for a command exchange besides the reply itself: the
+// SYN-ACK, the ACK of the request, our FIN and the ACK of the ground station's
+// FIN. The ground station's ledger holds them; on our port they come out of
+// the egress shaper like everything else (LinkBudget::DebitEgress).
+constexpr std::uint32_t kExchangeEgressBytes = wire::kSyn + 3 * wire::kPureAck;
 // Budget wait for a whole reply: under the ground station's 3 s default.
 constexpr auto kReplyBudgetWait = std::chrono::milliseconds(2500);
 constexpr auto kEmissionTail = std::chrono::milliseconds(50);
@@ -255,6 +260,7 @@ void CommandServer::HandleClient(int client_fd, const std::string& peer_ip) {
     if (budget_ == nullptr || (IsLoopback(peer_ip) && !pace_loopback_)) {
       SendAll(client_fd, response.data(), response.size());
     } else {
+      budget_->DebitEgress(kExchangeEgressBytes);
       SendPacedReply(client_fd, response);
     }
     return;  // replied once; the caller closes the connection
@@ -274,9 +280,13 @@ bool CommandServer::SendPacedReply(int client_fd, const std::string& response) {
     const std::uint32_t headers =
         (first ? 0U : wire::kTcpHeaders + wire::kFrameOverhead) + wire::kPureAck;
     const std::uint32_t cost = static_cast<std::uint32_t>(chunk) + headers + 2 * wire::kReset;
+    // On our own port the chunk is one segment, header included, whoever
+    // holds that header in the split above.
+    const std::uint32_t egress = wire::TcpBytes(chunk);
     LinkBudget::Ticket ticket;
-    if (!budget_->WaitHold(cost, LinkPriority::kCommandReply, deadline, &ticket)) {
+    if (!budget_->WaitHold(cost, LinkPriority::kCommandReply, deadline, &ticket, egress)) {
       ResetOnClose(client_fd);
+      budget_->DebitEgress(wire::kReset);
       return false;
     }
     // Gives up with a reset; answers already on their way draw resets from
@@ -289,6 +299,7 @@ bool CommandServer::SendPacedReply(int client_fd, const std::string& response) {
           std::chrono::duration_cast<std::chrono::steady_clock::duration>(
               known ? state.srtt : std::chrono::microseconds(0));
       ResetOnClose(client_fd);
+      budget_->DebitEgress(wire::kReset);
       budget_->ReleaseAt(ticket, release_at);
     };
     const std::chrono::milliseconds ack_deadline = wire::AckDeadline(client_fd);

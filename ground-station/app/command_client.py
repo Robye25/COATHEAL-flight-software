@@ -13,6 +13,7 @@ from .link_budget import (
     budget_wait_error,
     command_budget_wait_s,
     command_exchange_bytes,
+    command_exchange_egress,
     ground_budget,
     paced_connection,
     priority_for,
@@ -70,7 +71,8 @@ def discover_onboard_host(discovery_port: int, command_port: int, timeout: float
         for target in ("255.255.255.255", DEFAULT_STATIC_HOST):
             # Each datagram is charged before it is sent; one the link
             # budget cannot take is skipped.
-            if budget.try_charge(udp_datagram(len(hello)), Priority.DISCOVERY) is None:
+            size = udp_datagram(len(hello))
+            if budget.try_charge(size, Priority.DISCOVERY, tx_bytes=size) is None:
                 continue
             try:
                 sock.sendto(hello, (target, discovery_port))
@@ -116,7 +118,8 @@ def send_command(host: str, port: int, command: str, timeout: float,
         raise LinkBudgetRefusal(refusal)
     budget = budget if budget is not None else ground_budget()
     wait_s = command_budget_wait_s(timeout)
-    ticket = budget.hold(command_exchange_bytes(len(payload)), priority_for(command), wait_s)
+    ticket = budget.hold(command_exchange_bytes(len(payload)), priority_for(command), wait_s,
+                         tx_bytes=command_exchange_egress(len(payload)))
     if ticket is None:
         raise LinkBudgetRefusal(budget_wait_error(wait_s))
     with paced_connection(budget, ticket, host, port, timeout) as sock:

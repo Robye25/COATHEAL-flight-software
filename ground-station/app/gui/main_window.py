@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
     QSplitter, QStatusBar, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
+from .. import link_cap
 from ..link_budget import LINK_HEALTHY_S
 from ..protocol import LEAD_MM_PER_REV, CommandResponse, PullEvent, TelemetryPacket
 from ..telemetry_log import LogManager
@@ -52,6 +53,7 @@ from .widgets import apply_number_locale, confirm, install_input_policy
 
 STATE_TICK_MS = 500
 DISK_TICK_MS = 10_000
+LINK_CAP_TICK_MS = 30_000   # re-read the kernel shaper: a network manager may drop it
 # A GET_LAYOUT that never reached the onboard (refused, timed out) is asked
 # again on the first live frame after this long.
 LAYOUT_RETRY_S = 10.0
@@ -92,6 +94,7 @@ class MainWindow(QMainWindow):
         self._discovered_host: Optional[str] = None
         self._discovered_cmd_port: Optional[int] = None
         self._target_how = ""
+        self._link_cap_reported: Optional[tuple] = None
         self._last_pkt: Optional[TelemetryPacket] = None
         self._last_rx_mono: Optional[float] = None
         self._frames = 0
@@ -238,6 +241,9 @@ class MainWindow(QMainWindow):
 
         self._state_timer = QTimer(self); self._state_timer.timeout.connect(self._tick); self._state_timer.start(STATE_TICK_MS)
         self._disk_timer = QTimer(self); self._disk_timer.timeout.connect(self._refresh_disk); self._disk_timer.start(DISK_TICK_MS)
+        self._link_cap_timer = QTimer(self)
+        self._link_cap_timer.timeout.connect(lambda: self._report_link_cap(self._dispatcher.host))
+        self._link_cap_timer.start(LINK_CAP_TICK_MS)
 
         geo = self._settings.value("window/geometry")
         if geo:
@@ -527,7 +533,21 @@ class MainWindow(QMainWindow):
         self._discovered_cmd_port = cmd_port
         self._target_how = how
         self._events.append(f"[discovery] command target => {host}:{cmd_port} ({how})")
+        self._report_link_cap(host)
         self._refresh_link_info()
+
+    def _report_link_cap(self, host: str) -> None:
+        """Say once per port and state whether the kernel shaper of the hard
+        cap is on the port that reaches the onboard (docs/link-budget.md)."""
+        try:
+            status = link_cap.ground_cap_status(host)
+        except Exception as exc:  # never let a diagnostic stop the console
+            status = link_cap.CapStatus("unknown", "", f"check failed: {exc}")
+        key = (status.port, status.state)
+        if key == self._link_cap_reported:
+            return
+        self._link_cap_reported = key
+        self._events.append(f"[link cap] {status.detail}", None if status.ok else "WARN")
 
     def _refresh_link_info(self) -> None:
         target = f"{self._dispatcher.host}:{self._dispatcher.port}"

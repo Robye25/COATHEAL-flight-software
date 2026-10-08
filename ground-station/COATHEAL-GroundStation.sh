@@ -5,6 +5,11 @@ set -u
 #
 #    ./COATHEAL-GroundStation.sh            launch the GUI
 #    ./COATHEAL-GroundStation.sh --check    verify the setup, no GUI
+#    ./COATHEAL-GroundStation.sh --link-cap <port>
+#                                           flight: install the E-Link hard
+#                                           cap on that Ethernet port (sudo),
+#                                           then launch. `--link-cap off`
+#                                           removes it again (bench).
 #
 #  First run: creates a local Python environment, installs the
 #  dependencies, and offers firewall openings if ufw is active.
@@ -19,6 +24,24 @@ FW_MARKER="$VENV/.firewall.done"
 
 say()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 fail() { printf '\n\033[1;31m  %s\033[0m\n' "$*"; exit 1; }
+
+# ---- 0. E-Link hard cap (docs/link-budget.md, "Hard cap") ---------------
+# The kernel shapes everything this machine sends on the E-Link port to the
+# ground station's part of the 24 kbps (500 B/s, at most 1 200 B in any
+# second). It takes the whole port, so it is asked for by name; it stays on
+# until `--link-cap off` or a reboot.
+LINK_CAP_SCRIPT="../scripts/link_cap.sh"
+if [[ "${1:-}" == "--link-cap" ]]; then
+  [[ -n "${2:-}" ]] || fail "usage: --link-cap <port>   the Ethernet port the E-Link is on (ip -br link), or: --link-cap off"
+  [[ -f "$LINK_CAP_SCRIPT" ]] || fail "scripts/link_cap.sh not found next to ground-station/"
+  if [[ "$2" == "off" ]]; then
+    bash "$LINK_CAP_SCRIPT" off --role ground
+    exit $?
+  fi
+  say "Installing the E-Link hard cap on $2"
+  bash "$LINK_CAP_SCRIPT" on --role ground --iface "$2" || fail "the hard cap could not be installed on $2"
+  shift 2
+fi
 
 # ---- 1. Python + venv support ------------------------------------------
 command -v python3 >/dev/null 2>&1 || fail "python3 not found. Install it:  sudo apt install python3 python3-venv python3-pip"

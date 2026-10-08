@@ -558,6 +558,10 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
       if (!parse_double(key, value, &config->stepper.max_speed_mm_s, line_no)) return false;
     } else if (key == "stepper.max_direct_usteps") {
       if (!parse_i64(key, value, &config->stepper.max_direct_usteps, line_no)) return false;
+    } else if (key == "stepper.stall_min_step_hz") {
+      if (!parse_double(key, value, &config->stepper.stall_min_step_hz, line_no)) return false;
+    } else if (key == "stepper.stall_confirm_samples") {
+      if (!parse_int(key, value, &config->stepper.stall_confirm_samples, line_no)) return false;
 
     } else if (key == "pull.max_step_hz") {
       if (!parse_double(key, value, &config->pull.max_step_hz, line_no)) return false;
@@ -604,6 +608,12 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
         if (!parse_int(key, value, &motor.retry_ms, line_no)) return false;
       } else if (suffix == "accel_steps_per_s2") {
         if (!parse_double(key, value, &motor.accel_steps_per_s2, line_no)) return false;
+      } else if (suffix == "stall_detect") {
+        motor.stall_detect = value;
+      } else if (suffix == "stallguard_sgt") {
+        if (!parse_int(key, value, &motor.stallguard_sgt, line_no)) return false;
+      } else if (suffix == "stall_sg_min") {
+        if (!parse_int(key, value, &motor.stall_sg_min, line_no)) return false;
       } else if (suffix == "samples") {
         if (!ParseSizeList(value, &motor.samples)) {
           if (error != nullptr) {
@@ -1015,6 +1025,25 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
     return false;
   }
 
+  // StallGuard sampling gate: a rate (0 samples at every speed) and a
+  // confirmation count. One sample alone is not a verdict worth stopping a
+  // bend for, hence the floor of 1 with 3 as the default; 50 caps the
+  // travel a stall can run on to 200 full steps.
+  if (!std::isfinite(config->stepper.stall_min_step_hz) ||
+      config->stepper.stall_min_step_hz < 0.0) {
+    if (error != nullptr) {
+      *error = "stepper.stall_min_step_hz must be >= 0 full-steps/s";
+    }
+    return false;
+  }
+  if (config->stepper.stall_confirm_samples < 1 ||
+      config->stepper.stall_confirm_samples > 50) {
+    if (error != nullptr) {
+      *error = "stepper.stall_confirm_samples must be in [1, 50]";
+    }
+    return false;
+  }
+
   if (config->pull.max_step_hz <= 0.0 || config->pull.accel_steps_per_s2 <= 0.0 ||
       config->pull.accel_steps_per_s2 > config->stepper.max_accel_steps_per_s2 ||
       (config->pull.microstep != 1 && config->pull.microstep != 2 &&
@@ -1115,6 +1144,37 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
         *error = "motor" + std::to_string(i) +
                  ".accel_steps_per_s2 must be 0 (inherit) or in (0, "
                  "stepper.max_accel_steps_per_s2]";
+      }
+      return false;
+    }
+    if (motor.stall_detect != "off" && motor.stall_detect != "monitor" &&
+        motor.stall_detect != "stop") {
+      if (error != nullptr) {
+        *error = "motor" + std::to_string(i) +
+                 ".stall_detect must be off, monitor or stop";
+      }
+      return false;
+    }
+    // StallGuard2 measures in spreadCycle only: with stealthChop there is
+    // no SG_RESULT, and "stop" would be a protection that can never act.
+    if (motor.stall_detect == "stop" && motor.stealth_chop) {
+      if (error != nullptr) {
+        *error = "motor" + std::to_string(i) +
+                 ".stall_detect=stop needs spreadCycle (stealth_chop=false)";
+      }
+      return false;
+    }
+    if (motor.stallguard_sgt < -64 || motor.stallguard_sgt > 63) {
+      if (error != nullptr) {
+        *error = "motor" + std::to_string(i) +
+                 ".stallguard_sgt must be in [-64, 63]";
+      }
+      return false;
+    }
+    if (motor.stall_sg_min < 0 || motor.stall_sg_min > 1023) {
+      if (error != nullptr) {
+        *error = "motor" + std::to_string(i) +
+                 ".stall_sg_min must be in [0, 1023]";
       }
       return false;
     }

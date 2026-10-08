@@ -162,6 +162,16 @@ Every absolute motion requires a
 software zero established by `SET_POSITION_ZERO`; there are no limit switches.
 `MotionLock` serializes both manual moves and runtime bend sequences.
 
+The motors run open loop, so the position is a count of commanded steps.
+The driver and `StepperChannel` supervise what can be seen of a rotor that
+did not follow — a chip reset or supply undervoltage while enabled, a driver
+fault, a StallGuard2 stall (`motorN.stall_detect`), the chip's own
+`XACTUAL`/`XTARGET` — count each as a step-loss event and latch the position
+as uncertain (`STEPPERn` `loss:`/`unc:`) until `SET_POSITION_ZERO` or
+`STEPLOSS_ACK`. See
+[TMC5160 Commissioning, section 12](tmc5160-commissioning.md#12-step-loss-protection)
+and [Protocol, step-loss protection](protocol.md#step-loss-protection).
+
 ## Telemetry
 
 `SerializeTelemetryDataFrame` emits:
@@ -207,6 +217,7 @@ SET_PID <index|ALL> <kp> <ki> <kd>
 GET_THERMAL
 HEATERS_OFF
 SET_POSITION_ZERO <id>
+STEPLOSS_ACK <id>
 BENDSEQ_LOAD <id> <name> <target>:<hold>[:<speed>] ...
 BENDSEQ_RUN <id> <name>
 STEPPER_STOP <id>

@@ -2,7 +2,7 @@
 
 The receiver owns the TCP telemetry server (accept, parse, ACK, dedupe) and
 hands every accepted frame to the shared `LogManager`, which decides the
-session directory and writes the schema-v6 CSV. The dispatcher owns the
+session directory and writes the schema-v7 CSV. The dispatcher owns the
 one-shot TCP command client, the command history, the command log, and the
 radio-silence gate (redesign spec §9): while silent only the whitelist can
 leave the ground station.
@@ -22,16 +22,20 @@ from typing import Callable, Deque, Optional
 from PyQt6.QtCore import QObject, QRunnable, QThread, QThreadPool, pyqtSignal
 
 from ..link_budget import (
+    PURE_ACK,
+    SYN,
     TELEMETRY_CLOSE_BYTES,
     LinkBudget,
     Priority,
     budget_wait_error,
     command_budget_wait_s,
     command_exchange_bytes,
+    command_exchange_egress,
     ground_budget,
     paced_connection,
     priority_for,
     request_too_long,
+    send_answer,
 )
 from ..link_codec import CodecError, decode_line, describe_hello, hello_reply
 from ..protocol import (
@@ -196,6 +200,7 @@ class TelemetryReceiver(QThread):
     def _handle_connection(self, conn: socket.socket) -> None:
         conn.settimeout(1.0)
         conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        self._budget.debit_egress(SYN)   # the SYN-ACK our kernel answered with
         buf = ""
         last_data = time.monotonic()
         stale_emitted = False
@@ -208,7 +213,8 @@ class TelemetryReceiver(QThread):
                 if idle > self._DATA_TIMEOUT_S:
                     # The FIN and the onboard's ACK of it are charged first;
                     # with no room yet, the quiet connection waits a second.
-                    if self._budget.try_charge(TELEMETRY_CLOSE_BYTES, Priority.COMMAND) is None:
+                    if self._budget.try_charge(TELEMETRY_CLOSE_BYTES, Priority.COMMAND,
+                                               tx_bytes=PURE_ACK) is None:
                         continue
                     self.log_message.emit(
                         f"[telemetry] no data for {self._DATA_TIMEOUT_S:.0f}s "
@@ -240,7 +246,7 @@ class TelemetryReceiver(QThread):
                     # Codec negotiation (docs/link-budget.md): not a frame,
                     # never ACKed, answered on the same socket.
                     try:
-                        conn.sendall(reply.encode("utf-8"))
+                        send_answer(self._budget, conn, reply)
                     except OSError:
                         return
                     self.log_message.emit(f"[telemetry] {describe_hello(line, reply)}")
@@ -267,7 +273,7 @@ class TelemetryReceiver(QThread):
                             return
                         continue
                     try:
-                        conn.sendall(build_ack(ev.session_id, 0).encode("utf-8"))
+                        send_answer(self._budget, conn, build_ack(ev.session_id, 0))
                     except OSError:
                         return
                     self._logs.on_pull(ev, rx_utc)
@@ -298,7 +304,7 @@ class TelemetryReceiver(QThread):
                 # ACK before the cursor write: the onboard resets a link whose
                 # ACK misses its 180 ms deadline (docs/link-budget.md).
                 try:
-                    conn.sendall(build_ack(pkt.session_id, pkt.seq).encode("utf-8"))
+                    send_answer(self._budget, conn, build_ack(pkt.session_id, pkt.seq))
                 except OSError:
                     return
                 if not is_dup:
@@ -329,7 +335,7 @@ class TelemetryReceiver(QThread):
         if ack is None:
             return True
         try:
-            conn.sendall(ack.encode("utf-8"))
+            send_answer(self._budget, conn, ack)
         except OSError:
             return False
         return True
@@ -377,7 +383,8 @@ class _SendJob(QRunnable):
         # station's 1 150 B share from before connecting until the socket is
         # closed (docs/link-budget.md).
         wait_s = command_budget_wait_s(self._timeout)
-        ticket = self._budget.hold(command_exchange_bytes(len(payload)), self._priority, wait_s, self._cancel)
+        ticket = self._budget.hold(command_exchange_bytes(len(payload)), self._priority, wait_s, self._cancel,
+                                   tx_bytes=command_exchange_egress(len(payload)))
         if ticket is None:
             error = (CLOSING_ERROR if self._cancel is not None and self._cancel.is_set()
                      else budget_wait_error(wait_s))

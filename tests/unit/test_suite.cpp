@@ -1341,6 +1341,154 @@ void TestFallbackCommandParsing() {
   assert(parser.ParseLine("FALLBACK_STATUS").command.type == coatheal::CommandType::kFallbackStatus);
 }
 
+// ---------------------------------------------------------------------------
+// Step-loss protection: config keys and the command surface.
+
+void TestStallDetectConfig() {
+  // Defaults: monitor on both motors, the chip's own threshold untouched.
+  coatheal::OnboardConfig defaults;
+  assert(defaults.motors[0].stall_detect == "monitor");
+  assert(defaults.motors[1].stall_detect == "monitor");
+  assert(defaults.motors[0].stallguard_sgt == 0);
+  assert(defaults.motors[0].stall_sg_min == 0);
+  assert(std::fabs(defaults.stepper.stall_min_step_hz - 50.0) < 1e-9);
+  assert(defaults.stepper.stall_confirm_samples == 3);
+
+  const std::string path = WriteTempConfig(
+      "motor0.stall_detect=stop\n"
+      "motor0.stallguard_sgt=-12\n"
+      "motor0.stall_sg_min=40\n"
+      "motor1.stall_detect=off\n"
+      "stepper.stall_min_step_hz=80\n"
+      "stepper.stall_confirm_samples=5\n");
+  coatheal::OnboardConfig cfg;
+  std::string error;
+  assert(coatheal::LoadConfigFromIni(path, &cfg, &error));
+  assert(cfg.motors[0].stall_detect == "stop");
+  assert(cfg.motors[0].stallguard_sgt == -12);
+  assert(cfg.motors[0].stall_sg_min == 40);
+  assert(cfg.motors[1].stall_detect == "off");
+  assert(cfg.motors[1].stallguard_sgt == 0);
+  assert(std::fabs(cfg.stepper.stall_min_step_hz - 80.0) < 1e-9);
+  assert(cfg.stepper.stall_confirm_samples == 5);
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+
+  struct Case { const char* body; const char* fragment; };
+  const Case cases[] = {
+    {"motor0.stall_detect=on\n", "motor0.stall_detect must be off, monitor or stop"},
+    {"motor1.stall_detect=STOP\n", "motor1.stall_detect must be off, monitor or stop"},
+    // StallGuard2 does not exist in stealthChop: "stop" there could never act.
+    {"motor1.stealth_chop=true\nmotor1.stall_detect=stop\n",
+     "motor1.stall_detect=stop needs spreadCycle"},
+    {"motor0.stallguard_sgt=64\n", "motor0.stallguard_sgt must be in [-64, 63]"},
+    {"motor0.stallguard_sgt=-65\n", "motor0.stallguard_sgt must be in [-64, 63]"},
+    {"motor1.stall_sg_min=1024\n", "motor1.stall_sg_min must be in [0, 1023]"},
+    {"motor1.stall_sg_min=-1\n", "motor1.stall_sg_min must be in [0, 1023]"},
+    {"stepper.stall_min_step_hz=-1\n", "stepper.stall_min_step_hz must be >= 0"},
+    {"stepper.stall_confirm_samples=0\n", "stepper.stall_confirm_samples must be in [1, 50]"},
+    {"stepper.stall_confirm_samples=51\n", "stepper.stall_confirm_samples must be in [1, 50]"},
+  };
+  for (const Case& c : cases) {
+    const std::string bad = WriteTempConfig(c.body);
+    coatheal::OnboardConfig rejected;
+    std::string why;
+    assert(!coatheal::LoadConfigFromIni(bad, &rejected, &why));
+    assert(why.find(c.fragment) != std::string::npos);
+    std::filesystem::remove(bad, ec);
+  }
+  // The boundaries themselves are accepted; monitor with stealthChop is
+  // allowed (it simply never samples).
+  const std::string edge = WriteTempConfig(
+      "motor0.stallguard_sgt=63\nmotor1.stallguard_sgt=-64\n"
+      "motor0.stall_sg_min=1023\nstepper.stall_min_step_hz=0\n"
+      "stepper.stall_confirm_samples=50\n"
+      "motor1.stealth_chop=true\nmotor1.stall_detect=monitor\n");
+  coatheal::OnboardConfig ok;
+  assert(coatheal::LoadConfigFromIni(edge, &ok, &error));
+  std::filesystem::remove(edge, ec);
+}
+
+// The position-uncertain latch end to end through the command surface, on
+// an initialised controller with simulated backends (no hardware, command
+// server on an ephemeral port). The simulated driver never reports an event
+// of its own, so the latch is set the one way a simulated motor can lose
+// its position: STEPPER_DISABLE while a move is in progress.
+void TestStepLossLatchGatesAbsolutePositioningCommands() {
+  const std::filesystem::path dir = FreshQueueDir("steploss");
+  coatheal::OnboardConfig cfg = LoadRadioTestConfig(dir);
+  cfg.runtime.use_simulated_pwm = true;
+  cfg.runtime.use_simulated_sensors = true;
+  cfg.comms.discovery_enabled = false;
+  cfg.comms.command_port = 0;
+  cfg.storage.primary_log_path = (dir / "a.csv").string();
+  cfg.storage.secondary_log_path = (dir / "b.csv").string();
+  coatheal::SystemController controller(cfg);
+  std::string error;
+  assert(controller.Initialize(&error));
+  auto send = [&](const char* line) { return controller.HandleCommandLine(line, ""); };
+
+  assert(send("ARM").rfind("ACK,ARM", 0) == 0);
+  assert(send("STEPPER_ENABLE 0").rfind("ACK,", 0) == 0);
+  assert(send("SET_POSITION_ZERO 0").rfind("ACK,", 0) == 0);
+  // Nothing latched: the acknowledge is harmless and says so.
+  assert(send("STEPLOSS_ACK 0") == "ACK,STEPLOSS_ACK,motor=0;unc=0;loss=0");
+  assert(ContainsText(send("STEPLOSS_ACK 7"), "invalid motor id"));
+  assert(ContainsText(send("STEPLOSS_ACK"), "invalid argument count"));
+  assert(send("BENDSEQ_LOAD 0 flex 400:1").rfind("ACK,", 0) == 0);
+
+  assert(send("STEPPER_MOVE 0 400").rfind("ACK,", 0) == 0);
+  assert(send("STEPPER_DISABLE 0").rfind("ACK,", 0) == 0);   // mid-move
+  assert(send("STEPPER_ENABLE 0").rfind("ACK,", 0) == 0);
+
+  for (const char* refused : {"PULL_ARM 0", "PULL_EXECUTE 0", "BENDSEQ_RUN 0 flex"}) {
+    const std::string reply = send(refused);
+    assert(reply.rfind("NACK,", 0) == 0);
+    assert(ContainsText(reply, "position uncertain after a step-loss event"));
+    assert(ContainsText(reply, "(motor disabled while moving)"));
+    assert(ContainsText(reply, "SET_POSITION_ZERO 0 or STEPLOSS_ACK 0"));
+    // Reply bodies are comma-framed: the reason must not add a field.
+    assert(std::count(reply.begin(), reply.end(), ',') == 2);
+  }
+  // The other motor is not affected...
+  assert(send("STEPPER_ENABLE 1").rfind("ACK,", 0) == 0);
+  assert(send("SET_POSITION_ZERO 1").rfind("ACK,", 0) == 0);
+  assert(send("PULL_ARM 1").rfind("ACK,", 0) == 0);
+  assert(send("STEPPER_STOP 1").rfind("ACK,", 0) == 0);
+  // ...and the operator can still move the latched one by hand.
+  assert(send("STEPPER_MOVE 0 -100").rfind("ACK,", 0) == 0);
+  assert(send("STEPPER_STOP 0").rfind("ACK,", 0) == 0);
+  assert(send("STEPPER_HOME 0").rfind("ACK,", 0) == 0);
+  assert(send("STEPPER_STOP 0").rfind("ACK,", 0) == 0);
+
+  const std::string check = send("CHECK MOTOR0");
+  assert(ContainsText(check, ";motor0_warn=POSITION UNCERTAIN after 1 step-loss event(s): "
+                             "motor disabled while moving"));
+  assert(!ContainsText(send("CHECK MOTOR1"), "POSITION UNCERTAIN"));
+
+  // Radio silence refuses the acknowledge like every other command.
+  assert(send("RADIO_SILENCE").rfind("ACK,", 0) == 0);
+  assert(ContainsText(send("STEPLOSS_ACK 0"), "radio silence active"));
+  assert(send("RADIO_RESUME").rfind("ACK,", 0) == 0);
+
+  assert(send("STEPLOSS_ACK 0") == "ACK,STEPLOSS_ACK,motor=0;unc=0;loss=1");
+  assert(!ContainsText(send("CHECK MOTOR0"), "POSITION UNCERTAIN"));
+  assert(send("PULL_ARM 0") == "ACK,PULL_ARM,pull armed");
+
+  // The pull is now in progress: disabling latches again, and a new zero
+  // clears the latch as well as an acknowledge does.
+  assert(send("STEPPER_DISABLE 0").rfind("ACK,", 0) == 0);
+  assert(send("STEPPER_ENABLE 0").rfind("ACK,", 0) == 0);
+  assert(ContainsText(send("PULL_ARM 0"), "position uncertain"));
+  assert(send("SET_POSITION_ZERO 0").rfind("ACK,", 0) == 0);
+  assert(send("BENDSEQ_RUN 0 flex") == "ACK,BENDSEQ_RUN,sequence started");
+  assert(send("BENDSEQ_STOP 0").rfind("ACK,", 0) == 0);
+  // MUTATION: drop the position_uncertain check from PULL_ARM in
+  // system_controller.cpp and confirm this test fails in the loop above.
+
+  std::filesystem::remove_all(dir);
+}
+
 void TestFallbackPlanCommands() {
   const std::filesystem::path queue_dir = FreshQueueDir("fallback");
   coatheal::SystemController controller(LoadRadioTestConfig(queue_dir));
@@ -1687,6 +1835,8 @@ int main() {
   TestRadioSilenceGatesBeaconAndHelloReply();
   TestFallbackCommandParsing();
   TestFallbackPlanCommands();
+  TestStallDetectConfig();
+  TestStepLossLatchGatesAbsolutePositioningCommands();
   TestCommandArgumentHardening();
   TestFallbackConfigValidation();
   TestMotionEnvelopeConfig();

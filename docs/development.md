@@ -118,6 +118,12 @@ frames, variable sample counts, malformed inputs, duplicate detection
 logic. Run the full suite with `python -m unittest discover -s tests` from
 `ground-station/`.
 
+`test_link_cap.py` also runs the E-Link hard cap for real where the machine
+allows it (Linux with `unshare -Urn`, `ip` and `tc`): it installs both kernel
+shapers in throwaway network namespaces, floods them from both ends and
+checks the busiest second ([link-budget.md](link-budget.md#hard-cap)). It
+skips elsewhere. The same check by hand: `python3 scripts/link_cap_selftest.py`.
+
 ---
 
 ## Bench Mode

@@ -256,6 +256,15 @@ std::uint32_t TelemetryClient::FrameCostBytes(const std::string& line, std::size
          wire::kReset;                                            // our reset of the exchange
 }
 
+std::uint32_t TelemetryClient::FrameEgressBytes(std::size_t payload) {
+  return wire::TcpBytes(payload) + wire::kPureAck;
+}
+
+std::uint32_t TelemetryClient::ConnectEgressBytesLocked() const {
+  const std::string hello = "HELLO," + session_id_ + ",z1:00000000\n";
+  return wire::kSyn + wire::kPureAck + wire::TcpBytes(hello.size()) + wire::kPureAck;
+}
+
 std::uint32_t TelemetryClient::ConnectCostBytesLocked() const {
   // SYN, SYN-ACK and our ACK; the HELLO line, the ground station's ACK of it
   // and the reset our kernel answers that ACK with if it comes after we gave
@@ -355,7 +364,8 @@ void TelemetryClient::SendOnboardBeacon(int fd) {
       << command_port_ << ',' << telemetry_port_;
   const std::string payload = oss.str();
   if (budget_ != nullptr &&
-      !budget_->TryCharge(wire::UdpBytes(payload.size()), LinkPriority::kDiscovery)) {
+      !budget_->TryCharge(wire::UdpBytes(payload.size()), LinkPriority::kDiscovery,
+                          wire::UdpBytes(payload.size()))) {
     return;  // no room this period; the next beacon is two seconds away
   }
 
@@ -382,7 +392,8 @@ void TelemetryClient::SendOnboardHelloReply(int fd, const sockaddr_in& to,
       << ',' << command_port_ << ',' << telemetry_port_;
   const std::string payload = oss.str();
   if (budget_ != nullptr &&
-      !budget_->TryCharge(wire::UdpBytes(payload.size()), LinkPriority::kDiscovery)) {
+      !budget_->TryCharge(wire::UdpBytes(payload.size()), LinkPriority::kDiscovery,
+                          wire::UdpBytes(payload.size()))) {
     return;
   }
 
@@ -602,6 +613,7 @@ bool TelemetryClient::ConnectLocked() {
   int cmd_port = command_port_;
   if (!PickTargetHostLocked(&host, &tel_port, &cmd_port)) {
     ReleaseConnectHoldLocked(std::chrono::steady_clock::now());  // nothing sent
+    if (budget_ != nullptr) budget_->RefundEgress(ConnectEgressBytesLocked());
     return false;
   }
 
@@ -615,6 +627,7 @@ bool TelemetryClient::ConnectLocked() {
       result == nullptr) {
     connected_ = false;
     ReleaseConnectHoldLocked(std::chrono::steady_clock::now());  // nothing sent
+    if (budget_ != nullptr) budget_->RefundEgress(ConnectEgressBytesLocked());
     return false;
   }
 
@@ -639,6 +652,10 @@ bool TelemetryClient::ConnectLocked() {
     connected_ = false;
     // A SYN-ACK still on its way would draw a reset from our kernel.
     ReleaseConnectHoldLocked(std::chrono::steady_clock::now() + wire::kAbortTail);
+    // Only the SYN left; the reset for a late SYN-ACK stands in for our ACK.
+    if (budget_ != nullptr) {
+      budget_->RefundEgress(ConnectEgressBytesLocked() - wire::kSyn - wire::kPureAck);
+    }
     return false;
   }
 
@@ -709,6 +726,7 @@ void TelemetryClient::AbortLocked() {
     const linger reset_on_close{1, 0};
     setsockopt(socket_fd_, SOL_SOCKET, SO_LINGER, &reset_on_close, sizeof(reset_on_close));
 #endif
+    if (budget_ != nullptr) budget_->DebitEgress(wire::kReset);
   }
   CloseLocked();
 }
@@ -828,7 +846,8 @@ SendStatus TelemetryClient::SendFrame(const std::string& line, LinkPriority prio
     // HELLO answer that may still come (NegotiateCodecLocked).
     if (budget_ != nullptr) {
       ReleaseConnectHoldLocked(std::chrono::steady_clock::now() + wire::kAbortTail);  // none left open
-      if (!budget_->TryHold(ConnectCostBytesLocked(), priority, &connect_hold_)) {
+      if (!budget_->TryHold(ConnectCostBytesLocked(), priority, &connect_hold_,
+                            ConnectEgressBytesLocked())) {
         return SendStatus::kNoBudget;
       }
       connect_hold_open_ = true;
@@ -850,6 +869,7 @@ SendStatus TelemetryClient::SendFrame(const std::string& line, LinkPriority prio
   if (payload.empty()) payload = line;  // the ground inflates Z1 lines and passes plain ones
   payload.push_back('\n');
   const std::uint32_t cost = FrameCostBytes(line, payload.size());
+  const std::uint32_t egress = FrameEgressBytes(payload.size());
 
   LinkBudget::Ticket ticket;
   if (budget_ != nullptr) {
@@ -872,12 +892,13 @@ SendStatus TelemetryClient::SendFrame(const std::string& line, LinkPriority prio
       return SendStatus::kFailed;
     }
     lock.unlock();
-    const bool admitted = budget_->WaitHold(cost, priority, budget_deadline, &ticket);
+    const bool admitted = budget_->WaitHold(cost, priority, budget_deadline, &ticket, egress);
     lock.lock();
     if (!admitted) return SendStatus::kNoBudget;
     if (!connected_ || socket_fd_ != fd || codec_z1_ != z1 || !transmit_enabled_) {
       // The link changed while we waited: nothing was sent.
       budget_->Refund(ticket, cost);
+      budget_->RefundEgress(egress);
       budget_->Release(ticket);
       return transmit_enabled_ ? SendStatus::kNotConnected : SendStatus::kSilent;
     }

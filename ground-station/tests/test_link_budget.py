@@ -12,10 +12,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.link_budget import (  # noqa: E402
-    CAP_BYTES, COMMAND_EXCHANGE_FIXED, GROUND_SHARE, MAX_REQUEST_BYTES, ONBOARD_SHARE, PURE_ACK, SYN,
-    UNACCOUNTED, WINDOW_S, DiscoveryRounds, LinkBudget, Priority, budget_wait_error,
-    command_budget_wait_s, command_exchange_bytes, ground_budget, priority_for, request_too_long,
-    tcp_segment, udp_datagram,
+    ACK_RESERVE_BYTES, CAP_BYTES, COMMAND_EXCHANGE_FIXED, EGRESS_MODEL_RATE_PERCENT, GROUND_EGRESS_BURST,
+    GROUND_EGRESS_RATE, GROUND_SHARE, LINK_MTU, MAX_REQUEST_BYTES, ONBOARD_EGRESS_BURST,
+    ONBOARD_EGRESS_RATE, ONBOARD_SHARE, PURE_ACK, SYN, TCP_MAX_PAYLOAD, UNACCOUNTED, WINDOW_S,
+    DiscoveryRounds, LinkBudget, Priority, budget_wait_error, command_budget_wait_s,
+    command_exchange_bytes, command_exchange_egress, ground_budget, priority_for, request_too_long,
+    send_answer, shaped_ground_budget, tcp_segment, udp_datagram,
 )
 
 
@@ -40,7 +42,8 @@ class ByteModelTests(unittest.TestCase):
     def test_spec_table(self) -> None:
         self.assertEqual(tcp_segment(0), 90, "a segment without payload is a pure ACK")
         self.assertEqual(tcp_segment(1), 66 + 1 + 24)
-        self.assertEqual(tcp_segment(1448), 66 + 1448 + 24)
+        self.assertEqual((LINK_MTU, TCP_MAX_PAYLOAD), (576, 524), "one segment at the capped E-Link MTU")
+        self.assertEqual(tcp_segment(524), 66 + 524 + 24)
         self.assertEqual(PURE_ACK, 90)
         self.assertEqual(SYN, 98)
         self.assertEqual(udp_datagram(0), 60 + 24, "short datagrams pad to the 60 B minimum frame")
@@ -49,9 +52,9 @@ class ByteModelTests(unittest.TestCase):
         self.assertEqual(udp_datagram(38), 104, "a GS_BEACON line")
 
     def test_payload_over_one_segment_pays_headers_per_segment(self) -> None:
-        self.assertEqual(tcp_segment(1449), (66 + 1448 + 24) + (66 + 1 + 24))
-        self.assertEqual(tcp_segment(2 * 1448), 2 * (66 + 1448 + 24))
-        self.assertEqual(tcp_segment(1145), 1235, "a plain DATA line")
+        self.assertEqual(tcp_segment(525), (66 + 524 + 24) + (66 + 1 + 24))
+        self.assertEqual(tcp_segment(2 * 524), 2 * (66 + 524 + 24))
+        self.assertEqual(tcp_segment(1145), 1145 + 3 * 90, "a plain DATA line: three segments")
 
     def test_shares(self) -> None:
         self.assertEqual(CAP_BYTES, 3000)
@@ -84,6 +87,19 @@ class ByteModelTests(unittest.TestCase):
     def test_one_ledger_per_process(self) -> None:
         self.assertIs(ground_budget(), ground_budget())
         self.assertEqual(ground_budget().share_bytes, GROUND_SHARE)
+        self.assertTrue(ground_budget().egress_shaped, "it models the ground station's kernel shaper")
+
+    def test_hard_cap_buckets_add_up_to_the_cap(self) -> None:
+        # Each side's kernel shaper passes at most bucket + rate bytes in any
+        # second; together that is the whole 24 kbps.
+        self.assertEqual((ONBOARD_EGRESS_BURST, ONBOARD_EGRESS_RATE), (1000, 800))
+        self.assertEqual((GROUND_EGRESS_BURST, GROUND_EGRESS_RATE), (700, 500))
+        self.assertEqual(ONBOARD_EGRESS_BURST + ONBOARD_EGRESS_RATE + GROUND_EGRESS_BURST + GROUND_EGRESS_RATE,
+                         CAP_BYTES)
+        # No frame at the capped MTU is larger than a bucket (it would never pass).
+        self.assertLessEqual(LINK_MTU + 14 + 24, GROUND_EGRESS_BURST)
+        self.assertEqual(command_exchange_egress(5), 98 + 4 * 90 + 5)
+        self.assertEqual(ACK_RESERVE_BYTES, 260)
 
 
 class LedgerTests(unittest.TestCase):
@@ -245,6 +261,104 @@ class LedgerTests(unittest.TestCase):
     # MUTATION: drop the same-priority `other.order < waiter.order` test from
     # LinkBudget._fits and confirm test_same_priority_holds_are_served_in_arrival_order
     # fails on "an earlier hold is queued for the room".
+
+
+class EgressShaperTests(unittest.TestCase):
+    """The ledger's model of the kernel shaper on this side's port
+    (docs/link-budget.md, "Hard cap")."""
+
+    def setUp(self) -> None:
+        self.clock = FakeClock()
+        self.budget = LinkBudget(1150, window_s=1.0, clock=self.clock)
+        self.budget.set_egress_shaper(700, 500, reserve_bytes=260)
+
+    def test_a_charge_goes_only_while_the_bucket_holds_its_bytes(self) -> None:
+        b = self.budget
+        self.assertEqual(b.egress_tokens(), 700)
+        # 300 of ours: 300 + the 260 reserve are there.
+        self.assertIsNotNone(b.try_charge(400, Priority.COMMAND, tx_bytes=300))
+        self.assertEqual(b.egress_tokens(), 400)
+        # 200 more would leave less than the reserve.
+        self.assertIsNone(b.try_charge(200, Priority.COMMAND, tx_bytes=200))
+        self.assertEqual(b.in_window(), 400, "a refused charge charges nothing")
+        # A safety command does not keep the reserve.
+        self.assertIsNotNone(b.try_charge(200, Priority.CRITICAL, tx_bytes=200))
+        self.assertEqual(b.egress_tokens(), 200)
+        # Bytes the other side sends take no tokens.
+        self.assertIsNotNone(b.try_charge(100, Priority.COMMAND))
+        self.assertEqual(b.egress_tokens(), 200)
+        self.clock.now += 0.5            # 250 B refilled
+        self.assertEqual(b.egress_tokens(), 450)
+        self.clock.now += 10.0
+        self.assertEqual(b.egress_tokens(), 700, "the bucket does not overfill")
+
+    # MUTATION: return 0.0 from LinkBudget._egress_need and confirm
+    # test_a_charge_goes_only_while_the_bucket_holds_its_bytes fails.
+
+    def test_what_cannot_wait_is_debited_and_leaves_a_debt(self) -> None:
+        b = self.budget
+        b.debit_egress(600)
+        b.debit_egress(300)              # ACK lines go out whatever the bucket holds
+        self.assertEqual(b.egress_tokens(), -200)
+        self.assertIsNone(b.try_charge(100, Priority.CRITICAL, tx_bytes=100))
+        self.clock.now += 0.6            # 300 B refilled: 100 tokens
+        self.assertIsNotNone(b.try_charge(100, Priority.CRITICAL, tx_bytes=100))
+        for _ in range(20):
+            b.debit_egress(300)
+        self.assertEqual(b.egress_tokens(), -700, "the debt is never more than one bucket")
+        b.refund_egress(5000)            # never more than the bucket
+        self.assertEqual(b.egress_tokens(), 700)
+
+    def test_a_charge_needing_more_than_the_bucket_goes_from_a_full_bucket(self) -> None:
+        b = self.budget
+        # 473 B of a short command + the 260 reserve > 700: a full bucket does.
+        tx = command_exchange_egress(15)
+        self.assertIsNotNone(b.try_charge(935, Priority.COMMAND, tx_bytes=tx))
+        self.assertEqual(b.egress_tokens(), 700 - tx)
+        self.clock.now += 0.5
+        self.assertIsNone(b.try_charge(100, Priority.COMMAND, tx_bytes=tx), "not full again yet")
+
+    def test_hold_waits_for_the_tokens(self) -> None:
+        # Real clock: nothing calls notify(); the waiter computes the refill.
+        b = LinkBudget(1150, window_s=0.05)
+        b.set_egress_shaper(700, 2000)
+        b.debit_egress(700)
+        started = time.monotonic()
+        ticket = b.hold(300, Priority.COMMAND, timeout_s=5.0, tx_bytes=300)
+        waited = time.monotonic() - started
+        self.assertIsNotNone(ticket)
+        self.assertGreaterEqual(waited, 0.12)   # 300 B at 2 000 B/s
+        self.assertLess(waited, 1.0)
+
+    def test_an_unshaped_ledger_ignores_tx_bytes(self) -> None:
+        b = LinkBudget(1000, window_s=1.0, clock=self.clock)
+        self.assertFalse(b.egress_shaped)
+        self.assertIsNotNone(b.try_charge(900, Priority.COMMAND, tx_bytes=900))
+        b.debit_egress(5000)
+        self.assertEqual(b.egress_tokens(), 0)
+
+    def test_telemetry_answers_are_debited(self) -> None:
+        class Conn:
+            sent = b""
+
+            def sendall(self, data: bytes) -> None:
+                self.sent += data
+
+        b, conn = self.budget, Conn()
+        send_answer(b, conn, "ACK,coatheal-1789498045-582267,123456\n")
+        self.assertEqual(conn.sent, b"ACK,coatheal-1789498045-582267,123456\n")
+        self.assertEqual(b.egress_tokens(), 700 - tcp_segment(38))
+        self.assertEqual(b.in_window(), 0, "the onboard holds an ACK line's bytes on its share")
+
+    def test_the_ground_station_ledger_models_its_own_shaper(self) -> None:
+        b = shaped_ground_budget()
+        self.assertEqual(b.share_bytes, GROUND_SHARE)
+        self.assertEqual(b.egress_tokens(), GROUND_EGRESS_BURST)
+        # A full bucket takes one command at once and still answers a frame.
+        self.assertIsNotNone(b.try_charge(command_exchange_bytes(15), Priority.COMMAND,
+                                          tx_bytes=command_exchange_egress(15)))
+        self.assertGreaterEqual(b.egress_tokens(), tcp_segment(40))
+        self.assertLess(EGRESS_MODEL_RATE_PERCENT, 100)
 
 
 class DiscoveryRoundsTests(unittest.TestCase):

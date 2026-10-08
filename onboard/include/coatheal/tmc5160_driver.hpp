@@ -41,6 +41,23 @@ struct Tmc5160Config {
   // did for the TMC2240 driver -- this field is not consumed internally
   // here.
   int retry_ms = 2000;
+
+  // StallGuard2 stall detection (spreadCycle only; the measurement does not
+  // exist in stealthChop). The driver samples SG_RESULT once per electrical
+  // period (4 full steps) while the channel reports a steady rate of at
+  // least stall_min_step_hz, and calls it a stall when stall_confirm_samples
+  // consecutive samples are <= stall_sg_min. kMonitor counts and journals
+  // the verdict and keeps the statistics MOTOR_DEBUG shows; kStop also stops
+  // the move. Mirrors motorN.stall_detect / stallguard_sgt / stall_sg_min
+  // and stepper.stall_min_step_hz / stall_confirm_samples.
+  enum class StallDetect { kOff, kMonitor, kStop };
+  StallDetect stall_detect = StallDetect::kMonitor;
+  // COOLCONF.sgt, -64..63: the chip's own StallGuard2 threshold offset. A
+  // higher value makes SG_RESULT read higher (less sensitive).
+  int stallguard_sgt = 0;
+  int stall_sg_min = 0;  // 0..1023
+  double stall_min_step_hz = 50.0;
+  int stall_confirm_samples = 3;
 };
 
 class Tmc5160Driver : public StepperDriver {
@@ -83,7 +100,24 @@ class Tmc5160Driver : public StepperDriver {
   // GSTAT, CHOPCONF -- raw and decoded. Read-only (RAMPSTAT's read-clear
   // event bits are not used by this driver).
   std::string DebugRegisters() override;
+  // Enabled and idle, about once a second: GSTAT (reset, undervoltage,
+  // driver error), DRV_STATUS (thermal, shorts) and XACTUAL against the
+  // commanded target.
   bool Poll() override;
+
+  // Step-loss supervision (see StepperDriver). Events: a chip reset or a
+  // motor-supply undervoltage while the motor was enabled, a driver error
+  // or a short that cut the power stage, a StallGuard stall with
+  // stall_detect=kStop, and a chip that is not at its commanded position at
+  // standstill.
+  std::uint64_t step_loss_events() const override;
+  std::string step_loss_reason() const override;
+  bool TakeStepLossStop() override;
+  // Reads XTARGET back and rewrites it once when it is not the commanded
+  // target (a corrupted last write would otherwise run the motor to a
+  // position nobody asked for). Unhealthy when it still differs.
+  bool ConfirmTarget() override;
+  void NoteStepRate(double full_step_hz, bool steady) override;
 
   // Runtime run-current change: validates against the configured sense
   // resistor (same CalculateCurrent path as initialisation), rewrites
@@ -114,6 +148,16 @@ class Tmc5160Driver : public StepperDriver {
   // CHOPCONF read 0x10410150 while the firmware believed the motor was
   // enabled; XACTUAL never followed XTARGET).
   std::uint32_t reset_count() const { return reset_count_; }
+  // Supervision counters since boot (also in MOTOR_DEBUG and warning()).
+  std::uint32_t undervoltage_count() const;
+  std::uint32_t short_count() const;
+  std::uint32_t open_load_count() const;
+  std::uint32_t stall_verdict_count() const;
+  std::uint32_t xtarget_repair_count() const;
+  // StallGuard statistics of the move in progress, or of the last one.
+  std::uint32_t stallguard_samples() const;
+  int stallguard_last() const;
+  int stallguard_min() const;
   // Test hook: the IOIN verification after driving EN normally runs only
   // when this driver owns the GPIO (use_gpio=true); FakeSpiBus tests run
   // with use_gpio=false and turn it on explicitly.
@@ -169,10 +213,22 @@ class Tmc5160Driver : public StepperDriver {
 
   static constexpr std::uint8_t kInvalidMres = 0xFF;
 
+  // COOLCONF (0x6D) as this driver writes it: sgt in bits 22:16 (7-bit two's
+  // complement), sfilt (bit 24) set so SG_RESULT is filtered over one
+  // electrical period, and every coolStep field zero (semin=0 keeps
+  // coolStep off: the run current is never reduced under load).
+  static std::uint32_t EncodeCoolconf(int sgt);
+  // "off" / "monitor" / "stop", for motorN.stall_detect.
+  static bool ParseStallDetect(const std::string& text,
+                               Tmc5160Config::StallDetect* mode);
+  static const char* StallDetectName(Tmc5160Config::StallDetect mode);
+
  private:
   bool OpenGpio();
   void CloseGpio();
   bool OpenSpi();
+  // Both leave the SPI status byte of the reply (bits 39..32: reset_flag,
+  // driver_error, ...) in last_spi_status_.
   bool WriteRegister(std::uint8_t address, std::uint32_t value);
   bool ReadRegister(std::uint8_t address, std::uint32_t* value);
   bool Transfer(const std::uint8_t tx[5], std::uint8_t rx[5]);
@@ -210,12 +266,55 @@ class Tmc5160Driver : public StepperDriver {
   bool otpw_now_ = false;
   bool ot_latched_ = false;
   std::uint32_t otpw_events_ = 0;
-  // Reads DRV_STATUS and updates the thermal flags; edge-logs. Bus
-  // failures are ignored here (reported by the surrounding conversation).
-  void CheckThermalUnlocked();
+  // Reads DRV_STATUS: the thermal flags (edge-logged), a short that cut
+  // the power stage, the open-load flags while stepping, and -- when
+  // `sample_stallguard` -- one StallGuard sample. False when the step in
+  // progress must not be issued: a short, or a stall with
+  // stall_detect=kStop. Bus failures are ignored here (reported by the
+  // surrounding conversation).
+  bool CheckDriverStatusUnlocked(bool stepping, bool sample_stallguard);
   // Reads GSTAT; on GSTAT.reset rewrites the whole configuration (and the
-  // running chopper if enabled). False only on a bus failure.
+  // running chopper if enabled), and clears uv_cp / drv_err after counting
+  // them. False only on a bus failure.
   bool RecoverFromChipResetUnlocked(const char* where);
+  // Idle only: XACTUAL against target_. Two consecutive mismatches are a
+  // step-loss event and leave the driver unhealthy.
+  void CheckPositionUnlocked();
+  void RecordStepLossUnlocked(const std::string& reason, bool stop);
+  bool StallSamplingActiveUnlocked() const;
+
+  std::uint8_t last_spi_status_ = 0;
+  // Step-loss supervision. Guarded by io_mu_.
+  std::uint64_t step_loss_count_ = 0;
+  std::string step_loss_reason_;
+  bool step_loss_stop_ = false;
+  // A status-byte flag triggers at most one supervision read per this many
+  // steps, so a flag the chip will not let go of cannot double the bus
+  // traffic of a whole move.
+  std::uint32_t status_holdoff_steps_ = 0;
+  bool uv_cp_active_ = false;
+  bool drv_err_active_ = false;
+  bool drv_err_unexplained_ = false;
+  bool short_active_ = false;
+  bool open_load_active_ = false;
+  bool open_load_logged_ = false;
+  std::uint32_t uv_cp_events_ = 0;
+  std::uint32_t short_events_ = 0;
+  std::uint32_t open_load_events_ = 0;
+  std::uint32_t xtarget_repairs_ = 0;
+  int position_mismatch_polls_ = 0;
+  // StallGuard sampling.
+  double step_rate_hz_ = 0.0;
+  bool step_rate_steady_ = false;
+  bool move_open_ = false;
+  std::uint32_t steps_since_sg_sample_ = 0;
+  int sg_settle_samples_ = 0;
+  int sg_low_run_ = 0;
+  std::uint32_t sg_samples_ = 0;
+  int sg_last_ = 0;
+  int sg_min_ = 0;
+  std::uint32_t stall_verdicts_ = 0;
+  bool stall_logged_this_move_ = false;
   mutable std::mutex io_mu_;
 };
 

@@ -111,7 +111,12 @@ class StepperChannel {
                          std::string* error);
   bool Rotate(double revolutions, std::string* error);
   bool Home(std::string* error);
+  // Also clears the position-uncertain latch: the operator has just told
+  // us where the mechanism is.
   void SetPositionZero();
+  // Clears the position-uncertain latch and nothing else; the event count
+  // stays.
+  void AcknowledgeStepLoss();
   void Stop();
   bool SetSpeed(double full_step_hz, std::string* error);
   // Trapezoidal ramp slope, full-steps/s²; (0, cfg.max_accel_steps_per_s2].
@@ -187,6 +192,20 @@ class StepperChannel {
   // remaining-microsteps-to-target count and dt_s. Sets it to 0 when idle.
   void UpdateRampSpeed(double dt_s, std::int64_t remaining_usteps);
 
+  // Step-loss protection (all with mu_ held).
+  // Counts the driver's step-loss events since the last call and latches
+  // position_uncertain_ on any. True when the driver asks for the move in
+  // progress to be stopped with the motor left energised.
+  bool AbsorbDriverStepLoss();
+  // An event the channel itself knows of (thermal shutdown, a disable or a
+  // driver refusal mid-move).
+  void LatchStepLoss(const std::string& reason);
+  // Ends the move or hold in progress where it is, releases the MotionLock
+  // and leaves the motor enabled.
+  void AbortMoveForStepLoss();
+  // Tells the driver the rate of the pulses about to be issued.
+  void ReportStepRateToDriver();
+
   StepperChannelConfig cfg_;
   std::unique_ptr<StepperDriver> driver_;
   MotionLock* lock_ = nullptr;
@@ -213,6 +232,12 @@ class StepperChannel {
   std::atomic<bool> pulse_thread_run_{false};
   std::chrono::steady_clock::time_point last_driver_retry_{};
   std::uint64_t missed_deadlines_ = 0;
+
+  // Step-loss protection, guarded by mu_.
+  std::uint64_t driver_loss_seen_ = 0;   // driver events already absorbed
+  std::uint64_t step_loss_events_ = 0;
+  bool position_uncertain_ = false;
+  std::string step_loss_reason_;
 };
 
 }  // namespace coatheal

@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <deque>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <thread>
@@ -70,14 +71,93 @@ void TestWireModel() {
   assert(coatheal::wire::kSyn == 98);
   assert(coatheal::wire::TcpBytes(0) == 90);
   assert(coatheal::wire::TcpBytes(292) == 66 + 292 + 24);
-  assert(coatheal::wire::TcpBytes(1448) == 90 + 1448);
-  assert(coatheal::wire::TcpBytes(1449) == 2 * 90 + 1449);
+  // One segment carries what fits the capped E-Link MTU (576).
+  assert(coatheal::wire::kMss == 524);
+  assert(coatheal::wire::TcpBytes(524) == 90 + 524);
+  assert(coatheal::wire::TcpBytes(525) == 2 * 90 + 525);
   assert(coatheal::wire::UdpBytes(10) == 60 + 24);   // padded to the minimum frame
   assert(coatheal::wire::UdpBytes(100) == 142 + 24);
   assert(coatheal::kOnboardShareBytes + coatheal::kGroundShareBytes +
              coatheal::kUnaccountedBytes ==
          coatheal::kLinkCapBytes);
   assert(coatheal::kLinkCapBytes * 8 == 24000);
+  // Hard cap: each side's bucket plus one second of its rate, together the
+  // whole cap; and no frame at the capped MTU is larger than a bucket.
+  assert(coatheal::kOnboardEgressBurstBytes + coatheal::kOnboardEgressRateBytesPerS +
+             coatheal::kGroundEgressBurstBytes + coatheal::kGroundEgressRateBytesPerS ==
+         coatheal::kLinkCapBytes);
+  const std::uint32_t largest_frame = coatheal::wire::kLinkMtu + 14 + coatheal::wire::kFrameOverhead;
+  assert(largest_frame <= coatheal::kGroundEgressBurstBytes);
+  assert(largest_frame <= coatheal::kOnboardEgressBurstBytes);
+}
+
+// The ledger's model of the kernel shaper on our own port: a charge goes only
+// while the bucket holds the bytes our side sends for it.
+void TestEgressShaperModel() {
+  FakeClock clock;
+  coatheal::LinkBudget budget(1600, 1s, clock.fn());
+  assert(!budget.egress_shaped());
+  assert(budget.TryCharge(100, coatheal::LinkPriority::kLive, 100));  // nothing modelled yet
+  clock.advance(2s);
+
+  budget.SetEgressShaper(1000, 800);
+  assert(budget.egress_shaped());
+  assert(budget.EgressTokens() == 1000);
+  // 600 of ours go; 500 more do not, though the share has room for them.
+  assert(budget.TryCharge(700, coatheal::LinkPriority::kLive, 600));
+  assert(budget.EgressTokens() == 400);
+  assert(!budget.TryCharge(500, coatheal::LinkPriority::kLive, 500));
+  assert(budget.InWindow() == 700);  // a refused charge charges nothing
+  // Bytes the other side sends for a charge take no tokens.
+  assert(budget.TryCharge(300, coatheal::LinkPriority::kLive, 0));
+  assert(budget.EgressTokens() == 400);
+  // 125 ms refill 100 B.
+  clock.advance(125ms);
+  assert(budget.EgressTokens() == 500);
+  coatheal::LinkBudget::Ticket hold;
+  assert(budget.TryHold(500, coatheal::LinkPriority::kLive, &hold, 500));
+  assert(budget.EgressTokens() == 0);
+  budget.Release(hold);
+
+  // What nobody waited for is taken anyway and leaves a debt...
+  budget.DebitEgress(368);
+  assert(budget.EgressTokens() == -368);
+  clock.advance(1s);
+  assert(budget.EgressTokens() == 432);
+  // The debt is never more than one bucket: the kernel's queue holds no more.
+  for (int i = 0; i < 20; ++i) budget.DebitEgress(368);
+  assert(budget.EgressTokens() == -1000);
+  // ...and bytes that were never sent come back, up to the bucket.
+  budget.RefundEgress(5000);
+  assert(budget.EgressTokens() == 1000);
+  clock.advance(10s);
+  assert(budget.EgressTokens() == 1000);  // the bucket does not overfill
+
+  // A charge larger than the bucket goes only from a full bucket.
+  assert(budget.TryCharge(1200, coatheal::LinkPriority::kLive, 1200));
+  assert(budget.EgressTokens() == -200);
+  clock.advance(1s);
+  assert(!budget.TryCharge(1200, coatheal::LinkPriority::kLive, 1200));  // 600 of 1 000
+  clock.advance(500ms);
+  assert(budget.TryCharge(1200, coatheal::LinkPriority::kLive, 1200));
+
+  // WaitHold waits for the tokens as it waits for the share.
+  clock.advance(5s);
+  assert(budget.TryCharge(1000, coatheal::LinkPriority::kLive, 1000));
+  coatheal::LinkBudget::Ticket waited;
+  std::atomic<bool> done{false};
+  std::thread waiter([&] {
+    assert(budget.WaitHold(400, coatheal::LinkPriority::kLive, clock.now() + 2s, &waited, 400));
+    done = true;
+  });
+  std::this_thread::sleep_for(50ms);
+  assert(!done.load());
+  clock.advance(500ms);  // 400 B refilled
+  budget.Notify();
+  waiter.join();
+  assert(done.load());
+  // MUTATION: drop the `egress_tokens_ <` check in LinkBudget::AdmitLocked and
+  // confirm the 500-B charge above is admitted.
 }
 
 void TestLedgerSlidingWindow() {
@@ -325,6 +405,9 @@ class WireModelSender : public coatheal::FrameSender {
   WireModelSender(coatheal::LinkBudget* budget, FakeClock* clock, bool merged)
       : budget_(budget), clock_(clock), merged_(merged) {}
 
+  // What our own port sends: the segment, then our ACK of the ACK line.
+  std::vector<Emission> own_emissions;
+
   coatheal::SendStatus SendFrame(const std::string& line, coatheal::LinkPriority priority,
                                  std::chrono::steady_clock::time_point budget_deadline,
                                  coatheal::TelemetryAck* ack) override {
@@ -335,13 +418,16 @@ class WireModelSender : public coatheal::FrameSender {
     const std::uint32_t segment = coatheal::wire::TcpBytes(payload.size());
     const std::uint32_t cost = coatheal::TelemetryClient::FrameCostBytes(line, payload.size());
     coatheal::LinkBudget::Ticket ticket;
-    while (!budget_->TryHold(cost, priority, &ticket)) {
+    while (!budget_->TryHold(cost, priority, &ticket,
+                             coatheal::TelemetryClient::FrameEgressBytes(payload.size()))) {
       if (clock_->now() >= budget_deadline) return coatheal::SendStatus::kNoBudget;
       clock_->advance(5ms);
     }
     emissions.push_back({clock_->now(), segment});
+    own_emissions.push_back({clock_->now(), segment});
     budget_->ReleasePart(ticket, segment, clock_->now());
     clock_->advance(5ms);
+    own_emissions.push_back({clock_->now(), coatheal::wire::kPureAck});
     const std::uint32_t gs_ack = merged_ ? 0U : coatheal::wire::kPureAck;
     emissions.push_back({clock_->now(), cost - segment - 2 * coatheal::wire::kReset -
                                             coatheal::wire::kPureAck + gs_ack});
@@ -393,9 +479,10 @@ std::string RealisticLine(const std::string& session, std::uint64_t seq, int tic
          "energy_wh:1.02|budget_wh:130.0|budget_exhausted:0|heaters_active:3|queue:" +
          std::to_string(seq) + "|plan:none|debug:0|tune:-,STEPPER0=pos:0|tgt:0|hz:100.00|us:4|"
          "ok:1|en:1|mv:0|hold:0|hold_s:0.00|pulses:4800|missed:0|src:cmd:BEND_MM|zeroed:1|seq:-|"
-         "seqst:idle|amps:0.80|acc:400.0|mm:0.000|mm_tgt:0.000|therm:ok,STEPPER1=pos:0|tgt:0|"
+         "seqst:idle|amps:0.80|acc:400.0|mm:0.000|mm_tgt:0.000|therm:ok|loss:0|unc:0,"
+         "STEPPER1=pos:0|tgt:0|"
          "hz:100.00|us:4|ok:1|en:1|mv:0|hold:0|hold_s:0.00|pulses:0|missed:0|src:init|zeroed:0|"
-         "seq:-|seqst:idle|amps:0.80|acc:400.0|mm:0.000|mm_tgt:0.000|therm:ok";
+         "seq:-|seqst:idle|amps:0.80|acc:400.0|mm:0.000|mm_tgt:0.000|therm:ok|loss:0|unc:0";
 }
 
 void TestReplayDeadline() {
@@ -496,6 +583,108 @@ void TestDrainKeepsEveryWindowUnderTheShare(bool merged) {
             << ": worst 1-s window " << worst << " B of " << coatheal::kOnboardShareBytes
             << " B, replayed " << replay_order.size() << " frames in 180 s\n";
   assert(worst <= coatheal::kOnboardShareBytes);
+
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+// STATUS reports the kernel shaper from the state scripts/link_cap.sh leaves.
+void TestLinkCapState() {
+  const auto dir = TempDir("cap_state");
+  std::filesystem::create_directories(dir);
+  const std::string path = (dir / "state").string();
+  assert(coatheal::LinkCapState(path) == "off");  // never applied
+  const auto write = [&](const std::string& text) { std::ofstream(path) << text << "\n"; };
+  write("off eth0");
+  assert(coatheal::LinkCapState(path) == "off");
+  // "on" for a port that is not there (or no longer at the capped MTU).
+  write("on coatheal-none0 800 1000 576 1500 onboard");
+  assert(coatheal::LinkCapState(path) == "stale:coatheal-none0");
+  write("on ../../etc 800 1000 576 1500 onboard");
+  assert(coatheal::LinkCapState(path) == "off");
+#ifdef __linux__
+  // The loopback port exists everywhere and runs far above 576.
+  write("on lo 800 1000 576 1500 onboard");
+  assert(coatheal::LinkCapState(path) == "stale:lo");
+#endif
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+}
+
+// With the hard cap's shaper modelled, a ten-minute outage is replayed without
+// a single frame of ours ever having to wait in the kernel's token bucket: fed
+// what our port sent, the real bucket (not the slower model) never runs dry.
+void TestDrainNeverWaitsInTheKernelShaper() {
+  const auto dir = TempDir("drain_shaped");
+  std::string error;
+  FakeClock clock;
+  coatheal::LinkBudget budget(coatheal::kOnboardShareBytes, 1s, clock.fn());
+  budget.SetEgressShaper(coatheal::kOnboardEgressBurstBytes,
+                         coatheal::kOnboardEgressRateBytesPerS *
+                             coatheal::kEgressModelRatePercent / 100);
+  coatheal::TelemetryQueue queue(dir.string(), 72.0, 64 * 1024 * 1024);
+  assert(queue.Initialize(&error));
+  WireModelSender sender(&budget, &clock, /*merged=*/true);
+  coatheal::TelemetryDrain drain(&queue, &sender, clock.fn());
+
+  const std::string session = "coatheal-1789498045-582267";
+  std::uint64_t seq = 0;
+  for (; seq < 600; ++seq) {
+    assert(queue.Enqueue({coatheal::CurrentUnixEpochSeconds(), session, seq,
+                          RealisticLine(session, seq, 0), 0},
+                         &error));
+  }
+  std::size_t live_sent = 0;
+  std::size_t replayed = 0;
+  for (int tick = 0; tick < 180; ++tick) {
+    const Clock::time_point tick_start(Clock::duration(1000s) + std::chrono::seconds(tick));
+    clock.set(tick_start.time_since_epoch() + 60ms);
+    std::uint64_t live_index = 0;
+    const std::uint64_t live_seq = seq++;
+    assert(queue.Enqueue({coatheal::CurrentUnixEpochSeconds(), session, live_seq,
+                          RealisticLine(session, live_seq, tick), 0},
+                         &error, &live_index));
+    const std::size_t before = sender.sent_seqs.size();
+    const coatheal::DrainResult result =
+        drain.Drain(live_index, coatheal::CurrentUnixEpochSeconds(), tick_start + 400ms,
+                    coatheal::ReplayDeadline(tick_start, 1s));
+    assert(result.link_ok && !result.error);
+    assert(sender.sent_seqs.size() > before);
+    if (sender.sent_seqs[before] == live_seq) ++live_sent;
+    replayed += sender.sent_seqs.size() - before - 1;
+  }
+  // Every tick's frame still leaves on its own tick; the backlog moves at
+  // what the shaper's rate leaves over (about every other tick).
+  assert(live_sent == 180);
+  assert(replayed >= 60);
+
+  // The kernel's bucket, fed our port's frames: never short of tokens, and so
+  // no 1-second window above bucket + rate.
+  double tokens = coatheal::kOnboardEgressBurstBytes;
+  double lowest = tokens;
+  Clock::time_point stamp = sender.own_emissions.front().at;
+  std::uint64_t worst = 0, in_window = 0;
+  std::deque<WireModelSender::Emission> window;
+  for (const auto& e : sender.own_emissions) {
+    tokens = std::min<double>(coatheal::kOnboardEgressBurstBytes,
+                              tokens + coatheal::kOnboardEgressRateBytesPerS *
+                                           std::chrono::duration<double>(e.at - stamp).count());
+    stamp = e.at;
+    tokens -= e.bytes;
+    lowest = std::min(lowest, tokens);
+    window.push_back(e);
+    in_window += e.bytes;
+    while (window.front().at <= e.at - 1s) {
+      in_window -= window.front().bytes;
+      window.pop_front();
+    }
+    worst = std::max(worst, in_window);
+  }
+  std::cout << "[link_budget] shaped: replayed " << replayed << " frames in 180 s, our port's"
+            << " worst 1-s window " << worst << " B, kernel bucket never below " << lowest
+            << " B\n";
+  assert(lowest >= 0.0);
+  assert(worst <= coatheal::kOnboardEgressBurstBytes + coatheal::kOnboardEgressRateBytesPerS);
 
   std::error_code ec;
   std::filesystem::remove_all(dir, ec);
@@ -697,9 +886,60 @@ void TestCommandReplyIsPacedInChunks() {
   server.Stop();
 
   assert(received == reply + "\n");
-  // 600 + 90, 600 + 180 and 301 + 180 settled bytes do not fit one second.
+  // Chunks of 520, 520 and 461 B settle at 610, 700 and 641 B: more than one
+  // second's share.
   assert(elapsed >= 900ms);
   assert(budget.InWindow() <= coatheal::kOnboardShareBytes);
+}
+
+// On our own port a command exchange is the reply segment plus what the
+// kernel sends around it (SYN-ACK, ACK, FIN, ACK): all of it comes out of the
+// modelled shaper, although the ground station's ledger holds part of it.
+void TestCommandExchangeDrawsOnTheShaperModel() {
+  int probe = socket(AF_INET, SOCK_STREAM, 0);
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  assert(bind(probe, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+  socklen_t len = sizeof(addr);
+  getsockname(probe, reinterpret_cast<sockaddr*>(&addr), &len);
+  const int port = ntohs(addr.sin_port);
+  close(probe);
+
+  const std::string reply = "ACK,PING,pong";
+  FakeClock clock;  // frozen: the bucket does not refill behind the test's back
+  coatheal::LinkBudget budget(coatheal::kOnboardShareBytes, 1s, clock.fn());
+  budget.SetEgressShaper(coatheal::kOnboardEgressBurstBytes, coatheal::kOnboardEgressRateBytesPerS);
+  coatheal::CommandServer server(port);
+  server.SetLinkBudget(&budget);
+  server.SetPaceLoopbackForTesting(true);
+  std::string error;
+  assert(server.Start([&](const std::string&, const std::string&) { return reply; }, &error));
+
+  int fd = -1;
+  for (int attempt = 0; attempt < 50 && fd < 0; ++attempt) {
+    fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+      close(fd);
+      fd = -1;
+      std::this_thread::sleep_for(20ms);
+    }
+  }
+  assert(fd >= 0);
+  const std::string request = "PING\n";
+  assert(send(fd, request.data(), request.size(), 0) == static_cast<ssize_t>(request.size()));
+  std::string received;
+  char buf[128];
+  for (ssize_t n; (n = recv(fd, buf, sizeof(buf), 0)) > 0;) received.append(buf, buf + n);
+  close(fd);
+  server.Stop();
+
+  assert(received == reply + "\n");
+  const std::int64_t spent = coatheal::kOnboardEgressBurstBytes - budget.EgressTokens();
+  assert(spent == coatheal::wire::kSyn + 3 * coatheal::wire::kPureAck +
+                      coatheal::wire::TcpBytes(reply.size() + 1));
+  // MUTATION: drop `budget_->DebitEgress(kExchangeEgressBytes)` from
+  // CommandServer::HandleClient and confirm `spent` is 368 B short.
 }
 #endif
 
@@ -710,6 +950,8 @@ int main() {
   TestLedgerSlidingWindow();
   TestLedgerHoldsCountUntilReleasedPlusWindow();
   TestLedgerPriorityWaiterBlocksLessUrgent();
+  TestEgressShaperModel();
+  TestLinkCapState();
   TestCodec();
   TestQueueBisectionOrder();
   TestQueueLiveFrameAndEventsAroundAnOutage();
@@ -718,10 +960,12 @@ int main() {
   TestFrameCostCoversEveryAnswer();
   TestDrainKeepsEveryWindowUnderTheShare(/*merged=*/true);
   TestDrainKeepsEveryWindowUnderTheShare(/*merged=*/false);
+  TestDrainNeverWaitsInTheKernelShaper();
 #ifndef _WIN32
   TestTelemetryClientOverLoopback();
   TestPlainGroundStationLosesTheLink();
   TestCommandReplyIsPacedInChunks();
+  TestCommandExchangeDrawsOnTheShaperModel();
 #endif
   std::cout << "[link_budget] all tests passed\n";
   return 0;
