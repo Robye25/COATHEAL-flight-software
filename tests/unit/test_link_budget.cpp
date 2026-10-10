@@ -778,7 +778,7 @@ void TestTelemetryClientOverLoopback() {
     LoopbackGround ground(mode);
     coatheal::LinkBudget budget(coatheal::kOnboardShareBytes);
     coatheal::TelemetryClient client("127.0.0.1", ground.port(), 5000, 1000,
-                                     /*discovery_enabled=*/false, 4100, "", "");
+                                     /*discovery_enabled=*/false, 4100, /*static_ground_ip=*/"");
     client.SetLinkBudget(&budget);
     coatheal::TelemetryAck ack;
     const auto status = client.SendFrame(line, coatheal::LinkPriority::kLive,
@@ -824,7 +824,7 @@ void TestPlainGroundStationLosesTheLink() {
   LoopbackGround ground(LoopbackGround::Mode::kOldGround);  // never answers the HELLO
   coatheal::LinkBudget budget(coatheal::kOnboardShareBytes);
   coatheal::TelemetryClient client("127.0.0.1", ground.port(), 5000, 1000,
-                                   /*discovery_enabled=*/false, 4100, "", "");
+                                   /*discovery_enabled=*/false, 4100, /*static_ground_ip=*/"");
   client.SetLinkBudget(&budget);
   const std::string line = "DATA,coatheal-1789498045-582267,12,2026-09-15T18:48:05Z,1," +
                            std::string(1100, 'x');
