@@ -226,10 +226,12 @@ class TopStrip(QWidget):
         self._elide()
 
     def _elide(self) -> None:
-        for label, full in ((self._target, self._target_full), (self._sess, self._sess_full)):
+        # The session keeps its tail (the distinguishing digits and the seq).
+        for label, full, mode in ((self._target, self._target_full, Qt.TextElideMode.ElideMiddle),
+                                  (self._sess, self._sess_full, Qt.TextElideMode.ElideLeft)):
             metrics = QFontMetrics(label.font())
             width = max(20, label.width() - 4)
-            label.setText(metrics.elidedText(full, Qt.TextElideMode.ElideMiddle, width))
+            label.setText(metrics.elidedText(full, mode, width))
             label.setToolTip(full if label.text() != full else "")
 
     def resizeEvent(self, event) -> None:  # noqa: N802

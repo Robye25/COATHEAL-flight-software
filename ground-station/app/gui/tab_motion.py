@@ -69,7 +69,8 @@ class MotorCard(QFrame):
         self.group = QLabel(motor_group_text(DEFAULT_LAYOUT, motor_id))
         self.group.setStyleSheet(f"color: {MUTED}; font-size: 9pt; border: none;")
         self.group.setWordWrap(True); self.group.setMinimumWidth(1)
-        lay.addWidget(hrow(title, self.group, stretch_last=True))
+        lay.addWidget(title)
+        lay.addWidget(self.group)
         dots = QGridLayout(); dots.setHorizontalSpacing(2); dots.setVerticalSpacing(1)
         self.dots = {}
         tips = {"EN": "driver power stage enabled", "ZERO": "software zero set (SET_POSITION_ZERO)",
@@ -101,7 +102,7 @@ class MotorCard(QFrame):
         lay.addWidget(self.loss_note)
         self.pos = self._kv(lay, "pos / tgt")
         # The operator's primary number during a bend — give it weight.
-        self.pos.setStyleSheet(f"{MONO_CSS} border: none; font-size: 11pt; font-weight: bold;")
+        self.pos.setStyleSheet(f"{MONO_CSS} border: none; font-size: 10pt; font-weight: bold;")
         self.speed = self._kv(lay, "drive")
         self.src = self._kv(lay, "last cmd")
         self.seq = self._kv(lay, "sequence")
@@ -113,8 +114,9 @@ class MotorCard(QFrame):
 
     def _kv(self, lay: QVBoxLayout, key: str) -> QLabel:
         row = QWidget(); h = QHBoxLayout(row); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(6)
-        k = QLabel(key); k.setStyleSheet(f"color: {MUTED}; font-size: 8pt; border: none;"); k.setFixedWidth(52)
+        k = QLabel(key); k.setStyleSheet(f"color: {MUTED}; font-size: 8pt; border: none;"); k.setFixedWidth(54)
         v = QLabel("—"); v.setStyleSheet(f"{MONO_CSS} border: none;"); v.setMinimumWidth(1)
+        v.setWordWrap(True)   # a long value (ETA, hold) wraps instead of clipping
         h.addWidget(k); h.addWidget(v, 1)
         lay.addWidget(row)
         return v
@@ -186,14 +188,16 @@ class MotorCard(QFrame):
         else:
             self.pos.setText(f"{motor.position} / {motor.target} µst")
             self.pos.setToolTip("no mm telemetry (old firmware) — raw microsteps shown")
-        speed = f"{mm_s_from_hz(motor.hz):.2f} mm/s · µ{motor.microstep}"
+        # Speed, current and divisor; the acceleration is in Drive settings.
+        speed = f"{mm_s_from_hz(motor.hz):.2f} mm/s"
         if motor.amps is not None:
             speed += f" · {motor.amps:.2f} A"
-        if motor.accel is not None:
-            speed += f" · {motor.accel / FULL_STEPS_PER_MM:.2f} mm/s²"
+        speed += f" · µ{motor.microstep}"
         if motor.missed:
             speed += f" · missed {motor.missed}"
         self.speed.setText(speed)
+        self.speed.setToolTip(f"acceleration {motor.accel / FULL_STEPS_PER_MM:.2f} mm/s²"
+                              if motor.accel is not None else "")
         self.src.setText(motor.source or "—")
         if motor.seq_state in ("run", "pause"):
             self.seq.setText(f"{motor.seq_name or '?'} · {motor.seq_state}")
@@ -289,8 +293,8 @@ class MotionTab(QScrollArea):
         self.speed.setSingleStep(0.01); self.speed.setValue(DEFAULT_SPEED_MM_S)
         self.btn_speed = make_button("SET SPEED", "primary", sends="STEPPER_SET_SPEED <motor_id> <full-steps/s>",
                                      min_height=24, slot=self._set_speed)
-        s_lbl = QLabel(f"ball-screw travel speed, up to {MAX_SPEED_MM_S:g} mm/s (stepper.max_speed_mm_s); "
-                       f"sent as full-steps/s at the {LEAD_MM_PER_REV:g} mm lead")
+        s_lbl = QLabel(f"up to {MAX_SPEED_MM_S:g} mm/s (stepper.max_speed_mm_s)")
+        s_lbl.setToolTip(f"Ball-screw travel speed; sent as full-steps/s at the {LEAD_MM_PER_REV:g} mm lead.")
         s_lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         s_lbl.setWordWrap(True); s_lbl.setMinimumWidth(1)
         lay.addWidget(hrow(with_unit(self.speed, "mm/s"), self.btn_speed, stretch_last=True))
@@ -299,7 +303,7 @@ class MotionTab(QScrollArea):
         self.current.setSingleStep(0.05); self.current.setValue(DEFAULT_CURRENT_A)
         self.btn_current = make_button("SET CURRENT", "primary", sends="STEPPER_SET_CURRENT <motor_id> <a_rms>",
                                        min_height=24, slot=self._set_current)
-        c_lbl = QLabel("run current A RMS; onboard rejects what the sense resistor cannot deliver")
+        c_lbl = QLabel("run current, A RMS (the onboard refuses what the sense resistor cannot deliver)")
         c_lbl.setWordWrap(True); c_lbl.setMinimumWidth(1); c_lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(hrow(with_unit(self.current, "A"), self.btn_current, stretch_last=True))
         lay.addWidget(c_lbl)
@@ -307,8 +311,8 @@ class MotionTab(QScrollArea):
         self.accel.setSingleStep(0.5); self.accel.setValue(DEFAULT_ACCEL_MM_S2)
         self.btn_accel = make_button("SET ACCEL", "primary", sends="STEPPER_SET_ACCEL <motor_id> <full-steps/s²>",
                                      min_height=24, slot=self._set_accel)
-        a_lbl = QLabel(f"trapezoid acceleration, up to {MAX_ACCEL_MM_S2:g} mm/s² "
-                       "(stepper.max_accel_steps_per_s2); sent as full-steps/s²")
+        a_lbl = QLabel(f"up to {MAX_ACCEL_MM_S2:g} mm/s² (stepper.max_accel_steps_per_s2)")
+        a_lbl.setToolTip("Trapezoid acceleration; sent as full-steps/s².")
         a_lbl.setWordWrap(True); a_lbl.setMinimumWidth(1); a_lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(hrow(with_unit(self.accel, "mm/s²"), self.btn_accel, stretch_last=True))
         lay.addWidget(a_lbl)
@@ -333,7 +337,7 @@ class MotionTab(QScrollArea):
         lay.addWidget(hrow(t_lbl, with_unit(self.bend_target, "mm"), h_lbl, with_unit(self.bend_hold, "s"),
                            self.btn_bend))
         self.btn_pull = make_button("STANDARD PULL", "primary", sends="PULL_EXECUTE <motor_id>", min_height=26, slot=self._pull)
-        p_lbl = QLabel("pulls to 2.0 mm (two revolutions), holds 5 s, retracts to 0 · config pull.*; emits EVT,PULL")
+        p_lbl = QLabel("pulls to 2.0 mm (two revolutions), holds 5 s, retracts to 0 (config pull.*)")
         p_lbl.setWordWrap(True); p_lbl.setMinimumWidth(1); p_lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(self.btn_pull)
         lay.addWidget(p_lbl)
@@ -374,7 +378,8 @@ class MotionTab(QScrollArea):
         lay.addLayout(fields)
         self.cycle_preview = QLabel("—"); self.cycle_preview.setWordWrap(True); self.cycle_preview.setMinimumWidth(1)
         self.cycle_preview.setStyleSheet(f"{MONO_CSS} color: {MUTED}; font-size: 8pt;")
-        lay.addWidget(hrow(self.cycle_return, self.cycle_preview, stretch_last=True))
+        lay.addWidget(self.cycle_return)
+        lay.addWidget(self.cycle_preview)
         grid = QGridLayout(); grid.setSpacing(3)
         self.btn_cycle_memorise = make_button(
             "MEMORISE", "primary", min_height=24, slot=self._cycle_memorise,
@@ -393,9 +398,12 @@ class MotionTab(QScrollArea):
                                      self.btn_cycle_resume, self.btn_cycle_stop, self.btn_cycle_status)):
             grid.addWidget(btn, index // 3, index % 3)
         lay.addLayout(grid)
-        c_lbl = QLabel("MEMORISE sends the cycle to the onboard, in µsteps at the motor's live microstep; it runs at the "
-                       "motor's speed and acceleration (Drive settings) and is kept onboard until a reboot. PLAY starts it. "
-                       "The values are remembered per motor on this PC.")
+        c_lbl = QLabel("runs at the motor's speed and acceleration (Drive settings); remembered per motor on this PC")
+        self.btn_cycle_memorise.setToolTip(self.btn_cycle_memorise.toolTip() + "\nSends the cycle to the onboard in "
+                                           "µsteps at the motor's live microstep; the onboard keeps it until a reboot "
+                                           "(MEMORISE again after STEPPER_SET_MICROSTEP).")
+        self.btn_cycle_play.setToolTip(self.btn_cycle_play.toolTip() + "\nStarts the memorised cycle (asks first); "
+                                       "MEMORISE it before PLAY if the onboard does not have it yet.")
         c_lbl.setWordWrap(True); c_lbl.setMinimumWidth(1); c_lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(c_lbl)
         self.cycle_note = QLabel(""); self.cycle_note.setWordWrap(True); self.cycle_note.setMinimumWidth(1)

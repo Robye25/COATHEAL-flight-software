@@ -112,6 +112,7 @@ class TimePlot(QWidget):
             self.plot.removeItem(curve)
         for lbl in self._legend.values():
             self._legend_lay.removeWidget(lbl)
+            lbl.hide()   # gone from the row now, not only once the deferred delete runs
             lbl.deleteLater()
         self._curves.clear()
         self._colors.clear()

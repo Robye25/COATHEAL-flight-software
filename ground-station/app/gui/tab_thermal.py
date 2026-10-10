@@ -178,9 +178,8 @@ class ThermalTab(QScrollArea):
         self.layout_note = QLabel("")
         self.layout_note.setWordWrap(True); self.layout_note.setMinimumWidth(1)
         lay.addWidget(self.layout_note)
-        confirm_note = QLabel(f"A target above {gating.CONFIRM_ABOVE_C:g} °C asks first; the onboard "
-                              f"allows up to {TARGET_MAX_C:g} °C and latches a heater off above "
-                              f"{OVERTEMP_LATCH_C:g} °C.")
+        confirm_note = QLabel(f"targets up to {TARGET_MAX_C:g} °C (above {gating.CONFIRM_ABOVE_C:g} °C asks first); "
+                              f"a heater latches off at {OVERTEMP_LATCH_C:g} °C")
         confirm_note.setWordWrap(True); confirm_note.setMinimumWidth(1)
         confirm_note.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(confirm_note)
@@ -240,9 +239,10 @@ class ThermalTab(QScrollArea):
         for spin, width in ((self.tune_setpoint, 60), (self.tune_duty, 52), (self.tune_cycles, 44)):
             spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
             spin.setFixedWidth(width)
-        lay.addWidget(hrow(self.tune_heater, stretch_last=True))
-        lay.addWidget(hrow(with_unit(self.tune_setpoint, "°C"), hl, self.tune_duty, stretch_last=True))
-        lay.addWidget(hrow(cl, self.tune_cycles, stretch_last=True))
+        self.tune_heater.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        sl = QLabel("setpoint"); sl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
+        lay.addWidget(hrow(self.tune_heater, sl, with_unit(self.tune_setpoint, "°C"), stretch_last=True))
+        lay.addWidget(hrow(hl, self.tune_duty, cl, self.tune_cycles, stretch_last=True))
         self.btn_tune_start = make_button("START TUNE", "success",
                                           sends="PID_TUNE_START <heater> <setpoint_c> <relay_duty> <cycles>",
                                           min_height=26, slot=self._tune_start)
@@ -252,9 +252,12 @@ class ThermalTab(QScrollArea):
                                           min_height=26, slot=self._tune_apply)
         lay.addWidget(hrow(self.btn_tune_start, self.btn_tune_abort))
         lay.addWidget(self.btn_tune_apply)
-        note = QLabel("Bangs the heater between 0 and the relay duty around the setpoint, measures the induced "
-                      "oscillation (Ku, Tu) and suggests Tyreus–Luyben gains. Takes exclusive heater control; "
-                      "several minutes per channel. APPLY sends SET_PID for the tuned heater — save a preset after.")
+        note = QLabel("runs for minutes with exclusive heater control; APPLY GAINS sends SET_PID")
+        self.btn_tune_apply.setToolTip(self.btn_tune_apply.toolTip() + "\nSends SET_PID for the tuned heater; save "
+                                       "a preset afterwards so the gains survive a restart.")
+        self.btn_tune_start.setToolTip(self.btn_tune_start.toolTip() + "\nBangs the heater between 0 and the relay "
+                                       "duty around the setpoint, measures the induced oscillation (Ku, Tu) and "
+                                       "suggests Tyreus–Luyben gains.")
         note.setWordWrap(True); note.setMinimumWidth(1); note.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(note)
         self.tune_status = QLabel("idle")

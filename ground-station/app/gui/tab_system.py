@@ -68,8 +68,10 @@ class SystemTab(QScrollArea):
         self.btn_host_auto.setToolTip("Forget the address and follow the onboard's discovery beacon again.")
         hl = QLabel("onboard IP"); hl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(hrow(hl, self.host_edit, self.btn_host_apply, self.btn_host_auto))
-        self.host_note = QLabel("The Pi's E-Link address (SSC assigns it; onboard, comms.static_ground_ip names "
-                                "this PC). On AUTO the onboard's beacon on UDP 4100 stays the fallback.")
+        self.host_note = QLabel("the Pi's E-Link address (SSC-assigned); AUTO follows the onboard's beacon")
+        self.host_edit.setToolTip("The Pi's address on the E-Link, assigned by SSC (the onboard's "
+                                  "comms.static_ground_ip names this PC). APPLY saves it on this PC; on AUTO the "
+                                  "onboard's discovery beacon on UDP 4100 stays the fallback.")
         self.host_note.setWordWrap(True); self.host_note.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(self.host_note)
         self.btn_restart_receiver = make_button("RESTART RECEIVER", "neutral", min_height=24)
@@ -120,9 +122,11 @@ class SystemTab(QScrollArea):
         self.btn_resume = make_button("RADIO RESUME", "success", sends="RADIO_RESUME", min_height=30,
                                       slot=lambda: self._send("RADIO_RESUME"))
         lay.addWidget(hrow(self.btn_silence, self.btn_resume))
-        note = QLabel("Silence stops telemetry, beacons and hello replies onboard; the ground station "
-                      "pauses its beacon and probe and sends nothing but RADIO RESUME (STATUS/PING answer). "
-                      "The onboard queue keeps every frame and replays it after RESUME.")
+        note = QLabel("stops every onboard transmission until RADIO RESUME; queued frames replay afterwards")
+        self.btn_silence.setToolTip(self.btn_silence.toolTip() + "\nSilence stops telemetry, beacons and hello "
+                                    "replies onboard; the ground station pauses its beacon and probe and sends "
+                                    "nothing but RADIO RESUME (STATUS/PING answer). The onboard queue keeps every "
+                                    "frame and replays it after RESUME.")
         note.setWordWrap(True)
         note.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(note)
@@ -162,8 +166,11 @@ class SystemTab(QScrollArea):
         # did not fit the 392 px column of a 1366x768 screen.
         lay.addWidget(hrow(self.check_target, self.btn_check, stretch_last=True))
         lay.addWidget(self.btn_reset)
-        note = QLabel("CHECK drives real hardware conversations (up to 15 s); a motor check fails while that motor is moving "
-                      "or holding (CHECK ALL needs both idle). RESET_CTRL clears the over-temperature latch and PID integrators.")
+        note = QLabel("CHECK talks to the hardware (up to 15 s); a motor check needs that motor idle")
+        self.btn_check.setToolTip(self.btn_check.toolTip() + "\nDrives a real hardware conversation (up to 15 s); a "
+                                  "motor check fails while that motor is moving or holding (CHECK ALL needs both idle).")
+        self.btn_reset.setToolTip(self.btn_reset.toolTip() + "\nClears the over-temperature latch and the PID "
+                                  "integrators.")
         note.setWordWrap(True); note.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(note)
         self.resp_diag = ResponseLine()
@@ -173,10 +180,10 @@ class SystemTab(QScrollArea):
         # -- Shutdown --------------------------------------------------------
         frame, lay = group_box("Shutdown")
         self.btn_shutdown = make_button("SHUTDOWN SAFE", "danger", sends="SHUTDOWN_SAFE", slot=self._shutdown)
-        lbl = QLabel("safe for power-off: heaters off, overrides cleared, motors disabled, logs synced "
-                     "(the onboard keeps running)")
+        lbl = QLabel("heaters off, overrides cleared, motors disabled, logs synced; the onboard keeps running")
         lbl.setWordWrap(True); lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
-        lay.addWidget(hrow(self.btn_shutdown, lbl, stretch_last=True))
+        lay.addWidget(self.btn_shutdown)
+        lay.addWidget(lbl)
         self.resp_shutdown = ResponseLine()
         lay.addWidget(self.resp_shutdown)
         outer.addWidget(frame)

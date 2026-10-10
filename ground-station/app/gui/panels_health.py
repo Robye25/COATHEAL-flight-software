@@ -46,15 +46,15 @@ OK_FAIL_FLAGS: List[Tuple[str, str]] = [
     ("I2C",         "I2C bus"),
     ("SPI",         "SPI bus"),
     ("LINK",        "Radio link"),
-    ("T_AMBIENT",   "Ambient temperature sensor"),
-    ("P_AMBIENT",   "Ambient pressure sensor"),
+    ("T_AMBIENT",   "Ambient temperature"),
+    ("P_AMBIENT",   "Ambient pressure"),
     ("UNIFORMITY",  "Specimen uniformity"),
-    ("OVERTEMP",    "Over-temperature latch clear"),
+    ("OVERTEMP",    "Over-temperature latch"),
     ("ENERGY",      "Energy budget"),
     ("PWM",         "PWM driver"),
     ("STEPPER",     "Stepper motors"),
-    ("SAMPLE_TEMP", "Sample temp (RTD HAT)"),
-    ("RESISTANCE",  "Resistance (MAX31865)"),
+    ("SAMPLE_TEMP", "Sample temperatures"),
+    ("RESISTANCE",  "Sample resistance"),
 ]
 
 # 3 tri-state flags: (amber token, green token, human-readable label).
@@ -212,7 +212,6 @@ class HealthPanel(QWidget):
             text = QLabel(label)
             text.setStyleSheet("font-size: 11pt;")
             text.setToolTip(tooltip)
-            text.setWordWrap(True)
             cell = QWidget()
             h = QHBoxLayout(cell)
             h.setContentsMargins(0, 0, 0, 0)

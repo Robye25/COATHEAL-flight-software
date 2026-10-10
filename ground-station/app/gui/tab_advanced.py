@@ -70,8 +70,7 @@ class AdvancedTab(QScrollArea):
 
         # -- Open-loop duty --------------------------------------------------
         frame, lay = group_box("Open-loop duty")
-        note = QLabel("Sets a fixed duty and clears that channel's target. Refused unless the channel's PT100 is valid "
-                      "(or the bench debug arm is active). Never more than 3 heaters run at once (scheduler).")
+        note = QLabel("fixed duty (clears the target); needs a valid PT100 or ARM_DEBUG; 3 heaters at most")
         note.setWordWrap(True); note.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(note)
         self.debug_note = QLabel(""); self.debug_note.setWordWrap(True); self.debug_note.setMinimumWidth(1)
@@ -108,9 +107,7 @@ class AdvancedTab(QScrollArea):
         self.us = QComboBox(); self.us.addItems(["1", "2", "4", "8", "16", "32", "64", "128", "256"]); self.us.setCurrentText("4")
         self.btn_us = make_button("Set", "primary", sends="STEPPER_SET_MICROSTEP <motor_id> <n>", min_height=24, slot=self._set_microstep)
         lay.addWidget(hrow(self.us_motor, self.us, self.btn_us, stretch_last=True))
-        note = QLabel("The firmware rescales its stored position so mm travel is preserved across a divisor change — no re-zero "
-                      "needed. A memorised bend cycle and the fallback plan stay in raw µsteps onboard: MEMORISE / LOAD them "
-                      "again after changing it. Commissioning default 4.")
+        note = QLabel("position rescaled (no re-zero); re-MEMORISE the cycle and re-LOAD the plan; default 4")
         note.setWordWrap(True); note.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(note)
         self.resp_us = ResponseLine()
@@ -151,9 +148,11 @@ class AdvancedTab(QScrollArea):
         self.plan_state = QLabel("plan: —"); self.plan_state.setStyleSheet(f"{MONO_CSS} color: {MUTED};")
         lay.addWidget(hrow(self.btn_plan_arm, self.btn_plan_disarm, self.btn_plan_status))
         lay.addWidget(self.plan_state)
-        note = QLabel("Trigger: fallback active, phase PRE_FLOAT/FLOAT, plan armed and not yet executed, motor enabled+zeroed+healthy, "
-                      "sample temperature inside the configured window (or the deadline passed). Runs M0 then M1 at each motor's "
-                      "own speed and acceleration (Motion tab, Drive settings), emits EVT,PULL, never repeats.")
+        note = QLabel("onboard-only, during link-loss fallback at PRE_FLOAT/FLOAT; M0 then M1, once")
+        self.btn_plan_arm.setToolTip(self.btn_plan_arm.toolTip() + "\nTrigger: fallback active, phase PRE_FLOAT/FLOAT, "
+                                     "plan armed and not yet executed, motor enabled, zeroed and healthy, sample "
+                                     "temperature inside the configured window (or the deadline passed). Emits "
+                                     "EVT,PULL and never repeats.")
         note.setWordWrap(True); note.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(note)
         self.resp_plan = ResponseLine()
@@ -170,7 +169,7 @@ class AdvancedTab(QScrollArea):
         self.priority.valueChanged.connect(self.priority_changed.emit)
         pl = QLabel("beacon priority"); pl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(hrow(pl, self.priority, stretch_last=True))
-        note = QLabel("The onboard IP is set on the System tab (Link); the beacon stays the fallback when it is left on AUTO.")
+        note = QLabel("onboard IP: System tab (Link); on AUTO the beacon stays the fallback")
         note.setWordWrap(True); note.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(note)
         outer.addWidget(frame)

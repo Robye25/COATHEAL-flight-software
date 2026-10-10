@@ -196,7 +196,9 @@ class MainWindow(QMainWindow):
             self._main_splitter.addWidget(widget)
             self._main_splitter.setStretchFactor(self._main_splitter.count() - 1, stretch)
         self._main_splitter.setCollapsible(1, False)
-        self._main_splitter.setSizes([440, 840, 320])
+        # Left column wide enough for the motor cards and the notes on a
+        # 1536 px (125 % scaled 1080p) Windows desktop; the plots take the rest.
+        self._main_splitter.setSizes([520, 690, 326])
         self._body_splitter = QSplitter(Qt.Orientation.Vertical); self._body_splitter.setObjectName("bodySplit")
         self._body_splitter.addWidget(self._main_splitter); self._body_splitter.addWidget(self._bottom)
         self._body_splitter.setStretchFactor(0, 4); self._body_splitter.setStretchFactor(1, 1)
