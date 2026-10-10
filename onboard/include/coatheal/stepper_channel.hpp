@@ -56,7 +56,7 @@ struct StepperChannelConfig {
   std::int64_t max_position_steps = 200000;
 
   // Sample indices this motor pulls. Motor 0 default 0..3, motor 1 default
-  // 4..7. Exposed via samples() for Agent D's heater-scheduler interlock.
+  // 4..7. Exposed via samples() for the heater scheduler and EVT,PULL.
   std::vector<std::size_t> samples = {0, 1, 2, 3};
 
   // Pull cycle parameters. One pull = forward pull_travel_full_steps

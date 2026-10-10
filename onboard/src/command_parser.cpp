@@ -398,9 +398,9 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
       }
       break;
     case CommandType::kFallbackPlan:
-      // <motor> <target_usteps> <hold_s> [speed_hz]
-      if (command.args.size() < 3 || command.args.size() > 4) {
-        result.error = "invalid argument count for " + command.name;
+      // <motor> <target_usteps> <hold_s>; the bend runs at the motor's own
+      // speed (STEPPER_SET_SPEED), so there is no speed argument.
+      if (!require_args(3)) {
         return result;
       }
       break;

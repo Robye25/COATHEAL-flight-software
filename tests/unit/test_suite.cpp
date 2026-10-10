@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <cmath>
@@ -7,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "coatheal/bend_sequence.hpp"
 #include "coatheal/command_parser.hpp"
 #include "coatheal/config.hpp"
 #include "coatheal/heater_scheduler.hpp"
@@ -97,10 +99,10 @@ void TestCommandParser() {
   assert(spaced_target.command.args[1] == "42.5");
 
   auto sequence =
-      parser.ParseLine("BENDSEQ_LOAD 1 flex 800:2.5:50 0:1");
+      parser.ParseLine("BENDSEQ_LOAD 1 flex 800:2.5 repeat=3 0:1");
   assert(sequence.ok);
   assert(sequence.command.type == coatheal::CommandType::kBendSeqLoad);
-  assert(sequence.command.args.size() == 4);
+  assert(sequence.command.args.size() == 5);
 
   auto zero = parser.ParseLine("SET_POSITION_ZERO 1");
   assert(zero.ok);
@@ -574,7 +576,6 @@ std::string WriteTempConfig(const std::string& extra = "", bool legacy_layout = 
   out << "manual.link_loss_fallback_s=12.5\n";
   out << "comms.telemetry_host=\n";
   out << "comms.static_ground_ip=\n";
-  out << "comms.static_pi_ip=169.254.10.10\n";
   out << "comms.telemetry_port=4000\n";
   out << "comms.command_port=5000\n";
   out << "comms.reconnect_ms=2000\n";
@@ -667,7 +668,6 @@ void TestConfigParsesReliabilityFields() {
   assert(cfg.comms.discovery_enabled);
   assert(cfg.comms.telemetry_host.empty());
   assert(cfg.comms.static_ground_ip.empty());
-  assert(cfg.comms.static_pi_ip == "169.254.10.10");
   assert(cfg.storage.queue_max_bytes == 1024U);
   assert(!cfg.runtime.use_simulated_pwm);
   assert(!cfg.runtime.use_simulated_sensors);
@@ -1155,7 +1155,7 @@ void TestManualHeaterOverrideWithoutFloorControl() {
 void TestDiscoveryBeaconParser() {
   // discovery_enabled=false keeps Start()/Stop() a no-op so the test does not
   // open real sockets — ProcessIncomingDiscoveryLine is still usable.
-  coatheal::TelemetryClient client("", 4000, 5000, 2000, false, 4100, "", "",
+  coatheal::TelemetryClient client("", 4000, 5000, 2000, false, 4100, "",
                                    2000, 30, 5, 100);
 
   const bool ok = client.ProcessIncomingDiscoveryLine(
@@ -1181,7 +1181,7 @@ void TestDiscoveryBeaconParser() {
 }
 
 void TestCommandPeerCanSeedTelemetryTarget() {
-  coatheal::TelemetryClient client("", 4000, 5000, 2000, false, 4100, "", "",
+  coatheal::TelemetryClient client("", 4000, 5000, 2000, false, 4100, "",
                                    2000, 30, 5, 100);
 
   client.ObserveGroundStation("169.254.10.11", 4000, 5000, 1000);
@@ -1199,7 +1199,7 @@ void TestCommandPeerCanSeedTelemetryTarget() {
   client.ObserveGroundStation("127.0.0.1", 4000, 5000, 0);
   assert(client.current_host() == "169.254.10.11");
   // ...but is accepted when nothing better was ever heard.
-  coatheal::TelemetryClient bare("", 4000, 5000, 2000, false, 4100, "", "",
+  coatheal::TelemetryClient bare("", 4000, 5000, 2000, false, 4100, "",
                                  2000, 30, 5, 100);
   bare.ObserveGroundStation("127.0.0.1", 4000, 5000, 0);
   assert(bare.current_host() == "127.0.0.1");
@@ -1298,7 +1298,7 @@ void TestRadioSilencePersistsAcrossRestart() {
 }
 
 void TestRadioSilenceGatesBeaconAndHelloReply() {
-  coatheal::TelemetryClient client("", 4000, 5000, 2000, false, 4100, "", "",
+  coatheal::TelemetryClient client("", 4000, 5000, 2000, false, 4100, "",
                                    2000, 30, 5, 100);
   // Transmitting and not connected: the beacon loop may broadcast and the
   // listener may answer a GS_HELLO.
@@ -1324,13 +1324,16 @@ void TestRadioSilenceGatesBeaconAndHelloReply() {
 
 void TestFallbackCommandParsing() {
   coatheal::CommandParser parser;
-  const coatheal::CommandParseResult plan = parser.ParseLine("FALLBACK_PLAN 0 800 5 50");
+  // <id> <target_usteps> <hold_s>, exactly: the speed is the motor's own
+  // (the pre-2026-10-10 fourth field is refused on arity).
+  const coatheal::CommandParseResult plan = parser.ParseLine("FALLBACK_PLAN 0 800 5");
   assert(plan.ok);
   assert(plan.command.type == coatheal::CommandType::kFallbackPlan);
   assert(plan.command.name == "FALLBACK_PLAN");
-  assert(plan.command.args.size() == 4);
+  assert(plan.command.args.size() == 3);
   assert(parser.ParseLine("FALLBACK_PLAN 1 600 3").ok);
   assert(!parser.ParseLine("FALLBACK_PLAN 1 600").ok);
+  assert(!parser.ParseLine("FALLBACK_PLAN 0 800 5 50").ok);
   assert(!parser.ParseLine("FALLBACK_PLAN 1 600 3 50 extra").ok);
   for (const char* line : {"FALLBACK_ARM", "FALLBACK_DISARM", "FALLBACK_STATUS"}) {
     assert(parser.ParseLine(line).ok);
@@ -1506,19 +1509,21 @@ void TestFallbackPlanCommands() {
   assert(ContainsText(controller.HandleCommandLine("FALLBACK_PLAN 2 800 5", ""), "invalid motor id"));
   assert(ContainsText(controller.HandleCommandLine("FALLBACK_PLAN 0 999999 5", ""), "invalid target"));
   assert(ContainsText(controller.HandleCommandLine("FALLBACK_PLAN 0 800 -1", ""), "invalid hold_s"));
-  assert(ContainsText(controller.HandleCommandLine("FALLBACK_PLAN 0 800 5 500", ""), "invalid speed_hz"));
+  // Speed is the motor's own (STEPPER_SET_SPEED); a fourth field is an
+  // arity error, so a pre-2026-10-10 ground station cannot smuggle one in.
+  assert(ContainsText(controller.HandleCommandLine("FALLBACK_PLAN 0 800 5 500", ""), "invalid argument count"));
   assert(ContainsText(controller.HandleCommandLine("FALLBACK_PLAN 0 800", ""), "invalid argument count"));
   assert(!std::filesystem::exists(queue_dir / "fallback_plan.txt"));
 
-  assert(controller.HandleCommandLine("FALLBACK_PLAN 0 800 5 50", "") ==
-         "ACK,FALLBACK_PLAN,motor=0;target=800;hold_s=5;speed_hz=50");
+  assert(controller.HandleCommandLine("FALLBACK_PLAN 0 800 5", "") ==
+         "ACK,FALLBACK_PLAN,motor=0;target=800;hold_s=5");
   assert(controller.HandleCommandLine("FALLBACK_PLAN 1 600 3", "") ==
-         "ACK,FALLBACK_PLAN,motor=1;target=600;hold_s=3;speed_hz=0");
+         "ACK,FALLBACK_PLAN,motor=1;target=600;hold_s=3");
   assert(std::filesystem::exists(queue_dir / "fallback_plan.txt"));
   assert(controller.HandleCommandLine("FALLBACK_ARM", "") == "ACK,FALLBACK_ARM,plan=armed");
   assert(controller.HandleCommandLine("FALLBACK_STATUS", "") ==
          "ACK,FALLBACK_STATUS,state=armed;armed=1;deadline_s=1800;deadline_started=0;"
-         "m0=800/5/50/pending;m1=600/3/0/pending");
+         "m0=800/5/pending;m1=600/3/pending");
   assert(ContainsText(controller.HandleCommandLine("STATUS", ""), ";plan=armed"));
 
   // Radio silence refuses the plan commands like everything else.
@@ -1532,14 +1537,14 @@ void TestFallbackPlanCommands() {
     coatheal::SystemController restarted(LoadRadioTestConfig(queue_dir));
     const std::string status = restarted.HandleCommandLine("FALLBACK_STATUS", "");
     assert(ContainsText(status, "state=armed;armed=1"));
-    assert(ContainsText(status, "m0=800/5/50/pending;m1=600/3/0/pending"));
+    assert(ContainsText(status, "m0=800/5/pending;m1=600/3/pending"));
     assert(ContainsText(restarted.HandleCommandLine("STATUS", ""), ";plan=armed"));
     assert(restarted.HandleCommandLine("FALLBACK_DISARM", "") == "ACK,FALLBACK_DISARM,plan=none");
   }
   coatheal::SystemController third(LoadRadioTestConfig(queue_dir));
   const std::string after = third.HandleCommandLine("FALLBACK_STATUS", "");
   assert(ContainsText(after, "state=none;armed=0"));
-  assert(ContainsText(after, "m0=800/5/50/pending"));
+  assert(ContainsText(after, "m0=800/5/pending"));
 
   // A corrupt file is ignored: no plan, and the controller still starts.
   {
@@ -1679,15 +1684,120 @@ void TestDirectMicrostepCapAndSpeedCeiling() {
   assert(ContainsText(at_cap, "stepper unavailable"));
   assert(ContainsText(controller.HandleCommandLine("STEPPER_MOVETO 0 -1000", ""), "stepper unavailable"));
 
-  // Speed validation uses the derived ceiling -- 0.5 mm/s is 100
-  // full-steps/s at the 1 mm lead -- and names it.
-  const std::string fast = controller.HandleCommandLine("FALLBACK_PLAN 0 800 5 101", "");
-  assert(ContainsText(fast, "invalid speed_hz"));
-  assert(ContainsText(fast, "100 full-steps/s = 0.5 mm/s"));
-  assert(controller.HandleCommandLine("FALLBACK_PLAN 0 800 5 100", "") ==
-         "ACK,FALLBACK_PLAN,motor=0;target=800;hold_s=5;speed_hz=100");
+  // The plan carries no speed of its own: a fourth field is refused on
+  // arity (the ceiling itself is checked in TestBendSequenceRepeatAndStatus).
+  assert(ContainsText(controller.HandleCommandLine("FALLBACK_PLAN 0 800 5 101", ""),
+                      "invalid argument count"));
+  assert(controller.HandleCommandLine("FALLBACK_PLAN 0 800 5", "") ==
+         "ACK,FALLBACK_PLAN,motor=0;target=800;hold_s=5");
 
   std::filesystem::remove_all(queue_dir);
+}
+
+
+// Bend sequences (bend_sequence.hpp): <target>:<hold> steps, an optional
+// repeat=<n> for the cyclic body, and the motor's own speed throughout.
+void TestBendSequenceRepeatAndStatus() {
+  using coatheal::BendSequenceDefinition;
+  using coatheal::ParseBendSequenceSteps;
+  std::string error;
+  {
+    // +limit / -limit cycled three times, then back to zero once.
+    BendSequenceDefinition def;
+    assert(ParseBendSequenceSteps({"800:2.5", "-800:1", "repeat=3", "0:0"}, 200000, 3600.0, &def, &error));
+    assert(def.steps.size() == 2 && def.repeat == 3 && def.tail.size() == 1);
+    assert(def.total_steps() == 7);
+    assert(def.at(0).target_usteps == 800 && def.at(0).hold_s == 2.5);
+    assert(def.at(1).target_usteps == -800 && def.at(1).hold_s == 1.0);
+    assert(def.at(5).target_usteps == -800);
+    assert(def.at(6).target_usteps == 0 && def.at(6).hold_s == 0.0);
+    assert(def.cycle_of(0) == 1 && def.cycle_of(1) == 1);
+    assert(def.cycle_of(2) == 2 && def.cycle_of(5) == 3);
+    assert(def.cycle_of(6) == 3);  // the tail belongs to the last cycle
+  }
+  {
+    // No repeat=: the list runs once, as every sequence did before.
+    BendSequenceDefinition def;
+    assert(ParseBendSequenceSteps({"400:1", "0:1"}, 200000, 3600.0, &def, &error));
+    assert(def.repeat == 1 && def.total_steps() == 2 && def.tail.empty());
+    assert(def.cycle_of(1) == 1);
+  }
+  {
+    // Nothing after repeat=: the body alone cycles, up to the cap.
+    BendSequenceDefinition def;
+    assert(ParseBendSequenceSteps({"400:1", "repeat=1000"}, 200000, 3600.0, &def, &error));
+    assert(def.total_steps() == 1000 && def.at(999).target_usteps == 400);
+    assert(def.cycle_of(999) == 1000);
+  }
+  struct Bad { std::vector<std::string> tokens; const char* fragment; };
+  const Bad bad[] = {
+    {{}, "sequence has no steps"},
+    {{"repeat=3", "400:1"}, "repeat= needs at least one step before it"},
+    {{"400:1", "repeat=3", "repeat=4"}, "repeat= given twice"},
+    {{"400:1", "repeat=0"}, "invalid repeat (1..1000)"},
+    {{"400:1", "repeat=1001"}, "invalid repeat (1..1000)"},
+    {{"400:1", "repeat=x"}, "invalid repeat (1..1000)"},
+    {{"400:1:50"}, "speed is set per motor with STEPPER_SET_SPEED"},
+    {{"400"}, "invalid sequence step"},
+    {{"400:1:2:3"}, "invalid sequence step"},
+    {{"200001:1"}, "invalid sequence target/hold"},
+    {{"400:-1"}, "invalid sequence target/hold"},
+    {{"400:3601"}, "invalid sequence target/hold"},
+    {{"4e2:1"}, "invalid sequence target/hold"},
+  };
+  for (const Bad& b : bad) {
+    BendSequenceDefinition def;
+    error.clear();
+    assert(!ParseBendSequenceSteps(b.tokens, 200000, 3600.0, &def, &error));
+    if (error.find(b.fragment) == std::string::npos) {
+      std::cerr << "expected '" << b.fragment << "', got '" << error << "'\n";
+      assert(false);
+    }
+  }
+
+  // Through the command surface, on a controller with simulated motors.
+  const std::filesystem::path dir = FreshQueueDir("bendseq");
+  coatheal::OnboardConfig cfg = LoadRadioTestConfig(dir);
+  cfg.runtime.use_simulated_pwm = true;
+  cfg.runtime.use_simulated_sensors = true;
+  cfg.comms.discovery_enabled = false;
+  cfg.comms.command_port = 0;
+  cfg.storage.primary_log_path = (dir / "a.csv").string();
+  cfg.storage.secondary_log_path = (dir / "b.csv").string();
+  coatheal::SystemController controller(cfg);
+  assert(controller.Initialize(&error));
+  auto send = [&](const char* line) { return controller.HandleCommandLine(line, ""); };
+
+  assert(send("ARM").rfind("ACK,ARM", 0) == 0);
+  assert(send("STEPPER_ENABLE 0").rfind("ACK,", 0) == 0);
+  assert(send("SET_POSITION_ZERO 0").rfind("ACK,", 0) == 0);
+
+  assert(send("BENDSEQ_LOAD 0 cyc 800:2 -800:2 repeat=5 0:0") == "ACK,BENDSEQ_LOAD,sequence loaded");
+  // The pre-2026-10-10 <target>:<hold>:<hz> form is refused and says where
+  // the speed went.
+  const std::string with_speed = send("BENDSEQ_LOAD 0 old 800:2:50 0:1");
+  assert(with_speed.rfind("NACK,BENDSEQ_LOAD", 0) == 0);
+  assert(ContainsText(with_speed, "STEPPER_SET_SPEED"));
+  assert(ContainsText(send("BENDSEQ_LOAD 0 cyc2 800:2 repeat=0"), "invalid repeat"));
+  // Nothing active: no total/cycle fields.
+  const std::string idle = send("BENDSEQ_STATUS 0");
+  assert(ContainsText(idle, "running=0;paused=0;name=;step=0"));
+  assert(!ContainsText(idle, "total="));
+
+  // Speed and acceleration live on the motor, nowhere in the sequence, and
+  // the speed ceiling (0.5 mm/s = 100 full-steps/s at the 1 mm lead) is
+  // reported when it clamps.
+  const std::string fast = send("STEPPER_SET_SPEED 0 101");
+  assert(fast.rfind("ACK,STEPPER_SET_SPEED,speed clamped to ", 0) == 0);
+  assert(ContainsText(fast, "100 full-steps/s = 0.5 mm/s"));
+  assert(send("STEPPER_SET_SPEED 0 50") == "ACK,STEPPER_SET_SPEED,speed updated");
+  assert(send("STEPPER_SET_ACCEL 0 200") == "ACK,STEPPER_SET_ACCEL,accel updated");
+
+  assert(send("BENDSEQ_RUN 0 cyc") == "ACK,BENDSEQ_RUN,sequence started");
+  assert(ContainsText(send("BENDSEQ_STATUS 0"),
+                      "running=1;paused=0;name=cyc;step=0;total=11;cycle=1;cycles=5"));
+  assert(send("BENDSEQ_STOP 0").rfind("ACK,", 0) == 0);
+  std::filesystem::remove_all(dir);
 }
 
 
@@ -1841,6 +1951,7 @@ int main() {
   TestFallbackConfigValidation();
   TestMotionEnvelopeConfig();
   TestDirectMicrostepCapAndSpeedCeiling();
+  TestBendSequenceRepeatAndStatus();
   TestSpecimenListsDeriveTheLayout();
   TestSpecimenListsRejectWhatCannotRun();
   TestGetLayoutReportsTheGroups();

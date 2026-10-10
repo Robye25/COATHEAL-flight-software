@@ -40,7 +40,6 @@ class TelemetryClient : public FrameSender {
                   bool discovery_enabled,
                   int discovery_port,
                   std::string static_ground_ip,
-                  std::string static_pi_ip,
                   int discovery_period_ms = 2000,
                   int rediscover_period_s = 30,
                   int failover_grace_s = 5,
@@ -170,7 +169,6 @@ class TelemetryClient : public FrameSender {
   bool discovery_enabled_ = true;
   int discovery_port_ = 4100;
   std::string static_ground_ip_;
-  std::string static_pi_ip_;
   int discovery_period_ms_ = 2000;
   int rediscover_period_s_ = 30;
   int failover_grace_s_ = 5;

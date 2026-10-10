@@ -3,3 +3,9 @@
 deploy_onboard.sh text eol=lf
 *.sh text eol=lf
 *.bat text eol=crlf
+
+# The z1 telemetry dictionary is compared byte for byte (CRC-32) between the
+# onboard build and the ground station: a CRLF checkout on Windows changed its
+# CRC and the ground station answered HELLO,plain, i.e. no telemetry at all.
+protocol/** text eol=lf
+*.ini text eol=lf

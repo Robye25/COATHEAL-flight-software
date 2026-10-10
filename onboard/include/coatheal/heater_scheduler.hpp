@@ -50,7 +50,7 @@ class HeaterScheduler {
 
   // True iff the most recent Schedule() call was inhibited by the motion
   // lock (i.e., a motor was pulling and all duties were forced to zero).
-  // Agent C wires this into the HEATER_INHIBITED STATUS bit.
+  // SystemController copies this into the HEATER_INHIBITED STATUS bit.
   bool heater_inhibited() const { return last_inhibited_; }
 
   // Alias requested by the system_controller wiring plan. Identical to
@@ -83,7 +83,7 @@ class HeaterScheduler {
 
   // Pre-reserved scratch vectors so Schedule() no longer heap-allocates on
   // the steady-state tick path. Grown lazily to `requested.size()` on the
-  // first call and then reused. Agent B perf fix.
+  // first call and then reused.
   std::vector<double> scratch_clamped_;
   std::vector<std::pair<std::size_t, double>> scratch_ranked_;
   std::vector<double> scratch_scheduled_;

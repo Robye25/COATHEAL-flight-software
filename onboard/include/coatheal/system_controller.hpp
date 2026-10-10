@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "coatheal/bend_sequence.hpp"
 #include "coatheal/command_parser.hpp"
 #include "coatheal/command_server.hpp"
 #include "coatheal/config.hpp"
@@ -102,7 +103,7 @@ class SystemController {
   // the StepperController. In production, `active_motion_lock_` is
   // repointed at `stepper_->motion_lock()` in Initialize() so the heater
   // interlock and pull-event edge detector observe the same lock every
-  // StepperChannel actually acquires. (Agent C, 2026-04-17 routing fix.)
+  // StepperChannel actually acquires (routing fix, 2026-04-17).
   MotionLock motion_lock_;
   HeaterScheduler scheduler_;
   StorageManager storage_manager_;
@@ -135,19 +136,11 @@ class SystemController {
   bool drain_error_logged_ = false;
   SensorSnapshot last_sensor_snapshot_;
 
-  struct BendSequenceStep {
-    std::int64_t target_usteps = 0;
-    double hold_s = 0.0;
-    std::optional<double> speed_hz;
-  };
-  struct BendSequenceDefinition {
-    std::string name;
-    std::vector<BendSequenceStep> steps;
-  };
+  // Loaded sequences (bend_sequence.hpp) and the one running, per motor.
   struct BendSequenceRuntime {
     std::map<std::string, BendSequenceDefinition> definitions;
     std::string active_name;
-    std::size_t step_index = 0;
+    std::size_t step_index = 0;  // into the expanded body x repeat + tail list
     bool running = false;
     bool paused = false;
     bool step_queued = false;

@@ -361,8 +361,6 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
       config->comms.telemetry_host = value;
     } else if (key == "comms.static_ground_ip") {
       config->comms.static_ground_ip = value;
-    } else if (key == "comms.static_pi_ip") {
-      config->comms.static_pi_ip = value;
     } else if (key == "comms.telemetry_port") {
       if (!parse_int(key, value, &config->comms.telemetry_port, line_no)) return false;
     } else if (key == "comms.command_port") {

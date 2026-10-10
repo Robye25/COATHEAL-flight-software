@@ -207,7 +207,6 @@ SystemController::SystemController(OnboardConfig config)
                         config_.comms.discovery_enabled,
                         config_.comms.discovery_port,
                         config_.comms.static_ground_ip,
-                        config_.comms.static_pi_ip,
                         config_.comms.discovery_period_ms,
                         config_.comms.rediscover_period_s,
                         config_.comms.failover_grace_s,
@@ -414,7 +413,7 @@ bool SystemController::Initialize(std::string* error) {
   // read SPI_FAIL and sent bench debugging after the wiring.
   spi_.set_healthy(SpiBusHealthy());
 
-  // Routing fix (Agent C, 2026-04-17): StepperController owns its own
+  // Routing fix (2026-04-17): StepperController owns its own
   // MotionLock, and that is the one every StepperChannel actually takes on
   // ArmPullCycle. The SystemController::motion_lock_ member was a parallel,
   // never-acquired lock — so both the HeaterScheduler interlock and the
@@ -491,6 +490,15 @@ std::string SystemController::SequenceStatus(int motor_id) const {
       << ";paused=" << (runtime.paused ? "1" : "0")
       << ";name=" << runtime.active_name
       << ";step=" << runtime.step_index;
+  // Where the active sequence stands: `total` expanded steps, and which
+  // repeat of the body `step` falls in (cycle 1..cycles).
+  const auto definition_it = runtime.definitions.find(runtime.active_name);
+  if (!runtime.active_name.empty() && definition_it != runtime.definitions.end()) {
+    const BendSequenceDefinition& definition = definition_it->second;
+    oss << ";total=" << definition.total_steps()
+        << ";cycle=" << definition.cycle_of(runtime.step_index)
+        << ";cycles=" << definition.repeat;
+  }
   if (!runtime.fault.empty()) oss << ";fault=" << runtime.fault;
   return oss.str();
 }
@@ -635,22 +643,17 @@ void SystemController::TickFallbackPlan(MissionPhase phase,
   }
   if (action.has_value()) {
     // Same path as the operator's STEPPER_MOVETO: heaters inhibited first,
-    // then the absolute move with its hold. The EVT,PULL edge detector sees
-    // the MotionLock this acquires exactly as it would a manual bend.
+    // then the absolute move with its hold, at the motor's own speed. The
+    // EVT,PULL edge detector sees the MotionLock this acquires exactly as it
+    // would a manual bend.
     std::string err;
     bool accepted = true;
     bool retry_later = false;
-    if (action->speed_hz > 0.0 &&
-        !stepper_->SetSpeed(action->motor_id, action->speed_hz, &err)) {
+    InhibitHeatersForMotion();
+    if (!stepper_->MoveToSteps(action->motor_id, action->target_usteps,
+                               action->hold_s, &err)) {
       accepted = false;
-    }
-    if (accepted) {
-      InhibitHeatersForMotion();
-      if (!stepper_->MoveToSteps(action->motor_id, action->target_usteps,
-                                 action->hold_s, &err)) {
-        accepted = false;
-        retry_later = (err == "motion lock held by another motor");
-      }
+      retry_later = (err == "motion lock held by another motor");
     }
     {
       std::lock_guard<std::mutex> lock(fallback_mu_);
@@ -660,8 +663,7 @@ void SystemController::TickFallbackPlan(MissionPhase phase,
     if (accepted) {
       std::cerr << "[fallback] plan: M" << action->motor_id << " bend started"
                 << " target=" << action->target_usteps
-                << " hold_s=" << action->hold_s
-                << " speed_hz=" << action->speed_hz << '\n';
+                << " hold_s=" << action->hold_s << '\n';
     } else if (retry_later) {
       std::cerr << "[fallback] plan: M" << action->motor_id
                 << " waiting for the motion lock" << '\n';
@@ -721,14 +723,15 @@ void SystemController::TickBendSequences() {
       continue;
     }
     const BendSequenceDefinition& definition = definition_it->second;
-    if (runtime.step_index >= definition.steps.size()) {
+    const std::size_t total_steps = definition.total_steps();
+    if (runtime.step_index >= total_steps) {
       runtime.running = false;
       runtime.step_queued = false;
       runtime.active_name.clear();
       continue;
     }
 
-    const BendSequenceStep& step = definition.steps[runtime.step_index];
+    const BendSequenceStep& step = definition.at(runtime.step_index);
     const StepperStatus status = stepper_->Snapshot(static_cast<int>(motor));
     if (runtime.step_queued) {
       if (status.moving || status.holding) continue;
@@ -745,23 +748,21 @@ void SystemController::TickBendSequences() {
       }
       ++runtime.step_index;
       runtime.step_queued = false;
-      if (runtime.step_index >= definition.steps.size()) {
+      if (runtime.step_index >= total_steps) {
         runtime.running = false;
         runtime.active_name.clear();
+        std::cerr << "[sequence] motor " << motor << ": sequence "
+                  << definition.name << " complete (" << total_steps
+                  << " steps, " << definition.repeat << " cycle"
+                  << (definition.repeat == 1 ? "" : "s") << ")\n";
         continue;
       }
     }
 
-    const BendSequenceStep& next_step =
-        definition.steps[runtime.step_index];
+    // The step runs at the motor's own speed and acceleration
+    // (STEPPER_SET_SPEED / STEPPER_SET_ACCEL); a sequence carries neither.
+    const BendSequenceStep& next_step = definition.at(runtime.step_index);
     std::string error;
-    if (next_step.speed_hz.has_value() &&
-        !stepper_->SetSpeed(static_cast<int>(motor),
-                            next_step.speed_hz.value(), &error)) {
-      runtime.paused = true;
-      runtime.fault = error;
-      continue;
-    }
     InhibitHeatersForMotion();
     if (!stepper_->MoveToSteps(static_cast<int>(motor),
                                next_step.target_usteps,
@@ -1268,7 +1269,7 @@ int SystemController::Run() {
     // Using the lock as the authoritative "pull in progress" signal is
     // also tick-rate-independent and matches the heater-interlock contract
     // (HeaterScheduler zeros duty while the lock is held; the pull-event
-    // emitter must bracket exactly the same window). (Agent C, 2026-04-17.)
+    // emitter must bracket exactly the same window). (2026-04-17.)
     if (stepper_ && !record.steppers.empty()) {
       if (pull_state_.size() != record.steppers.size()) {
         pull_state_.resize(record.steppers.size());
@@ -1338,10 +1339,9 @@ int SystemController::Run() {
     }
 
     // Heartbeat: toggle the status LED every tick so a human can see the
-    // main loop is alive. Mode-indicator LED: Group A owns SystemMode — at
-    // merge time, replace the kSolid default with the mapped pattern from
-    // the current SystemMode (e.g. kHeartbeat=NOMINAL, kFastBlink=WARN,
-    // kSOS=FAULT). TODO(group-a-merge): wire SystemMode -> StatusLed::Pattern.
+    // main loop is alive. The flight pinout (schematic v4) has no LEDs, so
+    // both are the simulated backend unless hal.*_led_enabled says otherwise;
+    // the mode LED stays solid.
     if (status_led_) {
       status_led_->Toggle();
     }
@@ -2403,33 +2403,18 @@ std::string SystemController::HandleCommandLine(const std::string& line,
       if (!IsSequenceNameValid(name)) {
         return Nack(cmd_name, "invalid sequence name");
       }
+      // <target>:<hold> steps with an optional `repeat=<n>` (the steps
+      // before it run n times, the steps after it once at the end); every
+      // step runs at the motor's own speed and acceleration. The rules are
+      // in bend_sequence.hpp, where they are unit-tested.
       BendSequenceDefinition definition;
       definition.name = name;
-      for (std::size_t i = 2; i < command.args.size(); ++i) {
-        std::istringstream spec(command.args[i]);
-        std::vector<std::string> fields;
-        std::string field;
-        while (std::getline(spec, field, ':')) fields.push_back(field);
-        if (fields.size() < 2 || fields.size() > 3) {
-          return Nack(cmd_name, "invalid sequence step");
-        }
-        BendSequenceStep step;
-        if (!ParseInt64(fields[0], &step.target_usteps) ||
-            !ParseDouble(fields[1], &step.hold_s) ||
-            std::abs(step.target_usteps) > config_.stepper.max_position_steps ||
-            step.hold_s < 0.0 || step.hold_s > 86400.0) {
-          return Nack(cmd_name, "invalid sequence target/hold");
-        }
-        if (fields.size() == 3) {
-          double speed = 0.0;
-          if (!ParseDouble(fields[2], &speed) || speed <= 0.0 ||
-              speed > EffectiveMaxStepHz(config_)) {
-            return Nack(cmd_name, "invalid sequence speed (0 < hz <= " +
-                                      SpeedCeilingText(config_) + ")");
-          }
-          step.speed_hz = speed;
-        }
-        definition.steps.push_back(step);
+      std::string parse_error;
+      if (!ParseBendSequenceSteps(
+              std::vector<std::string>(command.args.begin() + 2, command.args.end()),
+              config_.stepper.max_position_steps, kMaxHoldSeconds, &definition,
+              &parse_error)) {
+        return Nack(cmd_name, parse_error);
       }
       {
         std::lock_guard<std::mutex> lock(sequence_mu_);
@@ -2853,7 +2838,7 @@ std::string SystemController::HandleCommandLine(const std::string& line,
         }
       }
       std::string err;
-      // Routing fix (Agent C, 2026-04-17): use the non-blocking ArmPull
+      // Routing fix (2026-04-17): use the non-blocking ArmPull
       // path and let the main loop's Tick() drive the pull to completion.
       // The previous `ExecutePull` helper pumped Tick() synchronously here,
       // which meant that by the time we ACK'd, the channel was already
@@ -2869,9 +2854,10 @@ std::string SystemController::HandleCommandLine(const std::string& line,
     }
 
     case CommandType::kFallbackPlan: {
-      // FALLBACK_PLAN <motor> <target_usteps> <hold_s> [speed_hz]. Validated
-      // like a BENDSEQ_LOAD step; motor ids come from the config so a bare
-      // controller (no stepper yet) can still be pre-loaded on the bench.
+      // FALLBACK_PLAN <motor> <target_usteps> <hold_s>. Validated like a
+      // BENDSEQ_LOAD step and run at the motor's own speed; motor ids come
+      // from the config so a bare controller (no stepper yet) can still be
+      // pre-loaded on the bench.
       std::size_t motor = 0;
       if (!ParseIndex(command.args[0], &motor) || motor >= config_.motors.size()) {
         return Nack(cmd_name, "invalid motor id");
@@ -2882,29 +2868,21 @@ std::string SystemController::HandleCommandLine(const std::string& line,
         return Nack(cmd_name, "invalid target (|usteps| must be <= stepper.max_position_steps)");
       }
       double hold_s = 0.0;
-      if (!ParseDouble(command.args[2], &hold_s) || hold_s < 0.0 || hold_s > 86400.0) {
+      if (!ParseDouble(command.args[2], &hold_s) || hold_s < 0.0 ||
+          hold_s > kMaxHoldSeconds) {
         return Nack(cmd_name, "invalid hold_s (0..86400)");
-      }
-      double speed_hz = 0.0;
-      if (command.args.size() == 4) {
-        if (!ParseDouble(command.args[3], &speed_hz) || speed_hz <= 0.0 ||
-            speed_hz > EffectiveMaxStepHz(config_)) {
-          return Nack(cmd_name, "invalid speed_hz (0 < hz <= " +
-                                    SpeedCeilingText(config_) + ")");
-        }
       }
       std::string error;
       {
         std::lock_guard<std::mutex> lock(fallback_mu_);
         if (!fallback_planner_.SetMotorPlan(static_cast<int>(motor), target,
-                                            hold_s, speed_hz, &error)) {
+                                            hold_s, &error)) {
           return Nack(cmd_name, error);
         }
       }
       PersistFallbackPlanIfDirty();
       std::ostringstream msg;
-      msg << "motor=" << motor << ";target=" << target << ";hold_s=" << hold_s
-          << ";speed_hz=" << speed_hz;
+      msg << "motor=" << motor << ";target=" << target << ";hold_s=" << hold_s;
       return Ack(cmd_name, msg.str());
     }
 

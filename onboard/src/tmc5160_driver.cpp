@@ -88,18 +88,16 @@ constexpr std::uint32_t kIholdDelay = 6U;
 constexpr std::uint32_t kTpowerdown = 10U;
 
 // VMAX: the pacing thread above this seam drives Step() at up to the
-// configured full-step ceiling (EffectiveMaxStepHz -- 50 full-steps/s at
-// the flight 0.5 mm/s; this constant keeps its original 100 Hz sizing, so
-// the margin only grew); XTARGET moves in the ramp generator's fixed
-// 256 internal-microsteps/fullstep units regardless of MRES, so a 100 Hz
-// dribble corresponds to a worst-case demand of 100*256 = 25600 internal-
-// microsteps/s. The VMAX register's unit is f_clk/2^24 internal-
+// configured full-step ceiling (EffectiveMaxStepHz: 100 full-steps/s at the
+// flight 0.5 mm/s and the 1 mm lead). XTARGET moves in the ramp generator's
+// fixed 256 internal-microsteps/fullstep units regardless of MRES, so a
+// 100 Hz dribble corresponds to a worst-case demand of 100*256 = 25600
+// internal-microsteps/s. The VMAX register's unit is f_clk/2^24 internal-
 // microsteps/s (~0.715 usteps/s per LSB at the default 12 MHz internal
 // clock), so VMAX=102400 corresponds to roughly 73000 usteps/s -- a ~2.9x
-// margin over the worst-case demand (not the 4x the raw
-// 4*100*256 arithmetic below might suggest), comfortably keeping the ramp
-// generator from ever becoming the limiting factor at any configured
-// microstep divisor.
+// margin over the worst-case demand (not the 4x the raw 4*100*256
+// arithmetic below might suggest), comfortably keeping the ramp generator
+// from ever becoming the limiting factor at any configured microstep divisor.
 constexpr std::uint32_t kVmax = 4U * 100U * 256U;
 
 // GSTAT flags (write 1 to clear): bit 0 reset, bit 1 drv_err, bit 2 uv_cp.

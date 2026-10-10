@@ -1,4 +1,4 @@
-// Agent B — telemetry enqueue throughput bench.
+// Telemetry enqueue throughput bench.
 //
 // Drives TelemetryQueue::Enqueue() at a fixed rate for a fixed wall-clock
 // window and reports per-call latency (avg / p50 / p99 / max). Frames are

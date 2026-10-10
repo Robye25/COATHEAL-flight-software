@@ -48,6 +48,7 @@ configure_file(src/telemetry_dictionary_z1.cpp.in
                "${CMAKE_CURRENT_BINARY_DIR}/generated/telemetry_dictionary_z1.cpp" @ONLY)
 
 add_library(coatheal_onboard_core
+  src/bend_sequence.cpp
   src/command_parser.cpp
   src/command_server.cpp
   src/config.cpp

@@ -59,8 +59,8 @@ FallbackTickInput In(bool fallback, MissionPhase phase, Clock::time_point now,
 FallbackPlanner ArmedPlanner(double deadline_s = 1800.0) {
   FallbackPlanner planner(Cfg(deadline_s), 2);
   std::string error;
-  assert(planner.SetMotorPlan(0, 800, 5.0, 50.0, &error));
-  assert(planner.SetMotorPlan(1, 600, 3.0, 0.0, &error));
+  assert(planner.SetMotorPlan(0, 800, 5.0, &error));
+  assert(planner.SetMotorPlan(1, 600, 3.0, &error));
   assert(planner.Arm(&error));
   assert(planner.state() == FallbackPlanState::kArmed);
   return planner;
@@ -92,7 +92,6 @@ void TestMotorsRunInOrderAtPreFloat() {
   assert(a0->motor_id == 0);
   assert(a0->target_usteps == 800);
   assert(a0->hold_s == 5.0);
-  assert(a0->speed_hz == 50.0);
   assert(planner.state() == FallbackPlanState::kRunning);
   assert(planner.motor(0).state == FallbackMotorState::kRunning);
   assert(planner.deadline_started());
@@ -111,7 +110,7 @@ void TestMotorsRunInOrderAtPreFloat() {
   assert(a1.has_value());
   assert(a1->motor_id == 1);
   assert(a1->target_usteps == 600);
-  assert(a1->speed_hz == 0.0);
+  assert(a1->hold_s == 3.0);
   planner.ReportStartResult(1, true, false, "");
   assert(planner.state() == FallbackPlanState::kRunning);
 
@@ -215,8 +214,8 @@ void TestAbortedBendFailsTheMotorAndTheOtherStillRuns() {
   assert(planner.motor(1).state == FallbackMotorState::kDone);
   // Both settled, one failed: the plan says so, and names the reason.
   assert(planner.state() == FallbackPlanState::kFailed);
-  assert(planner.StatusBody().find("m0=800/5/50/failed") != std::string::npos);
-  assert(planner.StatusBody().find("m1=600/3/0/done") != std::string::npos);
+  assert(planner.StatusBody().find("m0=800/5/failed") != std::string::npos);
+  assert(planner.StatusBody().find("m1=600/3/done") != std::string::npos);
   assert(planner.StatusBody().find("error=M0 bend aborted: StallGuard stall") != std::string::npos);
   // A failed plan never runs again, and survives a restart as failed.
   assert(!planner.Tick(In(true, MissionPhase::kFloat, t0 + std::chrono::seconds(20), Ready(), Ready())).has_value());
@@ -229,7 +228,7 @@ void TestAbortedBendFailsTheMotorAndTheOtherStillRuns() {
   // The last motor aborting fails the plan at once; no reason is still a failure.
   FallbackPlanner single(Cfg(), 2);
   std::string error;
-  assert(single.SetMotorPlan(0, 800, 5.0, 0.0, &error));
+  assert(single.SetMotorPlan(0, 800, 5.0, &error));
   assert(single.Arm(&error));
   assert(single.Tick(In(true, MissionPhase::kFloat, t0, Ready(), Ready())).has_value());
   single.ReportStartResult(0, true, false, "");
@@ -308,21 +307,21 @@ void TestOperatorSurfaceRules() {
   std::string error;
   assert(!planner.Arm(&error));
   assert(error == "no plan loaded");
-  assert(!planner.SetMotorPlan(2, 1, 1.0, 1.0, &error));
+  assert(!planner.SetMotorPlan(2, 1, 1.0, &error));
   assert(error == "invalid motor id");
-  assert(planner.SetMotorPlan(1, 600, 3.0, 25.0, &error));
+  assert(planner.SetMotorPlan(1, 600, 3.0, &error));
   assert(planner.Arm(&error));
   const Clock::time_point t0 = Clock::now();
   assert(planner.Tick(In(true, MissionPhase::kFloat, t0, Ready(), Ready())).has_value());
   planner.ReportStartResult(1, true, false, "");
   assert(planner.state() == FallbackPlanState::kRunning);
-  assert(!planner.SetMotorPlan(0, 800, 5.0, 50.0, &error));
+  assert(!planner.SetMotorPlan(0, 800, 5.0, &error));
   assert(error == "plan running");
   assert(!planner.Arm(&error));
   assert(error == "plan running");
   planner.Tick(In(true, MissionPhase::kFloat, t0 + std::chrono::seconds(30), Ready(), Ready(5.0, false)));
   assert(planner.state() == FallbackPlanState::kDone);
-  assert(planner.SetMotorPlan(0, 800, 5.0, 50.0, &error));
+  assert(planner.SetMotorPlan(0, 800, 5.0, &error));
   assert(planner.state() == FallbackPlanState::kNone);
   assert(planner.motor(1).state == FallbackMotorState::kPending);
   assert(planner.Arm(&error));
@@ -348,12 +347,11 @@ void TestPersistenceRoundTrip() {
   assert(loaded.motor(0).configured);
   assert(loaded.motor(0).target_usteps == 800);
   assert(loaded.motor(0).hold_s == 5.0);
-  assert(loaded.motor(0).speed_hz == 50.0);
   assert(loaded.motor(0).state == FallbackMotorState::kPending);
   assert(loaded.motor(1).target_usteps == 600);
   assert(loaded.StatusBody() ==
          "state=armed;armed=1;deadline_s=1800;deadline_started=0;"
-         "m0=800/5/50/pending;m1=600/3/0/pending");
+         "m0=800/5/pending;m1=600/3/pending");
   // The restored plan is live: it runs on the next window tick.
   assert(loaded.Tick(In(true, MissionPhase::kPreFloat, Clock::now(), Ready(), Ready())).has_value());
 
@@ -372,6 +370,19 @@ void TestPersistenceRoundTrip() {
   assert(reloaded.state() == FallbackPlanState::kDone);
   assert(reloaded.motor(0).state == FallbackMotorState::kDone);
   assert(!reloaded.Tick(In(true, MissionPhase::kFloat, t0 + std::chrono::seconds(30), Ready(), Ready())).has_value());
+
+  // A plan file written before 2026-10-10 carried a per-motor speed as its
+  // third field: it still loads, and the speed is simply the motor's now.
+  {
+    std::ofstream out(path, std::ios::trunc);
+    out << "armed=1\nstate=armed\ndeadline_s=1800\nm0=800,5,50,pending\nm1=600,3,0,done\n";
+  }
+  FallbackPlanner legacy(Cfg(), 2);
+  assert(legacy.LoadFrom(path));
+  assert(legacy.state() == FallbackPlanState::kArmed);
+  assert(legacy.motor(0).target_usteps == 800 && legacy.motor(0).hold_s == 5.0);
+  assert(legacy.motor(1).state == FallbackMotorState::kDone);
+  assert(legacy.Serialize().find("m0=800,5,pending\n") != std::string::npos);
 
   // Corrupt file: no plan, and the planner is inert.
   {
@@ -404,10 +415,10 @@ void TestPersistenceRoundTrip() {
 void TestSerializedShape() {
   FallbackPlanner planner(Cfg(), 2);
   std::string error;
-  assert(planner.SetMotorPlan(0, 800, 5.0, 50.0, &error));
-  assert(planner.Serialize() == "armed=0\nstate=none\ndeadline_s=1800\nm0=800,5,50,pending\n");
+  assert(planner.SetMotorPlan(0, 800, 5.0, &error));
+  assert(planner.Serialize() == "armed=0\nstate=none\ndeadline_s=1800\nm0=800,5,pending\n");
   assert(planner.StatusBody() ==
-         "state=none;armed=0;deadline_s=1800;deadline_started=0;m0=800/5/50/pending;m1=-");
+         "state=none;armed=0;deadline_s=1800;deadline_started=0;m0=800/5/pending;m1=-");
 }
 
 }  // namespace

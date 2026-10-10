@@ -104,8 +104,7 @@ const FallbackMotorPlan& FallbackPlanner::motor(int motor_id) const {
 }
 
 bool FallbackPlanner::SetMotorPlan(int motor_id, std::int64_t target_usteps,
-                                   double hold_s, double speed_hz,
-                                   std::string* error) {
+                                   double hold_s, std::string* error) {
   if (motor_id < 0 || static_cast<std::size_t>(motor_id) >= motors_.size()) {
     if (error) *error = "invalid motor id";
     return false;
@@ -123,7 +122,6 @@ bool FallbackPlanner::SetMotorPlan(int motor_id, std::int64_t target_usteps,
   plan.configured = true;
   plan.target_usteps = target_usteps;
   plan.hold_s = hold_s;
-  plan.speed_hz = speed_hz;
   plan.state = FallbackMotorState::kPending;
   ticks_since_start_[static_cast<std::size_t>(motor_id)] = 0;
   MarkDirty();
@@ -267,7 +265,6 @@ std::optional<FallbackAction> FallbackPlanner::Tick(const FallbackTickInput& in)
       action.motor_id = static_cast<int>(i);
       action.target_usteps = plan.target_usteps;
       action.hold_s = plan.hold_s;
-      action.speed_hz = plan.speed_hz;
       return action;
     }
     if (!ready && deadline_passed) {
@@ -322,8 +319,8 @@ std::string FallbackPlanner::StatusBody() const {
     if (!plan.configured) {
       oss << '-';
     } else {
-      oss << plan.target_usteps << '/' << plan.hold_s << '/' << plan.speed_hz
-          << '/' << ToString(plan.state);
+      oss << plan.target_usteps << '/' << plan.hold_s << '/'
+          << ToString(plan.state);
     }
   }
   if (!last_error_.empty()) oss << ";error=" << last_error_;
@@ -345,7 +342,7 @@ std::string FallbackPlanner::Serialize() const {
     const FallbackMotorPlan& plan = motors_[i];
     if (!plan.configured) continue;
     oss << 'm' << i << '=' << plan.target_usteps << ',' << plan.hold_s << ','
-        << plan.speed_hz << ',' << ToString(plan.state) << '\n';
+        << ToString(plan.state) << '\n';
   }
   return oss.str();
 }
@@ -378,13 +375,16 @@ bool FallbackPlanner::Deserialize(const std::string& text) {
       std::istringstream spec(value);
       std::string field;
       while (std::getline(spec, field, ',')) fields.push_back(field);
-      if (fields.size() != 4) return false;
+      // <target>,<hold>,<state>; a file written before 2026-10-10 carries a
+      // speed as its third field, which is read past (speed is the motor's).
+      if (fields.size() != 3 && fields.size() != 4) return false;
       FallbackMotorPlan plan;
       plan.configured = true;
+      double legacy_speed = 0.0;
       if (!ParseInt64Text(fields[0], &plan.target_usteps) ||
           !ParseDoubleText(fields[1], &plan.hold_s) ||
-          !ParseDoubleText(fields[2], &plan.speed_hz) ||
-          !ParseFallbackMotorState(fields[3], &plan.state) ||
+          (fields.size() == 4 && !ParseDoubleText(fields[2], &legacy_speed)) ||
+          !ParseFallbackMotorState(fields.back(), &plan.state) ||
           plan.state == FallbackMotorState::kUnconfigured) {
         return false;
       }

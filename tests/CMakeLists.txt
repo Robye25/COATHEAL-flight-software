@@ -122,7 +122,7 @@ target_link_libraries(coatheal_telemetry_rev_c_tests PRIVATE coatheal_onboard_co
 
 add_test(NAME coatheal_telemetry_rev_c_tests COMMAND coatheal_telemetry_rev_c_tests)
 
-# Agent B — pulse-thread jitter bench. Not registered as a ctest (it takes
+# Pulse-thread jitter bench. Not registered as a ctest (it takes
 # several seconds and is a timing measurement, not a correctness check).
 add_executable(coatheal_pulse_jitter_bench
   pulse_jitter_bench.cpp
@@ -130,7 +130,7 @@ add_executable(coatheal_pulse_jitter_bench
 
 target_link_libraries(coatheal_pulse_jitter_bench PRIVATE coatheal_onboard_core)
 
-# Agent B — telemetry enqueue throughput bench. Measures Enqueue() latency
+# Telemetry enqueue throughput bench. Measures Enqueue() latency
 # at 50 Hz for 60 s so we know if fsync-per-frame dominates the hot path.
 add_executable(coatheal_enqueue_throughput_bench
   enqueue_throughput_bench.cpp

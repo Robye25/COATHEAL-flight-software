@@ -5,9 +5,9 @@
 namespace coatheal {
 
 // MotionLock is a safety interlock shared between the stepper motion layer
-// (Agent B) and the heater scheduler (Agent D).
+// and the heater scheduler.
 //
-// Contract (REV B, 2-motor + pull-cycle design):
+// Contract (two motors, pull cycles):
 //   * Only one motor may hold the lock at a time. Pull cycles for two
 //     motors MUST serialise; any second attempt fails fast.
 //   * While the lock is held, all heater duties MUST be clamped to zero

@@ -1,4 +1,4 @@
-// Agent B — pulse-thread jitter harness.
+// Pulse-thread jitter harness.
 //
 // Launches a StepperChannel with use_pulse_thread=true so pulses come from
 // the dedicated RT thread (not from Tick()). Requests MoveToSteps(800, 0)

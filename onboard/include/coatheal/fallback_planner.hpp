@@ -52,11 +52,12 @@ struct FallbackPlannerConfig {
   double bend_deadline_s = 1800.0;
 };
 
+// One bend: an absolute target with a hold, run at the motor's own speed and
+// acceleration (STEPPER_SET_SPEED / STEPPER_SET_ACCEL) like every other move.
 struct FallbackMotorPlan {
   bool configured = false;
   std::int64_t target_usteps = 0;
   double hold_s = 0.0;
-  double speed_hz = 0.0;  // 0 = keep the motor's current speed
   FallbackMotorState state = FallbackMotorState::kUnconfigured;
 };
 
@@ -84,7 +85,6 @@ struct FallbackAction {
   int motor_id = 0;
   std::int64_t target_usteps = 0;
   double hold_s = 0.0;
-  double speed_hz = 0.0;
 };
 
 class FallbackPlanner {
@@ -96,7 +96,7 @@ class FallbackPlanner {
   // the plan completed or failed starts a fresh, unarmed plan with every
   // configured motor pending again.
   bool SetMotorPlan(int motor_id, std::int64_t target_usteps, double hold_s,
-                    double speed_hz, std::string* error);
+                    std::string* error);
   bool Arm(std::string* error);
   void Disarm();
 
@@ -121,14 +121,16 @@ class FallbackPlanner {
   bool deadline_started() const { return deadline_started_; }
   double deadline_s() const { return cfg_.bend_deadline_s; }
   const std::string& last_error() const { return last_error_; }
-  // `state=..;armed=..;deadline_s=..;deadline_started=..;m0=t/h/hz/state;m1=-`
+  // `state=..;armed=..;deadline_s=..;deadline_started=..;m0=t/h/state;m1=-`
   std::string StatusBody() const;
 
   // ---- persistence (plain key=value text, no JSON) ----
   // True once after any state change; SystemController persists on it.
   bool TakeDirty();
   std::string Serialize() const;
-  // A corrupt or empty text leaves the planner with no plan and returns false.
+  // A corrupt or empty text leaves the planner with no plan and returns
+  // false. A motor line from before 2026-10-10 (`m0=<target>,<hold>,<speed>,
+  // <state>`) still loads; its speed field is ignored.
   bool Deserialize(const std::string& text);
   bool SaveTo(const std::string& path) const;
   bool LoadFrom(const std::string& path);

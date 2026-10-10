@@ -42,10 +42,14 @@ struct FallbackConfig {
   bool landed_safe = true;
 };
 
+// Where telemetry goes. The onboard dials, in this order, the ground station
+// that most recently announced itself (a GS_BEACON within rediscover_period_s,
+// or the peer of a command connection), then static_ground_ip, then
+// telemetry_host. On the E-Link both addresses are fixed by SSC, so a flight
+// config sets static_ground_ip and keeps discovery on as the fallback.
 struct CommsConfig {
   std::string telemetry_host;
   std::string static_ground_ip;
-  std::string static_pi_ip = "169.254.10.10";
   int telemetry_port = 4000;
   int command_port = 5000;
   int reconnect_ms = 2000;

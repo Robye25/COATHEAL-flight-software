@@ -123,6 +123,9 @@ OBSOLETE_CONFIG_KEYS = {
     # scaler, no range selection involved.
     "motor0.current_range_a_peak",
     "motor1.current_range_a_peak",
+    # 2026-10-10: the onboard never read it (the Pi's address is OS
+    # configuration); dropped with the move to SSC-assigned E-Link addresses.
+    "comms.static_pi_ip",
 }
 # v3 reserved GPIO lines (BCM), mirroring config.cpp's kReservedGpioLines:
 # Sequent RTD HAT lines plus the hardware SPI0 chip-selects, which are wired

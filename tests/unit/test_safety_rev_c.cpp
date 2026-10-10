@@ -195,7 +195,7 @@ void TestSchedulerInhibitedWhenLocked() {
 
 void TestSchedulerNullLockIsAlwaysFree() {
   // Contract says a null MotionLock* behaves as "always free". This is the
-  // bench-mode path and also what Agent B's test stub will rely on.
+  // bench-mode path.
   const auto power = MakePower();
   coatheal::HeaterScheduler sched(power, kNoBoxHeater, nullptr);
   std::vector<double> requested(6, 1.0);
