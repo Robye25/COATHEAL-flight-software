@@ -218,10 +218,10 @@ GET_THERMAL
 HEATERS_OFF
 SET_POSITION_ZERO <id>
 STEPLOSS_ACK <id>
-BENDSEQ_LOAD <id> <name> <target>:<hold>[:<speed>] ...
+BENDSEQ_LOAD <id> <name> <target>:<hold> ... [repeat=<n> <target>:<hold> ...]
 BENDSEQ_RUN <id> <name>
 STEPPER_STOP <id>
-FALLBACK_PLAN <id> <target_usteps> <hold_s> [speed_hz]
+FALLBACK_PLAN <id> <target_usteps> <hold_s>
 FALLBACK_ARM
 FALLBACK_STATUS
 SHUTDOWN_SAFE

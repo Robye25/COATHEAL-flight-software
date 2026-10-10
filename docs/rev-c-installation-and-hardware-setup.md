@@ -123,7 +123,7 @@ python main.py command --cmd "SET_PID ALL 0.20 0.02 0.03"
 python main.py command --cmd "SET_TEMP_TARGET 0 25.0"
 python main.py command --cmd "STEPPER_ENABLE 0"
 python main.py command --cmd "SET_POSITION_ZERO 0"
-python main.py command --cmd "BENDSEQ_LOAD 0 flex 800:2:50 1600:3:75 0:1:50"
+python main.py command --cmd "BENDSEQ_LOAD 0 flex 800:5 -800:5 repeat=10 0:0"
 python main.py command --cmd "BENDSEQ_RUN 0 flex"
 python main.py command --cmd HEATERS_OFF --yes
 ```
@@ -385,8 +385,9 @@ manual.link_loss_fallback_enabled=true
 manual.link_loss_fallback_s=10.0
 
 comms.telemetry_host=
+# Flight: the ground station's E-Link address (SSC assigns the fixed
+# addresses); the discovery beacon stays the fallback. Empty = discovery first.
 comms.static_ground_ip=
-comms.static_pi_ip=169.254.10.10
 comms.telemetry_port=4000
 comms.command_port=5000
 comms.discovery_enabled=true
@@ -490,7 +491,7 @@ python main.py command --cmd "SET_ALL_TEMP_TARGETS 25.0"
 python main.py command --cmd GET_THERMAL
 python main.py command --cmd "STEPPER_ENABLE 0"
 python main.py command --cmd "SET_POSITION_ZERO 0"
-python main.py command --cmd "BENDSEQ_LOAD 0 flex 800:2:50 1600:3:75 0:1:50"
+python main.py command --cmd "BENDSEQ_LOAD 0 flex 800:5 -800:5 repeat=10 0:0"
 python main.py command --cmd "BENDSEQ_RUN 0 flex"
 python main.py command --cmd "BENDSEQ_STATUS 0"
 python main.py command --cmd HEATERS_OFF --yes

@@ -57,7 +57,7 @@ Registers this driver touches (all TMC5160 datasheet addresses):
 | VSTOP | `0x2B` | Ramp stop velocity |
 | XTARGET | `0x2D` | Ramp generator's target position |
 | CHOPCONF | `0x6C` | `MRES` (bits 27:24), `TOFF` (bits 3:0) |
-| DRV_STATUS | `0x6F` | Driver status/diagnostics — read by `scripts/spi_probe.py`, not by the flight software |
+| DRV_STATUS | `0x6F` | Driver status/diagnostics — read by the flight software every 64 steps and once a second while idle (section 12) and by `scripts/spi_probe.py` |
 
 Primary reference: [Analog Devices TMC5160A data sheet](https://www.analog.com/media/en/technical-documentation/data-sheets/TMC5160A_datasheet_rev1.17.pdf).
 
@@ -701,9 +701,10 @@ latch say that the position is no longer exact.
 
 - Telemetry: `STEPPERn` `loss:<events since start>` and `unc:<0|1>`; `src`
   reads `safety:STEPLOSS` when an event ended the move.
-- Console: a red `Mn STEP LOSS` alarm, a banner on the motor card, and
-  `ACK STEP LOSS` in the Motion tab's selected-motor controls; STANDARD PULL
-  and the sequence RUN/RESUME buttons are disabled with the reason.
+- Console: a red `Mn STEP LOSS` alarm and a banner on the motor card that
+  names the way out (`SET ZERO`, or `STEPLOSS_ACK <id>` from the console;
+  there is no ACK button); STANDARD PULL and the bend cycle's PLAY/RESUME
+  are disabled with the reason.
 - `CHECK MOTORn`: `motorN_warn=` lists the counts and `POSITION UNCERTAIN
   after N step-loss event(s): <reason>`.
 - `MOTOR_DEBUG n` (Debug tab): `loss`, `unc`, `loss_reason`, and the driver

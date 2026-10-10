@@ -10,7 +10,7 @@
 │   ├── include/coatheal/  Public headers (.hpp)
 │   └── CMakeLists.txt
 ├── tests/
-│   ├── unit/test_suite.cpp   C++ unit tests (doctest)
+│   ├── unit/*.cpp            C++ unit tests (plain assert, one binary each)
 │   └── CMakeLists.txt
 ├── ground-station/
 │   ├── gui_app.py      PyQt6 GUI (recommended)
@@ -67,7 +67,11 @@ cmake -S . -B build -DCOATHEAL_STRICT=OFF
 
 ## C++ Tests
 
-Unit tests use [doctest](https://github.com/doctest/doctest) (header-only, bundled or fetched by CMake).
+Unit tests are plain C++ with `assert` (no framework); every `tests/unit/*.cpp`
+is its own ctest entry, and `tests/CMakeLists.txt` strips `-DNDEBUG` so the
+asserts stay in every configuration. On a Windows/MinGW host put
+`C:\msys64\mingw64\bin` on `PATH` before running the binaries, or the missing
+runtime DLL dialog makes ctest look hung.
 
 ```bash
 # Run all C++ tests

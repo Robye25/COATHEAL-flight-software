@@ -99,8 +99,11 @@ dimmed until its condition clears, and re-raises if the condition returns.
 View → *Audible alarms* adds one beep per new alarm (off by default).
 
 ### System tab
-Link (target, receiver state, rate, onboard queue depth, session; a
-`RESTART RECEIVER` button appears only after a receiver failure) · Mode
+Link (target, receiver state, rate, onboard queue depth, session; the
+onboard IP — `APPLY` saves it on this PC and commands go there until `AUTO`
+returns to the beacon / probe / telemetry peer, `--host` on the command line
+wins at start-up; a `RESTART RECEIVER` button appears only after a receiver
+failure) · Mode
 (`ARM` confirmed, `DISARM`, `ENTER SAFE` confirmed, `EXIT SAFE` — each
 enabled only in the mode where the onboard accepts it) · Phase (`SET PHASE`
 confirmed; fallback indicator) · Radio (`RADIO SILENCE` confirmed, `RADIO
@@ -145,11 +148,11 @@ Two motor cards, each naming its specimens and heaters (for example
 holding / healthy dots, position and target, speed, last command, sequence
 state, and the resistance readout: `R now`, `bend start` and `Δ %` for the
 card's monitored specimen — the bend confirmation. The selector (M0 | M1)
-drives the shared controls: `ENABLE`, `DISABLE`, `SET ZERO`, `HOME`, `STOP`,
-`ACK STEP LOSS` (`STEPLOSS_ACK <id>`; live only while that motor's position
-is latched uncertain — the card then shows a red `STEP LOSS` banner and
-STANDARD PULL is disabled with the reason, while jog and BEND stay available)
-· jog ±0.1/±1/±5 mm (allowed before zeroing) · drive settings in SI units:
+drives the shared controls: `ENABLE`, `DISABLE`, `SET ZERO`, `HOME`, `STOP`
+(while a motor's position is latched uncertain after a step-loss event the
+card shows a red `STEP LOSS` banner naming the way out — `SET ZERO`, or
+`STEPLOSS_ACK <id>` from the console; STANDARD PULL and the bend cycle's
+PLAY are disabled with the reason, while jog and BEND stay available) · jog ±0.1/±1/±5 mm (allowed before zeroing) · drive settings in SI units:
 speed 0.01–0.5 mm/s, run current in A RMS, acceleration 0.01–25 mm/s²
 (the wire stays in full steps: ×200 at the 1 mm lead, so 0.5 mm/s is
 `STEPPER_SET_SPEED <id> 100.000` and 2 mm/s² is `STEPPER_SET_ACCEL <id> 400.0`).
@@ -164,17 +167,25 @@ enabled and zeroed, the mode is RUN, and neither radio silence nor
 link-loss fallback is active. Pressing them records the specimen
 resistance at bend start; the idle→moving edge does the same automatically.
 
+**Bend cycle** (the memorised sequence): name, + limit and − limit in mm,
+number of cycles, soak time at each limit in seconds, and whether to come
+back to 0 at the end. The preview shows the exact `BENDSEQ_LOAD` line and an
+estimate of the duration at the motor's current speed. `MEMORISE` sends it
+(`BENDSEQ_LOAD <id> <name> <+limit µst>:<soak> <−limit µst>:<soak>
+repeat=<cycles> 0:0`, µsteps at the motor's live divisor; the onboard keeps
+it until a reboot), `PLAY` (confirmed) runs it (`BENDSEQ_RUN`), then `PAUSE`
+/ `RESUME` / `STOP` / `STATUS` (`STATUS` shows `cycle k/n · step i/total`).
+A cycle carries no speed: it runs at the motor's speed and acceleration from
+Drive settings. The values are remembered per motor on this PC.
+
 ### Advanced tab
-Bend sequences (`BENDSEQ_LOAD/RUN/PAUSE/RESUME/STOP/STATUS/CLEAR`; each
-step is target mm, hold s and an optional speed ≤ 0.5 mm/s, encoded as
-microsteps at the motor's live divisor and full-steps/s) · PID tuning ·
-open-loop duty (`SET_HEATER_DUTY`, `SET_ALL_DUTY`, `CLEAR_OVERRIDES`) ·
-microstep · preset management · fallback plan
-(`FALLBACK_PLAN/ARM/DISARM/STATUS` with target mm, hold s and speed mm/s,
-executed onboard only during link-loss fallback — see the redesign spec
-§10) · network (beacon
-priority, manual host override). Bench-only commands (`ARM_DEBUG`,
-`HEATER_TEST`, `SET_BENCH_MODE`) are console-only.
+PID tuning · open-loop duty (`SET_HEATER_DUTY`, `SET_ALL_DUTY`,
+`CLEAR_OVERRIDES`) · microstep · preset management · fallback plan
+(`FALLBACK_PLAN/ARM/DISARM/STATUS` with target mm and hold s, run at the
+motor's own speed, executed onboard only during link-loss fallback — see
+the redesign spec §10) · network (beacon priority; the onboard IP itself is
+set on the System tab). Bench-only commands (`ARM_DEBUG`, `HEATER_TEST`,
+`SET_BENCH_MODE`) and `STEPLOSS_ACK` are console-only.
 
 ### Debug tab
 

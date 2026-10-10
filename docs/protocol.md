@@ -241,7 +241,7 @@ NACK,<COMMAND>,<reason>
 | `GET_LAYOUT` | none | The motor groups and the wiring behind them, derived from `motor0.specimens` / `motor1.specimens`: `samples=8;heaters=6;motor0=0,1,2,3;motor1=4,5,6,7;heater_samples=0,1,2,4,5,6;clicks=0,4;rtd_channels=8,2,3,4,5,7,1,6;heater_lines=19,13,6,5,24,23;lead_mm=1`. `motorN` = the sample indices that motor pulls; `heater_samples[h]` = the sample heater `h` reads; `clicks` = the samples MAX31865 click 1 and click 2 read (the first specimen of each motor); `rtd_channels[s]` = the RTD card terminal of sample `s`; `heater_lines[h]` = the BCM line of heater `h`; `lead_mm` = `stepper.lead_mm_per_rev` (added 2026-09-15; the console warns when its own conversion lead differs). The console asks it on the first live frame of every onboard session and groups its panels, plots and `session.json` by it; firmware before 2026-09-15 NACKs it and the console keeps the schematic groups |
 | `CLEAR_OVERRIDES` | none | Clear duty, target, and PID overrides |
 | `SET_POSITION_ZERO` | `<id>` | Set current physical position as software zero without motion. Also clears the position-uncertain latch (`unc`) |
-| `STEPLOSS_ACK` | `<id>` | Clear the position-uncertain latch a step-loss event set, keeping the zero: the operator checked the mechanism and accepts the position. Replies `motor=<id>;unc=0;loss=<events since start>`; the count is not reset. Added 2026-10-05 |
+| `STEPLOSS_ACK` | `<id>` | Clear the position-uncertain latch a step-loss event set, keeping the zero: the operator checked the mechanism and accepts the position. Replies `motor=<id>;unc=0;loss=<events since start>`; the count is not reset. Added 2026-10-05 Console-only on the ground station: the Motion tab offers SET ZERO and its step-loss banner names this command (there is no ACK button since 2026-10-10). |
 | `STEPPER_MOVE` | `<id> <steps>` | Relative motor move (`<steps>` are microsteps at the configured divisor: µ4 → 800 per revolution). `|steps|` ≤ `stepper.max_direct_usteps` (1000 = 1.25 rev at µ4); longer travel goes through `STEPPER_MOVE_MM` |
 | `STEPPER_MOVETO` | `<id> <abs_usteps> [hold_s]` | Absolute move; motor must be zeroed. `|abs_usteps|` ≤ `stepper.max_direct_usteps` (1000); `hold_s` is `0..86400` (a hold keeps the MotionLock, and with it the heater inhibit, for its whole duration) |
 | `STEPPER_MOVE_MM` | `<id> <mm>` | Relative move in millimetres of linear travel; converted onboard through `stepper.lead_mm_per_rev` (1 mm/rev → `1.0` = one revolution) at the current microstep divisor. The console's jog buttons use this |
@@ -257,16 +257,16 @@ NACK,<COMMAND>,<reason>
 | `STEPPER_ENABLE` / `STEPPER_DISABLE` | `<id>` | Enable or disable driver output |
 | `PULL_ARM` | `<id>` | Queue one pull cycle. Refused while the position is latched uncertain (`unc`) |
 | `PULL_EXECUTE` | `<id>` | Queue one pull cycle and report as executed. Refused while the position is latched uncertain |
-| `BENDSEQ_LOAD` | `<id> <name> <target>:<hold>[:<hz>] ...` | Load a runtime absolute-microstep sequence; each `hz` must be within the speed ceiling (see `STEPPER_SET_SPEED`), each target within `stepper.max_position_steps` |
+| `BENDSEQ_LOAD` | `<id> <name> <target>:<hold> ... [repeat=<n> <target>:<hold> ...]` | Load a runtime absolute-microstep sequence: each step is a target within `stepper.max_position_steps` and a hold in seconds; the steps before `repeat=<n>` (1..1000) run `n` times, the steps after it once at the end. Every step runs at the motor's own speed and acceleration (`STEPPER_SET_SPEED` / `STEPPER_SET_ACCEL`); a third `:<hz>` field is refused since 2026-10-10. The ground station's Motion tab builds one from + limit, − limit, cycles and the two soak times |
 | `BENDSEQ_RUN` | `<id> <name>` | Run a loaded sequence. Refused while the position is latched uncertain (`unc`) |
 | `BENDSEQ_PAUSE` / `BENDSEQ_RESUME` | `<id>` | Pause or resume the active sequence. `BENDSEQ_RESUME` is refused while the position is latched uncertain |
-| `BENDSEQ_STOP` / `BENDSEQ_STATUS` | `<id>` | Stop or inspect sequence state |
+| `BENDSEQ_STOP` / `BENDSEQ_STATUS` | `<id>` | Stop or inspect sequence state. `BENDSEQ_STATUS` answers `motor=;zeroed=;running=;paused=;name=;step=` and, while a sequence is active, `;total=<expanded steps>;cycle=<k>;cycles=<n>` (`;fault=...` after a stop by a safety) |
 | `MOTOR_DEBUG` | `<id>` | Read-only live read of the TMC5160's motion-truth registers for the console's Debug tab: `motor=;sw_pos=;sw_tgt=;sw_hz=;us=;enabled=;moving=;holding=;pulses=;missed=;xactual=;xtarget=;vactual=;mscnt=;tstep=;drv_status=0x…;stst=;cs_actual=;sg_result=;stallguard=;ot=;otpw=;s2ga=;s2gb=;ola=;olb=;s2vsa=;s2vsb=;stealth=;fsactive=;rampstat=0x…;vzero=;pos_reached=;vel_reached=;status_sg=;ioin=0x…;drv_enn=;sd_mode=;version=0x30;gstat=0x…;chopconf=0x…;toff=;mres=;usteps=;resets=;pwm_scale_sum=;pwm_scale_auto=;pwm_ofs_auto=;pwm_grad_auto=`. `pwm_scale_sum` (stealthChop PWM amplitude, 0–255) pinned at 255 means the current regulator cannot reach the target current (VM too low, coil open or too resistive, sense resistor mismatch). `sw_*` are the firmware's own counters; `resets` counts chip resets (GSTAT.reset seen after configuration -- VM/VCC_IO dropped) that the firmware recovered from; everything after them comes from the chip (`MSCNT` is the sine-table index that actually drives the coils). Step-loss protection (2026-10-05): `loss=;unc=;loss_reason=` after `missed=` are the channel's event count, its position-uncertain latch and the event that set it (`-` when none); the reply ends with the driver's own statistics `drv_loss=;stall_mode=<off\|monitor\|stop>;sgt=;sg_thr=;sg_last=;sg_min=;sg_n=;stalls=;uv=;shorts=;openload=;xt_repairs=` — `sg_last`/`sg_min`/`sg_n` are the StallGuard samples of the move in progress or of the last one (`-` before the first), `stalls` the stall verdicts, `uv` supply-undervoltage episodes, `xt_repairs` XTARGET rewrites after a readback mismatch. NACK `debug registers unavailable` on the simulated backend or a bus error |
 | `BENDSEQ_CLEAR` | `<id> [name]` | Clear one or all stored definitions for a motor |
-| `FALLBACK_PLAN` | `<id> <target_usteps> <hold_s> [speed_hz]` | Load the failsafe bend for one motor (validated like a `BENDSEQ_LOAD` step; refused with `plan running` while the plan executes) — see [Link-loss failsafe plan](#link-loss-failsafe-plan) |
+| `FALLBACK_PLAN` | `<id> <target_usteps> <hold_s>` | Load the failsafe bend for one motor (validated like a `BENDSEQ_LOAD` step, run at the motor's own speed and acceleration; refused with `plan running` while the plan executes; a fourth `speed_hz` field is an argument-count error since 2026-10-10) — see [Link-loss failsafe plan](#link-loss-failsafe-plan) |
 | `FALLBACK_ARM` | none | Arm the loaded plan. Allowed in any mode: the plan only ever runs during link-loss fallback, which itself requires RUN. `NACK,FALLBACK_ARM,no plan loaded` when nothing is loaded |
 | `FALLBACK_DISARM` | none | Clear the plan state to `none` (motor targets are kept, ready to re-arm). Does not stop a bend already in motion — `STEPPER_STOP <id>` does |
-| `FALLBACK_STATUS` | none | `state=<plan>;armed=<0\|1>;deadline_s=<cfg>;deadline_started=<0\|1>;m0=<target>/<hold_s>/<speed_hz>/<motor state>;m1=...` (`-` = not loaded; `;error=...` after a failure) |
+| `FALLBACK_STATUS` | none | `state=<plan>;armed=<0\|1>;deadline_s=<cfg>;deadline_started=<0\|1>;m0=<target>/<hold_s>/<motor state>;m1=...` (`-` = not loaded; `;error=...` after a failure) |
 
 `ON`, `OFF`, and `RESET` remain aliases for `FORCE_START`, `FORCE_STOP`, and
 `RESET_CTRL`.
@@ -310,7 +310,7 @@ have passed since fallback first held at `PRE_FLOAT`/`FLOAT`, in which case
 the bend goes ahead regardless of temperature. Motors run in id order (M0
 then M1, one at a time); a motor still not enabled/zeroed/healthy when the
 deadline has passed is `skipped`. The bend is an absolute move with hold
-(`STEPPER_MOVETO` semantics, `speed_hz` applied first when non-zero) and
+(`STEPPER_MOVETO` semantics, at the motor's own speed and acceleration) and
 emits `EVT,PULL` like any other motion. UV and specimen resistance are
 logged only; they never gate the plan.
 
@@ -332,9 +332,10 @@ onboard restart it starts again at the next fallback tick in
 `PRE_FLOAT`/`FLOAT`.
 
 Persistence: `<storage.queue_dir>/fallback_plan.txt`, plain `key=value`
-lines (`armed=`, `state=`, `deadline_s=`, `m0=<target>,<hold_s>,<speed_hz>,<state>`,
+lines (`armed=`, `state=`, `deadline_s=`, `m0=<target>,<hold_s>,<state>`,
 `m1=...`), rewritten on every state change and read at start-up. A missing or
-corrupt file means no plan.
+corrupt file means no plan; a file written before 2026-10-10 (four fields,
+with a per-motor speed) still loads and the speed is ignored.
 
 With `fallback.landed_safe=true` the first tick in which fallback is active
 at `LANDED` turns every heater off (same overrides as `HEATERS_OFF`) and
@@ -388,7 +389,7 @@ Example:
 ARM
 STEPPER_ENABLE 0
 SET_POSITION_ZERO 0
-BENDSEQ_LOAD 0 flex 800:2:50 1600:3:75 0:1:50
+BENDSEQ_LOAD 0 flex 800:5 -800:5 repeat=10 0:0
 BENDSEQ_RUN 0 flex
 BENDSEQ_STATUS 0
 ```

@@ -108,15 +108,20 @@ python main.py command --cmd "MOTOR_DEBUG 1"
 A step is:
 
 ```text
-<absolute_target_microsteps>:<hold_seconds>[:<speed_full_step_hz>]
+<absolute_target_microsteps>:<hold_seconds>
 ```
+
+Steps before `repeat=<n>` run `n` times (1..1000); steps after it run once at
+the end. Speed and acceleration are the motor's own (`STEPPER_SET_SPEED`,
+`STEPPER_SET_ACCEL`); a third field is refused. The console's Motion tab
+builds the line from + limit, − limit, cycles and the two soak times.
 
 Example:
 
 ```powershell
 python main.py command --cmd "STEPPER_ENABLE 1"
 python main.py command --cmd "SET_POSITION_ZERO 1"
-python main.py command --cmd "BENDSEQ_LOAD 1 flex 800:2:50 1600:3:75 0:1:50"
+python main.py command --cmd "BENDSEQ_LOAD 1 flex 800:5 -800:5 repeat=10 0:0"
 python main.py command --cmd "BENDSEQ_RUN 1 flex"
 python main.py command --cmd "BENDSEQ_STATUS 1"
 python main.py command --cmd "BENDSEQ_PAUSE 1"
@@ -189,12 +194,12 @@ python main.py command --cmd STATUS
 If the link is lost right when the samples should be bent (ascent, just
 before float), the onboard can bend them on its own — but only with a plan
 the operator loaded and armed beforehand. Load one bend per motor (absolute
-microsteps, hold seconds, optional full-steps/s — the console's Advanced tab
-takes mm and mm/s and converts), then arm:
+microsteps and hold seconds; it runs at the motor's own speed and
+acceleration — the console's Advanced tab takes mm and converts), then arm:
 
 ```powershell
-python main.py command --cmd "FALLBACK_PLAN 0 800 5 50"
-python main.py command --cmd "FALLBACK_PLAN 1 800 5 50"
+python main.py command --cmd "FALLBACK_PLAN 0 800 5"
+python main.py command --cmd "FALLBACK_PLAN 1 800 5"
 python main.py command --cmd FALLBACK_ARM
 python main.py command --cmd FALLBACK_STATUS
 ```

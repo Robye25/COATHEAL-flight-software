@@ -80,9 +80,12 @@ Ground command
 | `5000` | TCP | Laptop -> Pi | One-shot command uplink |
 | `4100` | UDP | Both | Discovery |
 
-The Pi uses static link-local Ethernet `169.254.10.10/16`. The laptop may use
-any `169.254.x.x/16` address. A successful command connection teaches the Pi
-where telemetry should be returned.
+On the bench the Pi uses the static link-local address `169.254.10.10/16`
+and the laptop any `169.254.x.x/16` address. On the BEXUS E-Link both
+addresses are fixed by SSC: set the ground station's in
+`comms.static_ground_ip` and the Pi's on the ground station's System tab
+(`APPLY`). The discovery beacon remains the fallback, and a successful
+command connection still teaches the Pi where telemetry should be returned.
 
 ## Final-BOM Hardware Boundaries
 

@@ -180,12 +180,12 @@ python -m unittest discover -s ground-station/tests -p "test_*.py"
 | `HEATER_TEST <i> <duty> <seconds>` | Bench-only bounded heater pulse after debug arm |
 | `HEATERS_OFF` | Emergency heater shutoff |
 | `SET_POSITION_ZERO <id>` | Declare the current physical motor position as zero |
-| `STEPLOSS_ACK <id>` | Clear a motor's position-uncertain latch after a step-loss event, keeping the zero |
-| `BENDSEQ_LOAD` / `BENDSEQ_RUN` | Define and execute absolute bend sequences |
+| `STEPLOSS_ACK <id>` | Clear a motor's position-uncertain latch after a step-loss event, keeping the zero (console-only; the Motion tab's SET ZERO is the normal way out) |
+| `BENDSEQ_LOAD` / `BENDSEQ_RUN` | Define (`<target>:<hold>` steps, `repeat=<n>` for the cyclic part) and execute absolute bend sequences at the motor's own speed |
 | `STEPPER_*` | Direct motor movement commands |
 | `PULL_EXECUTE <id>` | One config-defined standard pull (the console's STANDARD PULL) |
 | `RADIO_SILENCE` / `RADIO_RESUME` | Stop / restart every onboard transmission (telemetry, beacons, hello replies); only `RADIO_RESUME`, `STATUS` and `PING` are answered while silent |
-| `FALLBACK_PLAN <id> <target> <hold_s> [hz]` / `FALLBACK_ARM` / `FALLBACK_DISARM` / `FALLBACK_STATUS` | Operator-armed bend plan the onboard executes on its own only during link-loss fallback at PRE_FLOAT/FLOAT |
+| `FALLBACK_PLAN <id> <target> <hold_s>` / `FALLBACK_ARM` / `FALLBACK_DISARM` / `FALLBACK_STATUS` | Operator-armed bend plan the onboard executes on its own only during link-loss fallback at PRE_FLOAT/FLOAT |
 | `SHUTDOWN_SAFE` | Flush logs and stop onboard process |
 
 See [docs/protocol.md](docs/protocol.md) for the complete command list.
@@ -208,7 +208,11 @@ flight hardware operation.
 
 ## Security
 
-Historical credential exposure was remediated. See
-[docs/security-remediation.md](docs/security-remediation.md),
-[scripts/rotate_ssh_key.sh](scripts/rotate_ssh_key.sh), and
-[scripts/purge_sensitive_history.sh](scripts/purge_sensitive_history.sh).
+A private SSH key was once committed to this repository. The key was rotated
+(see [docs/security-remediation.md](docs/security-remediation.md) and
+[scripts/rotate_ssh_key.sh](scripts/rotate_ssh_key.sh)), but as of
+2026-10-10 the commit that contained it is **still reachable** in the
+history of `main`. Treat the old key as compromised. To remove it,
+[scripts/purge_sensitive_history.sh](scripts/purge_sensitive_history.sh)
+rewrites the history; run it and force-push only when every clone can be
+re-fetched afterwards.

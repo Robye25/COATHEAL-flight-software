@@ -869,15 +869,20 @@ motor supply. Full description and the StallGuard calibration:
 Each step is:
 
 ```text
-<absolute_target_microsteps>:<hold_seconds>[:<speed_hz>]
+<absolute_target_microsteps>:<hold_seconds>
 ```
+
+Steps before `repeat=<n>` run `n` times (1..1000), steps after it once at
+the end. The motor's own speed and acceleration apply (`STEPPER_SET_SPEED`,
+`STEPPER_SET_ACCEL`); a third field is refused. The console's Motion tab
+builds this line from + limit, − limit, cycles and the two soak times.
 
 Example:
 
 ```bash
 printf 'STEPPER_ENABLE 0\n' | nc 127.0.0.1 5000
 printf 'SET_POSITION_ZERO 0\n' | nc 127.0.0.1 5000
-printf 'BENDSEQ_LOAD 0 flex 800:2:25 1600:3:25 0:1:25\n' \
+printf 'BENDSEQ_LOAD 0 flex 800:5 -800:5 repeat=10 0:0\n' \
   | nc 127.0.0.1 5000
 printf 'BENDSEQ_RUN 0 flex\n' | nc 127.0.0.1 5000
 printf 'BENDSEQ_STATUS 0\n' | nc 127.0.0.1 5000

@@ -45,8 +45,7 @@ fallback at `PRE_FLOAT`/`FLOAT`.
 | Key | Default | Description |
 |---|---:|---|
 | `comms.telemetry_host` | empty | Leave empty for plug-and-play command-peer targeting. |
-| `comms.static_ground_ip` | empty | Optional fixed laptop IP. |
-| `comms.static_pi_ip` | `169.254.10.10` | Static onboard link-local IP. |
+| `comms.static_ground_ip` | empty | The ground station's address on the E-Link (SSC assigns the fixed addresses). Set it for flight: the onboard dials it first and falls back to the discovery beacon. Empty = discovery first. |
 | `comms.telemetry_port` | `4000` | TCP port on ground station. |
 | `comms.command_port` | `5000` | TCP command server port on Pi. |
 | `comms.discovery_enabled` | `true` | UDP discovery enabled. |
