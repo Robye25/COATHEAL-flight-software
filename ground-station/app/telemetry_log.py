@@ -331,6 +331,10 @@ class LogManager:
         self._pending_events: Deque[Dict[str, Any]] = deque(maxlen=buffer_limit)
         self._started = time.time()
         self._closed = False
+        # (now, session id) of a log session the operator started by hand:
+        # the next frame of that session (None: of any session) opens
+        # `<now>_<id>_manual` instead of the automatic directory.
+        self._manual: Optional[Tuple[float, Optional[str]]] = None
 
     # -- state ---------------------------------------------------------------
     @property
@@ -358,7 +362,12 @@ class LogManager:
         logs = self._open.get(session_id)
         if logs is not None:
             return logs, False
-        logs = SessionLogs(SessionDirectory(self.root, session_id), self._gs_info)
+        if self._manual is not None and self._manual[1] in (None, session_id):
+            directory = SessionDirectory(self.root, session_id, now=self._manual[0], suffix="manual")
+            self._manual = None
+        else:
+            directory = SessionDirectory(self.root, session_id)
+        logs = SessionLogs(directory, self._gs_info)
         self._open[session_id] = logs
         self.last_opened = (session_id, logs.dir)
         first = self._logs is None
@@ -373,6 +382,20 @@ class LogManager:
                 break
             self._open.pop(oldest).close()
         return logs, True
+
+    def start_new_session(self, now: Optional[float] = None, session_id: Optional[str] = None) -> None:
+        """The operator starts a new log session: every open session's files
+        are closed, and the next frame of `session_id` (None: of whatever
+        session comes next) opens `<now>_<id>_manual`. Commands and events
+        until then are buffered and written there."""
+        with self._lock:
+            if self._closed:
+                return
+            for logs in self._open.values():
+                logs.close()
+            self._open.clear()
+            self._logs = None
+            self._manual = (float(now) if now is not None else time.time(), session_id)
 
     def dir_for(self, session_id: str) -> Optional[Path]:
         with self._lock:

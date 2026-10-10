@@ -50,7 +50,7 @@ console is a fixed layout that scales to any screen from 1366×768 up
 
 | Region | Content |
 |---|---|
-| **Top strip** | MODE, PHASE, HEALTH, LINK age, RX rate, command target, session/seq, T+ mission time, UTC, RADIO state; panic group `HEATERS OFF` / `STOP MOTORS` (no confirmation) and `ENTER SAFE` (confirmed) |
+| **Top strip** | MODE, PHASE, HEALTH, LINK age, RX rate, command target, session (date, time, id, seq), frames queued onboard, the onboard's frame time (absolute), UTC, RADIO state; panic group `HEATERS OFF` / `STOP MOTORS` (no confirmation) and `ENTER SAFE` (confirmed) |
 | **Alarm strip** | Active alarms as chips (over-temperature, invalid heated channel, link-loss fallback, sequence paused, energy budget, motor failed, heaters inhibited, sensor faults, onboard backlog, stale link) with `ACK` |
 | **System tab** | Link status, the onboard IP (`APPLY` saves it on this PC, `AUTO` returns to the beacon) and the onboard clock (synced from this PC by `TIME_SYNC` every ten minutes), `ARM` / `DISARM` / `ENTER SAFE` / `EXIT SAFE`, `SET PHASE`, `RADIO SILENCE` / `RADIO RESUME`, downlink rate, diagnostics (`PING` `STATUS` `COMPONENTS` `GET_THERMAL` `CHECK <component>` `RESET_CTRL`), `SHUTDOWN SAFE` |
 | **Thermal tab** | Energy budget, active heaters, the heaters and specimens of each motor group as the onboard reports them (`GET_LAYOUT`: heater rows with measured sample, target, duty, state; unheated specimens), all-channel targets, presets (`profiles/thermal_presets.json`), PID autotune. Targets 0–75 °C; above 40 °C asks first |
@@ -72,7 +72,7 @@ whatever the system locale, and show their unit beside the box.
 sends immediately, including the panic pair.
 
 **Shortcuts:** `Esc` stops both motors, `Ctrl+Shift+H` heaters off,
-`Ctrl+L` console, `Ctrl+1…5` left tabs, `Alt+1…5` plot pages, `P` pause
+`Ctrl+L` console, `F2` command reference, `Ctrl+N` new log session, `Ctrl+1…5` left tabs, `Alt+1…5` plot pages, `P` pause
 plots, `F5` STATUS, `F1` the list. While a confirmation dialog is open every
 shortcut is blocked — `Esc` closes the dialog first.
 

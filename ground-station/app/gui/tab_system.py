@@ -79,6 +79,10 @@ class SystemTab(QScrollArea):
                                   "onboard's discovery beacon on UDP 4100 stays the fallback.")
         self.host_note.setWordWrap(True); self.host_note.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(self.host_note)
+        self.btn_new_session = make_button("NEW LOG SESSION", "neutral", min_height=22)
+        self.btn_new_session.setToolTip("Logs continue in a new folder named after this moment and the plots start "
+                                        "fresh (File → New log session, Ctrl+N). Not a wire command.")
+        lay.addWidget(self.btn_new_session)
         self.btn_restart_receiver = make_button("RESTART RECEIVER", "neutral", min_height=24)
         self.btn_restart_receiver.setToolTip("Restarts the local telemetry receiver — does not send a wire command.")
         self.btn_restart_receiver.hide()

@@ -136,6 +136,7 @@ class MainWindow(QMainWindow):
         # from the onboard's.
         self._silence_note = ""
         self._lead_note = ""
+        self._reference = None   # the command reference dialog, built on first use
 
         self._dispatcher = CommandDispatcher(self._user_host, cmd_port, log_manager=self._logs)
         self._dispatcher.response_received.connect(self._on_response)
@@ -157,6 +158,7 @@ class MainWindow(QMainWindow):
         self._alarm_strip.ack_all_requested.connect(self._ack_all_alarms)
         self._system = SystemTab(self._dispatcher, host_override=self._user_host)
         self._system.host_override_changed.connect(self._on_host_override)
+        self._system.btn_new_session.clicked.connect(self._new_log_session)
         self._system.btn_restart_receiver.clicked.connect(
             lambda: self._on_start_telemetry(self._bind, self._tel_port, self._cmd_port, self._user_host))
         self._thermal = ThermalTab(self._dispatcher, self._presets)
@@ -186,6 +188,7 @@ class MainWindow(QMainWindow):
         self._right_tabs.setMinimumWidth(300)
 
         self._console = ConsolePanel()
+        self._console.reference_requested.connect(self._show_command_reference)
         self._console.send_requested.connect(self._send_console)
         self._events = EventsPanel()
         self._events.set_sink(self._logs.log_event)
@@ -335,11 +338,11 @@ class MainWindow(QMainWindow):
         self._last_rx_mono = now_mono
         self._update_discovery_cadence()
         self._frames += 1
-        self._top.on_packet_received(pkt.session_id, now_mono)
+        self._top.on_packet_received(pkt.session_id, now_mono, live=not self._verdict.is_replay, frame_ts=onboard_ts)
         # Plots and logs take every frame, at its onboard time; the live
         # panels (state, gating, alarms, health, values) take only frames
         # that are not a replay of the onboard backlog (replay.py).
-        self._plots.on_packet(pkt, onboard_ts if onboard_ts is not None else rx_time)
+        self._plots.on_packet(pkt, onboard_ts if onboard_ts is not None else rx_time, live=not self._verdict.is_replay)
         if self._verdict.is_replay:
             self._replayed += 1
             self._last_replay_mono = now_mono
@@ -670,6 +673,8 @@ class MainWindow(QMainWindow):
         file_menu = self.menuBar().addMenu("&File")
         act = QAction("Clear plots", self); act.triggered.connect(self._plots.clear); file_menu.addAction(act)
         act = QAction("Export current plot…", self); act.triggered.connect(self._plots.export_dialog); file_menu.addAction(act)
+        act = QAction("New log session…", self); act.setShortcut("Ctrl+N"); act.triggered.connect(self._new_log_session)
+        file_menu.addAction(act)
         act = QAction("Quit", self); act.setShortcut("Ctrl+Q"); act.triggered.connect(self.close); file_menu.addAction(act)
 
         view_menu = self.menuBar().addMenu("&View")
@@ -689,6 +694,8 @@ class MainWindow(QMainWindow):
         help_menu = self.menuBar().addMenu("&Help")
         act = QAction("Keyboard shortcuts", self); act.setShortcut("F1"); act.triggered.connect(self._show_cheatsheet)
         help_menu.addAction(act)
+        act = QAction("Command reference", self); act.setShortcut("F2"); act.triggered.connect(self._show_command_reference)
+        help_menu.addAction(act)
 
     def _set_beep(self, enabled: bool) -> None:
         self._beep = bool(enabled)
@@ -707,6 +714,8 @@ class MainWindow(QMainWindow):
         ("Esc", "STEPPER_STOP 0 + STEPPER_STOP 1 (panic, no confirm)"),
         ("Ctrl+Shift+H", "HEATERS_OFF (panic, no confirm)"),
         ("Ctrl+L", "focus the console entry"),
+        ("F2", "command reference (every command, its arguments, what it does)"),
+        ("Ctrl+N", "new log session (new folder, plots start fresh)"),
         ("Ctrl+1 … Ctrl+5", "System / Thermal / Motion / Advanced / Debug"),
         ("Alt+1 … Alt+5", "plot tabs"),
         ("P", "pause / resume plots (ignored while typing)"),
@@ -714,6 +723,29 @@ class MainWindow(QMainWindow):
         ("Ctrl+= / Ctrl+- / Ctrl+0", "UI size"),
         ("F1", "this list"),
     )
+
+    def _show_command_reference(self) -> None:
+        if self._reference is None:
+            from .dialog_commands import CommandReferenceDialog
+            self._reference = CommandReferenceDialog(self)
+            self._reference.insert_requested.connect(self._console.insert_command)
+        self._reference.show()
+        self._reference.raise_()
+        self._reference.activateWindow()
+
+    def _new_log_session(self) -> None:
+        """A log session started by hand: the next frame opens a folder named
+        after this moment (`<now>_<onboard id>_manual`), the plots start
+        fresh; the onboard session itself continues."""
+        if not confirm(self, "Start a new log session?",
+                       "Logs continue in a new folder named after this moment and the plots start fresh. "
+                       "The onboard session (its id and frame numbers) continues."):
+            return
+        session = self._last_pkt.session_id if self._last_pkt is not None else None
+        self._logs.start_new_session(time.time(), session)
+        self._plots.clear()
+        self._events.append("[log] new log session started by the operator; the next frame opens its folder")
+        self._update_status_bar()
 
     def _show_cheatsheet(self) -> None:
         lines = [f"{keys:<24} {what}" for keys, what in self.SHORTCUTS]

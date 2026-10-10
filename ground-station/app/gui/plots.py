@@ -34,7 +34,9 @@ REDRAW_MS = 200
 
 
 class MissionTimeAxis(pg.AxisItem):
-    """Bottom axis labelled T+hh:mm:ss from the mission start (UTC clock
+    """Bottom axis labelled with absolute UTC (hh:mm:ss) -- the time the
+    onboard stamped on each frame, so operators and logs agree; `t0`, the
+    onboard session start, only serves the crosshair's T+ (UTC clock
     time until the first frame arrives)."""
 
     def __init__(self, *args, **kwargs):
@@ -42,9 +44,13 @@ class MissionTimeAxis(pg.AxisItem):
         self.t0: Optional[float] = None
 
     def tickStrings(self, values, scale, spacing):  # noqa: N802
-        if self.t0 is None:
-            return [datetime.fromtimestamp(v, tz=timezone.utc).strftime("%H:%M:%S") for v in values]
-        return [("T+" if v >= self.t0 else "T-") + format_elapsed(abs(v - self.t0)) for v in values]
+        labels = []
+        for v in values:
+            try:
+                labels.append(datetime.fromtimestamp(v, tz=timezone.utc).strftime("%H:%M:%S"))
+            except (OSError, OverflowError, ValueError):
+                labels.append("")
+        return labels
 
 
 class TimePlot(QWidget):
@@ -182,14 +188,14 @@ class TimePlot(QWidget):
         self._vline.setPos(pt.x()); self._hline.setPos(pt.y())
         parts = []
         try:
-            stamp = datetime.fromtimestamp(pt.x(), tz=timezone.utc).strftime("%H:%M:%SZ")
+            stamp = datetime.fromtimestamp(pt.x(), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
         except (OSError, OverflowError, ValueError):
             stamp = "—"
         if self.axis.t0 is not None:
             sign = "T+" if pt.x() >= self.axis.t0 else "T-"
-            parts.append(f"{sign}{format_elapsed(abs(pt.x() - self.axis.t0))} · {stamp}")
+            parts.append(f"{stamp} · {sign}{format_elapsed(abs(pt.x() - self.axis.t0))}")
         else:
-            parts.append(f"T+— · {stamp}")
+            parts.append(stamp)
         for name in self._curves:
             value = self._store.last_before(name, pt.x())
             if value is not None and np.isfinite(value):
@@ -378,12 +384,18 @@ class PlotArea(QWidget):
         return self._paused
 
     # -- data -------------------------------------------------------------------------
-    def on_packet(self, pkt: TelemetryPacket, rx_time: Optional[float] = None) -> None:
+    def on_packet(self, pkt: TelemetryPacket, rx_time: Optional[float] = None, *, live: bool = True) -> None:
+        """Every frame goes into the series at its own time (a backlog frame
+        fills its gap). Only a live frame may move the session and its
+        start: the live-first drain interleaves the previous session's
+        backlog with the current session's frames."""
         t = rx_time if rx_time is not None else time.time()
-        if pkt.session_id != self._session:
+        if live and pkt.session_id != self._session:
             self._session = pkt.session_id
             epoch = session_epoch(pkt.session_id)
             self._t0 = float(epoch) if epoch is not None else t
+        elif self._t0 is None:
+            self._t0 = t
         values: Dict[str, float] = {}
         for i, temp in enumerate(pkt.sample_temps_c[:8]):
             if pkt.sensor_valid.get(f"S{i}", True) and np.isfinite(temp):

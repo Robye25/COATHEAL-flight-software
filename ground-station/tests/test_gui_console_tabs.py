@@ -253,6 +253,71 @@ class ConsoleTabTests(unittest.TestCase):
         finally:
             other.close()
 
+    # ── top strip: absolute time, session name, backlog ──
+    def test_top_strip_shows_absolute_frame_time_and_backlog_frames_do_not_move_it(self) -> None:
+        from datetime import datetime, timezone
+        from app.protocol import parse_telemetry_csv
+        self.win._on_packet(parse_telemetry_csv(frame(ts="2026-10-10T12:20:56Z",
+                                                      ctrl="fallback:0|link_loss_s:0.0|energy_wh:1.0|budget_wh:130.0|"
+                                                           "budget_exhausted:0|heaters_active:0|queue:42|plan:none") + ",TX=0"))
+        top = self.win._top
+        top.refresh()
+        self.assertEqual(top.frame_time_text(), "12:20:56Z", "the onboard's own time, absolute")
+        self.assertIn("T+", top._frame_box.toolTip())
+        stamp = datetime.fromtimestamp(1787760547, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+        self.assertEqual(top.session_text(), f"{stamp} · 1787760547-1 · seq 1", "date, time and id")
+        self.assertEqual(top.queue_text(), "42", "frames still queued onboard")
+        plots = self.win._plots
+        t0, session, count = plots._t0, plots._session, plots.store.count
+        # A backlog frame of the previous onboard session, interleaved by the
+        # live-first drain: it goes into the plots at its own time but moves
+        # neither the session, nor the clock, nor the plots' origin.
+        self.win._on_packet(parse_telemetry_csv(frame(session="coatheal-1787000000-9", seq=5,
+                                                      ts="2026-10-10T11:00:00Z") + ",TX=4856"))
+        top.refresh()
+        self.assertEqual(top.frame_time_text(), "12:20:56Z")
+        self.assertEqual(top.session_text(), f"{stamp} · 1787760547-1 · seq 1")
+        self.assertEqual((plots._t0, plots._session), (t0, session))
+        self.assertEqual(plots.store.count, count + 1, "the backlog frame is drawn")
+        times, _ = plots.store.series("S0")
+        self.assertTrue((times[1:] >= times[:-1]).all(), "series stay time-ordered after a backlog frame")
+
+    def test_command_reference_lists_every_command_and_fills_the_console(self) -> None:
+        from app.protocol import KNOWN_COMMANDS
+        self.win._show_command_reference()
+        dialog = self.win._reference
+        self.assertEqual(dialog.table.rowCount(), len(KNOWN_COMMANDS))
+        dialog.filter.setText("bendseq")
+        self.assertEqual(len(dialog.visible_commands()), 7)
+        dialog.filter.setText("")
+        row = next(r for r in range(dialog.table.rowCount()) if dialog.table.item(r, 1).text() == "TIME_SYNC")
+        dialog.insert_row(row)
+        self.assertEqual(self.win._console.entry.text(), "TIME_SYNC ")
+        self.assertIn("ground station", self.win._console.hint.text())
+        self.win._console.entry.setText("nothing")
+        self.assertTrue(self.win._console.hint.isHidden())
+        dialog.close()
+
+    def test_a_new_log_session_rotates_the_folder_and_clears_the_plots(self) -> None:
+        from app.protocol import parse_telemetry_csv
+        pkt = parse_telemetry_csv(frame())
+        self.win._logs.on_packet(pkt); self.win._on_packet(pkt)
+        first = self.win._logs.current_dir
+        self.assertIsNotNone(first)
+        self.assertEqual(self.win._plots.store.count, 1)
+        with mock.patch("app.gui.main_window.confirm", return_value=False):
+            self.win._new_log_session()
+        self.assertEqual(self.win._logs.current_dir, first, "declined: nothing changes")
+        with mock.patch("app.gui.main_window.confirm", return_value=True):
+            self.win._new_log_session()
+        self.assertIsNone(self.win._logs.current_dir)
+        self.assertEqual(self.win._plots.store.count, 0, "the plots start fresh")
+        self.win._logs.on_packet(pkt); self.win._on_packet(pkt)
+        second = self.win._logs.current_dir
+        self.assertNotEqual(second, first)
+        self.assertTrue(second.name.endswith("_manual"), second.name)
+        self.assertEqual(self.win._plots.store.count, 1)
+
     # ── onboard clock ──
     def test_onboard_clock_is_synced_quietly_when_the_link_is_up(self) -> None:
         from app.clock_sync import ClockSync

@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit, QPushButton, QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from ..protocol import KNOWN_COMMANDS, CommandResponse
+from ..protocol import KNOWN_COMMANDS, CommandResponse, command_spec
 from ..reply_format import pretty_kv_body
 from .widgets import AMBER, GREEN, MONO_CSS, MUTED, RED, style_button
 
@@ -63,6 +63,7 @@ class CommandEntry(QLineEdit):
 
 class ConsolePanel(QWidget):
     send_requested = pyqtSignal(str)
+    reference_requested = pyqtSignal()   # the COMMANDS button: open the command reference
 
     COLUMNS = ("time", "command", "", "ms", "response")
 
@@ -101,11 +102,36 @@ class ConsolePanel(QWidget):
         self.btn_send.clicked.connect(self.entry._submit)
         self.btn_clear = QPushButton("CLEAR"); style_button(self.btn_clear, "neutral", min_height=26, bold=False)
         self.btn_clear.clicked.connect(self.clear)
+        self.btn_reference = QPushButton("COMMANDS"); style_button(self.btn_reference, "neutral", min_height=26, bold=False)
+        self.btn_reference.setToolTip("Every command, its arguments and what it does (F2)")
+        self.btn_reference.clicked.connect(self.reference_requested.emit)
         row.addWidget(prompt); row.addWidget(self.entry, 1); row.addWidget(self.btn_send); row.addWidget(self.btn_clear)
+        row.addWidget(self.btn_reference)
         lay.addLayout(row)
+        # What the typed verb takes and does, from the command reference.
+        self.hint = QLabel(""); self.hint.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
+        self.hint.setWordWrap(True); self.hint.setMinimumWidth(1); self.hint.hide()
+        lay.addWidget(self.hint)
+        self.entry.textChanged.connect(self._update_hint)
         self.note = QLabel(""); self.note.setStyleSheet(f"color: {AMBER}; font-size: 8pt;"); self.note.hide()
         lay.addWidget(self.note)
         self._bodies: List[str] = []
+
+    def _update_hint(self, text: str) -> None:
+        verb = text.strip().split()[0] if text.strip() else ""
+        spec = command_spec(verb)
+        if spec is None:
+            self.hint.hide()
+            return
+        self.hint.setText(f"{spec.name} {spec.args}".rstrip() + f" — {spec.summary}")
+        self.hint.show()
+
+    def insert_command(self, text: str) -> None:
+        """Put `text` (a command from the reference) into the entry, ready to complete."""
+        self.entry.setText(text)
+        self.entry.setFocus()
+        self.entry.deselect()
+        self.entry.setCursorPosition(len(text))
 
     def focus_entry(self) -> None:
         self.entry.setFocus()

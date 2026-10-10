@@ -60,7 +60,7 @@ window geometry are remembered between runs.
 
 ```text
 ┌ File · View · Help ──────────────────────────────────────────────────────────────────┐
-│ MODE · PHASE · HEALTH · LINK age · RX rate · TARGET · SESSION/seq · T+ · UTC · RADIO │ HEATERS OFF · STOP MOTORS · ENTER SAFE │
+│ MODE · PHASE · HEALTH · LINK · RX · TARGET · SESSION/seq · QUEUE · ONBOARD · UTC · RADIO │ HEATERS OFF · STOP MOTORS · ENTER SAFE │
 │ alarm strip (only while alarms are active)                                  [ACK ALL] │
 ├──────────────┬──────────────────────────────────────────────┬────────────────────────┤
 │ System       │ Temperatures · Ambient · Heaters ·           │ Health · Checkout ·    │
@@ -79,9 +79,13 @@ window geometry are remembered between runs.
 when all 14 OK/FAIL flags are OK and no component is DEGRADED/STALE/FAILED,
 amber on simulated sensors, red on any failure, grey when unreported),
 `LINK` (age of the last frame: green < 2 s, amber < 5 s, red beyond),
-`RX` frames/s, `TARGET` host:port and how it was chosen, `SESSION`/seq,
-`T+` mission elapsed since the first frame of the onboard session, `UTC`,
-`RADIO` (TX, or `SILENT hh:mm:ss`). The panic group on the right sends
+`RX` frames/s, `TARGET` host:port and how it was chosen, `SESSION` (the
+onboard session's date and time, from its id, the id and the seq), `QUEUE`
+(frames the onboard still holds for replay; amber while any), `ONBOARD` (the
+time the onboard stamped on the last live frame, absolute; the tooltip adds
+T+ since the session started), `UTC` (this PC's clock), `RADIO` (TX, or
+`SILENT hh:mm:ss`). Frames replayed from the backlog never move the session
+or the time shown: only live frames do. The panic group on the right sends
 `HEATERS_OFF` and `STEPPER_STOP 0` + `STEPPER_STOP 1` without confirmation;
 `ENTER SAFE` confirms first. During radio silence the whole strip turns
 purple and the panic buttons are disabled (only `RADIO RESUME` is live).
@@ -220,8 +224,10 @@ At the 0.5 mm/s ceiling (100 full-steps/s) a BEND of 800 µsteps at µ4 is one r
 probe stops itself when radio silence starts or the link is lost.
 
 ### Plots
-x-axis is mission elapsed time (`T+hh:mm:ss`; the crosshair readout also
-shows UTC). Window 5 m / 30 m / 2 h / all; `FOLLOW` re-engages live
+x-axis is absolute UTC (`hh:mm:ss`, the time the onboard stamped on each
+frame; the crosshair readout adds the date and T+ since the onboard session
+started). Frames replayed from the onboard backlog are drawn at their own
+time, so a gap fills in as the backlog drains. Window 5 m / 30 m / 2 h / all; `FOLLOW` re-engages live
 scrolling after a manual pan; `PAUSE` freezes drawing (data keeps
 accumulating); `EXPORT` writes a PNG of the current page or a CSV of the
 visible window. Every series is kept for the whole session. Pages:
@@ -331,6 +337,8 @@ as ignored.
 | `F5` | send `STATUS` |
 | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | UI size |
 | `F1` | shortcut list |
+| `F2` | command reference: every command, its arguments, what it does, where the console sends it from; double-click puts one into the console |
+| `Ctrl+N` | new log session |
 
 No unmodified letter sends a command. While a confirmation dialog is open
 every shortcut is blocked; `Esc` closes the dialog first.
@@ -351,7 +359,10 @@ logs/
 
 The directory is named after the onboard session id (its boot time first,
 so directories sort chronologically); a ground-station restart while the
-onboard session is unchanged appends to the same directory. Commands and
+onboard session is unchanged appends to the same directory. `File → New log
+session…` (Ctrl+N, or the System tab's NEW LOG SESSION) starts a log session
+by hand: the open files close, the plots start fresh, and the next frame
+opens `<now>_<session id>_manual`; the onboard session itself continues. Commands and
 events that happen before the first frame are buffered and written when
 the directory opens. The headless `telemetry-server` writes exactly the
 same files.

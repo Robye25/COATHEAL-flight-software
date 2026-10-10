@@ -15,7 +15,7 @@ from ..protocol import TelemetryPacket
 from .alarms import Alarm, headline
 from .dispatch import CommandDispatcher
 from .panels_health import health_summary
-from ..session_dir import session_epoch
+from ..session_dir import session_display, session_epoch
 from .series_store import format_elapsed
 from .state import OnboardState
 from .theme import mode_color, phase_color
@@ -31,8 +31,8 @@ STRIP_BG = "#141414"
 def _field(label: str) -> tuple[QWidget, QLabel]:
     box = QWidget()
     lay = QHBoxLayout(box)
-    lay.setContentsMargins(8, 0, 8, 0)
-    lay.setSpacing(5)
+    lay.setContentsMargins(5, 0, 5, 0)   # twelve boxes in one row: every pixel counts at 1366 px
+    lay.setSpacing(4)
     name = QLabel(label)
     name.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
     value = QLabel("—")
@@ -60,6 +60,7 @@ class TopStrip(QWidget):
         self._session = ""
         self._t0_mono: Optional[float] = None
         self._t0_wall: Optional[float] = None   # onboard boot epoch from the session id
+        self._frame_ts: Optional[float] = None  # onboard time stamped on the last live frame
         self._silence_since: Optional[float] = None
         self._receiver_state = "idle"
 
@@ -88,8 +89,13 @@ class TopStrip(QWidget):
         self._rx_box, self._rx = _field("RX")
         self._target_box, self._target = _field("TARGET")
         self._sess_box, self._sess = _field("SESSION")
-        self._tplus_box, self._tplus = _field("T+")
+        self._queue_box, self._queue = _field("QUEUE")
+        self._queue_box.setToolTip("Frames the onboard still holds in its queue (replayed into the plots and logs "
+                                   "as the link allows).")
+        self._frame_box, self._frame = _field("ONBOARD")
+        self._frame_box.setToolTip("The time stamped on the last live frame, by the onboard clock.")
         self._utc_box, self._utc = _field("UTC")
+        self._utc_box.setToolTip("This PC's clock.")
         self._replay_box, self._replay = _field("REPLAY")
         self._replay_box.hide()
         self._radio_box, self._radio = _field("RADIO")
@@ -103,22 +109,22 @@ class TopStrip(QWidget):
         self._sess_full = "—"
         for label in (self._target, self._sess):
             label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-            label.setMinimumWidth(96)
+            label.setMinimumWidth(72)
             label.setMaximumWidth(360)
         for box in (self._phase_box, self._health_box, self._link_box, self._rx_box):
             lay.addWidget(box)
-        lay.addWidget(self._target_box, 3)
-        lay.addWidget(self._sess_box, 2)
-        for box in (self._tplus_box, self._utc_box, self._replay_box, self._radio_box):
+        lay.addWidget(self._target_box, 2)
+        lay.addWidget(self._sess_box, 3)   # the session carries a date, a time and an id: give it the room
+        for box in (self._queue_box, self._frame_box, self._utc_box, self._replay_box, self._radio_box):
             lay.addWidget(box)
 
         # Panic group: unconfirmed HEATERS OFF / STOP MOTORS, confirmed ENTER SAFE.
         self.btn_heaters_off = make_button("HEATERS OFF", "panic", sends="HEATERS_OFF", min_height=32,
-                                           slot=self.heaters_off)
-        self.btn_stop_motors = make_button("STOP MOTORS", "panic", min_height=32, slot=self.stop_motors)
+                                           compact=True, slot=self.heaters_off)
+        self.btn_stop_motors = make_button("STOP MOTORS", "panic", min_height=32, compact=True, slot=self.stop_motors)
         self.btn_stop_motors.set_sends_tip("Sends: STEPPER_STOP 0\nSends: STEPPER_STOP 1")
         self.btn_enter_safe = make_button("ENTER SAFE", "danger", sends="ENTER_SAFE", min_height=32,
-                                          slot=self.enter_safe)
+                                          compact=True, slot=self.enter_safe)
         for btn in (self.btn_heaters_off, self.btn_stop_motors, self.btn_enter_safe):
             btn.setMinimumWidth(96)
             lay.addWidget(btn)
@@ -152,10 +158,18 @@ class TopStrip(QWidget):
         self.setStyleSheet(f"QWidget#topStrip {{ background: {bg}; border-bottom: 1px solid #2a2a2a; }}")
 
     # -- inputs -----------------------------------------------------------------
-    def on_packet_received(self, session_id: str, rx_mono: float) -> None:
-        """Called for every accepted frame (before `set_state`)."""
+    def on_packet_received(self, session_id: str, rx_mono: float, *, live: bool = True,
+                           frame_ts: Optional[float] = None) -> None:
+        """Called for every accepted frame (before `set_state`). A backlog
+        frame (`live=False`, possibly of an older session interleaved with
+        live ones) counts for the rate only: it must not move the session,
+        the clock or the mission time."""
         self._last_rx_mono = rx_mono
         self._rx_times.append(rx_mono)
+        if not live:
+            return
+        if frame_ts is not None:
+            self._frame_ts = frame_ts
         if session_id != self._session:
             self._session = session_id
             self._t0_mono = rx_mono
@@ -181,7 +195,15 @@ class TopStrip(QWidget):
             self._paint_mode(state.mode, mode_color(state.mode))
             self._phase.setText(state.phase or "—")
             self._phase.setStyleSheet(f"{MONO_CSS} font-weight: bold; color: {phase_color(state.phase)}; border: none;")
-            self._sess_full = f"{state.session_id} · seq {state.seq}"
+            self._sess_full = f"{session_display(state.session_id)} · seq {state.seq}"
+            self._sess_box.setToolTip(f"onboard session {state.session_id}, frame {state.seq}")
+            if state.queue_depth is None:
+                self._queue.setText("—")
+                self._queue.setStyleSheet(f"{MONO_CSS} font-weight: bold; color: {MUTED}; border: none;")
+            else:
+                self._queue.setText(str(state.queue_depth))
+                self._queue.setStyleSheet(f"{MONO_CSS} font-weight: bold; "
+                                          f"color: {AMBER if state.queue_depth > 0 else GREEN}; border: none;")
         self.set_silence(state.silence)
 
     def set_silence(self, active: bool) -> None:
@@ -226,9 +248,10 @@ class TopStrip(QWidget):
         self._elide()
 
     def _elide(self) -> None:
-        # The session keeps its tail (the distinguishing digits and the seq).
+        # Elided in the middle: the session keeps its date at the front and
+        # the distinguishing digits and the seq at the end.
         for label, full, mode in ((self._target, self._target_full, Qt.TextElideMode.ElideMiddle),
-                                  (self._sess, self._sess_full, Qt.TextElideMode.ElideLeft)):
+                                  (self._sess, self._sess_full, Qt.TextElideMode.ElideMiddle)):
             metrics = QFontMetrics(label.font())
             width = max(20, label.width() - 4)
             label.setText(metrics.elidedText(full, mode, width))
@@ -279,13 +302,20 @@ class TopStrip(QWidget):
             self._rx.setText("—")
         else:
             self._rx.setText(f"{len(self._rx_times) / self.RATE_WINDOW_S:.1f} Hz")
-        # T+ counts from the onboard session start (its boot epoch, embedded
-        # in the session id) so it survives a ground-station restart; a
-        # session id without an epoch falls back to the first frame seen.
-        if self._t0_wall is not None:
-            self._tplus.setText(format_elapsed(max(0.0, time.time() - self._t0_wall)))
-        elif self._t0_mono is not None:
-            self._tplus.setText(format_elapsed(now - self._t0_mono))
+        # The onboard's own time on the last live frame (absolute, so two
+        # operators and the logs agree); T+ since the onboard session started
+        # is in the tooltip.
+        if self._frame_ts is not None:
+            try:
+                when = datetime.fromtimestamp(self._frame_ts, tz=timezone.utc)
+            except (OSError, OverflowError, ValueError):
+                when = None
+            if when is not None:
+                self._frame.setText(when.strftime("%H:%M:%SZ"))
+                tip = f"The time stamped on the last live frame, by the onboard clock: {when.strftime('%Y-%m-%d %H:%M:%SZ')}."
+                if self._t0_wall is not None:
+                    tip += f"\nT+{format_elapsed(max(0.0, self._frame_ts - self._t0_wall))} since the onboard session started."
+                self._frame_box.setToolTip(tip)
 
     # -- test accessors ---------------------------------------------------------
     def link_text(self) -> str:
@@ -299,6 +329,12 @@ class TopStrip(QWidget):
 
     def session_text(self) -> str:
         return self._sess_full
+
+    def frame_time_text(self) -> str:
+        return self._frame.text()
+
+    def queue_text(self) -> str:
+        return self._queue.text()
 
 
 class AlarmStrip(QWidget):

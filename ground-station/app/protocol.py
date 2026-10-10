@@ -534,7 +534,127 @@ KNOWN_COMMANDS = {
     "FALLBACK_DISARM",
     "FALLBACK_STATUS",
     "MOTOR_DEBUG",
+    "GET_LAYOUT",
 }
+
+# Aliases the onboard still accepts (docs/protocol.md): listed so the
+# console's command list is exactly the onboard's.
+ALIASES = {"ON": "FORCE_START", "OFF": "FORCE_STOP", "RESET": "RESET_CTRL"}
+
+
+@dataclass(frozen=True)
+class CommandSpec:
+    """One row of the command reference (Help → Command reference, F2)."""
+    group: str
+    name: str
+    args: str
+    summary: str
+    where: str          # which console control sends it, or "console"
+
+
+_C = CommandSpec
+COMMAND_REFERENCE: Tuple[CommandSpec, ...] = (
+    # -- link and system ------------------------------------------------------------
+    _C("System", "PING", "", "Liveness check; answers pong.", "System tab · PING, the discovery probe"),
+    _C("System", "STATUS", "", "Mode, phase, link, fallback, plan and counters in one line.", "System tab · STATUS, F5"),
+    _C("System", "COMPONENTS", "", "Health of every hardware component.", "System tab · COMPONENTS"),
+    _C("System", "CHECK", "[ALL|DPS310|ADS1115|SEQUENT_RTD|MAX31865|PWM|MOTOR0|MOTOR1|STORAGE|COMMS]",
+       "Drive one component (or all) through a real hardware conversation, up to 15 s; a motor check needs that motor idle.",
+       "System tab · CHECK, Checkout · RUN CHECK ALL"),
+    _C("System", "GET_THERMAL", "", "Targets, duties and PID state of every heater.", "System tab · GET_THERMAL, Thermal · Refresh"),
+    _C("System", "GET_LAYOUT", "", "The motor groups: samples, heaters, clicks and the ball-screw lead.", "asked once per onboard session"),
+    _C("System", "SET_TICK_HZ", "<hz>", "Control and telemetry rate, 0.1–5 Hz.", "System tab · Downlink rate"),
+    _C("System", "RESET_CTRL", "", "Clear the over-temperature latch and the PID integrators.", "System tab · RESET_CTRL"),
+    _C("System", "SHUTDOWN_SAFE", "", "Heaters off, overrides cleared, motors disabled, logs synced; the process keeps running.",
+       "System tab · SHUTDOWN SAFE"),
+    _C("System", "RADIO_SILENCE", "", "Stop every onboard transmission until RADIO_RESUME; frames are queued meanwhile.",
+       "System tab · RADIO SILENCE"),
+    _C("System", "RADIO_RESUME", "", "Resume transmitting; the queued frames replay.", "System tab · RADIO RESUME"),
+    _C("System", "TIME_SYNC", "<ground_unix_ms> [<rtt_ms>]",
+       "Set the onboard clock from the ground station's (no NTP on the E-Link); the offset is reported either way.",
+       "automatic, every ten minutes"),
+    # -- mode and phase ---------------------------------------------------------------
+    _C("Mode", "ARM", "", "STANDBY → RUN: heater and motor commands become live.", "System tab · ARM"),
+    _C("Mode", "DISARM", "", "RUN → STANDBY.", "System tab · DISARM"),
+    _C("Mode", "ENTER_SAFE", "", "Heaters off, motors stopped, logs synced: SAFE mode.", "top strip · ENTER SAFE"),
+    _C("Mode", "EXIT_SAFE", "", "SAFE → STANDBY.", "System tab · EXIT SAFE"),
+    _C("Mode", "SET_PHASE", "<BOOT|ASCENT|PRE_FLOAT|FLOAT|DESCENT|LANDED>", "Force the mission phase.", "System tab · SET PHASE"),
+    _C("Mode", "FORCE_START", "", "Alias of SET_PHASE ASCENT (manual-first flights).", "console"),
+    _C("Mode", "FORCE_STOP", "", "Alias of SET_PHASE DESCENT plus a stop of both motors.", "console"),
+    _C("Mode", "ON", "", "Alias of FORCE_START.", "console"),
+    _C("Mode", "OFF", "", "Alias of FORCE_STOP.", "console"),
+    _C("Mode", "RESET", "", "Alias of RESET_CTRL.", "console"),
+    # -- heaters ------------------------------------------------------------------------
+    _C("Heaters", "SET_TEMP_TARGET", "<heater> <°C>", "Closed-loop target for one heater, 0–75 °C; needs a valid PT100.",
+       "Thermal tab · Set"),
+    _C("Heaters", "SET_ALL_TEMP_TARGETS", "<°C>", "The same target for every heater.", "Thermal tab · Set all"),
+    _C("Heaters", "CLEAR_TEMP_TARGET", "<heater>", "Drop one heater's target (heater off).", "Thermal tab · Clr"),
+    _C("Heaters", "CLEAR_TEMP_TARGETS", "", "Drop every target.", "Thermal tab · Clear all"),
+    _C("Heaters", "SET_PID", "<heater|ALL> <kp> <ki> <kd>", "PID gains for one heater or all.", "Advanced tab · PID tuning"),
+    _C("Heaters", "PID_TUNE_START", "<heater> <setpoint_c> [relay_duty] [cycles]",
+       "Relay auto-tune of one heater around the setpoint; takes exclusive heater control for minutes.",
+       "Thermal tab · START TUNE"),
+    _C("Heaters", "PID_TUNE_ABORT", "", "Stop the auto-tune.", "Thermal tab · ABORT"),
+    _C("Heaters", "PID_TUNE_STATUS", "", "Where the auto-tune stands.", "console"),
+    _C("Heaters", "SET_HEATER_DUTY", "<heater> <0–1>", "Open-loop duty; clears that heater's target. Needs a valid PT100 or ARM_DEBUG.",
+       "Advanced tab · Open-loop duty"),
+    _C("Heaters", "SET_ALL_DUTY", "<0–1>", "Open-loop duty on every heater.", "Advanced tab · All n %"),
+    _C("Heaters", "CLEAR_OVERRIDES", "", "Drop every duty override.", "Advanced tab · CLEAR_OVERRIDES"),
+    _C("Heaters", "HEATERS_OFF", "", "Emergency: every heater off, every override cleared.", "top strip · HEATERS OFF, Ctrl+Shift+H"),
+    # -- motion -------------------------------------------------------------------------
+    _C("Motion", "STEPPER_ENABLE", "<motor>", "Power the driver stage.", "Motion tab · ENABLE"),
+    _C("Motion", "STEPPER_DISABLE", "<motor>", "Driver stage off (a move in progress counts as a step-loss event).", "Motion tab · DISABLE"),
+    _C("Motion", "SET_POSITION_ZERO", "<motor>", "The current position is zero; clears a step-loss latch.", "Motion tab · SET ZERO"),
+    _C("Motion", "STEPLOSS_ACK", "<motor>", "Clear the position-uncertain latch and keep the zero (the operator checked the mechanism).",
+       "console"),
+    _C("Motion", "STEPPER_HOME", "<motor>", "Move to position 0.", "Motion tab · HOME"),
+    _C("Motion", "STEPPER_STOP", "<motor>", "Stop now.", "Motion tab · STOP, top strip · STOP MOTORS, Esc"),
+    _C("Motion", "STEPPER_MOVE", "<motor> <usteps>", "Relative move in raw microsteps, |usteps| ≤ 1000; allowed before zeroing.", "console"),
+    _C("Motion", "STEPPER_MOVETO", "<motor> <usteps> [hold_s]", "Absolute move in raw microsteps; motor must be zeroed.", "console"),
+    _C("Motion", "STEPPER_MOVE_MM", "<motor> <mm>", "Relative move in millimetres (converted onboard at the lead).", "Motion tab · Jog"),
+    _C("Motion", "STEPPER_MOVETO_MM", "<motor> <mm> [hold_s]", "Absolute move in millimetres with an optional hold; motor must be zeroed.",
+       "Motion tab · BEND"),
+    _C("Motion", "STEPPER_BEND", "<motor> <usteps> [hold_s]", "Alias of STEPPER_MOVETO (compatibility).", "console"),
+    _C("Motion", "STEPPER_ROTATE", "<motor> <revs>", "Rotate by full revolutions; allowed before zeroing.", "console"),
+    _C("Motion", "STEPPER_SET_SPEED", "<motor> <full-steps/s>", "Travel speed, clamped to 100 full-steps/s (0.5 mm/s). The only place speed is set.",
+       "Motion tab · SET SPEED"),
+    _C("Motion", "STEPPER_SET_ACCEL", "<motor> <full-steps/s²>", "Trapezoid acceleration.", "Motion tab · SET ACCEL"),
+    _C("Motion", "STEPPER_SET_CURRENT", "<motor> <A_rms>", "Run current; refused when the sense resistor cannot deliver it.",
+       "Motion tab · SET CURRENT"),
+    _C("Motion", "STEPPER_SET_MICROSTEP", "<motor> <1|2|4|…|256>", "Microstep divisor; the position is rescaled, sequences and the plan are not.",
+       "Advanced tab · Microstep"),
+    _C("Motion", "PULL_ARM", "<motor>", "Queue one standard pull; refused while the position is latched uncertain.", "console"),
+    _C("Motion", "PULL_EXECUTE", "<motor>", "The config-defined standard pull now (2 mm out, hold, back); emits EVT,PULL.",
+       "Motion tab · STANDARD PULL"),
+    _C("Motion", "MOTOR_DEBUG", "<motor>", "The TMC5160's live registers and the step-loss statistics.", "Debug tab"),
+    # -- bend sequences ---------------------------------------------------------------------
+    _C("Sequences", "BENDSEQ_LOAD", "<motor> <name> <target_usteps>:<hold_s> … [repeat=<n> <target>:<hold> …]",
+       "Store a sequence of absolute targets with holds; the steps before repeat= run n times. Runs at the motor's own speed.",
+       "Motion tab · MEMORISE"),
+    _C("Sequences", "BENDSEQ_RUN", "<motor> <name>", "Start a stored sequence (RUN mode, zeroed, no step-loss latch).", "Motion tab · PLAY"),
+    _C("Sequences", "BENDSEQ_PAUSE", "<motor>", "Pause after the current step.", "Motion tab · PAUSE"),
+    _C("Sequences", "BENDSEQ_RESUME", "<motor>", "Resume a paused sequence.", "Motion tab · RESUME"),
+    _C("Sequences", "BENDSEQ_STOP", "<motor>", "Stop and forget the running sequence.", "Motion tab · STOP"),
+    _C("Sequences", "BENDSEQ_STATUS", "<motor>", "Running/paused, step, total, cycle of the active sequence.", "Motion tab · STATUS"),
+    _C("Sequences", "BENDSEQ_CLEAR", "<motor> [name]", "Forget one or every stored sequence.", "console"),
+    # -- fallback plan ----------------------------------------------------------------------
+    _C("Fallback", "FALLBACK_PLAN", "<motor> <target_usteps> <hold_s>",
+       "The bend the onboard performs on its own during link-loss fallback (one per motor).", "Advanced tab · LOAD"),
+    _C("Fallback", "FALLBACK_ARM", "", "Arm the loaded plan.", "Advanced tab · ARM PLAN"),
+    _C("Fallback", "FALLBACK_DISARM", "", "Disarm and forget the plan.", "Advanced tab · DISARM"),
+    _C("Fallback", "FALLBACK_STATUS", "", "Plan state and each motor's bend.", "Advanced tab · STATUS"),
+    # -- bench only -------------------------------------------------------------------------
+    _C("Bench", "ARM_DEBUG", "<token>", "Bench debug arm (runtime.bench_mode only): unlocks open-loop duty without PT100 feedback.", "console"),
+    _C("Bench", "DISARM_DEBUG", "", "End the bench debug arm.", "console"),
+    _C("Bench", "SET_BENCH_MODE", "<1|0>", "Toggle bench mode.", "console"),
+    _C("Bench", "HEATER_TEST", "<heater> <duty> <seconds>", "Bounded commissioning pulse (bench mode, debug arm, RUN).", "console"),
+)
+COMMAND_SPECS: Dict[str, CommandSpec] = {spec.name: spec for spec in COMMAND_REFERENCE}
+
+
+def command_spec(verb: str) -> Optional[CommandSpec]:
+    """The reference row of a command verb (any case), or None."""
+    return COMMAND_SPECS.get((verb or "").strip().upper())
 
 
 DEFAULT_COMMAND_TIMEOUT_S = 3.0

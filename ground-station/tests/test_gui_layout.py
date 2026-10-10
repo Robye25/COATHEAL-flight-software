@@ -110,9 +110,9 @@ class LayoutTests(unittest.TestCase):
         from app.protocol import parse_telemetry_csv
         self.win._on_packet(parse_telemetry_csv(frame()))
         self.assertIn("frames", self.win.statusBar().currentMessage())
-        # T+ counts from the onboard boot epoch embedded in the session id.
+        # The top strip shows the onboard's own time on the frame, absolute.
         self.win._top.refresh()
-        self.assertNotEqual(self.win._top._tplus.text(), "00:00:00")
+        self.assertEqual(self.win._top.frame_time_text(), "00:00:00Z")
 
     def test_receiver_autostart_and_failure_recovery(self) -> None:
         import socket

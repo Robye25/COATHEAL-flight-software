@@ -38,25 +38,43 @@ def _stamp(epoch: float) -> str:
     return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime("%Y%m%d-%H%M%S")
 
 
-def session_dir_name(session_id: str, now: Optional[float] = None) -> str:
+def session_dir_name(session_id: str, now: Optional[float] = None, *, suffix: str = "") -> str:
     """``<YYYYMMDD-HHMMSS>_<session id>`` -- time from the id when it carries
-    one, otherwise from `now` (or the wall clock)."""
+    one, otherwise from `now` (or the wall clock). With a `suffix` (a log
+    session the operator started by hand) the time is `now` and the name
+    ends in ``_<suffix>``, so it never collides with the automatic one."""
     epoch: float
     parsed = session_epoch(session_id)
-    if parsed is not None:
+    if parsed is not None and not suffix:
         epoch = float(parsed)
     else:
         epoch = float(now) if now is not None else time.time()
-    return f"{_stamp(epoch)}_{safe_component(session_id)}"
+    name = f"{_stamp(epoch)}_{safe_component(session_id)}"
+    return f"{name}_{safe_component(suffix)}" if suffix else name
+
+
+def session_display(session_id: str) -> str:
+    """The session for the operator: its boot date and time (from the id)
+    and the id without the `coatheal-` prefix, e.g.
+    ``2026-10-10 12:20:56Z · 1787760547-1``; an id without an epoch as is."""
+    session_id = (session_id or "").strip()
+    if not session_id:
+        return "—"
+    epoch = session_epoch(session_id)
+    if epoch is None:
+        return session_id
+    stamp = datetime.fromtimestamp(epoch, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+    tail = session_id.split("-", 1)[1] if "-" in session_id else session_id
+    return f"{stamp} · {tail}"
 
 
 class SessionDirectory:
     """Location of one session's files. Creating it is explicit (`ensure`)."""
 
-    def __init__(self, root: Path, session_id: str, *, now: Optional[float] = None):
+    def __init__(self, root: Path, session_id: str, *, now: Optional[float] = None, suffix: str = ""):
         self.root = Path(root)
         self.session_id = session_id
-        self.path = self.root / SESSIONS_SUBDIR / session_dir_name(session_id, now)
+        self.path = self.root / SESSIONS_SUBDIR / session_dir_name(session_id, now, suffix=suffix)
 
     @classmethod
     def no_session(cls, root: Path, *, now: Optional[float] = None) -> "SessionDirectory":
