@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -103,15 +104,13 @@ class ConsoleTabTests(unittest.TestCase):
         motion.selector.set_value(0)
         motion.update_state(self.win._state)
         card = motion.cards[0]
-        # Old firmware / nothing latched: no banner, nothing to acknowledge...
+        # Old firmware / nothing latched: no banner, the pull is live...
         self.assertTrue(card.loss_note.isHidden())
-        self.assertIsNone(motion.btn_ack_loss.reason(), "unknown (old firmware) never blocks")
         self.feed(m0="en:1|ok:1|mv:0|hold:0|zeroed:1|therm:ok|loss:0|unc:0")
-        self.assertIn("no step-loss latch", motion.btn_ack_loss.reason() or "")
         self.assertIsNone(motion.btn_pull.reason())
 
-        # ...latched: the card says so, the standard pull is refused with the
-        # reason, BEND and jog stay live, and ACK sends the acknowledge.
+        # ...latched: the card says so and names the way out, the standard
+        # pull is refused with the reason, BEND and jog stay live.
         self.feed(m0="en:1|ok:1|mv:0|hold:0|zeroed:1|therm:ok|loss:2|unc:1")
         self.assertFalse(card.loss_note.isHidden())
         self.assertIn("STEP LOSS (2×)", card.loss_note.text())
@@ -121,11 +120,14 @@ class ConsoleTabTests(unittest.TestCase):
         self.assertIsNone(motion.jog_buttons[0].reason())
         self.assertIsNone(motion.btn_home.reason())
         self.assertTrue(motion.cards[1].loss_note.isHidden(), "the other motor is not latched")
-        self.assertIsNone(motion.btn_ack_loss.reason())
-        motion.btn_ack_loss.click()
-        self.assertEqual(sent[-1], "STEPLOSS_ACK 0")
-        # The sequence controls on the Advanced tab follow the same latch.
-        self.assertIn("position uncertain", self.win._advanced.btn_seq_run.reason() or "")
+        # No ACK button (owner 2026-10-10): SET ZERO is the way out; the
+        # console command is named for the rare case the position is right.
+        self.assertIn("SET ZERO", card.loss_note.text())
+        self.assertIn("STEPLOSS_ACK 0", card.loss_note.text())
+        self.assertFalse(hasattr(motion, "btn_ack_loss"))
+        self.assertEqual(sent, [], "looking sends nothing")
+        # The bend cycle's PLAY follows the same latch.
+        self.assertIn("position uncertain", motion.btn_cycle_play.reason() or "")
         # The alarm strip's model raises it too.
         from app.gui.alarms import evaluate
         self.assertIn("M0_STEPLOSS", {a.key for a in evaluate(self.win._state)})
@@ -138,6 +140,117 @@ class ConsoleTabTests(unittest.TestCase):
 
     # MUTATION: drop `or gating.position_trust_reason(...)` from the pull
     # button in tab_motion.update_state and confirm this test fails.
+
+    def test_bend_cycle_is_memorised_and_played_per_motor(self) -> None:
+        sent = capture_sends(self.win._dispatcher)
+        self.feed()   # hz:100 (0.5 mm/s) and us:4 on both motors; M0 enabled+zeroed in RUN
+        motion = self.win._motion
+        motion.selector.set_value(0)
+        motion.update_state(self.win._state)
+        motion.cycle_name.setText("flex")
+        motion.cycle_plus.setValue(1.5); motion.cycle_minus.setValue(-0.5)
+        motion.cycle_count.setValue(3); motion.cycle_upper.setValue(5.0); motion.cycle_lower.setValue(2.5)
+        motion.cycle_return.setChecked(True)
+        # 1 mm lead, µ4: 1.5 mm is 1200 µsteps. No speed anywhere: the
+        # motor's own (STEPPER_SET_SPEED) applies.
+        wire = "BENDSEQ_LOAD 0 flex 1200:5 -400:2.5 repeat=3 0:0"
+        self.assertIn(wire, motion.cycle_preview.text(), "the preview is the line that will be sent")
+        self.assertIn("3 × (+1.500 mm soak 5 s → -0.500 mm soak 2.5 s), then back to 0", motion.cycle_preview.text())
+        self.assertIn("at 0.50 mm/s", motion.cycle_preview.text())
+        self.assertIsNone(motion.btn_cycle_memorise.reason())
+        motion.btn_cycle_memorise.click()
+        self.assertEqual(sent, [wire])
+        self.assertIsNone(motion.btn_cycle_play.reason(), "M0 is enabled+zeroed in RUN")
+        with mock.patch("app.gui.tab_motion.confirm", return_value=False):
+            motion.btn_cycle_play.click()
+        self.assertEqual(len(sent), 1, "declined: nothing sent")
+        with mock.patch("app.gui.tab_motion.confirm", return_value=True):
+            motion.btn_cycle_play.click()
+        self.assertEqual(sent[-1], "BENDSEQ_RUN 0 flex")
+        for btn, expected in ((motion.btn_cycle_pause, "BENDSEQ_PAUSE 0"), (motion.btn_cycle_stop, "BENDSEQ_STOP 0"),
+                              (motion.btn_cycle_status, "BENDSEQ_STATUS 0")):
+            btn.click()
+            self.assertEqual(sent[-1], expected)
+        # The STATUS reply says where the cycle stands.
+        from app.protocol import CommandResponse
+        body = "motor=0;zeroed=1;running=1;paused=0;name=flex;step=4;total=7;cycle=3;cycles=3"
+        motion.on_response("BENDSEQ_STATUS 0", CommandResponse(ok=True, command="BENDSEQ_STATUS", body=body,
+                                                                 raw=f"ACK,BENDSEQ_STATUS,{body}"), 12.0, motion)
+        self.assertEqual(motion.cycle_progress.text(), "flex: cycle 3/3 · step 5/7 · running")
+        # Each motor remembers its own cycle, on this PC...
+        motion.selector.set_value(1)
+        motion.update_state(self.win._state)
+        self.assertEqual((motion.cycle_name.text(), motion.cycle_count.value()), ("cycle", 1), "M1: the defaults")
+        motion.selector.set_value(0)
+        motion.update_state(self.win._state)
+        self.assertEqual((motion.cycle_name.text(), motion.cycle_count.value(), motion.cycle_minus.value()),
+                         ("flex", 3, -0.5))
+        self.assertEqual(self.win._settings.value("bendcycle/m0/name"), "flex")
+        self.win._settings.sync()
+        # ...and a window opened later starts from it.
+        other = make_window(Path(self._tmp.name))
+        try:
+            other._motion.selector.set_value(0)
+            other._motion.update_state(other._state)
+            self.assertEqual((other._motion.cycle_name.text(), other._motion.cycle_count.value()), ("flex", 3))
+        finally:
+            other.close()
+
+    def test_bend_cycle_refuses_what_the_onboard_would(self) -> None:
+        sent = capture_sends(self.win._dispatcher)
+        motion = self.win._motion
+        motion.selector.set_value(0)
+        motion.update_state(self.win._state)
+        motion.cycle_plus.setValue(0.0); motion.cycle_minus.setValue(0.0)
+        self.assertIn("equal", motion.cycle_preview.text())
+        motion.btn_cycle_memorise.click()
+        self.assertEqual(sent, [])
+        self.assertIn("equal", motion.resp_cycle.text())
+        # Before telemetry the microstep is unknown: nothing is encoded on a guess.
+        motion.cycle_plus.setValue(2.0)
+        self.assertIn("µsteps unknown", motion.cycle_preview.text())
+        motion.btn_cycle_memorise.click()
+        self.assertEqual(sent, [])
+        self.assertIn("microstep unknown", motion.resp_cycle.text())
+        self.feed()
+        self.assertIn("BENDSEQ_LOAD 0 cycle 1600:5 0:5", motion.cycle_preview.text())
+
+    # ── System tab: onboard IP ──
+    def test_onboard_ip_is_set_on_the_system_tab_and_remembered(self) -> None:
+        # --host (gui_helpers passes 127.0.0.1) wins at startup...
+        self.assertEqual(self.win._user_host, "127.0.0.1")
+        system = self.win._system
+        self.assertEqual(system.host_edit.text(), "127.0.0.1")
+        # ...APPLY points the dispatcher at the address and saves it...
+        system.host_edit.setText(" 10.20.30.40 ")
+        system.btn_host_apply.click()
+        self.assertEqual(self.win._dispatcher.host, "10.20.30.40")
+        self.assertEqual(self.win._settings.value("link/onboard_host"), "10.20.30.40")
+        self.assertIn("(manual)", system.i_target.value())
+        # ...a beacon from elsewhere does not move the target while it is set...
+        self.win._on_onboard_discovered("10.0.0.9", 5000, 4000, "sess", "coatheal-pi")
+        self.assertEqual(self.win._dispatcher.host, "10.20.30.40")
+        # ...AUTO forgets it and follows the beacon again.
+        system.btn_host_auto.click()
+        self.assertEqual(self.win._user_host, "")
+        self.assertIsNone(self.win._settings.value("link/onboard_host"))
+        self.assertEqual(self.win._dispatcher.host, "10.0.0.9")
+        self.assertEqual(system.host_edit.text(), "")
+        self.assertIn("(discovery)", system.i_target.value())
+        # Garbage is refused locally and sends nothing anywhere.
+        system.host_edit.setText("10.0.0.9 5000")
+        system.btn_host_apply.click()
+        self.assertEqual(self.win._user_host, "")
+        # Without --host, a window opened later uses what was saved.
+        system.host_edit.setText("10.20.30.41"); system.btn_host_apply.click()
+        self.win._settings.sync()
+        other = make_window(Path(self._tmp.name), cmd_host="")
+        try:
+            self.assertEqual(other._user_host, "10.20.30.41")
+            self.assertEqual(other._dispatcher.host, "10.20.30.41")
+            self.assertEqual(other._system.host_edit.text(), "10.20.30.41")
+        finally:
+            other.close()
 
     def test_esc_and_stop_motors_send_both_stops(self) -> None:
         from PyQt6.QtGui import QKeySequence, QShortcut

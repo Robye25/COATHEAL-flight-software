@@ -96,7 +96,7 @@ def evaluate(state: OnboardState) -> List[Alarm]:
                     if motor.step_loss else ""
                 alarms.append(Alarm(f"M{motor_id}_STEPLOSS",
                                     f"M{motor_id} STEP LOSS{count} — position uncertain; CHECK MOTOR{motor_id} "
-                                    f"says why. Check the mechanism, then SET ZERO or STEPLOSS_ACK {motor_id}"))
+                                    f"says why. Check the mechanism, then SET ZERO (or STEPLOSS_ACK {motor_id} from the console)"))
         if state.heaters_inhibited:
             moving = [f"M{m.motor_id}" for m in state.motors if m.moving or m.holding]
             who = f" ({' '.join(moving)} moving)" if moving else ""

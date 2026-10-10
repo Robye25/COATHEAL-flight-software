@@ -3,20 +3,24 @@
 Two always-visible motor cards, a selector that drives the shared
 controls, jog in mm (STEPPER_MOVE_MM; the onboard converts through the
 ball-screw lead), per-motor drive settings (speed, run current, accel),
-BEND (STEPPER_MOVETO_MM with hold), STANDARD PULL (PULL_EXECUTE), and the
-resistance-before/after readout that confirms a bend. Every control that
-cannot succeed is disabled with its reason.
+BEND (STEPPER_MOVETO_MM with hold), STANDARD PULL (PULL_EXECUTE), the
+memorised bend cycle (BENDSEQ_*, built by app/bend_cycle.py and remembered
+per motor on this PC), and the resistance-before/after readout that
+confirms a bend. Every control that cannot succeed is disabled with its
+reason.
 """
 from __future__ import annotations
 
 from collections import deque
-from typing import Deque, List, Optional
+from typing import Deque, Dict, List, Optional
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QSettings, Qt
 from PyQt6.QtWidgets import (
-    QAbstractSpinBox, QDoubleSpinBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QScrollArea,
-    QVBoxLayout, QWidget,
+    QAbstractSpinBox, QCheckBox, QDoubleSpinBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
+    QScrollArea, QSpinBox, QVBoxLayout, QWidget,
 )
+
+from .. import bend_cycle
 
 from ..protocol import (
     CommandResponse, PullEvent, validate_accel_mm_s2, validate_current_a,
@@ -30,7 +34,7 @@ from .dispatch import CommandDispatcher
 from .state import DEFAULT_LAYOUT, MOTOR_COUNT, Layout, MotorState, OnboardState
 from .widgets import (
     AMBER, BLUE, GRAY, GREEN, MONO_CSS, MUTED, RED, ResponseLine, Segmented, StatusDot,
-    group_box, hrow, make_button, with_unit,
+    confirm, group_box, hrow, make_button, with_unit,
 )
 
 MOTOR_COLORS = ("#2ecc71", "#e67e22")
@@ -155,7 +159,8 @@ class MotorCard(QFrame):
             self.thermal_note.hide()
         if motor.position_uncertain:
             events = f" ({motor.step_loss}×)" if motor.step_loss else ""
-            self.loss_note.setText(f"STEP LOSS{events} — position uncertain; check, then SET ZERO or ACK")
+            self.loss_note.setText(f"STEP LOSS{events} — position uncertain; check the mechanism, then SET ZERO "
+                                   f"(console: STEPLOSS_ACK {self.motor_id} keeps the zero)")
             self.loss_note.setStyleSheet(f"color: {RED}; font-size: 8pt; font-weight: bold; border: none;")
             self.loss_note.show()
         elif motor.step_loss:
@@ -208,7 +213,7 @@ class MotorCard(QFrame):
 
 
 class MotionTab(QScrollArea):
-    def __init__(self, dispatcher: CommandDispatcher, parent=None):
+    def __init__(self, dispatcher: CommandDispatcher, settings: Optional[QSettings] = None, parent=None):
         super().__init__(parent)
         self.setWidgetResizable(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -217,6 +222,12 @@ class MotionTab(QScrollArea):
         self.state = OnboardState()
         self.tracker = BendTracker()
         self._pulls: Deque[tuple] = deque(maxlen=3)  # (PullEvent, mm frozen at arrival)
+        # The memorised bend cycle of each motor (app/bend_cycle.py), kept on
+        # this PC across sessions under bendcycle/m<n>/<field>.
+        self._settings = settings
+        self._cycles: Dict[int, bend_cycle.BendCycle] = self._load_cycles()
+        self._cycle_shown: Optional[int] = None
+        self._cycle_loading = False
 
         inner = QWidget(); self.setWidget(inner)
         outer = QVBoxLayout(inner); outer.setContentsMargins(6, 6, 6, 6); outer.setSpacing(8)
@@ -243,11 +254,6 @@ class MotionTab(QScrollArea):
         self.btn_stop = make_button("STOP", "danger", sends="STEPPER_STOP <motor_id>", min_height=30, slot=lambda: self._send_motor("STEPPER_STOP"))
         grid.addWidget(self.btn_enable, 0, 0); grid.addWidget(self.btn_disable, 0, 1); grid.addWidget(self.btn_zero, 0, 2)
         grid.addWidget(self.btn_home, 1, 0); grid.addWidget(self.btn_stop, 1, 1, 1, 2)
-        # Clears the onboard's position-uncertain latch without moving the
-        # zero: the operator checked the mechanism and accepts the position.
-        self.btn_ack_loss = make_button("ACK STEP LOSS", "neutral", sends="STEPLOSS_ACK <motor_id>", min_height=24,
-                                        slot=lambda: self._send_motor("STEPLOSS_ACK"))
-        grid.addWidget(self.btn_ack_loss, 2, 0, 1, 3)
         lay.addLayout(grid)
         self.motor_note = QLabel(""); self.motor_note.setWordWrap(True); self.motor_note.setMinimumWidth(1)
         self.motor_note.setStyleSheet(f"color: {AMBER}; font-size: 8pt;")
@@ -335,6 +341,69 @@ class MotionTab(QScrollArea):
         lay.addWidget(self.resp_bend)
         outer.addWidget(frame)
 
+        frame, lay = group_box("Bend cycle (memorised sequence)")
+        self.cycle_name = QLineEdit(); self.cycle_name.setMaxLength(bend_cycle.MAX_NAME_LEN)
+        self.cycle_name.setPlaceholderText("name"); self.cycle_name.setFixedWidth(72)
+        self.cycle_plus = QDoubleSpinBox(); self.cycle_plus.setRange(0.0, 500.0); self.cycle_plus.setDecimals(3)
+        self.cycle_minus = QDoubleSpinBox(); self.cycle_minus.setRange(-500.0, 0.0); self.cycle_minus.setDecimals(3)
+        self.cycle_count = QSpinBox(); self.cycle_count.setRange(1, bend_cycle.MAX_CYCLES)
+        self.cycle_upper = QDoubleSpinBox(); self.cycle_upper.setRange(0.0, bend_cycle.MAX_SOAK_S); self.cycle_upper.setDecimals(1)
+        self.cycle_lower = QDoubleSpinBox(); self.cycle_lower.setRange(0.0, bend_cycle.MAX_SOAK_S); self.cycle_lower.setDecimals(1)
+        for spin, width in ((self.cycle_plus, 66), (self.cycle_minus, 66), (self.cycle_count, 48),
+                            (self.cycle_upper, 56), (self.cycle_lower, 56)):
+            spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+            spin.setFixedWidth(width)
+        self.cycle_return = QCheckBox("back to 0 at the end")
+        self.cycle_return.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
+
+        def small(text: str) -> QLabel:
+            lbl = QLabel(text); lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
+            return lbl
+
+        lay.addWidget(hrow(small("name"), self.cycle_name, small("+ limit"), with_unit(self.cycle_plus, "mm"),
+                           small("− limit"), with_unit(self.cycle_minus, "mm")))
+        lay.addWidget(hrow(small("cycles"), self.cycle_count, small("soak at +"), with_unit(self.cycle_upper, "s"),
+                           small("soak at −"), with_unit(self.cycle_lower, "s")))
+        self.cycle_preview = QLabel("—"); self.cycle_preview.setWordWrap(True); self.cycle_preview.setMinimumWidth(1)
+        self.cycle_preview.setStyleSheet(f"{MONO_CSS} color: {MUTED}; font-size: 8pt;")
+        lay.addWidget(hrow(self.cycle_return, self.cycle_preview, stretch_last=True))
+        grid = QGridLayout(); grid.setSpacing(3)
+        self.btn_cycle_memorise = make_button(
+            "MEMORISE", "primary", min_height=24, slot=self._cycle_memorise,
+            sends="BENDSEQ_LOAD <motor_id> <name> <+limit µst>:<soak s> <−limit µst>:<soak s> repeat=<cycles> 0:0")
+        self.btn_cycle_play = make_button("PLAY", "success", sends="BENDSEQ_RUN <motor_id> <name>", min_height=24,
+                                          slot=self._cycle_play)
+        self.btn_cycle_pause = make_button("PAUSE", "danger", sends="BENDSEQ_PAUSE <motor_id>", min_height=24,
+                                           slot=lambda: self._cycle_cmd("BENDSEQ_PAUSE"))
+        self.btn_cycle_resume = make_button("RESUME", "success", sends="BENDSEQ_RESUME <motor_id>", min_height=24,
+                                            slot=lambda: self._cycle_cmd("BENDSEQ_RESUME"))
+        self.btn_cycle_stop = make_button("STOP", "danger", sends="BENDSEQ_STOP <motor_id>", min_height=24,
+                                          slot=lambda: self._cycle_cmd("BENDSEQ_STOP"))
+        self.btn_cycle_status = make_button("STATUS", "neutral", sends="BENDSEQ_STATUS <motor_id>", min_height=24,
+                                            slot=lambda: self._cycle_cmd("BENDSEQ_STATUS"))
+        for index, btn in enumerate((self.btn_cycle_memorise, self.btn_cycle_play, self.btn_cycle_pause,
+                                     self.btn_cycle_resume, self.btn_cycle_stop, self.btn_cycle_status)):
+            grid.addWidget(btn, index // 3, index % 3)
+        lay.addLayout(grid)
+        c_lbl = QLabel("MEMORISE sends the cycle to the onboard, in µsteps at the motor's live microstep; it runs at the "
+                       "motor's speed and acceleration (Drive settings) and is kept onboard until a reboot. PLAY starts it. "
+                       "The values are remembered per motor on this PC.")
+        c_lbl.setWordWrap(True); c_lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
+        lay.addWidget(c_lbl)
+        self.cycle_note = QLabel(""); self.cycle_note.setWordWrap(True); self.cycle_note.setMinimumWidth(1)
+        self.cycle_note.setStyleSheet(f"color: {AMBER}; font-size: 8pt;")
+        lay.addWidget(self.cycle_note)
+        self.cycle_progress = QLabel("—"); self.cycle_progress.setStyleSheet(f"{MONO_CSS} font-size: 9pt;")
+        self.cycle_progress.setWordWrap(True); self.cycle_progress.setMinimumWidth(1)
+        lay.addWidget(self.cycle_progress)
+        self.resp_cycle = ResponseLine()
+        lay.addWidget(self.resp_cycle)
+        for signal in (self.cycle_name.textChanged, self.cycle_plus.valueChanged, self.cycle_minus.valueChanged,
+                       self.cycle_count.valueChanged, self.cycle_upper.valueChanged, self.cycle_lower.valueChanged,
+                       self.cycle_return.toggled):
+            signal.connect(self._on_cycle_edited)
+        outer.addWidget(frame)
+
         frame, lay = group_box("Recent pulls")
         self.pull_lines = [QLabel("—") for _ in range(3)]
         for lbl in self.pull_lines:
@@ -392,6 +461,130 @@ class MotionTab(QScrollArea):
         self.tracker.mark_start(motor, self.state, utc_now_iso())
         self._send(f"PULL_EXECUTE {motor}")
 
+    # -- bend cycle (app/bend_cycle.py) --------------------------------------------
+    def _load_cycles(self) -> Dict[int, bend_cycle.BendCycle]:
+        cycles: Dict[int, bend_cycle.BendCycle] = {}
+        for motor_id in range(MOTOR_COUNT):
+            values = {}
+            if self._settings is not None:
+                for field in bend_cycle.FIELDS:
+                    value = self._settings.value(f"bendcycle/m{motor_id}/{field}")
+                    if value is not None:
+                        values[field] = value
+            cycles[motor_id] = bend_cycle.from_mapping(values)
+        return cycles
+
+    def _save_cycle(self, motor_id: int) -> None:
+        if self._settings is None:
+            return
+        for field, value in bend_cycle.to_mapping(self._cycles[motor_id]).items():
+            self._settings.setValue(f"bendcycle/m{motor_id}/{field}", value)
+
+    def _show_cycle(self, motor_id: int) -> None:
+        """Put motor `motor_id`'s remembered cycle into the fields."""
+        cycle = self._cycles[motor_id]
+        self._cycle_loading = True
+        try:
+            self.cycle_name.setText(cycle.name)
+            self.cycle_plus.setValue(cycle.plus_mm)
+            self.cycle_minus.setValue(cycle.minus_mm)
+            self.cycle_count.setValue(cycle.cycles)
+            self.cycle_upper.setValue(cycle.upper_soak_s)
+            self.cycle_lower.setValue(cycle.lower_soak_s)
+            self.cycle_return.setChecked(cycle.return_to_zero)
+        finally:
+            self._cycle_loading = False
+        self._cycle_shown = motor_id
+
+    def _cycle_from_fields(self) -> bend_cycle.BendCycle:
+        return bend_cycle.BendCycle(
+            name=self.cycle_name.text().strip(), plus_mm=self.cycle_plus.value(), minus_mm=self.cycle_minus.value(),
+            cycles=int(self.cycle_count.value()), upper_soak_s=self.cycle_upper.value(),
+            lower_soak_s=self.cycle_lower.value(), return_to_zero=self.cycle_return.isChecked())
+
+    def _on_cycle_edited(self, *_args) -> None:
+        if self._cycle_loading or self._cycle_shown is None:
+            return
+        self._cycles[self._cycle_shown] = self._cycle_from_fields()
+        self._save_cycle(self._cycle_shown)
+        self._update_cycle_controls(self.state, self.motor_id())
+
+    def _live_microstep(self, motor_id: int) -> Optional[int]:
+        """The motor's live divisor from telemetry, or None before its first
+        STEPPER<n> segment: absolute µstep targets are never encoded against
+        a guess (a cycle built at µ4 for a motor on µ16 bends 4x short)."""
+        motor = self.state.motor(motor_id)
+        return motor.microstep if motor.present and motor.microstep > 0 else None
+
+    def _live_speed_mm_s(self, motor_id: int) -> Optional[float]:
+        motor = self.state.motor(motor_id)
+        if self.state.have_packet and motor.present and motor.hz > 0:
+            return mm_s_from_hz(motor.hz)
+        return None
+
+    def _cycle_memorise(self) -> None:
+        motor = self.motor_id()
+        cycle = self._cycles[motor]
+        reason = bend_cycle.validate(cycle)
+        if reason:
+            self.resp_cycle.show_note(f"✖ {reason}", RED); return
+        us = self._live_microstep(motor)
+        if us is None:
+            self.resp_cycle.show_note("✖ motor microstep unknown — wait for telemetry before MEMORISE", RED); return
+        self._send(bend_cycle.load_command(motor, cycle, us))
+
+    def _cycle_play(self) -> None:
+        motor = self.motor_id()
+        cycle = self._cycles[motor]
+        reason = bend_cycle.validate(cycle)
+        if reason:
+            self.resp_cycle.show_note(f"✖ {reason}", RED); return
+        body = (f"Send BENDSEQ_RUN {motor} {cycle.name}? M{motor} runs "
+                f"{bend_cycle.describe(cycle, self._live_speed_mm_s(motor))}. "
+                "MEMORISE first if the onboard does not have this cycle yet.")
+        if confirm(self, "Play the bend cycle?", body):
+            self.tracker.mark_start(motor, self.state, utc_now_iso())
+            self._send(f"BENDSEQ_RUN {motor} {cycle.name}")
+
+    def _cycle_cmd(self, verb: str) -> None:
+        self._send(f"{verb} {self.motor_id()}")
+
+    def _update_cycle_controls(self, state: OnboardState, motor_id: int) -> None:
+        if self._cycle_shown != motor_id:
+            self._show_cycle(motor_id)
+        cycle = self._cycles[motor_id]
+        reason = bend_cycle.validate(cycle)
+        if reason:
+            self.cycle_preview.setText(f"✖ {reason}")
+            self.cycle_preview.setStyleSheet(f"{MONO_CSS} color: {RED}; font-size: 8pt;")
+        else:
+            us = self._live_microstep(motor_id)
+            wire = (bend_cycle.load_command(motor_id, cycle, us) if us is not None
+                    else "(µsteps unknown until telemetry shows the microstep)")
+            self.cycle_preview.setText(f"{bend_cycle.describe(cycle, self._live_speed_mm_s(motor_id))}\n{wire}")
+            self.cycle_preview.setStyleSheet(f"{MONO_CSS} color: {MUTED}; font-size: 8pt;")
+        generic = gating.generic_reason(state)
+        self.btn_cycle_memorise.set_reason(generic)
+        play_reason = gating.sequence_run_reason(state, motor_id)
+        self.btn_cycle_play.set_reason(play_reason)
+        self.btn_cycle_pause.set_reason(gating.motion_reason(state, motor_id, needs_zero=False, needs_enable=False))
+        self.btn_cycle_resume.set_reason(gating.motion_reason(state, motor_id, needs_zero=True, needs_enable=False)
+                                         or gating.position_trust_reason(state, motor_id))
+        self.btn_cycle_stop.set_reason(generic)
+        self.btn_cycle_status.set_reason(generic)
+        self.cycle_note.setText(f"PLAY disabled: {play_reason}" if play_reason else "")
+        motor = state.motor(motor_id)
+        if not (state.have_packet and motor.present):
+            return
+        if motor.seq_state in ("run", "pause"):
+            # A STATUS reply (on_response) fills in the cycle count; until
+            # then telemetry only says that something runs.
+            if not self.cycle_progress.text().startswith(f"{motor.seq_name}:"):
+                word = "paused" if motor.seq_state == "pause" else "running"
+                self.cycle_progress.setText(f"{motor.seq_name or '?'} · {word} — STATUS shows the cycle count")
+        else:
+            self.cycle_progress.setText("idle" if motor.seq_state else "—")
+
     def stop_all(self) -> None:
         for motor_id in range(MOTOR_COUNT):
             self._disp.send(f"STEPPER_STOP {motor_id}", tag=self)
@@ -429,7 +622,6 @@ class MotionTab(QScrollArea):
         self.btn_zero.set_reason(gating.generic_reason(state))
         self.btn_stop.set_reason(gating.generic_reason(state))
         self.btn_home.set_reason(gating.motion_reason(state, motor_id, needs_zero=True))
-        self.btn_ack_loss.set_reason(gating.step_loss_ack_reason(state, motor_id))
         jog_reason = gating.motion_reason(state, motor_id, needs_zero=False)
         for btn in self.jog_buttons:
             btn.set_reason(jog_reason)
@@ -455,6 +647,7 @@ class MotionTab(QScrollArea):
             self.bend_note.setText(f"STANDARD PULL disabled: {pull_reason}")
         else:
             self.bend_note.setText("")
+        self._update_cycle_controls(state, motor_id)
 
     def on_pull_event(self, ev: PullEvent) -> None:
         # Freeze the mm value at arrival: steps_moved is in µsteps at the
@@ -483,5 +676,11 @@ class MotionTab(QScrollArea):
             self.resp_drive.show_response(cmd, resp, ms)
         elif verb in ("STEPPER_MOVETO", "STEPPER_MOVETO_MM", "PULL_EXECUTE", "STEPPER_BEND"):
             self.resp_bend.show_response(cmd, resp, ms)
+        elif verb.startswith("BENDSEQ"):
+            self.resp_cycle.show_response(cmd, resp, ms)
+            if verb == "BENDSEQ_STATUS" and resp.ok:
+                progress = bend_cycle.progress_text(resp.body)
+                if progress:
+                    self.cycle_progress.setText(progress)
         else:
             self.resp_motor.show_response(cmd, resp, ms)

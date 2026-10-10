@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
-    QComboBox, QDoubleSpinBox, QGridLayout, QHBoxLayout, QLabel, QScrollArea,
+    QComboBox, QDoubleSpinBox, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QScrollArea,
     QVBoxLayout, QWidget,
 )
 
@@ -27,7 +27,11 @@ CHECK_TARGETS = ["ALL", "DPS310", "ADS1115", "SEQUENT_RTD", "MAX31865", "PWM", "
 
 
 class SystemTab(QScrollArea):
-    def __init__(self, dispatcher: CommandDispatcher, parent=None):
+    # The onboard IP the operator APPLYed ("" for AUTO); the main window
+    # saves it on this PC and points the dispatcher and the probe at it.
+    host_override_changed = pyqtSignal(str)
+
+    def __init__(self, dispatcher: CommandDispatcher, *, host_override: str = "", parent=None):
         super().__init__(parent)
         self.setWidgetResizable(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -51,6 +55,23 @@ class SystemTab(QScrollArea):
         self.i_session = Indicator("Session")
         for ind in (self.i_target, self.i_receiver, self.i_rate, self.i_uplink, self.i_queue, self.i_session):
             lay.addWidget(ind)
+        # The onboard's address, set by hand for flight (the E-Link addresses
+        # are fixed by SSC); AUTO leaves it to the beacon, the probe and the
+        # telemetry peer. `--host` on the command line still wins at startup.
+        self.host_edit = QLineEdit(host_override)
+        self.host_edit.setPlaceholderText("AUTO: beacon / probe / telemetry peer")
+        self.host_edit.setStyleSheet(MONO_CSS)
+        self.host_edit.returnPressed.connect(self._apply_host)
+        self.btn_host_apply = make_button("APPLY", "primary", min_height=22, slot=self._apply_host)
+        self.btn_host_apply.setToolTip("Commands go to this address, saved on this PC, until AUTO. Not a wire command.")
+        self.btn_host_auto = make_button("AUTO", "neutral", min_height=22, slot=self._auto_host)
+        self.btn_host_auto.setToolTip("Forget the address and follow the onboard's discovery beacon again.")
+        hl = QLabel("onboard IP"); hl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
+        lay.addWidget(hrow(hl, self.host_edit, self.btn_host_apply, self.btn_host_auto))
+        self.host_note = QLabel("The Pi's E-Link address (SSC assigns it; onboard, comms.static_ground_ip names this PC). "
+                                "On AUTO the onboard's beacon on UDP 4100 stays the fallback.")
+        self.host_note.setWordWrap(True); self.host_note.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
+        lay.addWidget(self.host_note)
         self.btn_restart_receiver = make_button("RESTART RECEIVER", "neutral", min_height=24)
         self.btn_restart_receiver.setToolTip("Restarts the local telemetry receiver — does not send a wire command.")
         self.btn_restart_receiver.hide()
@@ -168,6 +189,20 @@ class SystemTab(QScrollArea):
     # -- senders -----------------------------------------------------------------
     def _send(self, cmd: str) -> None:
         self._disp.send(cmd, tag=self)
+
+    def _apply_host(self) -> None:
+        host = self.host_edit.text().strip()
+        if host and (" " in host or any(ch in host for ch in "/\\,;")):
+            self.host_edit.setStyleSheet(f"{MONO_CSS} color: {RED};")
+            return
+        self.host_edit.setStyleSheet(MONO_CSS)
+        self.host_edit.setText(host)
+        self.host_override_changed.emit(host)
+
+    def _auto_host(self) -> None:
+        self.host_edit.setStyleSheet(MONO_CSS)
+        self.host_edit.clear()
+        self.host_override_changed.emit("")
 
     def _arm(self) -> None:
         if confirm(self, "Arm the experiment?", "Send ARM? Heater and motor commands become live."):

@@ -8,11 +8,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.protocol import (
     KNOWN_COMMANDS, PullEvent, StepperSnapshot, TelemetryParseError, build_ack,
     parse_command_response, parse_pull_event, parse_telemetry_csv,
-    validate_accel, validate_current_a, validate_duty,
-    validate_heater_index, validate_microstep, validate_move_mm,
-    validate_pid_gains, validate_revolutions, validate_speed_hz,
-    validate_stepper_move, validate_temperature_target,
-    validate_tick_hz,
+    validate_current_a, validate_duty, validate_microstep, validate_move_mm,
+    validate_pid_gains, validate_temperature_target, validate_tick_hz,
 )
 
 
@@ -355,14 +352,6 @@ class ValidatorTests(unittest.TestCase):
         self.assertFalse(validate_duty(-0.01)[0])
         self.assertFalse(validate_duty("xx")[0])
 
-    def test_heater_index(self) -> None:
-        # Rev-B.1: 6 heater channels (0..5). No box heater.
-        self.assertTrue(validate_heater_index(0)[0])
-        self.assertTrue(validate_heater_index(5)[0])
-        self.assertFalse(validate_heater_index(6)[0])
-        self.assertFalse(validate_heater_index(-1)[0])
-        # Explicit count still honoured for callers that pre-set it.
-        self.assertTrue(validate_heater_index(6, count=8)[0])
 
     def test_tick_hz(self) -> None:
         self.assertTrue(validate_tick_hz(0.1)[0])
@@ -370,21 +359,6 @@ class ValidatorTests(unittest.TestCase):
         self.assertFalse(validate_tick_hz(0.05)[0])
         self.assertFalse(validate_tick_hz(5.01)[0])
 
-    def test_speed_hz(self) -> None:
-        # The onboard motion envelope is 0.5 mm/s (stepper.max_speed_mm_s),
-        # 100 full-steps/s at the 1 mm lead; anything above it would be
-        # clamped onboard, so the ground station refuses it up front
-        # (redesign spec §3 item 2; owner rules 2026-09-11 and 2026-09-15).
-        from app.protocol import MAX_SPEED_HZ
-        self.assertEqual(MAX_SPEED_HZ, 100.0)
-        self.assertTrue(validate_speed_hz(1)[0])
-        self.assertTrue(validate_speed_hz(100)[0])
-        self.assertFalse(validate_speed_hz(0)[0])
-        self.assertFalse(validate_speed_hz(100.5)[0])
-        self.assertFalse(validate_speed_hz(200)[0], "1 mm/s, the pre-2026-09-11 ceiling, must be rejected")
-        self.assertFalse(validate_speed_hz(400)[0], "the old Rev-A 400 Hz default must be rejected")
-        # Explicit ceiling still honoured for bench use.
-        self.assertTrue(validate_speed_hz(400, max_hz=5000.0)[0])
 
     def test_microstep(self) -> None:
         for n in (1, 2, 4, 8, 16, 32, 64, 128, 256):
@@ -392,20 +366,7 @@ class ValidatorTests(unittest.TestCase):
         for n in (0, 3, 512):
             self.assertFalse(validate_microstep(n)[0], msg=f"{n}")
 
-    def test_stepper_move(self) -> None:
-        # Raw microstep moves are capped at stepper.max_direct_usteps (1000)
-        # onboard; the mm commands carry longer travel.
-        self.assertTrue(validate_stepper_move(100)[0])
-        self.assertTrue(validate_stepper_move(-1000)[0])
-        self.assertFalse(validate_stepper_move(1001)[0])
-        self.assertFalse(validate_stepper_move(-200000)[0])
-        self.assertTrue(validate_stepper_move(-200000, max_range=200000)[0])
-        self.assertFalse(validate_stepper_move("abc")[0])
 
-    def test_revolutions(self) -> None:
-        self.assertTrue(validate_revolutions(0.0)[0])
-        self.assertTrue(validate_revolutions(-12.5)[0])
-        self.assertFalse(validate_revolutions(2e6)[0])
 
     def test_move_mm(self) -> None:
         # 500 mm is a coarse bound; the onboard enforces max_position_steps
@@ -427,13 +388,6 @@ class ValidatorTests(unittest.TestCase):
         self.assertFalse(validate_current_a(3.2)[0])
         self.assertFalse(validate_current_a("x")[0])
 
-    def test_accel(self) -> None:
-        # (0, 5000] full-steps/s^2 mirrors stepper.max_accel_steps_per_s2.
-        self.assertEqual(validate_accel(200), (True, "200.0"))
-        self.assertTrue(validate_accel(5000)[0])
-        self.assertFalse(validate_accel(0)[0])
-        self.assertFalse(validate_accel(5001)[0])
-        self.assertFalse(validate_accel("x")[0])
 
     def test_temperature_target(self) -> None:
         self.assertTrue(validate_temperature_target(0.0)[0])

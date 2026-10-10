@@ -155,19 +155,17 @@ class GatingTests(unittest.TestCase):
         # Jog, BEND and HOME stay the operator's: the onboard accepts them.
         self.assertIsNone(gating.motion_reason(latched, 0, needs_zero=False))
         self.assertIsNone(gating.motion_reason(latched, 0, needs_zero=True))
-        # The acknowledge is offered exactly while there is a latch.
-        self.assertIsNone(gating.step_loss_ack_reason(latched, 0))
+        # No ACK button (owner 2026-10-10): the console command is named.
+        self.assertIn("STEPLOSS_ACK 0", reason)
+        self.assertFalse(hasattr(gating, "step_loss_ack_reason"))
         clear = state(m0="en:1|zeroed:1|therm:ok|loss:1|unc:0")
         self.assertIsNone(gating.position_trust_reason(clear, 0))
         self.assertIsNone(gating.sequence_run_reason(clear, 0))
-        self.assertIn("no step-loss latch", gating.step_loss_ack_reason(clear, 0) or "")
         # Old firmware (no keys) and no telemetry never block either way.
         old = state()
         self.assertIsNone(old.motor(0).position_uncertain)
         self.assertIsNone(gating.position_trust_reason(old, 0))
-        self.assertIsNone(gating.step_loss_ack_reason(old, 0))
-        self.assertIsNone(gating.step_loss_ack_reason(OnboardState(), 0))
-        self.assertEqual(gating.step_loss_ack_reason(state(silence=True), 0), gating.SILENCE)
+        self.assertIsNone(gating.position_trust_reason(OnboardState(), 0))
 
     def test_enable_gate_on_failed_motor(self) -> None:
         st = state()

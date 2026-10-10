@@ -251,21 +251,27 @@ class SiUnitTests(WindowTestCase):
         # 1 mm lead: 200 full steps per mm, so 100 Hz is 0.5 mm/s and 1.5 mm
         # at µ4 is 1200 µsteps.
         self.assertEqual(self.win._values._fields["m0_cfg"].text(), "0.50 mm/s · µstep 1/4")
+        motion = self.win._motion
+        motion.selector.set_value(0)
+        motion.update_state(self.win._state)
+        motion.cycle_name.setText("bend1")
+        motion.cycle_plus.setValue(1.5); motion.cycle_minus.setValue(0.0)
+        motion.cycle_count.setValue(2); motion.cycle_upper.setValue(5.0); motion.cycle_lower.setValue(5.0)
+        motion._cycle_memorise()
+        self.assertEqual(sent[-1], "BENDSEQ_LOAD 0 bend1 1200:5 0:5 repeat=2")
+        # Speed is set once, per motor, in mm/s; the wire carries full-steps/s.
+        motion.speed.setValue(0.29)
+        motion._set_speed()
+        self.assertEqual(sent[-1], "STEPPER_SET_SPEED 0 58.000")
+        motion.speed.setValue(0.6)
+        self.assertEqual(motion.speed.value(), 0.5, "the box itself stops at the 0.5 mm/s ceiling")
+        motion._set_speed()
+        self.assertEqual(sent[-1], "STEPPER_SET_SPEED 0 100.000")
         advanced = self.win._advanced
-        advanced.seq_name.setText("bend1")
-        advanced.seq_table.item(0, 0).setText("1.5")
-        advanced.seq_table.item(0, 1).setText("5")
-        advanced.seq_table.item(0, 2).setText("0,125")     # a typed comma reads as "."
-        advanced._seq_load()
-        self.assertEqual(sent[-1], "BENDSEQ_LOAD 0 bend1 1200:5:25")
-        advanced.seq_table.item(0, 2).setText("0.6")
-        advanced._seq_load()
-        self.assertEqual(len(sent), 1, "above 0.5 mm/s is refused")
-        self.assertIn("(0, 0.5] mm/s", advanced.resp_seq.text().replace("​", ""))
-        target, hold, speed, _btn = advanced.plan_rows[1]
-        target.setValue(2.0); hold.setValue(5.0); speed.setValue(0.29)
+        target, hold, _btn = advanced.plan_rows[1]
+        target.setValue(2.0); hold.setValue(5.0)
         advanced._plan_load(1)
-        self.assertEqual(sent[-1], "FALLBACK_PLAN 1 1600 5 58")
+        self.assertEqual(sent[-1], "FALLBACK_PLAN 1 1600 5")
 
     def test_pull_distances_follow_the_lead(self) -> None:
         from PyQt6.QtWidgets import QLabel

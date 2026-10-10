@@ -44,7 +44,10 @@ def _load_dictionary(path: Path) -> Optional[bytes]:
         data = path.read_bytes()
     except OSError:
         return None
-    return data or None
+    # The onboard build embeds the file as the Pi checks it out (LF). A
+    # Windows checkout with core.autocrlf rewrites it with CRLF, which moved
+    # the CRC and made this ground station answer HELLO,plain: no telemetry.
+    return data.replace(b"\r\n", b"\n") or None
 
 
 DICTIONARY_PATH = _dictionary_path()

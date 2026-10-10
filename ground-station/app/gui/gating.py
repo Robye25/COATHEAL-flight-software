@@ -141,18 +141,7 @@ def position_trust_reason(state: OnboardState, motor_id: int) -> Optional[str]:
     motor = state.motor(motor_id)
     if state.have_packet and motor.present and motor.position_uncertain:
         return (f"M{motor_id} position uncertain after a step-loss event — check the mechanism, "
-                f"then SET ZERO or ACK STEP LOSS")
-    return None
-
-
-def step_loss_ack_reason(state: OnboardState, motor_id: int) -> Optional[str]:
-    """STEPLOSS_ACK: nothing to acknowledge unless the latch is set. Unknown
-    (no telemetry, old firmware) never blocks."""
-    if state.silence:
-        return SILENCE
-    motor = state.motor(motor_id)
-    if state.have_packet and motor.present and motor.position_uncertain is False:
-        return f"M{motor_id} has no step-loss latch to acknowledge"
+                f"then SET ZERO (console: STEPLOSS_ACK {motor_id} keeps the zero)")
     return None
 
 

@@ -27,12 +27,16 @@ def pump_until(app, predicate, timeout_s: float = 3.0) -> bool:
 
 
 def make_window(tmp_root: Path, *, cmd_host: str = "127.0.0.1"):
+    from PyQt6.QtCore import QSettings
     from app.gui.main_window import MainWindow
     from app.thermal_presets import PresetStore
+    # The window's settings (geometry, saved onboard IP, bend cycles) land in
+    # an .ini under tmp_root, not in the developer's registry / ~/.config.
     return MainWindow(
         bind="127.0.0.1", tel_port=free_port(), cmd_port=free_port(), cmd_host=cmd_host,
         log_path=tmp_root, firewall_check=False,
         preset_store=PresetStore(tmp_root / "profiles" / "thermal_presets.json").load(),
+        settings=QSettings(str(tmp_root / "settings" / "GroundStation.ini"), QSettings.Format.IniFormat),
     )
 
 

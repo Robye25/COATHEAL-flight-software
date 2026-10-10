@@ -705,18 +705,8 @@ def parse_command_response(line: str) -> CommandResponse:
 
 
 # --- Argument validators ------------------------------------------------------
-# Each returns (ok, normalised_or_error). Used by GUI before enabling Send and
-# by CLI before wire-encoding. Single source of truth for bounds.
-
-def validate_heater_index(idx: int, count: int = 6) -> Tuple[bool, str]:
-    """Validate a heater index.
-
-    Final-BOM heater channels: 0..5 (six sample-bank heaters, no box heater).
-    """
-    if not isinstance(idx, int) or idx < 0 or idx >= count:
-        return False, f"index must be in [0, {count - 1}]"
-    return True, str(idx)
-
+# Each returns (ok, normalised_or_error): the tabs refuse what the onboard
+# would NACK before it goes on the wire. Single source of truth for bounds.
 
 def validate_duty(duty: float) -> Tuple[bool, str]:
     try:
@@ -770,11 +760,11 @@ def validate_tick_hz(hz: float) -> Tuple[bool, str]:
 # Owner motion envelope (2026-09-11), mirrored from the onboard config:
 # stepper.max_speed_mm_s = 0.5 mm/s of ball-screw travel, which at the 1 mm
 # lead (stepper.lead_mm_per_rev, owner 2026-09-15) and 200 full steps/rev is
-# 100 full-steps/s, and stepper.max_direct_usteps = 1000, the longest
-# raw-microstep move (STEPPER_MOVE / STEPPER_MOVETO / STEPPER_BEND) the
-# onboard accepts. Change these together with config/onboard.example.ini; the
-# onboard reports its lead in GET_LAYOUT (`lead_mm=`) and the window warns
-# when it differs.
+# 100 full-steps/s. Change these together with config/onboard.example.ini;
+# the onboard reports its lead in GET_LAYOUT (`lead_mm=`) and the window
+# warns when it differs. Raw-microstep moves (STEPPER_MOVE / STEPPER_MOVETO,
+# capped onboard at stepper.max_direct_usteps) are console-only: the tabs
+# work in mm.
 MAX_SPEED_MM_S = 0.5
 LEAD_MM_PER_REV = 1.0
 FULL_STEPS_PER_REV = 200
@@ -782,37 +772,19 @@ FULL_STEPS_PER_MM = FULL_STEPS_PER_REV / LEAD_MM_PER_REV              # 200
 MAX_SPEED_HZ = MAX_SPEED_MM_S * FULL_STEPS_PER_MM                     # 100.0
 MAX_ACCEL_STEPS_S2 = 5000.0         # stepper.max_accel_steps_per_s2
 MAX_ACCEL_MM_S2 = MAX_ACCEL_STEPS_S2 / FULL_STEPS_PER_MM              # 25.0
-MAX_DIRECT_USTEPS = 1000
 
 
 # The operator works in SI (owner 2026-09-15): speed in mm/s and
 # acceleration in mm/s² of ball-screw travel. The wire keeps full-steps
-# (STEPPER_SET_SPEED <hz>, STEPPER_SET_ACCEL <steps/s²>, the BENDSEQ_LOAD and
-# FALLBACK_PLAN speeds); these convert at the lead above.
+# (STEPPER_SET_SPEED <hz>, STEPPER_SET_ACCEL <steps/s²>); these convert at
+# the lead above. Bend sequences and the fallback plan carry no speed of
+# their own (2026-10-10): the motor's applies.
 def hz_from_mm_s(mm_s: float) -> float:
     return float(mm_s) * FULL_STEPS_PER_MM
 
 
 def mm_s_from_hz(hz: float) -> float:
     return float(hz) / FULL_STEPS_PER_MM
-
-
-def validate_speed_hz(hz: float, max_hz: float = MAX_SPEED_HZ) -> Tuple[bool, str]:
-    """Validate a motor speed in full-step Hz.
-
-    The onboard clamps `STEPPER_SET_SPEED` to its speed ceiling (100
-    full-steps/s = 0.5 mm/s at the 1 mm lead in the flight config) and
-    NACKs `BENDSEQ_LOAD` / `FALLBACK_PLAN` speeds above it, so the ground
-    station refuses anything above that bound up front instead of letting
-    a 200 Hz request silently become 100 Hz.
-    """
-    try:
-        v = float(hz)
-    except (TypeError, ValueError):
-        return False, "hz must be numeric"
-    if v <= 0.0 or v > max_hz:
-        return False, f"hz must be in (0, {max_hz}]"
-    return True, f"{v:.3f}"
 
 
 def validate_speed_mm_s(mm_s: float, max_mm_s: float = MAX_SPEED_MM_S) -> Tuple[bool, str]:
@@ -843,31 +815,6 @@ def validate_microstep(divisor: int) -> Tuple[bool, str]:
     if divisor not in (1, 2, 4, 8, 16, 32, 64, 128, 256):
         return False, "microstep must be a power of two from 1 through 256"
     return True, str(divisor)
-
-
-def validate_stepper_move(steps: int, max_range: int = MAX_DIRECT_USTEPS) -> Tuple[bool, str]:
-    """Validate a raw-microstep move (STEPPER_MOVE / STEPPER_MOVETO target).
-
-    The onboard refuses anything beyond stepper.max_direct_usteps (1000);
-    longer travel goes through the mm commands.
-    """
-    try:
-        n = int(steps)
-    except (TypeError, ValueError):
-        return False, "steps must be integer"
-    if abs(n) > max_range:
-        return False, f"steps exceed max_range {max_range}"
-    return True, str(n)
-
-
-def validate_revolutions(revs: float) -> Tuple[bool, str]:
-    try:
-        r = float(revs)
-    except (TypeError, ValueError):
-        return False, "revs must be numeric"
-    if abs(r) > 1e6:
-        return False, "revs unrealistically large"
-    return True, f"{r:.4f}"
 
 
 def validate_move_mm(mm: float, max_mm: float = 500.0) -> Tuple[bool, str]:
@@ -902,19 +849,3 @@ def validate_current_a(a_rms: float, max_a: float = 3.1) -> Tuple[bool, str]:
     if v <= 0.0 or v > max_a:
         return False, f"current must be in (0, {max_a}] A RMS"
     return True, f"{v:.3f}"
-
-
-def validate_accel(accel: float, max_accel: float = 5000.0) -> Tuple[bool, str]:
-    """Validate a trapezoid acceleration in full-steps/s².
-
-    The onboard clamps STEPPER_SET_ACCEL against
-    stepper.max_accel_steps_per_s2 (5000 by default); refuse out-of-range
-    values up front, like validate_speed_hz does for speed.
-    """
-    try:
-        v = float(accel)
-    except (TypeError, ValueError):
-        return False, "accel must be numeric"
-    if v <= 0.0 or v > max_accel:
-        return False, f"accel must be in (0, {max_accel:g}] full-steps/s^2"
-    return True, f"{v:.1f}"

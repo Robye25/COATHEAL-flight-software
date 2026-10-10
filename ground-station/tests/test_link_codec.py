@@ -4,6 +4,7 @@ checked against the frame the onboard's own codec test pins. No Qt."""
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 import zlib
 from pathlib import Path
@@ -59,6 +60,15 @@ class DictionaryTests(unittest.TestCase):
 
     def test_missing_file_is_no_dictionary(self) -> None:
         self.assertIsNone(link_codec._load_dictionary(Path(__file__).with_name("no-such-dictionary.txt")))
+
+    def test_a_crlf_checkout_is_the_same_dictionary(self) -> None:
+        # core.autocrlf=true on Windows rewrites the file with CRLF; the CRC
+        # the HELLO handshake compares must not move with it.
+        with tempfile.TemporaryDirectory() as tmp:
+            crlf = Path(tmp) / "dictionary.txt"
+            crlf.write_bytes(link_codec.DICTIONARY.replace(b"\n", b"\r\n"))
+            self.assertNotEqual(crlf.read_bytes(), link_codec.DICTIONARY)
+            self.assertEqual(link_codec._load_dictionary(crlf), link_codec.DICTIONARY)
 
 
 class HelloTests(unittest.TestCase):

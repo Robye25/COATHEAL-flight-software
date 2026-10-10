@@ -206,7 +206,7 @@ class MotionEstimator:
                     color = "amber"
             if last.uncertain:
                 why = f": {last.loss_reason}" if last.loss_reason else ""
-                text += f" · POSITION UNCERTAIN after a step-loss event{why} — SET ZERO or STEPLOSS_ACK"
+                text += f" · POSITION UNCERTAIN after a step-loss event{why} — SET ZERO (or STEPLOSS_ACK from the console)"
                 if color in ("green", "gray"):
                     color = "amber"
         return text, color

@@ -62,11 +62,13 @@ LAYOUT_RETRY_S = 10.0
 class MainWindow(QMainWindow):
     def __init__(self, *, bind: str, tel_port: int, cmd_port: int, cmd_host: str,
                  log_path: Path, firewall_check: bool = True,
-                 preset_store: Optional[PresetStore] = None):
+                 preset_store: Optional[PresetStore] = None, settings: Optional[QSettings] = None):
         super().__init__()
         self.setWindowTitle("COATHEAL Ground Station")
         self.resize(1600, 900)
-        self._settings = QSettings("COATHEAL", "GroundStation")
+        # Window geometry, UI scale, alarm beep, the saved onboard IP and the
+        # memorised bend cycles; tests pass their own file.
+        self._settings = settings if settings is not None else QSettings("COATHEAL", "GroundStation")
         app = QApplication.instance()
         # Before any widget exists: "." decimals, and the wheel edits a value
         # only with Ctrl or Shift held (owner 2026-09-15).
@@ -87,7 +89,13 @@ class MainWindow(QMainWindow):
         self._bind = bind
         self._tel_port = tel_port
         self._cmd_port = cmd_port
-        self._user_host = (cmd_host or "").strip()
+        # The onboard's address: --host wins, then the address APPLYed on the
+        # System tab (saved on this PC), else discovery (beacon / probe /
+        # telemetry peer). The E-Link addresses are fixed by SSC, so flight is
+        # a saved address with the beacon as the fallback.
+        saved_host = str(self._settings.value("link/onboard_host", "", type=str) or "").strip()
+        self._host_from_cli = bool((cmd_host or "").strip())
+        self._user_host = (cmd_host or "").strip() or saved_host
         self._receiver: Optional[TelemetryReceiver] = None
         self._receiver_state = "idle"
         self._link_ok = False
@@ -127,7 +135,7 @@ class MainWindow(QMainWindow):
         self._silence_note = ""
         self._lead_note = ""
 
-        self._dispatcher = CommandDispatcher(cmd_host, cmd_port, log_manager=self._logs)
+        self._dispatcher = CommandDispatcher(self._user_host, cmd_port, log_manager=self._logs)
         self._dispatcher.response_received.connect(self._on_response)
         self._dispatcher.silence_changed.connect(self._on_silence_changed)
         self._presets = preset_store if preset_store is not None else PresetStore().load()
@@ -140,17 +148,16 @@ class MainWindow(QMainWindow):
         self._alarm_strip = AlarmStrip()
         self._alarm_strip.ack_requested.connect(self._ack_alarm)
         self._alarm_strip.ack_all_requested.connect(self._ack_all_alarms)
-        self._system = SystemTab(self._dispatcher)
+        self._system = SystemTab(self._dispatcher, host_override=self._user_host)
+        self._system.host_override_changed.connect(self._on_host_override)
         self._system.btn_restart_receiver.clicked.connect(
             lambda: self._on_start_telemetry(self._bind, self._tel_port, self._cmd_port, self._user_host))
         self._thermal = ThermalTab(self._dispatcher, self._presets)
-        self._motion = MotionTab(self._dispatcher)
+        self._motion = MotionTab(self._dispatcher, self._settings)
         self._advanced = AdvancedTab(self._dispatcher, self._presets, bind=bind, tel_port=tel_port,
-                                     cmd_port=cmd_port, discovery_port=DISCOVERY_PORT_DEFAULT,
-                                     host_override=self._user_host)
+                                     cmd_port=cmd_port, discovery_port=DISCOVERY_PORT_DEFAULT)
         self._advanced.gains_changed.connect(self._thermal.set_gains)
         self._advanced.priority_changed.connect(self._on_priority_changed)
-        self._advanced.host_override_changed.connect(self._on_host_override)
         self._debug = DebugTab(self._dispatcher, self._settings)
         self._left_tabs = QTabWidget(); self._left_tabs.setObjectName("leftTabs")
         for widget, title in ((self._system, "System"), (self._thermal, "Thermal"),
@@ -216,12 +223,15 @@ class MainWindow(QMainWindow):
         self._listener.log_message.connect(self._events.append)
         self._listener.onboard_discovered.connect(self._on_onboard_discovered)
         self._listener.peer_gs_seen.connect(self._on_peer_gs_seen)
-        self._probe = CommandProbe([cmd_host], cmd_port=cmd_port, include_static=not bool(cmd_host))
+        self._probe = CommandProbe([self._user_host], cmd_port=cmd_port, include_static=not bool(self._user_host))
         self._probe.log_message.connect(self._events.append)
         self._probe.onboard_reachable.connect(self._on_onboard_reachable)
         self._beacon.start(); self._listener.start(); self._probe.start()
 
-        self._on_start_telemetry(bind, tel_port, cmd_port, cmd_host)
+        if self._user_host:
+            where = "--host" if self._host_from_cli else "saved on this PC; System tab, AUTO to clear"
+            self._events.append(f"[discovery] manual command target {self._user_host}:{cmd_port} ({where})")
+        self._on_start_telemetry(bind, tel_port, cmd_port, self._user_host)
         self._refresh_link_info()
 
         if firewall_check:
@@ -564,14 +574,22 @@ class MainWindow(QMainWindow):
         self._events.append(f"[discovery] beacon priority => {p}")
 
     def _on_host_override(self, host: str) -> None:
+        """The System tab's onboard IP: APPLY saves it on this PC and commands
+        go there until AUTO, which forgets it and follows discovery again."""
+        host = (host or "").strip()
         self._user_host = host
+        self._host_from_cli = False
         if host:
+            self._settings.setValue("link/onboard_host", host)
             self._dispatcher.set_endpoint(host, self._cmd_port)
             self._probe.set_candidates([host])
-            self._events.append(f"[discovery] manual command target => {host}:{self._cmd_port}")
+            self._events.append(f"[discovery] manual command target => {host}:{self._cmd_port} (saved on this PC)")
         else:
+            self._settings.remove("link/onboard_host")
             self._probe.set_candidates([self._discovered_host or ""])
-            self._events.append("[discovery] manual override cleared — back to discovery")
+            self._events.append("[discovery] onboard IP on AUTO — following the beacon, the probe and the telemetry peer")
+            if self._discovered_host:
+                self._set_target(self._discovered_host, self._discovered_cmd_port or self._cmd_port, "discovery")
         self._refresh_link_info()
 
     def _on_onboard_discovered(self, host: str, cmd_port: int, tel_port: int, session: str, hostname: str) -> None:
