@@ -25,7 +25,7 @@ from .state import DEFAULT_LAYOUT, MOTOR_COUNT, Layout
 from .theme import (
     HEATER_COLORS, OVERTEMP_CUTOFF_C, PRE_FLOAT_PRESSURE_MBAR, RESISTANCE_COLORS, SAMPLE_FLOOR_C,
 )
-from .widgets import MONO_CSS, MUTED, style_button
+from .widgets import FlowLayout, MONO_CSS, MUTED, style_button
 
 MOTOR_COLORS = (("#2ecc71", "#27ae60"), ("#e67e22", "#d35400"))
 WINDOWS: List[Tuple[str, Optional[float]]] = [
@@ -79,13 +79,14 @@ class TimePlot(QWidget):
         lay = QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(2)
         lay.addWidget(self.plot, 1)
         self._legend_row = QWidget()
-        self._legend_lay = QHBoxLayout(self._legend_row)
-        self._legend_lay.setContentsMargins(8, 0, 8, 2); self._legend_lay.setSpacing(14)
+        # Entries wrap (FlowLayout): eight resistance traces in one row made
+        # the plot column, and with it the window, wider than the screen.
+        self._legend_lay = FlowLayout(self._legend_row, h_spacing=14, v_spacing=2)
+        self._legend_lay.setContentsMargins(8, 0, 8, 2)
         self._legend_row.setVisible(show_legend)
         lay.addWidget(self._legend_row)
         self._readout = QLabel(""); self._readout.setStyleSheet(f"{MONO_CSS} color: {MUTED}; font-size: 8pt;")
         self._legend_lay.addWidget(self._readout)
-        self._legend_lay.addStretch()
 
         self._vline = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("#666", width=1))
         self._hline = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen("#666", width=1))
@@ -104,7 +105,7 @@ class TimePlot(QWidget):
             lbl = QLabel(f"{name} —")
             lbl.setStyleSheet(f"{MONO_CSS} color: {color}; font-size: 9pt;")
             self._legend[name] = lbl
-            self._legend_lay.insertWidget(self._legend_lay.count() - 2, lbl)
+            self._legend_lay.insertWidget(self._legend_lay.count() - 1, lbl)   # before the readout
 
     def clear_series(self) -> None:
         """Remove every curve and its legend entry (the store keeps the data)."""

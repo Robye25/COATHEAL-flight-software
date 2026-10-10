@@ -12,7 +12,7 @@ from PyQt6.QtGui import QFontMetrics
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSizePolicy, QWidget
 
 from ..protocol import TelemetryPacket
-from .alarms import Alarm
+from .alarms import Alarm, headline
 from .dispatch import CommandDispatcher
 from .panels_health import health_summary
 from ..session_dir import session_epoch
@@ -20,7 +20,7 @@ from .series_store import format_elapsed
 from .state import OnboardState
 from .theme import mode_color, phase_color
 from .widgets import (
-    AMBER, GRAY, GREEN, MONO_CSS, MUTED, RED, StatusDot, confirm, make_button, style_button,
+    FlowLayout, AMBER, GRAY, GREEN, MONO_CSS, MUTED, RED, StatusDot, confirm, make_button, style_button,
 )
 
 STEPPER_MOTOR_IDS = (0, 1)
@@ -315,10 +315,11 @@ class AlarmStrip(QWidget):
         lay.setContentsMargins(8, 3, 8, 3)
         lay.setSpacing(6)
         self._chips_box = QWidget()
-        self._chips = QHBoxLayout(self._chips_box)
-        self._chips.setContentsMargins(0, 0, 0, 0)
-        self._chips.setSpacing(6)
+        # Chips wrap into more rows as alarms pile up: a single row of them
+        # once forced the window wider than the screen.
+        self._chips = FlowLayout(self._chips_box, h_spacing=6, v_spacing=4)
         lay.addWidget(self._chips_box, 1)
+        lay.setAlignment(self._chips_box, Qt.AlignmentFlag.AlignTop)
         self._count = QLabel("")
         self._count.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(self._count)
@@ -340,21 +341,24 @@ class AlarmStrip(QWidget):
             if item.widget() is not None:
                 item.widget().deleteLater()
         for alarm in self._alarms:
-            chip = QPushButton(f"⚠ {alarm.text}")
+            chip = QPushButton(f"⚠ {headline(alarm.text)}")
             bg = "#c0392b" if alarm.severity == "red" else "#b9770e"
             chip.setStyleSheet(
                 f"QPushButton {{ background: {bg}; color: white; font-weight: bold; font-size: 9pt; "
                 f"border: none; border-radius: 3px; padding: 2px 8px; }}"
                 + ("QPushButton { color: #ddd; background: #4a2a2a; }" if alarm.acked else ""))
-            chip.setToolTip("acknowledged — stays until the condition clears" if alarm.acked
-                            else "click to acknowledge")
+            chip.setToolTip(alarm.text + "\n" + ("acknowledged — stays until the condition clears" if alarm.acked
+                                                   else "click to acknowledge"))
             chip.clicked.connect(lambda _c=False, key=alarm.key: self.ack_requested.emit(key))
             self._chips.addWidget(chip)
-        self._chips.addStretch()
         unacked = sum(1 for a in self._alarms if not a.acked)
         self._count.setText(f"{len(self._alarms)} active · {unacked} unacked")
         self._ack_all.setEnabled(unacked > 0)
         self.setVisible(bool(self._alarms))
 
     def chip_texts(self) -> List[str]:
+        """The full alarm texts behind the chips (the chips show headlines)."""
         return [f"⚠ {a.text}" for a in self._alarms]
+
+    def chip_labels(self) -> List[str]:
+        return [self._chips.itemAt(i).widget().text() for i in range(self._chips.count())]

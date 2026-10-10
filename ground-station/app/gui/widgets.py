@@ -8,13 +8,13 @@ from __future__ import annotations
 
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from PyQt6.QtCore import QEvent, QLocale, QObject, QPointF, Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, QLocale, QObject, QPoint, QPointF, QRect, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QKeyEvent, QPainter, QWheelEvent
 from PyQt6.QtWidgets import (
     QAbstractScrollArea, QAbstractSlider, QAbstractSpinBox, QApplication, QButtonGroup, QComboBox,
     QDoubleSpinBox,
-    QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QScrollBar, QSizePolicy,
-    QVBoxLayout, QWidget,
+    QFrame, QHBoxLayout, QLabel, QLayout, QLayoutItem, QLineEdit, QMessageBox, QPushButton, QScrollBar,
+    QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from ..protocol import CommandResponse
@@ -293,6 +293,75 @@ def group_box(title: str) -> Tuple[QFrame, QVBoxLayout]:
     title_lbl.setWordWrap(True)
     outer.addWidget(title_lbl)
     return frame, outer
+
+
+class FlowLayout(QLayout):
+    """Items laid out left to right, wrapping to the next line when the row
+    is full (Qt's flow layout). Its minimum width is one item, not the sum,
+    so a row of alarm chips or legend entries can never force the window
+    wider than the screen (a maximized window that overflowed, 2026-10-10)."""
+
+    def __init__(self, parent: Optional[QWidget] = None, h_spacing: int = 6, v_spacing: int = 4):
+        super().__init__(parent)
+        self._items: List[QLayoutItem] = []
+        self._h = h_spacing
+        self._v = v_spacing
+        self.setContentsMargins(0, 0, 0, 0)
+
+    def addItem(self, item: QLayoutItem) -> None:  # noqa: N802
+        self._items.append(item)
+
+    def insertWidget(self, index: int, widget: QWidget) -> None:  # noqa: N802
+        self.addWidget(widget)                  # parents it and appends an item
+        item = self._items.pop()
+        self._items.insert(max(0, min(index, len(self._items))), item)
+        self.invalidate()
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, index: int) -> Optional[QLayoutItem]:  # noqa: N802
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index: int) -> Optional[QLayoutItem]:  # noqa: N802
+        return self._items.pop(index) if 0 <= index < len(self._items) else None
+
+    def expandingDirections(self) -> Qt.Orientation:  # noqa: N802
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802
+        return self._arrange(QRect(0, 0, width, 0), apply=False)
+
+    def setGeometry(self, rect: QRect) -> None:  # noqa: N802
+        super().setGeometry(rect)
+        self._arrange(rect, apply=True)
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        return self.minimumSize()
+
+    def minimumSize(self) -> QSize:  # noqa: N802
+        size = QSize(0, 0)
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        left, top, right, bottom = self.getContentsMargins()
+        return size + QSize(left + right, top + bottom)
+
+    def _arrange(self, rect: QRect, *, apply: bool) -> int:
+        left, top, right, bottom = self.getContentsMargins()
+        area = rect.adjusted(left, top, -right, -bottom)
+        x, y, row_h = area.x(), area.y(), 0
+        for item in self._items:
+            hint = item.sizeHint()
+            if x + hint.width() > area.right() + 1 and row_h > 0:
+                x = area.x(); y += row_h + self._v; row_h = 0
+            if apply:
+                item.setGeometry(QRect(QPoint(x, y), hint))
+            x += hint.width() + self._h
+            row_h = max(row_h, hint.height())
+        return y + row_h - rect.y() + bottom
 
 
 def hrow(*widgets: QWidget, spacing: int = 6, stretch_last: bool = False) -> QWidget:

@@ -57,6 +57,39 @@ class LayoutTests(unittest.TestCase):
     # MUTATION: give a label in tab_motion a setMinimumWidth(700) and confirm
     # test_fits_minimum_and_comfortable_screens names the Motion tab.
 
+    def test_alarms_and_legends_never_widen_the_window(self) -> None:
+        # Every alarm the model can raise at once, and the plot page with the
+        # most legend entries: the window's minimum width must stay inside a
+        # 1366 px screen (a maximized console once overflowed it, 2026-10-10).
+        from app.protocol import parse_telemetry_csv
+        self.win.show(); self.win.resize(1366, 768); self._app.processEvents()
+        self.win._on_packet(parse_telemetry_csv(frame(
+            status="SD_FAIL|USB_FAIL|I2C_FAIL|SPI_FAIL|LINK_FAIL|T_AMBIENT_FAIL|P_AMBIENT_FAIL|UNIFORMITY_FAIL"
+                   "|OVERTEMP_FAIL|ENERGY_FAIL|PWM_FAIL|STEPPER_FAIL|SAMPLE_TEMP_FAIL|SIMULATED|SEQ_PAUSED"
+                   "|HEATER_ACTIVE|RESISTANCE_FAIL",
+            valid="AT:0|AP:0|UV:0|S0:0|S1:1|S2:1|S3:1|S4:1|S5:1|S6:1|S7:1",
+            comps="DPS310:FAILED|ADS1115:FAILED|SEQUENT_RTD:FAILED|MOTOR0:FAILED|MOTOR1:FAILED|PWM:FAILED",
+            ctrl="fallback:1|link_loss_s:120.0|energy_wh:131.0|budget_wh:130.0|budget_exhausted:1|heaters_active:0"
+                 "|queue:900|plan:failed",
+            m0="en:1|ok:0|mv:0|hold:0|zeroed:1|therm:hot|loss:3|unc:1",
+            m1="en:1|ok:0|mv:0|hold:0|zeroed:1|therm:hot|loss:2|unc:1", duties="0.5|0.5|0.5|0|0|0")))
+        self._app.processEvents(); self._app.processEvents()
+        strip = self.win._alarm_strip
+        self.assertGreaterEqual(len(strip.chip_texts()), 10, "the frame raises most alarms at once")
+        self.assertLessEqual(self.win.minimumSizeHint().width(), 1366,
+                             f"the alarm strip must wrap, not widen the window ({strip.minimumSizeHint().width()} px)")
+        self.assertGreater(strip.height(), 40, "more than one row of chips")
+        for label in strip.chip_labels():
+            self.assertLessEqual(len(label), 52, label)
+        chips = [w for w in strip._chips_box.findChildren(type(strip._ack_all))]
+        self.assertEqual(len(chips), len(strip.chip_texts()))
+        self.assertTrue(all(c.toolTip().startswith(t[2:]) for c, t in zip(chips, strip.chip_texts())),
+                        "the full alarm text is the chip's tooltip")
+        for index in range(self.win._plots.tabs.count()):
+            self.win._plots.tabs.setCurrentIndex(index); self._app.processEvents()
+            self.assertLessEqual(self.win.minimumSizeHint().width(), 1366, f"plot page {index}")
+        self.win.hide()
+
     def test_splitters_are_named_and_persist(self) -> None:
         for splitter in (self.win._main_splitter, self.win._body_splitter, self.win._bottom):
             self.assertTrue(splitter.objectName(), "unnamed splitters cannot be restored")

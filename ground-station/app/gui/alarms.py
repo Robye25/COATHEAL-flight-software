@@ -33,6 +33,23 @@ class Alarm:
     acked: bool = False
 
 
+HEADLINE_MAX = 48
+
+
+def headline(text: str) -> str:
+    """The short label an alarm chip shows: the part before " — " (every
+    long alarm text puts its name first), else the text itself, cut at a
+    clause boundary when it is long. The full text is the chip's tooltip."""
+    head = text.split(" — ", 1)[0].strip()
+    if len(head) <= HEADLINE_MAX:
+        return head
+    for sep in ("; ", ": ", " ("):
+        cut = head.find(sep)
+        if 0 < cut <= HEADLINE_MAX:
+            return head[:cut].strip()
+    return head[:HEADLINE_MAX - 1].rstrip() + "…"
+
+
 def evaluate(state: OnboardState) -> List[Alarm]:
     """Raw active alarms for `state`, in display order."""
     alarms: List[Alarm] = []
