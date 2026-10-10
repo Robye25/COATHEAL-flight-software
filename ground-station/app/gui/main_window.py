@@ -751,4 +751,13 @@ def run_gui(argv: Optional[list[str]] = None) -> int:
                      cmd_host=args.host, log_path=args.log,
                      firewall_check=not args.no_firewall_check)
     win.show()
-    return app.exec()
+    rc = app.exec()
+    # Destroy the window while the QApplication still exists. Python tears
+    # module globals down in no defined order, and PyQt6 on Windows crashes
+    # (exit code 139 / 0xC0000005) when the application dies before a window
+    # that still owns QThreads and timers.
+    win.close()
+    win.deleteLater()
+    app.processEvents()
+    del win
+    return rc

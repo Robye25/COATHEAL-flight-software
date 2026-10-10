@@ -2,12 +2,37 @@
 free ports, feed scripted frames, capture dispatcher sends."""
 from __future__ import annotations
 
+import atexit
+import gc
 import os
 import socket
 import time
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+
+def _destroy_windows_before_the_application() -> None:
+    """Interpreter teardown destroys module globals in no defined order;
+    PyQt6 on Windows segfaults when the QApplication goes before a window
+    that still owns QThreads and timers, and unittest then exits 139 after
+    reporting OK. atexit runs first, while the application is still alive."""
+    try:
+        from PyQt6.QtWidgets import QApplication
+    except Exception:
+        return
+    app = QApplication.instance()
+    if app is None:
+        return
+    for widget in app.topLevelWidgets():
+        widget.close()
+        widget.deleteLater()
+    app.processEvents()
+    gc.collect()
+    app.processEvents()
+
+
+atexit.register(_destroy_windows_before_the_application)
 
 
 def free_port() -> int:
