@@ -21,8 +21,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import command_client  # noqa: E402
 from app.link_budget import (  # noqa: E402
-    ABORT_TAIL_S, CLOSE_TAIL_S, GROUND_SHARE, LinkBudget, Priority, ground_budget, udp_datagram,
+    ABORT_TAIL_S, CLOSE_TAIL_S, GROUND_SHARE, LinkBudget, Priority, ground_budget, paced_connection,
+    udp_datagram,
 )
+
+# The tails below are checked to 10 ms, so the round trip the kernel reports
+# (Linux TCP_INFO) or the connect time stands in for (Windows, a few ms on
+# loopback) is pinned to zero where the tail itself is under test.
+NO_RTT = mock.patch("app.link_budget.tcp_srtt_s", return_value=0.0)
 
 
 class FakeCommandServer:
@@ -160,7 +166,8 @@ class SendJobPacingTests(unittest.TestCase):
     # (use a dummy ticket) and confirm test_two_commands_are_serialized_by_the_ledger
     # fails: both requests arrive together.
 
-    def test_hold_covers_the_request_line_and_is_released(self) -> None:
+    @NO_RTT
+    def test_hold_covers_the_request_line_and_is_released(self, _rtt) -> None:
         clock = FakeClock()
         budget = LinkBudget(GROUND_SHARE, clock=clock)
         self.job("STEPPER_STOP 1", budget).run()
@@ -177,7 +184,27 @@ class SendJobPacingTests(unittest.TestCase):
     # MUTATION: pass delay 0 to budget.release in paced_connection and confirm
     # the "closing FIN or ACK" assertion above fails.
 
-    def test_a_failed_exchange_is_reset_and_held_for_the_abort_tail(self) -> None:
+    def test_without_kernel_rtt_the_connect_time_stands_in(self) -> None:
+        # Windows has no TCP_INFO: the connect handshake (one round trip) is
+        # the estimate, so a clean close is still held for CLOSE_TAIL_S plus
+        # two round trips, never for the abort tail.
+        clock = FakeClock()
+        budget = LinkBudget(GROUND_SHARE, clock=clock)
+        charge = budget.hold(925, Priority.COMMAND)
+        self.assertIsNotNone(charge)
+        with mock.patch("app.link_budget.tcp_srtt_s", return_value=None):
+            started = time.monotonic()
+            with paced_connection(budget, charge, "127.0.0.1", self.server.port, 3.0) as sock:
+                sock.sendall(b"PING\n")
+                self.assertEqual(sock.recv(64), b"ACK,PING,ok\n")
+            elapsed = time.monotonic() - started
+        tail = charge.released_at - clock.now
+        self.assertGreaterEqual(tail, CLOSE_TAIL_S)
+        self.assertLessEqual(tail, CLOSE_TAIL_S + 2 * elapsed)
+        self.assertLess(tail, ABORT_TAIL_S, "a clean close is not held for the abort tail")
+
+    @NO_RTT
+    def test_a_failed_exchange_is_reset_and_held_for_the_abort_tail(self, _rtt) -> None:
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.bind(("127.0.0.1", 0))
         listener.listen(1)
@@ -334,7 +361,8 @@ class CliPacingTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.server.close()
 
-    def test_send_command_holds_the_exchange(self) -> None:
+    @NO_RTT
+    def test_send_command_holds_the_exchange(self, _rtt) -> None:
         clock = FakeClock()
         budget = LinkBudget(GROUND_SHARE, clock=clock)
         reply = command_client.send_command("127.0.0.1", self.server.port, "PING", 3.0, budget=budget)

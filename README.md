@@ -209,10 +209,10 @@ flight hardware operation.
 ## Security
 
 A private SSH key was once committed to this repository. The key was rotated
-(see [docs/security-remediation.md](docs/security-remediation.md) and
-[scripts/rotate_ssh_key.sh](scripts/rotate_ssh_key.sh)), but as of
-2026-10-10 the commit that contained it is **still reachable** in the
-history of `main`. Treat the old key as compromised. To remove it,
-[scripts/purge_sensitive_history.sh](scripts/purge_sensitive_history.sh)
-rewrites the history; run it and force-push only when every clone can be
-re-fetched afterwards.
+and, on 2026-10-10, the history was rewritten with `git-filter-repo`
+([scripts/purge_sensitive_history.sh](scripts/purge_sensitive_history.sh)) so
+that no commit carries it any more. Every clone made before that date must
+be re-cloned, and GitHub keeps the old commits reachable by their SHA until
+support purges them; see
+[docs/security-remediation.md](docs/security-remediation.md). Treat the old
+key as compromised regardless.

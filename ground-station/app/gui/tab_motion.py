@@ -70,19 +70,22 @@ class MotorCard(QFrame):
         self.group.setStyleSheet(f"color: {MUTED}; font-size: 9pt; border: none;")
         self.group.setWordWrap(True); self.group.setMinimumWidth(1)
         lay.addWidget(hrow(title, self.group, stretch_last=True))
-        dots = QHBoxLayout(); dots.setSpacing(1)
+        dots = QGridLayout(); dots.setHorizontalSpacing(2); dots.setVerticalSpacing(1)
         self.dots = {}
         tips = {"EN": "driver power stage enabled", "ZERO": "software zero set (SET_POSITION_ZERO)",
                 "MOV": "pulses being issued", "HOLD": "at target, hold countdown running",
                 "OK": "driver backend healthy", "DRV": "driver die thermal state (TMC5160 flags)"}
-        for key in ("EN", "ZERO", "MOV", "HOLD", "OK", "DRV"):
+        for index, key in enumerate(("EN", "ZERO", "MOV", "HOLD", "OK", "DRV")):
             lbl = QLabel(key); lbl.setStyleSheet(f"color: {MUTED}; font-size: 7pt; border: none;")
             lbl.setToolTip(tips[key])
             dot = StatusDot(8); dot.set_color(GRAY)
             dot.setToolTip(tips[key])
-            dots.addWidget(lbl); dots.addWidget(dot); dots.addSpacing(1)
+            # Two rows of three: one row of six left no room for two cards
+            # side by side in the 392 px column of a 1366x768 screen.
+            dots.addWidget(lbl, index // 3, (index % 3) * 2)
+            dots.addWidget(dot, index // 3, (index % 3) * 2 + 1)
             self.dots[key] = dot
-        dots.addStretch()
+        dots.setColumnStretch(6, 1)
         lay.addLayout(dots)
         # A shutdown/pre-warning banner: the 8 px DRV dot alone is too easy
         # to miss when the safety has just disabled the motor.
@@ -274,7 +277,7 @@ class MotionTab(QScrollArea):
         self.jog_note = QLabel(""); self.jog_note.setWordWrap(True); self.jog_note.setMinimumWidth(1)
         self.jog_note.setStyleSheet(f"color: {AMBER}; font-size: 8pt;")
         j_lbl = QLabel(f"converted onboard via stepper.lead_mm_per_rev ({LEAD_MM_PER_REV:g} mm/rev)")
-        j_lbl.setWordWrap(True); j_lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
+        j_lbl.setWordWrap(True); j_lbl.setMinimumWidth(1); j_lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(j_lbl)
         lay.addWidget(self.jog_note)
         self.resp_jog = ResponseLine()
@@ -289,7 +292,7 @@ class MotionTab(QScrollArea):
         s_lbl = QLabel(f"ball-screw travel speed, up to {MAX_SPEED_MM_S:g} mm/s (stepper.max_speed_mm_s); "
                        f"sent as full-steps/s at the {LEAD_MM_PER_REV:g} mm lead")
         s_lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
-        s_lbl.setWordWrap(True)
+        s_lbl.setWordWrap(True); s_lbl.setMinimumWidth(1)
         lay.addWidget(hrow(with_unit(self.speed, "mm/s"), self.btn_speed, stretch_last=True))
         lay.addWidget(s_lbl)
         self.current = QDoubleSpinBox(); self.current.setRange(0.05, 3.1); self.current.setDecimals(2)
@@ -297,7 +300,7 @@ class MotionTab(QScrollArea):
         self.btn_current = make_button("SET CURRENT", "primary", sends="STEPPER_SET_CURRENT <motor_id> <a_rms>",
                                        min_height=24, slot=self._set_current)
         c_lbl = QLabel("run current A RMS; onboard rejects what the sense resistor cannot deliver")
-        c_lbl.setWordWrap(True); c_lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
+        c_lbl.setWordWrap(True); c_lbl.setMinimumWidth(1); c_lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(hrow(with_unit(self.current, "A"), self.btn_current, stretch_last=True))
         lay.addWidget(c_lbl)
         self.accel = QDoubleSpinBox(); self.accel.setRange(0.01, MAX_ACCEL_MM_S2); self.accel.setDecimals(2)
@@ -306,7 +309,7 @@ class MotionTab(QScrollArea):
                                      min_height=24, slot=self._set_accel)
         a_lbl = QLabel(f"trapezoid acceleration, up to {MAX_ACCEL_MM_S2:g} mm/s² "
                        "(stepper.max_accel_steps_per_s2); sent as full-steps/s²")
-        a_lbl.setWordWrap(True); a_lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
+        a_lbl.setWordWrap(True); a_lbl.setMinimumWidth(1); a_lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(hrow(with_unit(self.accel, "mm/s²"), self.btn_accel, stretch_last=True))
         lay.addWidget(a_lbl)
         self.drive_now = QLabel("—"); self.drive_now.setStyleSheet(f"{MONO_CSS} color: {MUTED}; font-size: 8pt;")
@@ -331,7 +334,7 @@ class MotionTab(QScrollArea):
                            self.btn_bend))
         self.btn_pull = make_button("STANDARD PULL", "primary", sends="PULL_EXECUTE <motor_id>", min_height=26, slot=self._pull)
         p_lbl = QLabel("pulls to 2.0 mm (two revolutions), holds 5 s, retracts to 0 · config pull.*; emits EVT,PULL")
-        p_lbl.setWordWrap(True); p_lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
+        p_lbl.setWordWrap(True); p_lbl.setMinimumWidth(1); p_lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(self.btn_pull)
         lay.addWidget(p_lbl)
         self.bend_note = QLabel(""); self.bend_note.setWordWrap(True); self.bend_note.setMinimumWidth(1)
@@ -360,10 +363,15 @@ class MotionTab(QScrollArea):
             lbl = QLabel(text); lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
             return lbl
 
-        lay.addWidget(hrow(small("name"), self.cycle_name, small("+ limit"), with_unit(self.cycle_plus, "mm"),
-                           small("− limit"), with_unit(self.cycle_minus, "mm")))
-        lay.addWidget(hrow(small("cycles"), self.cycle_count, small("soak at +"), with_unit(self.cycle_upper, "s"),
-                           small("soak at −"), with_unit(self.cycle_lower, "s")))
+        fields = QGridLayout(); fields.setSpacing(4)
+        for row, (left_label, left, right_label, right) in enumerate((
+                ("name", self.cycle_name, "cycles", self.cycle_count),
+                ("+ limit", with_unit(self.cycle_plus, "mm"), "soak at +", with_unit(self.cycle_upper, "s")),
+                ("− limit", with_unit(self.cycle_minus, "mm"), "soak at −", with_unit(self.cycle_lower, "s")))):
+            fields.addWidget(small(left_label), row, 0); fields.addWidget(left, row, 1)
+            fields.addWidget(small(right_label), row, 2); fields.addWidget(right, row, 3)
+        fields.setColumnStretch(4, 1)
+        lay.addLayout(fields)
         self.cycle_preview = QLabel("—"); self.cycle_preview.setWordWrap(True); self.cycle_preview.setMinimumWidth(1)
         self.cycle_preview.setStyleSheet(f"{MONO_CSS} color: {MUTED}; font-size: 8pt;")
         lay.addWidget(hrow(self.cycle_return, self.cycle_preview, stretch_last=True))
@@ -388,7 +396,7 @@ class MotionTab(QScrollArea):
         c_lbl = QLabel("MEMORISE sends the cycle to the onboard, in µsteps at the motor's live microstep; it runs at the "
                        "motor's speed and acceleration (Drive settings) and is kept onboard until a reboot. PLAY starts it. "
                        "The values are remembered per motor on this PC.")
-        c_lbl.setWordWrap(True); c_lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
+        c_lbl.setWordWrap(True); c_lbl.setMinimumWidth(1); c_lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(c_lbl)
         self.cycle_note = QLabel(""); self.cycle_note.setWordWrap(True); self.cycle_note.setMinimumWidth(1)
         self.cycle_note.setStyleSheet(f"color: {AMBER}; font-size: 8pt;")

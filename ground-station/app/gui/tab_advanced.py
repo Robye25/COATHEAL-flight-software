@@ -123,7 +123,8 @@ class AdvancedTab(QScrollArea):
         self.btn_preset_rename = make_button("Rename", "neutral", min_height=22, slot=self._rename_preset)
         self.btn_preset_delete = make_button("Delete", "danger", min_height=22, slot=self._delete_preset)
         self.btn_preset_export = make_button("Export…", "neutral", min_height=22, slot=self._export_presets)
-        lay.addWidget(hrow(self.preset_select, self.btn_preset_rename, self.btn_preset_delete, self.btn_preset_export))
+        lay.addWidget(hrow(self.preset_select, self.btn_preset_rename, stretch_last=True))
+        lay.addWidget(hrow(self.btn_preset_delete, self.btn_preset_export))
         self.preset_note = QLabel(""); self.preset_note.setWordWrap(True); self.preset_note.setMinimumWidth(1)
         self.preset_note.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(self.preset_note)
@@ -148,7 +149,8 @@ class AdvancedTab(QScrollArea):
         self.btn_plan_disarm = make_button("DISARM", "danger", sends="FALLBACK_DISARM", min_height=24, slot=lambda: self._send("FALLBACK_DISARM"))
         self.btn_plan_status = make_button("STATUS", "neutral", sends="FALLBACK_STATUS", min_height=24, slot=lambda: self._send("FALLBACK_STATUS"))
         self.plan_state = QLabel("plan: —"); self.plan_state.setStyleSheet(f"{MONO_CSS} color: {MUTED};")
-        lay.addWidget(hrow(self.btn_plan_arm, self.btn_plan_disarm, self.btn_plan_status, self.plan_state, stretch_last=True))
+        lay.addWidget(hrow(self.btn_plan_arm, self.btn_plan_disarm, self.btn_plan_status))
+        lay.addWidget(self.plan_state)
         note = QLabel("Trigger: fallback active, phase PRE_FLOAT/FLOAT, plan armed and not yet executed, motor enabled+zeroed+healthy, "
                       "sample temperature inside the configured window (or the deadline passed). Runs M0 then M1 at each motor's "
                       "own speed and acceleration (Motion tab, Drive settings), emits EVT,PULL, never repeats.")

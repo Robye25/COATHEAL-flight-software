@@ -199,15 +199,22 @@ def paced_connection(budget: "LinkBudget", charge: "Charge", host: str, port: in
     released when the connection closes. A clean exchange closes normally and
     releases CLOSE_TAIL_S plus two round trips later. One that raises is
     closed with a reset -- so the onboard can no longer answer it -- and the
-    hold stays ABORT_TAIL_S plus a round trip."""
+    hold stays ABORT_TAIL_S plus a round trip. The round trip is the kernel's
+    smoothed estimate where it reports one (Linux TCP_INFO), else the time
+    the connect handshake took (Windows), which is one round trip."""
     sock: Optional[socket.socket] = None
     clean = False
+    connect_rtt: Optional[float] = None
     try:
+        started = time.monotonic()
         sock = socket.create_connection((host, port), timeout=timeout_s)
+        connect_rtt = max(0.0, time.monotonic() - started)
         yield sock
         clean = True
     finally:
         srtt = tcp_srtt_s(sock)
+        if srtt is None and sock is not None:
+            srtt = connect_rtt
         if sock is not None:
             if not clean:
                 reset_on_close(sock)

@@ -181,7 +181,10 @@ class ProbeCadenceTests(QtTestCase):
         port = server.getsockname()[1]
 
         def answer() -> None:
-            conn, _addr = server.accept()
+            try:
+                conn, _addr = server.accept()
+            except OSError:   # the test closed the server before any probe reached it
+                return
             with conn:
                 conn.recv(64)
                 conn.sendall(b"ACK,PING,pong\n")
@@ -190,8 +193,10 @@ class ProbeCadenceTests(QtTestCase):
         responder.start()
         clock = FakeClock()
         budget = LinkBudget(GROUND_SHARE, clock=clock)
-        # 127.0.0.2 is loopback too but nothing listens there: refused at once.
-        probe = CommandProbe(["127.0.0.2", "127.0.0.1"], cmd_port=port, timeout_s=1.0,
+        # 127.0.0.2 is loopback too but nothing listens there: refused at once
+        # on Linux; Windows drops the SYN instead, so the connect timeout is
+        # kept short enough to tell a budget wait (10 s) from a probe.
+        probe = CommandProbe(["127.0.0.2", "127.0.0.1"], cmd_port=port, timeout_s=0.3,
                              include_static=False, budget=budget)
         reachable: list = []
         probe.onboard_reachable.connect(lambda host, p: reachable.append(host), Qt.ConnectionType.DirectConnection)

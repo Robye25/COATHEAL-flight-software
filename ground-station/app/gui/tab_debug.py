@@ -13,7 +13,7 @@ import time
 from typing import Dict, Optional
 
 from PyQt6.QtCore import QSettings, Qt, QTimer
-from PyQt6.QtWidgets import QGridLayout, QLabel, QScrollArea, QSpinBox, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QAbstractSpinBox, QGridLayout, QLabel, QScrollArea, QSpinBox, QVBoxLayout, QWidget
 
 from ..protocol import CommandResponse
 from . import gating
@@ -73,16 +73,18 @@ class DebugTab(QScrollArea):
         inner = QWidget(); self.setWidget(inner)
         outer = QVBoxLayout(inner); outer.setContentsMargins(6, 6, 6, 6); outer.setSpacing(8)
 
-        frame, lay = group_box("TMC5160 driver — live registers (MOTOR_DEBUG)")
+        frame, lay = group_box("TMC5160 live registers (MOTOR_DEBUG)")
         self.selector = Segmented([("M0", 0), ("M1", 1)], current=0)
         self.selector.valueChanged.connect(lambda _v: self._restart_estimator())
         self.btn_probe = make_button("START PROBE", "success", sends="MOTOR_DEBUG <motor_id> (polled)", min_height=28,
                                      slot=self.toggle_probe)
         self.btn_once = make_button("READ ONCE", "neutral", sends="MOTOR_DEBUG <motor_id>", min_height=28, slot=self.read_once)
         self.interval = QSpinBox(); self.interval.setRange(200, 5000); self.interval.setSingleStep(100); self.interval.setValue(500)
+        # Compact: the row has to fit the 392 px column of a 1366x768 screen.
+        self.interval.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons); self.interval.setFixedWidth(56)
         il = QLabel("poll every"); il.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
-        lay.addWidget(hrow(self.selector, self.btn_probe, self.btn_once))
-        lay.addWidget(hrow(il, with_unit(self.interval, "ms"), stretch_last=True))
+        lay.addWidget(hrow(self.selector, self.btn_probe, stretch_last=True))
+        lay.addWidget(hrow(self.btn_once, il, with_unit(self.interval, "ms"), stretch_last=True))
 
         # Driver health at a glance: thermal state, faults, resets, PWM
         # saturation. This is the line the operator scans first.

@@ -15,6 +15,10 @@ from pathlib import Path
 from unittest import mock
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "associate_heaters.py"
+if os.name != "posix":
+    # The script runs on the Pi: POSIX signals (SIGHUP) and select() on the
+    # terminal, neither of which Windows has. The ground station never runs it.
+    raise unittest.SkipTest("scripts/associate_heaters.py is POSIX-only (runs on the Pi)")
 SPEC = importlib.util.spec_from_file_location("associate_heaters", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 associate_heaters = importlib.util.module_from_spec(SPEC)

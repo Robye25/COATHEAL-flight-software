@@ -68,8 +68,8 @@ class SystemTab(QScrollArea):
         self.btn_host_auto.setToolTip("Forget the address and follow the onboard's discovery beacon again.")
         hl = QLabel("onboard IP"); hl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(hrow(hl, self.host_edit, self.btn_host_apply, self.btn_host_auto))
-        self.host_note = QLabel("The Pi's E-Link address (SSC assigns it; onboard, comms.static_ground_ip names this PC). "
-                                "On AUTO the onboard's beacon on UDP 4100 stays the fallback.")
+        self.host_note = QLabel("The Pi's E-Link address (SSC assigns it; onboard, comms.static_ground_ip names "
+                                "this PC). On AUTO the onboard's beacon on UDP 4100 stays the fallback.")
         self.host_note.setWordWrap(True); self.host_note.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         lay.addWidget(self.host_note)
         self.btn_restart_receiver = make_button("RESTART RECEIVER", "neutral", min_height=24)
@@ -137,7 +137,9 @@ class SystemTab(QScrollArea):
         self.tick_hz.setValue(1.0)
         self.btn_tick = make_button("SET", "primary", sends="SET_TICK_HZ <hz>", slot=self._set_tick, min_height=24)
         lbl = QLabel("0.1–5.0 Hz (BEXUS §5.4)"); lbl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
-        lay.addWidget(hrow(with_unit(self.tick_hz, "Hz"), self.btn_tick, lbl, stretch_last=True))
+        lbl.setWordWrap(True)
+        lay.addWidget(hrow(with_unit(self.tick_hz, "Hz"), self.btn_tick, stretch_last=True))
+        lay.addWidget(lbl)
         self.resp_rate = ResponseLine()
         lay.addWidget(self.resp_rate)
         outer.addWidget(frame)
@@ -156,7 +158,10 @@ class SystemTab(QScrollArea):
         self.check_target.addItems(CHECK_TARGETS)
         self.btn_check = make_button("CHECK", "neutral", sends="CHECK <component>", slot=self._check)
         self.btn_reset = make_button("RESET_CTRL", "danger", sends="RESET_CTRL", slot=self._reset_ctrl)
-        lay.addWidget(hrow(self.check_target, self.btn_check, self.btn_reset))
+        # Two rows, not one: with Windows' wider default font a single row
+        # did not fit the 392 px column of a 1366x768 screen.
+        lay.addWidget(hrow(self.check_target, self.btn_check, stretch_last=True))
+        lay.addWidget(self.btn_reset)
         note = QLabel("CHECK drives real hardware conversations (up to 15 s); a motor check fails while that motor is moving "
                       "or holding (CHECK ALL needs both idle). RESET_CTRL clears the over-temperature latch and PID integrators.")
         note.setWordWrap(True); note.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")

@@ -197,7 +197,10 @@ class ThermalTab(QScrollArea):
                                          slot=lambda: self._send("CLEAR_TEMP_TARGETS"))
         self.btn_refresh = make_button("Refresh", "neutral", sends="GET_THERMAL", min_height=24,
                                        slot=lambda: self._send("GET_THERMAL"))
-        lay.addWidget(hrow(with_unit(self.all_target, "°C"), self.btn_set_all, self.btn_clear_all, self.btn_refresh))
+        # Two rows: one did not fit the 392 px column of a 1366x768 screen
+        # with Windows' wider default font.
+        lay.addWidget(hrow(with_unit(self.all_target, "°C"), self.btn_set_all, stretch_last=True))
+        lay.addWidget(hrow(self.btn_clear_all, self.btn_refresh))
         self.resp_all = ResponseLine()
         lay.addWidget(self.resp_all)
         outer.addWidget(frame)
@@ -210,7 +213,8 @@ class ThermalTab(QScrollArea):
         self.btn_save_preset.setToolTip("Saves the six target spin-boxes and the PID gains locally — no wire command.")
         self.btn_capture = make_button("Capture", "neutral", min_height=24, slot=self.capture_preset)
         self.btn_capture.setToolTip("Sends: GET_THERMAL, then saves the onboard's current targets as a preset.")
-        lay.addWidget(hrow(self.preset_select, self.btn_apply_preset, self.btn_save_preset, self.btn_capture))
+        lay.addWidget(hrow(self.preset_select, self.btn_apply_preset, stretch_last=True))
+        lay.addWidget(hrow(self.btn_save_preset, self.btn_capture))
         self.preset_info = QLabel(soft_breaks(str(self.presets.path)))
         self.preset_info.setWordWrap(True); self.preset_info.setMinimumWidth(1)
         self.preset_info.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
@@ -231,8 +235,14 @@ class ThermalTab(QScrollArea):
         self.tune_cycles = QSpinBox(); self.tune_cycles.setRange(1, 10); self.tune_cycles.setValue(4)
         hl = QLabel("relay duty"); hl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
         cl = QLabel("cycles"); cl.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
-        lay.addWidget(hrow(self.tune_heater, with_unit(self.tune_setpoint, "°C"), hl, self.tune_duty, cl,
-                           self.tune_cycles))
+        # Compact boxes (as in the Motion tab's Bend group): with Windows'
+        # default spin boxes the row overflowed the 392 px column at 1366x768.
+        for spin, width in ((self.tune_setpoint, 60), (self.tune_duty, 52), (self.tune_cycles, 44)):
+            spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+            spin.setFixedWidth(width)
+        lay.addWidget(hrow(self.tune_heater, stretch_last=True))
+        lay.addWidget(hrow(with_unit(self.tune_setpoint, "°C"), hl, self.tune_duty, stretch_last=True))
+        lay.addWidget(hrow(cl, self.tune_cycles, stretch_last=True))
         self.btn_tune_start = make_button("START TUNE", "success",
                                           sends="PID_TUNE_START <heater> <setpoint_c> <relay_duty> <cycles>",
                                           min_height=26, slot=self._tune_start)
@@ -240,7 +250,8 @@ class ThermalTab(QScrollArea):
                                           slot=lambda: self._send("PID_TUNE_ABORT"))
         self.btn_tune_apply = make_button("APPLY GAINS", "primary", sends="SET_PID <heater> <kp> <ki> <kd>",
                                           min_height=26, slot=self._tune_apply)
-        lay.addWidget(hrow(self.btn_tune_start, self.btn_tune_abort, self.btn_tune_apply))
+        lay.addWidget(hrow(self.btn_tune_start, self.btn_tune_abort))
+        lay.addWidget(self.btn_tune_apply)
         note = QLabel("Bangs the heater between 0 and the relay duty around the setpoint, measures the induced "
                       "oscillation (Ku, Tu) and suggests Tyreus–Luyben gains. Takes exclusive heater control; "
                       "several minutes per channel. APPLY sends SET_PID for the tuned heater — save a preset after.")
