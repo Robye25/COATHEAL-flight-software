@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -251,6 +252,41 @@ class ConsoleTabTests(unittest.TestCase):
             self.assertEqual(other._system.host_edit.text(), "10.20.30.41")
         finally:
             other.close()
+
+    # ── onboard clock ──
+    def test_onboard_clock_is_synced_quietly_when_the_link_is_up(self) -> None:
+        from app.clock_sync import ClockSync
+        from app.protocol import CommandResponse
+        self.win._clock_sync = ClockSync()   # off in the test window (gui_helpers); on here
+        sent = capture_sends(self.win._dispatcher)
+        self.feed()
+        self.assertEqual([c for c in sent if c.startswith("TIME_SYNC")], [],
+                         "nothing before the telemetry connection says the link is up")
+        self.win._link_ok = True
+        self.win._tick()
+        syncs = [c for c in sent if c.startswith("TIME_SYNC ")]
+        self.assertEqual(len(syncs), 1, "the first frame of a session asks for a sync")
+        self.assertLess(abs(int(syncs[0].split()[1]) / 1000.0 - time.time()), 5.0, "this PC's clock, unix ms")
+        self.win._tick()
+        self.assertEqual(len([c for c in sent if c.startswith("TIME_SYNC")]), 1, "one exchange in flight at a time")
+        body = "offset_ms=-1340;applied=1;rtt_ms=0;syncs=1;now=2026-10-10T12:00:00Z"
+        self.win._on_quiet_reply(syncs[0], CommandResponse(ok=True, command="TIME_SYNC", body=body,
+                                                           raw=f"ACK,TIME_SYNC,{body}"), 180.0, self.win)
+        self.assertIn("stepped -1.3 s", self.win._system.i_clock.value())
+        self.win._tick()
+        self.assertEqual(len([c for c in sent if c.startswith("TIME_SYNC")]), 1, "the next check is ten minutes away")
+        # A new onboard session (a reboot) is synced again at once, with the
+        # round-trip hint: half of the last exchange's latency.
+        self.feed(session="coatheal-1787760999-2", seq=1)
+        self.win._tick()
+        syncs = [c for c in sent if c.startswith("TIME_SYNC ")]
+        self.assertEqual(len(syncs), 2)
+        self.assertEqual(syncs[1].split()[2], "90")
+        # Radio silence sends nothing, a full budget postpones.
+        self.win._on_quiet_reply(syncs[1], CommandResponse(ok=False, command="TIME_SYNC",
+                                                           error="link budget full", raw=""), 0.0, self.win)
+        self.assertEqual(self.win._system.i_clock.value(), "not checked",
+                         "a new boot's clock is unknown until it answers; a postponed check leaves it so")
 
     def test_esc_and_stop_motors_send_both_stops(self) -> None:
         from PyQt6.QtGui import QKeySequence, QShortcut

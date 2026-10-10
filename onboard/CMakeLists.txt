@@ -49,6 +49,7 @@ configure_file(src/telemetry_dictionary_z1.cpp.in
 
 add_library(coatheal_onboard_core
   src/bend_sequence.cpp
+  src/clock_sync.cpp
   src/command_parser.cpp
   src/command_server.cpp
   src/config.cpp

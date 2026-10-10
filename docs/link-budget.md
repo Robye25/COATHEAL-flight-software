@@ -202,7 +202,8 @@ ticks stop replay at 70 % (`ReplayDeadline`).
 
 Priorities, highest first: safety commands (`HEATERS_OFF`, `STEPPER_STOP`,
 `DISARM`, `SHUTDOWN_SAFE`, `RADIO_SILENCE`, `RADIO_RESUME`), other commands,
-background polls (`MOTOR_DEBUG` probe), discovery. A command whose request
+background polls (`MOTOR_DEBUG` probe, and `TIME_SYNC` every ten minutes,
+which never waits for room: a full share postpones it), discovery. A command whose request
 line cannot fit the share (longer than 230 B) is refused locally. Exchanges go
 one at a time: about one per second.
 

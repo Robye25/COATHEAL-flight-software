@@ -42,6 +42,15 @@ struct FallbackConfig {
   bool landed_safe = true;
 };
 
+// The onboard clock is set from the ground station (TIME_SYNC, see
+// clock_sync.hpp): there is no NTP on the E-Link and no RTC on the board.
+// The clock is stepped when it differs from the ground station's by
+// step_threshold_ms or more; sync_from_ground=false refuses the command.
+struct ClockConfig {
+  bool sync_from_ground = true;
+  double step_threshold_ms = 250.0;
+};
+
 // Where telemetry goes. The onboard dials, in this order, the ground station
 // that most recently announced itself (a GS_BEACON within rediscover_period_s,
 // or the peer of a command connection), then static_ground_ip, then
@@ -333,6 +342,7 @@ struct OnboardConfig {
   RuntimeConfig runtime;
   ManualControlConfig manual;
   FallbackConfig fallback;
+  ClockConfig clock;
   CommsConfig comms;
   StorageConfig storage;
   PhaseConfig phase;

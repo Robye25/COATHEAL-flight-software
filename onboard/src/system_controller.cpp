@@ -2393,6 +2393,44 @@ std::string SystemController::HandleCommandLine(const std::string& line,
                                std::to_string(st.step_loss_events));
     }
 
+    case CommandType::kTimeSync: {
+      // The ground station's clock; the only time reference on the E-Link.
+      if (!config_.clock.sync_from_ground) {
+        return Nack(cmd_name, "disabled by clock.sync_from_ground=false");
+      }
+      ClockSyncRequest request;
+      std::string parse_error;
+      if (!ParseClockSyncArgs(command.args, RtcAdapter::BuildFloorUnixSeconds(), &request,
+                              &parse_error)) {
+        return Nack(cmd_name, parse_error);
+      }
+      const std::int64_t local_ms =
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::system_clock::now().time_since_epoch())
+              .count();
+      const ClockSyncPlan plan = PlanClockSync(
+          request, local_ms, static_cast<std::int64_t>(config_.clock.step_threshold_ms));
+      if (plan.step) {
+        std::string set_error;
+        if (!clock_setter_(plan.target_unix_ms, &set_error)) {
+          std::cerr << "[clock] ground station is " << plan.offset_ms
+                    << " ms away but the clock cannot be set: " << set_error << "\n";
+          return Nack(cmd_name, "offset_ms=" + std::to_string(plan.offset_ms) + ": " + set_error);
+        }
+        std::cerr << "[clock] stepped " << (plan.offset_ms >= 0 ? "+" : "") << plan.offset_ms
+                  << " ms to the ground station's time (rtt hint " << request.rtt_ms
+                  << " ms); timestamps before this are off by that much\n";
+      }
+      rtc_.MarkSynchronised();
+      ++clock_syncs_;
+      last_clock_offset_ms_ = plan.offset_ms;
+      return Ack(cmd_name, "offset_ms=" + std::to_string(plan.offset_ms) +
+                               ";applied=" + (plan.step ? "1" : "0") +
+                               ";rtt_ms=" + std::to_string(request.rtt_ms) +
+                               ";syncs=" + std::to_string(clock_syncs_) +
+                               ";now=" + rtc_.NowUtcIso8601());
+    }
+
     case CommandType::kBendSeqLoad: {
       std::size_t motor = 0;
       if (!ParseIndex(command.args[0], &motor) ||

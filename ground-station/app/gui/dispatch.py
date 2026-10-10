@@ -22,6 +22,7 @@ from typing import Callable, Deque, Optional
 from PyQt6.QtCore import QObject, QRunnable, QThread, QThreadPool, pyqtSignal
 
 from ..link_budget import (
+    BUDGET_FULL_ERROR,
     PURE_ACK,
     SYN,
     TELEMETRY_CLOSE_BYTES,
@@ -355,9 +356,10 @@ class _SendJob(QRunnable):
     def __init__(self, host: str, port: int, command: str, timeout: float,
                  tag: Optional[object], signal_emit: Callable[[str, CommandResponse, float, object], None],
                  priority: Priority = Priority.COMMAND, budget: Optional[LinkBudget] = None,
-                 cancel: Optional[threading.Event] = None):
+                 cancel: Optional[threading.Event] = None, wait: bool = True):
         super().__init__()
         self._host = host
+        self._wait = wait   # False: fail at once when the link budget has no room
         self._port = port
         self._cmd = command
         self._timeout = timeout
@@ -382,12 +384,12 @@ class _SendJob(QRunnable):
         # The whole exchange (SYN to the last FIN) is held on the ground
         # station's 1 150 B share from before connecting until the socket is
         # closed (docs/link-budget.md).
-        wait_s = command_budget_wait_s(self._timeout)
+        wait_s = command_budget_wait_s(self._timeout) if self._wait else 0.0
         ticket = self._budget.hold(command_exchange_bytes(len(payload)), self._priority, wait_s, self._cancel,
                                    tx_bytes=command_exchange_egress(len(payload)))
         if ticket is None:
             error = (CLOSING_ERROR if self._cancel is not None and self._cancel.is_set()
-                     else budget_wait_error(wait_s))
+                     else BUDGET_FULL_ERROR if wait_s <= 0 else budget_wait_error(wait_s))
             return CommandResponse(ok=False, command=self._cmd, error=error, raw="")
         try:
             # Releases the hold once the connection is closed (a failed
@@ -469,11 +471,13 @@ class CommandDispatcher(QObject):
         return None
 
     def send(self, command: str, tag: Optional[object] = None,
-             timeout: Optional[float] = None, quiet: bool = False) -> bool:
+             timeout: Optional[float] = None, quiet: bool = False, wait: bool = True) -> bool:
         """Queue `command`. False only for a quiet poll whose previous send
         for the same tag has not come back yet: it is dropped, not queued
         behind it (a 2 Hz poll outruns a link that carries about one
-        exchange a second)."""
+        exchange a second). `wait=False` makes an exchange that cannot get
+        room on the link budget right now fail at once with
+        BUDGET_FULL_ERROR instead of waiting for it (the periodic TIME_SYNC)."""
         emit = self.quiet_response.emit if quiet else self.response_received.emit
         reason = self.blocked_reason(command)
         if reason is not None:
@@ -495,7 +499,7 @@ class CommandDispatcher(QObject):
         resolved_timeout = timeout if timeout is not None else timeout_for(command)
         priority = priority_for(command, quiet)
         job = _SendJob(self.host, self.port, command, resolved_timeout, tag, emit,
-                       priority=priority, budget=self._budget, cancel=self._closing)
+                       priority=priority, budget=self._budget, cancel=self._closing, wait=wait)
         # Jobs waiting for a pool thread leave in link-budget priority order,
         # so a safety command never queues behind a batch of ordinary ones.
         self._pool.start(job, int(Priority.DISCOVERY) - int(priority))
@@ -509,6 +513,12 @@ class CommandDispatcher(QObject):
         budget fails at once instead of keeping its pool thread (and the
         process) alive for up to its budget wait."""
         self._closing.set()
+        # A job already past its budget wait is connecting or waiting for a
+        # reply; let it finish (at most its timeout) rather than leave a pool
+        # thread alive when the interpreter tears down.
+        wait_for_done = getattr(self._pool, "waitForDone", None)   # tests substitute a plain pool
+        if wait_for_done is not None:
+            wait_for_done(5000)
 
     def _on_response(self, cmd: str, resp: CommandResponse, ms: float, _tag) -> None:
         ts = datetime.now().strftime("%H:%M:%S")

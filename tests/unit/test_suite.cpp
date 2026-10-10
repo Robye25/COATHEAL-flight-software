@@ -9,6 +9,8 @@
 #include <vector>
 
 #include "coatheal/bend_sequence.hpp"
+#include "coatheal/clock_sync.hpp"
+#include "coatheal/hal/rtc_adapter.hpp"
 #include "coatheal/command_parser.hpp"
 #include "coatheal/config.hpp"
 #include "coatheal/heater_scheduler.hpp"
@@ -1801,6 +1803,83 @@ void TestBendSequenceRepeatAndStatus() {
 }
 
 
+// TIME_SYNC (clock_sync.hpp): the ground station's clock, stepped to when
+// the offset reaches the threshold, reported either way.
+void TestTimeSyncCommand() {
+  coatheal::CommandParser parser;
+  assert(parser.ParseLine("TIME_SYNC 1760000000000").ok);
+  assert(parser.ParseLine("TIME_SYNC 1760000000000 120").command.args.size() == 2);
+  assert(!parser.ParseLine("TIME_SYNC").ok);
+  assert(!parser.ParseLine("TIME_SYNC 1 2 3").ok);
+
+  coatheal::ClockSyncRequest req;
+  std::string err;
+  assert(coatheal::ParseClockSyncArgs({"1760000000000", "120"}, 1750000000, &req, &err));
+  assert(req.ground_unix_ms == 1760000000000LL && req.rtt_ms == 120);
+  assert(coatheal::ParseClockSyncArgs({"1760000000000"}, 1750000000, &req, &err) && req.rtt_ms == 0);
+  assert(!coatheal::ParseClockSyncArgs({"123"}, 1750000000, &req, &err) && ContainsText(err, "implausible"));
+  assert(!coatheal::ParseClockSyncArgs({"4102444800000"}, 1750000000, &req, &err) && ContainsText(err, "implausible"));
+  assert(!coatheal::ParseClockSyncArgs({"abc"}, 1750000000, &req, &err) && ContainsText(err, "invalid ground time"));
+  assert(!coatheal::ParseClockSyncArgs({"1760000000000", "-1"}, 1750000000, &req, &err) && ContainsText(err, "rtt_ms"));
+  assert(!coatheal::ParseClockSyncArgs({"1760000000000", "40000"}, 1750000000, &req, &err) && ContainsText(err, "rtt_ms"));
+  assert(!coatheal::ParseClockSyncArgs({}, 1750000000, &req, &err) && ContainsText(err, "usage"));
+  const coatheal::ClockSyncPlan far_plan = coatheal::PlanClockSync({1000000, 200}, 999500, 250);
+  assert(far_plan.target_unix_ms == 1000100 && far_plan.offset_ms == 600 && far_plan.step);
+  const coatheal::ClockSyncPlan near_plan = coatheal::PlanClockSync({1000000, 200}, 1000050, 250);
+  assert(near_plan.offset_ms == 50 && !near_plan.step);
+  assert(coatheal::PlanClockSync({1000000, 0}, 1000600, 250).offset_ms == -600);
+  assert(coatheal::PlanClockSync({1000000, 0}, 1000000, 0).step);   // threshold 0: always set
+
+  // The command, with a fake clock setter.
+  const std::filesystem::path dir = FreshQueueDir("timesync");
+  coatheal::SystemController controller(LoadRadioTestConfig(dir));
+  std::vector<std::int64_t> set_to;
+  controller.set_clock_setter([&](std::int64_t ms, std::string*) { set_to.push_back(ms); return true; });
+  auto now_ms = []() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::system_clock::now().time_since_epoch()).count();
+  };
+  const std::int64_t t0 = now_ms();
+  const std::string stepped = controller.HandleCommandLine("TIME_SYNC " + std::to_string(t0 + 5000) + " 200", "");
+  assert(stepped.rfind("ACK,TIME_SYNC,offset_ms=", 0) == 0);
+  assert(ContainsText(stepped, ";applied=1;rtt_ms=200;syncs=1;now="));
+  assert(set_to.size() == 1);
+  assert(set_to[0] == t0 + 5100);   // target = ground + rtt / 2, whatever the local clock
+  const std::string close = controller.HandleCommandLine("TIME_SYNC " + std::to_string(now_ms() + 10), "");
+  assert(ContainsText(close, ";applied=0;rtt_ms=0;syncs=2;"));
+  assert(set_to.size() == 1);       // within the threshold: nothing set
+  assert(ContainsText(controller.HandleCommandLine("TIME_SYNC 123", ""), "implausible"));
+  assert(ContainsText(controller.HandleCommandLine("TIME_SYNC", ""), "invalid argument count"));
+  controller.set_clock_setter([](std::int64_t, std::string* e) {
+    *e = "cannot set the clock: Operation not permitted"; return false; });
+  const std::string refused = controller.HandleCommandLine("TIME_SYNC " + std::to_string(now_ms() + 60000), "");
+  assert(refused.rfind("NACK,TIME_SYNC,offset_ms=", 0) == 0 && ContainsText(refused, "Operation not permitted"));
+  assert(controller.HandleCommandLine("RADIO_SILENCE", "").rfind("ACK,", 0) == 0);
+  assert(ContainsText(controller.HandleCommandLine("TIME_SYNC " + std::to_string(now_ms()), ""), "radio silence active"));
+  assert(controller.HandleCommandLine("RADIO_RESUME", "").rfind("ACK,", 0) == 0);
+
+  // Disabled by configuration, and the keys themselves.
+  coatheal::OnboardConfig off_cfg = LoadRadioTestConfig(dir);
+  off_cfg.clock.sync_from_ground = false;
+  coatheal::SystemController off(off_cfg);
+  assert(ContainsText(off.HandleCommandLine("TIME_SYNC " + std::to_string(now_ms()), ""), "clock.sync_from_ground"));
+  {
+    coatheal::OnboardConfig parsed;
+    std::string error;
+    assert(coatheal::LoadConfigFromIni(WriteTempConfig("clock.sync_from_ground=false\nclock.step_threshold_ms=500\n"),
+                                       &parsed, &error));
+    assert(!parsed.clock.sync_from_ground && parsed.clock.step_threshold_ms == 500.0);
+    assert(!coatheal::LoadConfigFromIni(WriteTempConfig("clock.step_threshold_ms=-1\n"), &parsed, &error));
+    assert(ContainsText(error, "clock.step_threshold_ms"));
+  }
+  // A ground-station sync satisfies the RTC adapter's "disciplined" criterion.
+  coatheal::RtcAdapter rtc;
+  rtc.MarkSynchronised();
+  assert(rtc.valid());
+  std::filesystem::remove_all(dir);
+}
+
+
 // ---------------------------------------------------------------------------
 // Motor-group layout (owner request 2026-09-15): motorN.specimens lists each
 // motor's specimens as PT100 card terminal and heater BCM line, and every
@@ -1952,6 +2031,7 @@ int main() {
   TestMotionEnvelopeConfig();
   TestDirectMicrostepCapAndSpeedCeiling();
   TestBendSequenceRepeatAndStatus();
+  TestTimeSyncCommand();
   TestSpecimenListsDeriveTheLayout();
   TestSpecimenListsRejectWhatCannotRun();
   TestGetLayoutReportsTheGroups();

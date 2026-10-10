@@ -181,6 +181,7 @@ python -m unittest discover -s ground-station/tests -p "test_*.py"
 | `HEATERS_OFF` | Emergency heater shutoff |
 | `SET_POSITION_ZERO <id>` | Declare the current physical motor position as zero |
 | `STEPLOSS_ACK <id>` | Clear a motor's position-uncertain latch after a step-loss event, keeping the zero (console-only; the Motion tab's SET ZERO is the normal way out) |
+| `TIME_SYNC <ground_unix_ms> [<rtt_ms>]` | Set the onboard clock from the ground station (no NTP on the E-Link); the console sends it every ten minutes when the link budget allows |
 | `BENDSEQ_LOAD` / `BENDSEQ_RUN` | Define (`<target>:<hold>` steps, `repeat=<n>` for the cyclic part) and execute absolute bend sequences at the motor's own speed |
 | `STEPPER_*` | Direct motor movement commands |
 | `PULL_EXECUTE <id>` | One config-defined standard pull (the console's STANDARD PULL) |

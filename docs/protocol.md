@@ -242,6 +242,7 @@ NACK,<COMMAND>,<reason>
 | `CLEAR_OVERRIDES` | none | Clear duty, target, and PID overrides |
 | `SET_POSITION_ZERO` | `<id>` | Set current physical position as software zero without motion. Also clears the position-uncertain latch (`unc`) |
 | `STEPLOSS_ACK` | `<id>` | Clear the position-uncertain latch a step-loss event set, keeping the zero: the operator checked the mechanism and accepts the position. Replies `motor=<id>;unc=0;loss=<events since start>`; the count is not reset. Added 2026-10-05 Console-only on the ground station: the Motion tab offers SET ZERO and its step-loss banner names this command (there is no ACK button since 2026-10-10). |
+| `TIME_SYNC` | `<ground_unix_ms> [<rtt_ms>]` | The ground station\'s clock in Unix milliseconds and, from the second exchange on, half its last exchange latency as the round-trip hint. The onboard compares `ground_unix_ms + rtt_ms / 2` with its own clock, steps the clock to it when they differ by `clock.step_threshold_ms` (250 ms) or more, and replies `offset_ms=<ground minus onboard>;applied=<0\|1>;rtt_ms=<used>;syncs=<since boot>;now=<its clock>`. Either way the clock then counts as disciplined (`rtc_valid`). Refused as `implausible ground time` before the firmware\'s build day or after 2100, with `clock.sync_from_ground=false`, and with the kernel\'s reason when the clock cannot be set (the service unit grants `CAP_SYS_TIME`). The console sends it quietly on the first frame of every onboard session and every ten minutes, only when its link budget has room. Added 2026-10-10, see [Clock sync](#clock-sync) |
 | `STEPPER_MOVE` | `<id> <steps>` | Relative motor move (`<steps>` are microsteps at the configured divisor: µ4 → 800 per revolution). `|steps|` ≤ `stepper.max_direct_usteps` (1000 = 1.25 rev at µ4); longer travel goes through `STEPPER_MOVE_MM` |
 | `STEPPER_MOVETO` | `<id> <abs_usteps> [hold_s]` | Absolute move; motor must be zeroed. `|abs_usteps|` ≤ `stepper.max_direct_usteps` (1000); `hold_s` is `0..86400` (a hold keeps the MotionLock, and with it the heater inhibit, for its whole duration) |
 | `STEPPER_MOVE_MM` | `<id> <mm>` | Relative move in millimetres of linear travel; converted onboard through `stepper.lead_mm_per_rev` (1 mm/rev → `1.0` = one revolution) at the current microstep divisor. The console's jog buttons use this |
@@ -393,6 +394,33 @@ BENDSEQ_LOAD 0 flex 800:5 -800:5 repeat=10 0:0
 BENDSEQ_RUN 0 flex
 BENDSEQ_STATUS 0
 ```
+
+### Clock sync
+
+The BEXUS E-Link carries no NTP and the board has no RTC: after a reboot the
+onboard clock is fake-hwclock's last save and stays wrong until something
+disciplines it. The ground station is the only time reference on the link, so
+it disciplines the onboard with `TIME_SYNC`:
+
+- the console sends `TIME_SYNC <its unix ms> [<rtt hint>]` on the first live
+  frame of an onboard session and every ten minutes after a reply, as a quiet
+  background exchange at poll priority that never waits for the link budget
+  (no room: the attempt is skipped and tried again 30 s later);
+- the onboard takes `ground + rtt / 2` as the time now, reports the offset to
+  its own clock, and steps the clock when the offset is at least
+  `clock.step_threshold_ms` (250 ms). Below that nothing moves. A step is
+  journaled (`[clock] stepped +1234 ms …`);
+- after any successful exchange the clock counts as disciplined: `rtc_valid`
+  in the frame header turns `1`, the console's RTC alarm and checkout row
+  clear. The console's System tab shows the last offset and age ("in sync
+  (+12 ms) · checked 3 min ago", "stepped −1.3 s · 10 s ago", or the refusal).
+
+A step moves the onboard's timestamps: frames stamped before it are off by
+the offset (the console plots them at their onboard time), and the session
+id keeps the boot epoch the onboard had when it started. Mission time (T+)
+on the console is derived from that session id; a large first step is a good
+moment to note the offset in the log. The ledger cost is one command exchange
+(about 1 KB) per ten minutes.
 
 ### Bench-Only Commands
 

@@ -65,6 +65,10 @@ enum class CommandType {
   // STEPLOSS_ACK <id>: clear the position-uncertain latch a step-loss event
   // set, keeping the zero (SET_POSITION_ZERO clears it with a new zero).
   kStepLossAck,
+  // TIME_SYNC <ground_unix_ms> [<rtt_ms>]: the ground station's clock. The
+  // onboard steps its own to it when they differ by clock.step_threshold_ms
+  // or more and reports the offset either way (clock_sync.hpp).
+  kTimeSync,
   kBendSeqLoad,
   kBendSeqRun,
   kBendSeqPause,

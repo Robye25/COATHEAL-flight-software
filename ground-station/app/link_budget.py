@@ -130,11 +130,18 @@ SAFETY_VERBS = frozenset({"HEATERS_OFF", "STEPPER_STOP", "DISARM", "SHUTDOWN_SAF
                           "RADIO_SILENCE", "RADIO_RESUME"})
 
 
+# Background exchanges the console starts on its own: they never outrank an
+# operator's command.
+BACKGROUND_VERBS = frozenset({"TIME_SYNC"})
+
+
 def priority_for(command: str, quiet: bool = False) -> Priority:
     stripped = (command or "").strip()
     verb = stripped.split()[0].upper() if stripped else ""
     if verb in SAFETY_VERBS:
         return Priority.CRITICAL
+    if verb in BACKGROUND_VERBS:
+        return Priority.POLL
     return Priority.POLL if quiet else Priority.COMMAND
 
 
@@ -165,6 +172,11 @@ def command_budget_wait_s(timeout_s: float) -> float:
 
 def budget_wait_error(wait_s: float) -> str:
     return f"waited {wait_s:g} s for link budget"
+
+
+# The refusal of an exchange that was not allowed to wait for room
+# (CommandDispatcher.send(wait=False): TIME_SYNC).
+BUDGET_FULL_ERROR = "link budget full"
 
 
 def tcp_srtt_s(sock: Optional[socket.socket]) -> Optional[float]:

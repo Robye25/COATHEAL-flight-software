@@ -16,7 +16,7 @@ from .dispatch import CommandDispatcher
 from .state import OnboardState
 from .theme import mode_color, phase_color
 from .widgets import (
-    AMBER, GREEN, MONO_CSS, MUTED, RED, Indicator, ResponseLine, confirm,
+    AMBER, GRAY, GREEN, MONO_CSS, MUTED, RED, Indicator, ResponseLine, confirm,
     group_box, hrow, make_button, with_unit,
 )
 
@@ -53,7 +53,12 @@ class SystemTab(QScrollArea):
         self.i_uplink.setToolTip("CTRL link_loss_s: how long ago the onboard last heard this ground station")
         self.i_queue = Indicator("Onboard queue")
         self.i_session = Indicator("Session")
-        for ind in (self.i_target, self.i_receiver, self.i_rate, self.i_uplink, self.i_queue, self.i_session):
+        self.i_clock = Indicator("Onboard clock", value="not checked")
+        self.i_clock.setToolTip("TIME_SYNC: the onboard sets its clock from this PC (no NTP on the E-Link). "
+                                "Checked on the first frame of a session and every ten minutes, when the "
+                                "link budget has room.")
+        for ind in (self.i_target, self.i_receiver, self.i_rate, self.i_uplink, self.i_queue, self.i_session,
+                    self.i_clock):
             lay.addWidget(ind)
         # The onboard's address, set by hand for flight (the E-Link addresses
         # are fixed by SSC); AUTO leaves it to the beacon, the probe and the
@@ -312,6 +317,12 @@ class SystemTab(QScrollArea):
         else:
             age = f" · age {age_s:.1f} s" if age_s is not None else ""
             self.i_rate.set_value(f"{rate_hz:.1f} Hz{age}")
+
+    def set_clock_info(self, text: str, color_key: str) -> None:
+        """The onboard clock's sync state (app/clock_sync.py status)."""
+        color = {"green": GREEN, "amber": AMBER, "red": RED}.get(color_key, MUTED)
+        self.i_clock.set_value(text, color)
+        self.i_clock.set_color(color if color_key in ("green", "amber", "red") else GRAY)
 
     def on_response(self, cmd: str, resp: CommandResponse, ms: float, tag) -> None:
         if tag is not self:

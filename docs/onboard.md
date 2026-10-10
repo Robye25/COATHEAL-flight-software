@@ -218,6 +218,7 @@ GET_THERMAL
 HEATERS_OFF
 SET_POSITION_ZERO <id>
 STEPLOSS_ACK <id>
+TIME_SYNC <ground_unix_ms> [<rtt_ms>]
 BENDSEQ_LOAD <id> <name> <target>:<hold> ... [repeat=<n> <target>:<hold> ...]
 BENDSEQ_RUN <id> <name>
 STEPPER_STOP <id>

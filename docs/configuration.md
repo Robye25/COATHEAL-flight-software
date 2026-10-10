@@ -39,6 +39,8 @@ fallback at `PRE_FLOAT`/`FLOAT`.
 | `fallback.bend_max_c` | `40.0` | Upper bound of that window; must be greater than `fallback.bend_min_c`. |
 | `fallback.bend_deadline_s` | `1800.0` | Seconds after fallback first holds at `PRE_FLOAT`/`FLOAT` beyond which the bend starts regardless of temperature (a motor still not enabled/zeroed/healthy is skipped instead). Must be `>= 0`; the clock restarts after an onboard restart. |
 | `fallback.landed_safe` | `true` | Heaters off and both motors disabled the first time fallback is active at `LANDED`. |
+| `clock.sync_from_ground` | `true` | Accept `TIME_SYNC` from the ground station (the only time reference on the E-Link; see [protocol.md, Clock sync](protocol.md#clock-sync)). |
+| `clock.step_threshold_ms` | `250` | Step the system clock when it differs from the ground station\'s by at least this; below it the offset is only reported. Needs `CAP_SYS_TIME` (the service units grant it). |
 
 ## Communications
 

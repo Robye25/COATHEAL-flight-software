@@ -27,6 +27,7 @@ from .. import link_cap
 from ..link_budget import LINK_HEALTHY_S
 from ..protocol import LEAD_MM_PER_REV, CommandResponse, PullEvent, TelemetryPacket
 from ..telemetry_log import LogManager
+from ..clock_sync import ClockSync
 from ..thermal_presets import PresetStore
 from . import firewall, gating
 from .alarms import AlarmModel
@@ -62,7 +63,8 @@ LAYOUT_RETRY_S = 10.0
 class MainWindow(QMainWindow):
     def __init__(self, *, bind: str, tel_port: int, cmd_port: int, cmd_host: str,
                  log_path: Path, firewall_check: bool = True,
-                 preset_store: Optional[PresetStore] = None, settings: Optional[QSettings] = None):
+                 preset_store: Optional[PresetStore] = None, settings: Optional[QSettings] = None,
+                 time_sync: bool = True):
         super().__init__()
         self.setWindowTitle("COATHEAL Ground Station")
         self.resize(1600, 900)
@@ -138,6 +140,11 @@ class MainWindow(QMainWindow):
         self._dispatcher = CommandDispatcher(self._user_host, cmd_port, log_manager=self._logs)
         self._dispatcher.response_received.connect(self._on_response)
         self._dispatcher.silence_changed.connect(self._on_silence_changed)
+        self._dispatcher.quiet_response.connect(self._on_quiet_reply)
+        # The onboard's clock is set from this PC (app/clock_sync.py): once per
+        # onboard session, then every ten minutes, only when the budget has
+        # room. None (--no-time-sync) when this PC's clock is not to be trusted.
+        self._clock_sync: Optional[ClockSync] = ClockSync() if time_sync else None
         self._presets = preset_store if preset_store is not None else PresetStore().load()
 
         pg.setConfigOption("background", "#0d0d0d")
@@ -343,6 +350,8 @@ class MainWindow(QMainWindow):
                 self._backlog_frames = self._verdict.backlog_frames
             self._mode_override = None
             self._last_pkt = pkt
+            if self._clock_sync is not None:
+                self._clock_sync.on_session(pkt.session_id, now_mono)
             if (pkt.session_id != self._layout_session and not self._dispatcher.silence
                     and now_mono >= self._layout_retry_mono):
                 self._layout_session = pkt.session_id
@@ -525,7 +534,26 @@ class MainWindow(QMainWindow):
         # Link age changes between frames; alarms, gating and the discovery
         # cadence must follow it.
         self._update_discovery_cadence()
+        self._maybe_sync_clock()
         self._apply_state()
+        self._refresh_link_info()
+
+    # ── onboard clock ──
+    def _maybe_sync_clock(self) -> None:
+        now_mono = time.monotonic()
+        if self._clock_sync is None or not self._clock_sync.due(now_mono, self._link_ok, self._dispatcher.silence):
+            return
+        # Quiet (no console row) and never waiting for the link budget: a
+        # full budget postpones the check, it does not queue behind commands.
+        self._dispatcher.send(self._clock_sync.command(time.time()), tag=self, quiet=True, wait=False)
+
+    def _on_quiet_reply(self, cmd: str, resp: CommandResponse, ms: float, tag) -> None:
+        verb = cmd.strip().split()[0].upper() if cmd.strip() else ""
+        if verb != "TIME_SYNC" or tag is not self or self._clock_sync is None:
+            return
+        line, level = self._clock_sync.on_reply(resp.ok, resp.body if resp.ok else (resp.error or resp.raw),
+                                                ms, time.monotonic())
+        self._events.append(line, None if level == "INFO" else level)
         self._refresh_link_info()
 
     def _ack_alarm(self, key: str) -> None:
@@ -570,6 +598,8 @@ class MainWindow(QMainWindow):
             rate = len(self._top._rx_times) / TopStrip.RATE_WINDOW_S
         self._system.set_link_info(target=target, target_how=how, receiver=self._receiver_state,
                                    rate_hz=rate, age_s=self._link_age())
+        self._system.set_clock_info(*(self._clock_sync.status(time.monotonic()) if self._clock_sync is not None
+                                      else ("off (--no-time-sync)", "muted")))
 
     def _on_priority_changed(self, p: int) -> None:
         self._beacon.set_priority(int(p))
@@ -741,6 +771,8 @@ def run_gui(argv: Optional[list[str]] = None) -> int:
                         help="Log root; each onboard session gets its own directory under <root>/sessions/.")
     parser.add_argument("--no-firewall-check", action="store_true",
                         help="Skip the Windows firewall / network-profile auto-check at startup.")
+    parser.add_argument("--no-time-sync", action="store_true",
+                        help="Do not set the onboard clock from this PC (TIME_SYNC every ten minutes).")
     args = parser.parse_args(argv)
 
     app = QApplication.instance() or QApplication([])
@@ -751,7 +783,7 @@ def run_gui(argv: Optional[list[str]] = None) -> int:
 
     win = MainWindow(bind=args.bind, tel_port=args.tel_port, cmd_port=args.cmd_port,
                      cmd_host=args.host, log_path=args.log,
-                     firewall_check=not args.no_firewall_check)
+                     firewall_check=not args.no_firewall_check, time_sync=not args.no_time_sync)
     win.show()
     rc = app.exec()
     # Destroy the window while the QApplication still exists. Python tears

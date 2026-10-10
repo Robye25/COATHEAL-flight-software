@@ -51,7 +51,9 @@ def pump_until(app, predicate, timeout_s: float = 3.0) -> bool:
     return bool(predicate())
 
 
-def make_window(tmp_root: Path, *, cmd_host: str = "127.0.0.1"):
+def make_window(tmp_root: Path, *, cmd_host: str = "127.0.0.1", time_sync: bool = False):
+    """A window on free ports. The periodic TIME_SYNC is off unless asked
+    for: it would open real connections from the 500 ms tick."""
     from PyQt6.QtCore import QSettings
     from app.gui.main_window import MainWindow
     from app.thermal_presets import PresetStore
@@ -62,6 +64,7 @@ def make_window(tmp_root: Path, *, cmd_host: str = "127.0.0.1"):
         log_path=tmp_root, firewall_check=False,
         preset_store=PresetStore(tmp_root / "profiles" / "thermal_presets.json").load(),
         settings=QSettings(str(tmp_root / "settings" / "GroundStation.ini"), QSettings.Format.IniFormat),
+        time_sync=time_sync,
     )
 
 
@@ -70,7 +73,7 @@ def capture_sends(dispatcher, *, layout_query: bool = False) -> list:
     new onboard session is left out unless `layout_query`."""
     sent: list = []
 
-    def send(cmd, tag=None, timeout=None, quiet=False):
+    def send(cmd, tag=None, timeout=None, quiet=False, **_kwargs):
         if layout_query or cmd != "GET_LAYOUT":
             sent.append(cmd)
 

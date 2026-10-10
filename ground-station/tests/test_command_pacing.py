@@ -21,8 +21,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import command_client  # noqa: E402
 from app.link_budget import (  # noqa: E402
-    ABORT_TAIL_S, CLOSE_TAIL_S, GROUND_SHARE, LinkBudget, Priority, ground_budget, paced_connection,
-    udp_datagram,
+    ABORT_TAIL_S, BUDGET_FULL_ERROR, CLOSE_TAIL_S, GROUND_SHARE, LinkBudget, Priority, ground_budget,
+    paced_connection, udp_datagram,
 )
 
 # The tails below are checked to 10 ms, so the round trip the kernel reports
@@ -183,6 +183,22 @@ class SendJobPacingTests(unittest.TestCase):
 
     # MUTATION: pass delay 0 to budget.release in paced_connection and confirm
     # the "closing FIN or ACK" assertion above fails.
+
+    def test_a_no_wait_send_fails_at_once_when_the_budget_is_full(self) -> None:
+        # TIME_SYNC is sent with wait=False: no room now means "not now",
+        # never a wait behind the operator's commands.
+        from app.gui.dispatch import _SendJob
+        clock = FakeClock()
+        budget = LinkBudget(GROUND_SHARE, clock=clock)
+        self.assertIsNotNone(budget.hold(GROUND_SHARE, Priority.COMMAND), "the share is taken")
+        started = time.monotonic()
+        _SendJob("127.0.0.1", self.server.port, "TIME_SYNC 1760000000000", 3.0, None,
+                 lambda cmd, resp, ms, tag: self.results.append((cmd, resp, ms)), budget=budget, wait=False).run()
+        self.assertLess(time.monotonic() - started, 0.5, "never waits for room")
+        _cmd, resp, _ms = self.results[0]
+        self.assertFalse(resp.ok)
+        self.assertEqual(resp.error, BUDGET_FULL_ERROR)
+        self.assertEqual(self.server.accepts, 0, "nothing reached the onboard")
 
     def test_without_kernel_rtt_the_connect_time_stands_in(self) -> None:
         # Windows has no TCP_INFO: the connect handshake (one round trip) is

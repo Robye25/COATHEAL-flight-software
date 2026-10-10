@@ -14,11 +14,13 @@ namespace coatheal {
 //
 //   1. the clock is not before this firmware's build date -- a clock that
 //      is, is the epoch or a stale fake-hwclock restore; and
-//   2. the kernel has reported the clock NTP-synchronised since boot:
-//      adjtimex() with STA_UNSYNC clear, or systemd-timesyncd's per-boot
-//      marker file. Latched once seen: the kernel re-raises STA_UNSYNC
-//      about nine hours after the last correction, and a clock disciplined
-//      nine hours ago is still fine for telemetry timestamps.
+//   2. the clock has been disciplined since boot: the kernel reports it
+//      NTP-synchronised (adjtimex() with STA_UNSYNC clear, or
+//      systemd-timesyncd's per-boot marker file), or the ground station set
+//      it with TIME_SYNC (MarkSynchronised; clock_sync.hpp). Latched once
+//      seen: the kernel re-raises STA_UNSYNC about nine hours after the
+//      last correction, and a clock disciplined nine hours ago is still
+//      fine for telemetry timestamps.
 //
 // Until 2026-09 this class returned a constant true, so the ground
 // station's "RTC invalid" alarm and checkout row could never fire.
@@ -28,6 +30,8 @@ class RtcAdapter {
   bool valid() const;
   void set_valid(bool value) { override_ = value; }
   void clear_override() { override_.reset(); }
+  // The ground station synchronised the clock (TIME_SYNC): criterion 2 holds.
+  void MarkSynchronised() { synced_since_start_.store(true); }
 
   std::string NowUtcIso8601() const;
 

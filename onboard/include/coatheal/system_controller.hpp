@@ -4,6 +4,7 @@
 #include <chrono>
 #include <map>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -11,6 +12,7 @@
 #include <vector>
 
 #include "coatheal/bend_sequence.hpp"
+#include "coatheal/clock_sync.hpp"
 #include "coatheal/command_parser.hpp"
 #include "coatheal/command_server.hpp"
 #include "coatheal/config.hpp"
@@ -50,6 +52,11 @@ class SystemController {
                                 const std::string& peer_ip);
   // True while RADIO_SILENCE is in force (redesign spec §9).
   bool radio_silent() const { return !telemetry_client_.transmit_enabled(); }
+  // TIME_SYNC steps the system clock through this (SetSystemClockMs by
+  // default); tests inject a recorder.
+  void set_clock_setter(std::function<bool(std::int64_t, std::string*)> setter) {
+    clock_setter_ = std::move(setter);
+  }
 
  private:
   void TickBendSequences();
@@ -117,6 +124,12 @@ class SystemController {
   mutable std::mutex fallback_mu_;
   FallbackPlanner fallback_planner_;
   bool landed_safed_ = false;
+
+  // TIME_SYNC (clock_sync.hpp): how the clock is set, and what the last
+  // exchange found. Command thread only.
+  std::function<bool(std::int64_t, std::string*)> clock_setter_ = SetSystemClockMs;
+  int clock_syncs_ = 0;
+  std::int64_t last_clock_offset_ms_ = 0;
 
   std::atomic<bool> running_{true};
   std::atomic<bool> debug_armed_{false};

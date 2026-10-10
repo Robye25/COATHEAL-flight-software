@@ -102,8 +102,11 @@ View → *Audible alarms* adds one beep per new alarm (off by default).
 Link (target, receiver state, rate, onboard queue depth, session; the
 onboard IP — `APPLY` saves it on this PC and commands go there until `AUTO`
 returns to the beacon / probe / telemetry peer, `--host` on the command line
-wins at start-up; a `RESTART RECEIVER` button appears only after a receiver
-failure) · Mode
+wins at start-up; the onboard clock — the console sets it with `TIME_SYNC`
+on the first frame of a session and every ten minutes when the link budget
+has room, and shows the last offset and age; `--no-time-sync` keeps this
+PC's clock to itself; a `RESTART RECEIVER` button appears only after a
+receiver failure) · Mode
 (`ARM` confirmed, `DISARM`, `ENTER SAFE` confirmed, `EXIT SAFE` — each
 enabled only in the mode where the onboard accepts it) · Phase (`SET PHASE`
 confirmed; fallback indicator) · Radio (`RADIO SILENCE` confirmed, `RADIO

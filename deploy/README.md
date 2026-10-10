@@ -146,3 +146,13 @@ Optional, not required. COATHEAL discovery is its own UDP beacon on 4100 and
 does not use mDNS, so disabling `avahi-daemon` does not affect it — but it
 does remove `.local` name resolution, so keep it if you reach the Pi by
 hostname rather than by IP.
+
+## Clock
+
+The onboard sets its clock from the ground station (`TIME_SYNC`, see
+docs/protocol.md "Clock sync"): the E-Link has no NTP and the board no RTC.
+Stepping the clock needs `CAP_SYS_TIME`, which both onboard units grant with
+`AmbientCapabilities=CAP_SYS_TIME` (2026-10-10). After copying a changed unit
+run `sudo systemctl daemon-reload` and restart the service; without the
+capability the onboard answers `TIME_SYNC` with `cannot set the clock:
+Operation not permitted` and the console's System tab shows it.

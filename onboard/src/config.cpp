@@ -357,6 +357,11 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
     } else if (key == "fallback.landed_safe") {
       if (!parse_bool(key, value, &config->fallback.landed_safe, line_no)) return false;
 
+    } else if (key == "clock.sync_from_ground") {
+      if (!parse_bool(key, value, &config->clock.sync_from_ground, line_no)) return false;
+    } else if (key == "clock.step_threshold_ms") {
+      if (!parse_double(key, value, &config->clock.step_threshold_ms, line_no)) return false;
+
     } else if (key == "comms.telemetry_host") {
       config->comms.telemetry_host = value;
     } else if (key == "comms.static_ground_ip") {
@@ -683,6 +688,13 @@ bool LoadConfigFromIni(const std::string& path, OnboardConfig* config, std::stri
   if (!(config->fallback.bend_max_c > config->fallback.bend_min_c)) {
     if (error != nullptr) {
       *error = "fallback.bend_max_c must be > fallback.bend_min_c";
+    }
+    return false;
+  }
+
+  if (config->clock.step_threshold_ms < 0.0) {
+    if (error != nullptr) {
+      *error = "clock.step_threshold_ms must be >= 0";
     }
     return false;
   }

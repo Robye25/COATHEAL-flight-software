@@ -21,6 +21,10 @@ WatchdogSec=10
 KillSignal=SIGINT
 TimeoutStopSec=20
 NoNewPrivileges=true
+# TIME_SYNC steps the system clock to the ground station's (no NTP on the
+# E-Link, no RTC on the board): that needs CAP_SYS_TIME, granted here only.
+AmbientCapabilities=CAP_SYS_TIME
+CapabilityBoundingSet=CAP_SYS_TIME
 
 [Install]
 WantedBy=multi-user.target

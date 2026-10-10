@@ -132,6 +132,8 @@ std::string CommandTypeToString(CommandType type) {
       return "SET_POSITION_ZERO";
     case CommandType::kStepLossAck:
       return "STEPLOSS_ACK";
+    case CommandType::kTimeSync:
+      return "TIME_SYNC";
     case CommandType::kBendSeqLoad:
       return "BENDSEQ_LOAD";
     case CommandType::kBendSeqRun:
@@ -253,6 +255,7 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
       {"STEPPER_BEND", CommandType::kStepperBend},
       {"SET_POSITION_ZERO", CommandType::kSetPositionZero},
       {"STEPLOSS_ACK", CommandType::kStepLossAck},
+      {"TIME_SYNC", CommandType::kTimeSync},
       {"BENDSEQ_LOAD", CommandType::kBendSeqLoad},
       {"BENDSEQ_RUN", CommandType::kBendSeqRun},
       {"BENDSEQ_PAUSE", CommandType::kBendSeqPause},
@@ -401,6 +404,13 @@ CommandParseResult CommandParser::ParseLine(const std::string& line) const {
       // <motor> <target_usteps> <hold_s>; the bend runs at the motor's own
       // speed (STEPPER_SET_SPEED), so there is no speed argument.
       if (!require_args(3)) {
+        return result;
+      }
+      break;
+    case CommandType::kTimeSync:
+      // <ground_unix_ms> [<rtt_ms>]
+      if (command.args.empty() || command.args.size() > 2) {
+        result.error = "invalid argument count for " + command.name;
         return result;
       }
       break;
